@@ -36,6 +36,9 @@ let package = Package(
             ],
             resources: [
                 .process("Assets.xcassets"),
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-LSentinelPass/Native/libs", "-lsentinelpass_mobile_bridge_ios_sim"])
             ]
         ),
         // Test target

@@ -1,7 +1,14 @@
+#ifndef SENTINELPASS_BRIDGE_H
+#define SENTINELPASS_BRIDGE_H
+
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**
  * Error codes that can be returned to mobile platforms
@@ -55,7 +62,7 @@ typedef struct SPEntrySummary {
 } SPEntrySummary;
 
 /**
- * FFI-safe TOTP code
+ * FFI-safe TOTP code representation
  */
 typedef struct SPTotpCode {
   const char *code;
@@ -76,12 +83,12 @@ typedef struct SPPasswordAnalysis {
   bool has_symbol;
 } SPPasswordAnalysis;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+// ============================================================================
+// Vault Management
+// ============================================================================
 
 /**
- * Initialize a new vault or unlock existing vault
+ * Initialize or unlock a vault
  *
  * # Safety
  * - `vault_path` must be a valid pointer to a C string
@@ -93,6 +100,16 @@ extern "C" {
 SPErrorCode sp_vault_init(const char *vault_path,
                           const char *master_password,
                           SPVaultHandle *out_handle);
+
+/**
+ * Destroy a vault
+ *
+ * # Safety
+ * - `handle` must be a valid vault handle
+ *
+ * Returns SPErrorCode_Success on success
+ */
+SPErrorCode sp_vault_destroy(SPVaultHandle handle);
 
 /**
  * Check if vault is unlocked
@@ -111,75 +128,64 @@ SPErrorCode sp_vault_is_unlocked(SPVaultHandle handle,
  *
  * # Safety
  * - `handle` must be a valid vault handle
+ *
+ * Returns SPErrorCode_Success on success
  */
-void sp_vault_lock(SPVaultHandle handle);
+SPErrorCode sp_vault_lock(SPVaultHandle handle);
+
+// ============================================================================
+// Entry Management
+// ============================================================================
 
 /**
- * Destroy vault handle and free resources
+ * Add a new entry
  *
  * # Safety
- * - `handle` must be a valid vault handle
- */
-void sp_vault_destroy(SPVaultHandle handle);
-
-/**
- * Add entry to vault
- *
- * # Safety
- * - `handle` must be a valid vault handle
- * - `entry` must be a valid pointer to SPEntry
- * - `out_id` must be a valid pointer to a string pointer
+ * - All string parameters must be valid C string pointers (can be NULL for url/notes)
+ * - `out_entry_id` must be a valid pointer to a const char pointer
  *
  * Returns SPErrorCode_Success on success
  */
 SPErrorCode sp_entry_add(SPVaultHandle handle,
-                        const SPEntry *entry,
-                        const char **out_id);
+                        const char *title,
+                        const char *username,
+                        const char *password,
+                        const char *url,
+                        const char *notes,
+                        const char **out_entry_id);
 
 /**
  * Get entry by ID
  *
  * # Safety
  * - `handle` must be a valid vault handle
- * - `id` must be a valid pointer to a C string
+ * - `entry_id` must be a valid pointer to a C string
  * - `out_entry` must be a valid pointer to SPEntry
  *
  * Returns SPErrorCode_Success on success
  */
 SPErrorCode sp_entry_get_by_id(SPVaultHandle handle,
-                               const char *id,
+                               const char *entry_id,
                                SPEntry *out_entry);
-
-/**
- * Update entry
- *
- * # Safety
- * - `handle` must be a valid vault handle
- * - `entry` must be a valid pointer to SPEntry
- *
- * Returns SPErrorCode_Success on success
- */
-SPErrorCode sp_entry_update(SPVaultHandle handle,
-                           const SPEntry *entry);
 
 /**
  * Delete entry
  *
  * # Safety
  * - `handle` must be a valid vault handle
- * - `id` must be a valid pointer to a C string
+ * - `entry_id` must be a valid pointer to a C string
  *
  * Returns SPErrorCode_Success on success
  */
 SPErrorCode sp_entry_delete(SPVaultHandle handle,
-                           const char *id);
+                           const char *entry_id);
 
 /**
  * List all entries
  *
  * # Safety
  * - `handle` must be a valid vault handle
- * - `out_entries` must be a valid pointer to a SPEntrySummary const pointer
+ * - `out_entries` must be a valid pointer to a const SPEntrySummary pointer
  * - `out_count` must be a valid pointer to size_t
  *
  * Returns SPErrorCode_Success on success
@@ -194,7 +200,7 @@ SPErrorCode sp_entry_list_all(SPVaultHandle handle,
  * # Safety
  * - `handle` must be a valid vault handle
  * - `query` must be a valid pointer to a C string
- * - `out_entries` must be a valid pointer to a SPEntrySummary const pointer
+ * - `out_entries` must be a valid pointer to a const SPEntrySummary pointer
  * - `out_count` must be a valid pointer to size_t
  *
  * Returns SPErrorCode_Success on success
@@ -203,6 +209,10 @@ SPErrorCode sp_entry_search(SPVaultHandle handle,
                            const char *query,
                            const SPEntrySummary **out_entries,
                            size_t *out_count);
+
+// ============================================================================
+// TOTP
+// ============================================================================
 
 /**
  * Generate TOTP code
@@ -218,11 +228,15 @@ SPErrorCode sp_totp_generate_code(SPVaultHandle handle,
                                   const char *entry_id,
                                   SPTotpCode *out_code);
 
+// ============================================================================
+// Password Generation
+// ============================================================================
+
 /**
  * Generate password
  *
  * # Safety
- * - `length` must be >= 8 and <= 64
+ * - `length` must be >= 8 and <= 128
  * - `include_symbols` must be a valid boolean
  * - `out_password` must be a valid pointer to a const char pointer
  *
@@ -244,19 +258,23 @@ SPErrorCode sp_password_generate(size_t length,
 SPErrorCode sp_password_check_strength(const char *password,
                                       SPPasswordAnalysis *out_analysis);
 
+// ============================================================================
+// Biometric
+// ============================================================================
+
 /**
  * Set biometric key
  *
  * # Safety
  * - `handle` must be a valid vault handle
  * - `key_data` must be a valid pointer to bytes
- * - `key_len` must be the length of key_data
+ * - `key_data_len` must be the length of key_data
  *
  * Returns SPErrorCode_Success on success
  */
 SPErrorCode sp_biometric_set_key(SPVaultHandle handle,
                                 const uint8_t *key_data,
-                                size_t key_len);
+                                size_t key_data_len);
 
 /**
  * Check if biometric key exists
@@ -290,6 +308,10 @@ SPErrorCode sp_biometric_remove_key(SPVaultHandle handle);
  */
 SPErrorCode sp_biometric_unlock(SPVaultHandle handle);
 
+// ============================================================================
+// Memory Management
+// ============================================================================
+
 /**
  * Free string allocated by Rust
  *
@@ -302,11 +324,13 @@ void sp_string_free(const char *s);
  * Free bytes allocated by Rust
  *
  * # Safety
- * - `bytes` must be a byte pointer allocated by Rust functions
+ * - `ptr` must be a byte pointer allocated by Rust functions
  * - `len` must be the length of the bytes
  */
-void sp_bytes_free(const uint8_t *bytes, size_t len);
+void sp_bytes_free(const uint8_t *ptr, size_t len);
 
 #ifdef __cplusplus
 }
 #endif
+
+#endif // SENTINELPASS_BRIDGE_H

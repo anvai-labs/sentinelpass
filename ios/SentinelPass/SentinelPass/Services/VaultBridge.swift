@@ -103,19 +103,12 @@ class VaultBridge {
     /// Add a new entry
     func addEntry(title: String, username: String, password: String, url: String, notes: String) async -> String? {
         return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
-            guard title.cString(using: .utf8) != nil,
-                  username.cString(using: .utf8) != nil,
-                  password.cString(using: .utf8) != nil else {
-                continuation.resume(returning: nil)
-                return
-            }
-
             title.withCString { titleC in
                 username.withCString { usernameC in
                     password.withCString { passwordC in
                         url.withCString { urlC in
                             notes.withCString { notesC in
-                                var entryIdPointer: UnsafeMutablePointer<CChar>?
+                                var entryId: UnsafePointer<CChar>?
 
                                 let result = sp_entry_add(
                                     vaultHandle,
@@ -124,17 +117,17 @@ class VaultBridge {
                                     passwordC,
                                     urlC,
                                     notesC,
-                                    &entryIdPointer
+                                    &entryId
                                 )
 
                                 guard result == SPErrorCode_Success,
-                                      let entryId = entryIdPointer else {
+                                      let idPtr = entryId else {
                                     continuation.resume(returning: nil)
                                     return
                                 }
 
-                                let entryIdString = String(cString: entryId)
-                                sp_string_free(entryIdPointer)
+                                let entryIdString = String(cString: idPtr)
+                                sp_string_free(idPtr)
 
                                 continuation.resume(returning: entryIdString)
                             }
@@ -365,22 +358,22 @@ class VaultBridge {
     /// Generate random password
     static func generatePassword(length: Int, includeSymbols: Bool) async -> String? {
         return await withCheckedContinuation { continuation in
-            var passwordPointer: UnsafePointer<CChar>?
+            var password: UnsafePointer<CChar>?
 
             let result = sp_password_generate(
                 Int(length),
                 includeSymbols,
-                &passwordPointer
+                &password
             )
 
             guard result == SPErrorCode_Success,
-                  let password = passwordPointer else {
+                  let passwordPtr = password else {
                 continuation.resume(returning: nil)
                 return
             }
 
-            let passwordStr = String(cString: password)
-            sp_string_free(password)
+            let passwordStr = String(cString: passwordPtr)
+            sp_string_free(passwordPtr)
 
             continuation.resume(returning: passwordStr)
         }
