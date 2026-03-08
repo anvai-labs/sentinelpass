@@ -56,18 +56,6 @@ jobs:
 
       - name: Build JNI libraries
         run: |
-          # Diagnostic: Check NDK installation
-          echo "=== NDK Diagnostic ==="
-          echo "ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
-          echo "PWD: $(pwd)"
-          echo "Listing NDK directory:"
-          ls -la "$ANDROID_NDK_HOME" || echo "NDK directory not found!"
-          echo "Listing toolchain directory:"
-          ls -la "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/" || echo "Toolchain directory not found!"
-          echo "Checking for linker (API 33):"
-          ls -la "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang" || echo "Linker not found!"
-          echo "===================="
-
           # Set linker and ar environment variables using shell expansion
           # Use API level 33 which is available in NDK r25c
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
@@ -77,6 +65,14 @@ jobs:
           export AR_armv7_linux_androideabi="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 
+          # Set CC environment variables for libsqlite3-sys and other build scripts
+          export CC_aarch64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
+          export CC_armv7_linux_androideabi="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi33-clang"
+          export CC_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
+          export CFLAGS_aarch64_linux_android="--target=aarch64-linux-android33"
+          export CFLAGS_armv7_linux_androideabi="--target=armv7-linux-androideabi"
+          export CFLAGS_x86_64_linux_android="--target=x86_64-linux-android33"
+
           # Build for each architecture
           for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
             cargo build --package sentinelpass-mobile-bridge --target $target --release
@@ -84,9 +80,11 @@ jobs:
 
       - name: Run mobile bridge unit tests
         run: |
-          # Set linker environment variable
+          # Set linker and CC environment variables
           export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
           export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export CC_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
+          export CFLAGS_x86_64_linux_android="--target=x86_64-linux-android33"
           export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           cargo test --package sentinelpass-mobile-bridge --target x86_64-linux-android
 
