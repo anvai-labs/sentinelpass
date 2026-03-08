@@ -34,7 +34,6 @@ jobs:
         with:
           targets: |
             aarch64-linux-android
-            armv7-linux-androideabi
             x86_64-linux-android
 
       - name: Setup Rust cache
@@ -62,22 +61,18 @@ jobs:
           # Set linker and ar environment variables using shell expansion
           # Use API level 33 which is available in NDK r25c
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
-          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi33-clang"
           export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
           export AR_aarch64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          export AR_armv7_linux_androideabi="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 
           # Set CC environment variables for libsqlite3-sys and other build scripts
           export CC_aarch64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
-          export CC_armv7_linux_androideabi="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi33-clang"
           export CC_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
           export CFLAGS_aarch64_linux_android="--target=aarch64-linux-android33"
-          export CFLAGS_armv7_linux_androideabi="--target=armv7-linux-androideabi"
           export CFLAGS_x86_64_linux_android="--target=x86_64-linux-android33"
 
-          # Build for each architecture
-          for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
+          # Build for each architecture (64-bit only - 32-bit ARM is deprecated)
+          for target in aarch64-linux-android x86_64-linux-android; do
             cargo build --package sentinelpass-mobile-bridge --target $target --release
           done
 
@@ -97,7 +92,6 @@ jobs:
           name: android-jni-libs
           path: |
             target/aarch64-linux-android/release/libsentinelpass_mobile_bridge.so
-            target/armv7-linux-androideabi/release/libsentinelpass_mobile_bridge.so
             target/x86_64-linux-android/release/libsentinelpass_mobile_bridge.so
           retention-days: 7
 
