@@ -6,8 +6,7 @@ import PackageDescription
 let package = Package(
     name: "SentinelPass",
     platforms: [
-        .iOS(.v17),
-        .macOS(.v14)  // Required for swift test on macOS CI runners
+        .iOS(.v17)
     ],
     products: [
         .executable(

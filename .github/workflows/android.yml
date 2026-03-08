@@ -46,7 +46,7 @@ jobs:
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
           unzip -q android-ndk-r25c-linux.zip
-          NDK_ROOT=$PWD/android-ndk-r25c
+          NDK_ROOT=$(pwd)/android-ndk-r25c
           echo "ANDROID_NDK_HOME=$NDK_ROOT" >> $GITHUB_ENV
           echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
           echo "NDK_TOOLCHAIN_DIR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
@@ -270,7 +270,7 @@ jobs:
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
           unzip -q android-ndk-r25c-linux.zip
-          NDK_ROOT=$PWD/android-ndk-r25c
+          NDK_ROOT=$(pwd)/android-ndk-r25c
           echo "ANDROID_NDK_HOME=$NDK_ROOT" >> $GITHUB_ENV
           echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
           echo "NDK_TOOLCHAIN_DIR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
