@@ -18,13 +18,13 @@ let package = Package(
     targets: [
         // Native C library target
         .systemLibrary(
-            name: "sentinelpass_mobile_bridge",
+            name: "sentinelpass",
             path: "SentinelPass/Native"
         ),
         // iOS App target
         .executableTarget(
             name: "SentinelPassApp",
-            dependencies: ["sentinelpass_mobile_bridge"],
+            dependencies: ["sentinelpass"],
             path: "SentinelPass",
             exclude: ["Info.plist", "Native"],
             sources: [
@@ -36,15 +36,6 @@ let package = Package(
             ],
             resources: [
                 .process("Assets.xcassets"),
-            ],
-            cSettings: [
-                .headerSearchPath("Native/include"),
-            ],
-            linkerSettings: [
-                .unsafeFlags([
-                    "-LSentinelPass/Native/libs",
-                    "-lsentinelpass_mobile_bridge_ios",
-                ])
             ]
         ),
         // Test target

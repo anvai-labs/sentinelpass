@@ -8,6 +8,10 @@
 import Foundation
 import LocalAuthentication
 
+#if canImport(sentinelpass)
+import sentinelpass
+#endif
+
 /// Bridge class to communicate with the SentinelPass Rust mobile bridge
 @available(iOS 17.0, macOS 14.0, *)
 @MainActor
@@ -98,7 +102,7 @@ class VaultBridge {
 
     /// Add a new entry
     func addEntry(title: String, username: String, password: String, url: String, notes: String) async -> String? {
-        return await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
             guard title.cString(using: .utf8) != nil,
                   username.cString(using: .utf8) != nil,
                   password.cString(using: .utf8) != nil else {
@@ -195,7 +199,7 @@ class VaultBridge {
     /// List all entries
     func listEntries() async -> [EntrySummary] {
         return await withCheckedContinuation { continuation in
-            var entriesPointer: UnsafeMutablePointer<UnsafeMutablePointer<SPEntrySummary>?>?
+            var entriesPointer: UnsafePointer<SPEntrySummary>?
             var count: UInt = 0
 
             let result = sp_entry_list_all(vaultHandle, &entriesPointer, &count)
@@ -209,7 +213,7 @@ class VaultBridge {
             var summaries: [EntrySummary] = []
 
             for i in 0..<count {
-                let entry = entries![Int(i)].pointee
+                let entry = entries[Int(i)]
 
                 guard let idPtr = entry.id,
                       let titlePtr = entry.title,
@@ -232,7 +236,9 @@ class VaultBridge {
             }
 
             // Free array
-            sp_bytes_free(entriesPointer, UInt(count))
+            entries.withMemoryRebound(to: UInt8.self, capacity: Int(count) * MemoryLayout<SPEntrySummary>.stride) { bytePtr in
+                sp_bytes_free(bytePtr, Int(count) * MemoryLayout<SPEntrySummary>.stride)
+            }
 
             continuation.resume(returning: summaries)
         }
@@ -247,7 +253,7 @@ class VaultBridge {
             }
 
             query.withCString { queryC in
-                var entriesPointer: UnsafeMutablePointer<UnsafeMutablePointer<SPEntrySummary>?>?
+                var entriesPointer: UnsafePointer<SPEntrySummary>?
                 var count: UInt = 0
 
                 let result = sp_entry_search(vaultHandle, queryC, &entriesPointer, &count)
@@ -261,7 +267,7 @@ class VaultBridge {
                 var summaries: [EntrySummary] = []
 
                 for i in 0..<count {
-                    let entry = entries![Int(i)].pointee
+                    let entry = entries[Int(i)]
 
                     guard let idPtr = entry.id,
                           let titlePtr = entry.title,
@@ -284,7 +290,9 @@ class VaultBridge {
                 }
 
                 // Free array
-                sp_bytes_free(entriesPointer, UInt(count))
+                entries.withMemoryRebound(to: UInt8.self, capacity: Int(count) * MemoryLayout<SPEntrySummary>.stride) { bytePtr in
+                    sp_bytes_free(bytePtr, Int(count) * MemoryLayout<SPEntrySummary>.stride)
+                }
 
                 continuation.resume(returning: summaries)
             }
@@ -357,11 +365,11 @@ class VaultBridge {
     /// Generate random password
     static func generatePassword(length: Int, includeSymbols: Bool) async -> String? {
         return await withCheckedContinuation { continuation in
-            var passwordPointer: UnsafeMutablePointer<CChar>?
+            var passwordPointer: UnsafePointer<CChar>?
 
             let result = sp_password_generate(
-                UInt(length),
-                includeSymbols ? 1 : 0,
+                Int(length),
+                includeSymbols,
                 &passwordPointer
             )
 

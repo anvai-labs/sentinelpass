@@ -1,5 +1,5 @@
-module sentinelpass_mobile_bridge {
-    header "sentinelpass_bridge.h"
-    link "sentinelpass_mobile_bridge_ios"
+module sentinelpass [system] [extern_c] {
+    header "include/sentinelpass_bridge.h"
+    link "sentinelpass_mobile_bridge_ios_sim"
     export *
 }
