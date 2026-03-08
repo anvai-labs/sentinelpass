@@ -52,21 +52,26 @@ jobs:
           echo "NDK_TOOLCHAIN_DIR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
 
       - name: Build JNI libraries
-        env:
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang', env.ANDROID_NDK_HOME) }}
-          CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: ${{ format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi34-clang', env.ANDROID_NDK_HOME) }}
-          CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: ${{ format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang', env.ANDROID_NDK_HOME) }}
-          AR_aarch64_linux_android: ${{ format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar', env.ANDROID_NDK_HOME) }}
-          AR_armv7_linux_androideabi: ${{ format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar', env.ANDROID_NDK_HOME) }}
-          AR_x86_64_linux_android: ${{ format('{0}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar', env.ANDROID_NDK_HOME) }}
         run: |
+          # Set linker and ar environment variables using shell expansion
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7-linux-androideabi34-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang"
+          export AR_aarch64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export AR_armv7_linux_androideabi="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           # Build for each architecture
           for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
             cargo build --package sentinelpass-mobile-bridge --target $target --release
           done
 
       - name: Run mobile bridge unit tests
-        run: cargo test --package sentinelpass-mobile-bridge --target x86_64-linux-android
+        run: |
+          # Set linker environment variable
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang"
+          export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cargo test --package sentinelpass-mobile-bridge --target x86_64-linux-android
 
       - name: Upload JNI libraries
         uses: actions/upload-artifact@v4
@@ -272,14 +277,20 @@ jobs:
 
       - name: Run integration tests
         run: |
-          NDK_ROOT=$ANDROID_NDK_HOME
-          export PATH="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          # Set linker and ar environment variables using shell expansion
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang"
+          export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           # Run mobile bridge integration tests
           cargo test --package sentinelpass-mobile-bridge --test integration_test --target x86_64-linux-android -- --nocapture
 
       - name: Test JNI bridge API
         working-directory: sentinelpass-mobile-bridge
         run: |
+          # Set linker environment variable
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang"
+          export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           # Test JNI bridge functionality
           cargo test --target x86_64-linux-android --test jni -- --nocapture
 

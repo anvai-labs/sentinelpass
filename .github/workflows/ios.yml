@@ -209,7 +209,7 @@ jobs:
       - name: Run integration tests
         run: |
           # Run mobile bridge integration tests
-          cargo test --package sentinelpass-mobile-bridge --test integration --target aarch64-apple-ios-sim -- --nocapture
+          cargo test --package sentinelpass-mobile-bridge --test integration_test --target aarch64-apple-ios-sim -- --nocapture
 
       - name: Test bridge API
         run: |
