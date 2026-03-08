@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct ContentView: View {
     @EnvironmentObject private var vaultState: VaultState
     @EnvironmentObject private var biometricAuth: BiometricAuth
@@ -28,6 +29,7 @@ struct ContentView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 struct MainTabView: View {
     @EnvironmentObject private var vaultState: VaultState
 
@@ -56,6 +58,7 @@ struct MainTabView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     ContentView()
         .environmentObject(VaultState.shared)

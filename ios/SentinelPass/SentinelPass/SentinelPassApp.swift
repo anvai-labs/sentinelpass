@@ -6,7 +6,9 @@
 //
 
 import SwiftUI
+import SwiftData
 
+@available(iOS 17.0, macOS 14.0, *)
 @main
 struct SentinelPassApp: App {
     @StateObject private var vaultState = VaultState.shared
@@ -25,6 +27,7 @@ struct SentinelPassApp: App {
     }
 
     private func setupAppearance() {
+        #if os(iOS)
         // Configure app appearance
         let appearance = UINavigationBarAppearance()
         appearance.configureWithOpaqueBackground()
@@ -32,5 +35,6 @@ struct SentinelPassApp: App {
 
         UINavigationBar.appearance().standardAppearance = appearance
         UINavigationBar.appearance().scrollEdgeAppearance = appearance
+        #endif
     }
 }

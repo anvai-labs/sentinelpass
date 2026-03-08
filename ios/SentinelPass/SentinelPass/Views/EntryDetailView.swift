@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct EntryDetailView: View {
     @EnvironmentObject private var vaultState: VaultState
     @Environment(\.dismiss) private var dismiss
@@ -152,7 +153,9 @@ struct EntryDetailView: View {
                 }
             }
             .navigationTitle(entry.title)
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
@@ -206,6 +209,7 @@ struct EntryDetailView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     EntryDetailView(entry: EntryModel(
         id: "1",

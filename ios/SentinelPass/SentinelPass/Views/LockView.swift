@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct LockView: View {
     @EnvironmentObject private var vaultState: VaultState
     @EnvironmentObject private var biometricAuth: BiometricAuth
@@ -69,7 +70,9 @@ struct LockView: View {
                         .background(.ultraThinMaterial)
                         .clipShape(.capsule)
                         .autocorrectionDisabled()
+                        #if os(iOS)
                         .textInputAutocapitalization(.never)
+                        #endif
                         .onSubmit {
                             unlockVault()
                         }
@@ -162,6 +165,7 @@ struct LockView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     LockView()
         .environmentObject(VaultState.shared)

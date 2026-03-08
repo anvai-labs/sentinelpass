@@ -8,10 +8,11 @@
 import Foundation
 import LocalAuthentication
 
+@available(iOS 11.0, macOS 10.15, *)
 @MainActor
 class BiometricAuth: ObservableObject {
     @Published var isAvailable: Bool = false
-    @Published var biometricType: LABiometricType = .none
+    @Published var biometricType: LABiometryType = .none
 
     private let context = LAContext()
 
@@ -50,12 +51,14 @@ class BiometricAuth: ObservableObject {
     }
 }
 
-extension LABiometricType {
+@available(iOS 11.0, macOS 10.15, *)
+extension LABiometryType {
     var displayName: String {
         switch self {
         case .none: return "None"
         case .touchID: return "Touch ID"
         case .faceID: return "Face ID"
+        case .opticID: return "Optic ID"
         @unknown default: return "Biometric"
         }
     }

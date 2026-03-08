@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 import LocalAuthentication
 
+@available(iOS 17.0, macOS 14.0, *)
 @MainActor
 class VaultState: ObservableObject {
     static let shared = VaultState()

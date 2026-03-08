@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct PasswordGeneratorView: View {
     @EnvironmentObject private var vaultState: VaultState
     @Environment(\.dismiss) private var dismiss
@@ -85,7 +86,9 @@ struct PasswordGeneratorView: View {
                 }
             }
             .navigationTitle("Generate Password")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -111,6 +114,7 @@ struct PasswordGeneratorView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     PasswordGeneratorView(generatedPassword: .constant(""))
         .environmentObject(VaultState.shared)

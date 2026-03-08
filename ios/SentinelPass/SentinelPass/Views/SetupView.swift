@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct SetupView: View {
     @EnvironmentObject private var vaultState: VaultState
     @State private var masterPassword: String = ""
@@ -59,7 +60,9 @@ struct SetupView: View {
                                 .background(.ultraThinMaterial)
                                 .clipShape(.capsule)
                                 .autocorrectionDisabled()
+                                #if os(iOS)
                                 .textInputAutocapitalization(.never)
+                                #endif
                                 .onChange(of: masterPassword) { _, _ in
                                     checkPasswordStrength()
                                 }
@@ -92,7 +95,9 @@ struct SetupView: View {
                                 .background(.ultraThinMaterial)
                                 .clipShape(.capsule)
                                 .autocorrectionDisabled()
+                                #if os(iOS)
                                 .textInputAutocapitalization(.never)
+                                #endif
                         }
 
                         // Password Requirements
@@ -211,6 +216,7 @@ struct SetupView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     SetupView()
         .environmentObject(VaultState.shared)

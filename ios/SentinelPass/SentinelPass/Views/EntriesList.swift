@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct EntriesList: View {
     @EnvironmentObject private var vaultState: VaultState
     @State private var searchText = ""
@@ -110,6 +111,7 @@ struct EntriesList: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 struct EntryRow: View {
     let entry: EntryModel
 
@@ -161,6 +163,7 @@ struct EntryRow: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     NavigationStack {
         EntriesList()

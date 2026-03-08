@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct AddEntryView: View {
     @EnvironmentObject private var vaultState: VaultState
     @Environment(\.dismiss) private var dismiss
@@ -37,7 +38,9 @@ struct AddEntryView: View {
 
                     TextField("Username / Email", text: $username)
                         .focused($focusedField, equals: .username)
+                        #if os(iOS)
                         .textInputAutocapitalization(.never)
+                        #endif
                         .autocorrectionDisabled()
 
                     HStack {
@@ -85,8 +88,10 @@ struct AddEntryView: View {
                 Section {
                     TextField("Website URL", text: $url)
                         .focused($focusedField, equals: .url)
+                        #if os(iOS)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
+                        #endif
                 } header: {
                     Text("Website")
                 }
@@ -100,7 +105,9 @@ struct AddEntryView: View {
                 }
             }
             .navigationTitle("Add Entry")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -167,6 +174,7 @@ struct AddEntryView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     AddEntryView()
         .environmentObject(VaultState.shared)

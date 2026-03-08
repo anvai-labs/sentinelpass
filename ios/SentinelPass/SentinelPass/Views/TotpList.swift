@@ -8,6 +8,7 @@
 import SwiftUI
 import Combine
 
+@available(iOS 17.0, macOS 14.0, *)
 struct TotpList: View {
     @EnvironmentObject private var vaultState: VaultState
     @State private var totpCodes: [String: TotpCode] = [:]
@@ -62,7 +63,9 @@ struct TotpList: View {
                 }
             }
         }
+        #if os(iOS)
         .listStyle(.insetGrouped)
+        #endif
     }
 
     private func progressForCode(_ totp: TotpCode) -> Double {
@@ -96,6 +99,7 @@ struct TotpList: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 struct TotpRow: View {
     let entry: EntryModel
     let totp: TotpCode
@@ -198,6 +202,7 @@ struct TotpRow: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     NavigationStack {
         TotpList()
