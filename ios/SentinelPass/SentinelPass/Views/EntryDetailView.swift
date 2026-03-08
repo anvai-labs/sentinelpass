@@ -84,8 +84,8 @@ struct EntryDetailView: View {
                             Text("Website")
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            if let url = URL(string: url) {
-                                Link(destination: url) {
+                            if let linkUrl = URL(string: url) {
+                                Link(destination: linkUrl) {
                                     Text(url)
                                         .lineLimit(1)
                                 }

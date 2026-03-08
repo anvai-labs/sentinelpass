@@ -30,6 +30,7 @@ struct EntriesList: View {
                 filterEntries()
             }
             .toolbar {
+                #if os(iOS)
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showingAddEntry = true
@@ -37,6 +38,15 @@ struct EntriesList: View {
                         Image(systemName: "plus")
                     }
                 }
+                #else
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        showingAddEntry = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+                #endif
             }
             .sheet(isPresented: $showingAddEntry) {
                 AddEntryView()
@@ -88,7 +98,9 @@ struct EntriesList: View {
                 }
             }
         }
+        #if os(iOS)
         .listStyle(.insetGrouped)
+        #endif
     }
 
     private var sortedEntries: [EntryModel] {
