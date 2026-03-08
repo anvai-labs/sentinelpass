@@ -121,7 +121,7 @@ class VaultState: ObservableObject {
             throw VaultError.vaultLocked
         }
 
-        guard let entryId = await bridge.addEntry(
+        guard let _ = await bridge.addEntry(
             title: title,
             username: username,
             password: password,
