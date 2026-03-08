@@ -51,8 +51,11 @@ jobs:
           echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
           echo "NDK_TOOLCHAIN_DIR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
           # Diagnostic: Check available clang versions
-          echo "Available clang versions:"
-          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "android.*-clang" | head -20
+          echo "=== Available clang versions ==="
+          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "android.*-clang" | head -30
+          echo "=== Checking armv7 variants ==="
+          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep -i "armv7\|arm.*androideabi" | head -20
+          echo "================================"
 
       - name: Build JNI libraries
         run: |
@@ -290,8 +293,11 @@ jobs:
           echo "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
           echo "NDK_TOOLCHAIN_DIR=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
           # Diagnostic: Check available clang versions
-          echo "Available clang versions:"
-          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "android.*-clang" | head -20
+          echo "=== Available clang versions ==="
+          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "android.*-clang" | head -30
+          echo "=== Checking armv7 variants ==="
+          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep -i "armv7\|arm.*androideabi" | head -20
+          echo "================================"
 
       - name: Run integration tests
         run: |
