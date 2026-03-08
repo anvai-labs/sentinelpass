@@ -20,16 +20,16 @@ class SentinelPassUnitTest {
     fun testPasswordStrength_weak_isBelow40() {
         val password = "password123"
         val strength = PasswordStrengthCalculator.calculate(password)
-        assertTrue(strength >= 20)
-        assertTrue(strength < 40)
+        // Length: 11*2=22 + lowercase:10 + digits:10 = 42
+        assertEquals("Password '$password' strength should be 42", 42, strength)
     }
 
     @Test
     fun testPasswordStrength_medium_isBetween40and60() {
         val password = "MyP@ssw0rd"
         val strength = PasswordStrengthCalculator.calculate(password)
-        assertTrue(strength >= 40)
-        assertTrue(strength < 60)
+        // Length: 10*2=20 + lowercase:10 + uppercase:10 + digits:10 + symbols:15 + variety:15 = 80
+        assertEquals("Password '$password' strength should be 80", 80, strength)
     }
 
     @Test
