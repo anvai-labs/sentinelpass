@@ -37,15 +37,24 @@ The workflow will:
 
 You need to configure Chrome Web Store API credentials:
 
+### ⚠️ Important: Chrome Web Store API is NOT in Google Cloud Console
+
+**You don't need to "enable" Chrome Web Store API** - it's not listed in the Google Cloud Console API library. Just create OAuth credentials.
+
 ### Step 1: Get Chrome Web Store API Credentials
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a project or select existing
-3. Enable **"Chrome Web Store API"**
-4. Create OAuth 2.0 credentials:
+3. Go to **APIs & Services** > **Credentials**
+4. Click **Create Credentials** > **OAuth client ID**
+5. Configure:
    - **Application type**: Web application
-   - **Authorized redirect URI**: `https://oauth2.googleapis.com/token`
-5. Save **Client ID** and **Client Secret**
+   - **Name**: Chrome Web Store Publish
+   - **Authorized redirect URIs**:
+     - `https://oauth2.googleapis.com/token`
+     - `urn:ietf:wg:oauth:2.0:oob`
+6. Click **Create**
+7. Save **Client ID** and **Client Secret**
 
 ### Step 2: Generate Refresh Token
 
