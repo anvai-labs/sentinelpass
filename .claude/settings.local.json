@@ -84,7 +84,13 @@
       "Bash(git stash:*)",
       "Bash(git pull:*)",
       "Bash(git stash pop:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(xcrun simctl spawn:*)",
+      "Bash(swift package generate-xcodeproj:*)",
+      "Bash(./build-ios.sh:*)",
+      "Bash(xcrun simctl install:*)",
+      "Bash(xcrun simctl launch:*)",
+      "Bash(xcrun simctl:*)"
     ]
   }
 }
