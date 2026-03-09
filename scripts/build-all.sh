@@ -159,12 +159,16 @@ build_mobile() {
     fi
 
     # Build Android
-    if [ -d "android/SentinelPass" ] && command_exists gradle; then
+    if [ -d "android/SentinelPass" ]; then
         log_info "Building Android app..."
+        # Source Android environment if available
+        if [ -f "$SCRIPT_DIR/android-env.sh" ]; then
+            source "$SCRIPT_DIR/android-env.sh"
+        fi
         "$SCRIPT_DIR/build-android.sh" $([ "$BUILD_TYPE" = "release" ] && echo "--release" || echo "--debug")
         log_success "Android build complete"
     else
-        log_warning "Android SDK/Gradle not found, skipping Android build"
+        log_warning "Android project not found, skipping Android build"
     fi
 }
 

@@ -66,9 +66,12 @@ cd "$PROJECT_ROOT"
 # ============================================================================
 
 # Source android-env.sh if it exists and NDK isn't already in PATH
-if [ -f "scripts/android-env.sh" && ! echo "$PATH" | grep -q "ndk.*bin"; then
-    log_info "Loading Android environment..."
-    source scripts/android-env.sh
+if [ -f "scripts/android-env.sh" ]; then
+    # Check if NDK bin is already in PATH
+    if ! echo "$PATH" | grep -q "ndk.*prebuilt.*bin"; then
+        log_info "Loading Android environment..."
+        source scripts/android-env.sh
+    fi
 fi
 
 # ============================================================================
