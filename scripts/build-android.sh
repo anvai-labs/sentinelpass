@@ -87,12 +87,18 @@ ANDROID_TARGETS=(
     "x86_64-linux-android"      # x86_64
 )
 
+# Set cargo flags
+CARGO_FLAGS=""
+if [ "$BUILD_TYPE" = "release" ]; then
+    CARGO_FLAGS="--release"
+fi
+
 for target in "${ANDROID_TARGETS[@]}"; do
     if rustc --print target-list | grep -q "^$target\$"; then
         log_info "Building for $target..."
         cargo build --package sentinelpass-mobile-bridge \
             --target "$target" \
-            --$BUILD_TYPE
+            $CARGO_FLAGS
     else
         log_warning "Target $target not available, skipping"
     fi
