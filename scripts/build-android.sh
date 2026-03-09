@@ -62,6 +62,16 @@ done
 cd "$PROJECT_ROOT"
 
 # ============================================================================
+# Setup Android Environment
+# ============================================================================
+
+# Source android-env.sh if it exists and NDK isn't already in PATH
+if [ -f "scripts/android-env.sh" && ! echo "$PATH" | grep -q "ndk.*bin"; then
+    log_info "Loading Android environment..."
+    source scripts/android-env.sh
+fi
+
+# ============================================================================
 # Check Android Environment
 # ============================================================================
 
@@ -70,9 +80,11 @@ if [ ! -d "android/SentinelPass" ]; then
     exit 1
 fi
 
-# Check for ANDROID_SDK_ROOT
-if [ -z "$ANDROID_SDK_ROOT" ] && [ -z "$ANDROID_HOME" ]; then
-    log_warning "ANDROID_SDK_ROOT not set. Using default Android SDK location."
+# Verify NDK is available
+if [ -z "$ANDROID_NDK_ROOT" ] && [ ! -d "$HOME/Library/Android/sdk/ndk" ]; then
+    log_error "Android NDK not found"
+    log_info "Run: ./scripts/setup-android-env.sh"
+    exit 1
 fi
 
 # ============================================================================
@@ -81,9 +93,9 @@ fi
 
 log_info "Building Rust mobile bridge for Android..."
 
+# Note: NDK r29 only supports ARM64 and x86_64 (ARMv7 was removed)
 ANDROID_TARGETS=(
     "aarch64-linux-android"     # ARM64
-    "armv7-linux-androideabi"   # ARM32
     "x86_64-linux-android"      # x86_64
 )
 
@@ -117,17 +129,13 @@ JNI_LIBS_DIR="$ANDROID_DIR/app/src/main/jniLibs"
 
 # Create ABI directories
 mkdir -p "$JNI_LIBS_DIR/arm64-v8a"
-mkdir -p "$JNI_LIBS_DIR/armeabi-v7a"
 mkdir -p "$JNI_LIBS_DIR/x86_64"
 
 # Copy libraries to correct ABI directories
-cp "target/aarch64-linux-android/$BUILD_TYPE/libsentinelpass_mobile_bridge_android.so" \
+cp "target/aarch64-linux-android/$BUILD_TYPE/libsentinelpass_mobile_bridge.so" \
    "$JNI_LIBS_DIR/arm64-v8a/" 2>/dev/null || log_warning "ARM64 library not found"
 
-cp "target/armv7-linux-androideabi/$BUILD_TYPE/libsentinelpass_mobile_bridge_android.so" \
-   "$JNI_LIBS_DIR/armeabi-v7a/" 2>/dev/null || log_warning "ARMv7 library not found"
-
-cp "target/x86_64-linux-android/$BUILD_TYPE/libsentinelpass_mobile_bridge_android.so" \
+cp "target/x86_64-linux-android/$BUILD_TYPE/libsentinelpass_mobile_bridge.so" \
    "$JNI_LIBS_DIR/x86_64/" 2>/dev/null || log_warning "x86_64 library not found"
 
 log_success "JNI libraries prepared"
