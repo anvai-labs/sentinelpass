@@ -1,0 +1,144 @@
+name: Chrome Extension Release
+
+on:
+  push:
+    tags:
+      - 'chrome-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Extension version (e.g., 0.1.0)'
+        required: true
+        type: string
+      publish_target:
+        description: 'Publish target'
+        required: true
+        type: choice
+        default: 'test'
+        options:
+          - test
+          - production
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    name: Build and Publish Chrome Extension
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web artifacts
+        run: npm run web:build
+
+      - name: Copy web artifacts to extension
+        run: |
+          cp dist/bundle.js browser-extension/chrome/
+          cp dist/bundle.css browser-extension/chrome/
+
+      - name: Determine extension version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#chrome-v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Update manifest version
+        working-directory: browser-extension/chrome
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Update version in manifest.json
+          jq --arg version "$VERSION" '.version = $version' manifest.json > manifest.json.tmp
+          mv manifest.json.tmp manifest.json
+          echo "Updated manifest version to $VERSION"
+          cat manifest.json | jq '{version, name}'
+
+      - name: Package extension
+        working-directory: browser-extension
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          zip -r "dist/sentinelpass-chrome-${VERSION}.zip" chrome/ \
+            -x "chrome/*.ts" \
+            -x "chrome/dist" \
+            -x "chrome/DEBUGGING.md"
+          ls -lh dist/
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-extension
+          path: browser-extension/dist/*.zip
+          retention-days: 30
+
+      - name: Publish to Chrome Web Store (Test)
+        if: github.event.inputs.publish_target != 'production'
+        env:
+          EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CLIENT_ID: ${{ secrets.CHROME_WEBSTORE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CHROME_WEBSTORE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}
+          APP_ID: ${{ secrets.CHROME_WEBSTORE_APP_ID }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIP_FILE="browser-extension/dist/sentinelpass-chrome-${VERSION}.zip"
+
+          # Install webstore-upload CLI
+          npm install -g chrome-webstore-upload
+
+          # Upload to Chrome Web Store (trusted testers)
+          echo "Uploading extension to Chrome Web Store (trusted testers)..."
+          chrome-webstore-upload upload \
+            --source "$ZIP_FILE" \
+            --extension-id "$EXTENSION_ID" \
+            --client-id "$CLIENT_ID" \
+            --client-secret "$CLIENT_SECRET" \
+            --refresh-token "$REFRESH_TOKEN" \
+            --app-id "$APP_ID" \
+            --trusted-users
+
+          echo "Extension uploaded to Chrome Web Store for trusted testers"
+          echo "Note: This is a TEST upload. The extension is NOT published to the public store."
+
+      - name: Publish to Chrome Web Store (Production)
+        if: github.event.inputs.publish_target == 'production'
+        env:
+          EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CLIENT_ID: ${{ secrets.CHROME_WEBSTORE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CHROME_WEBSTORE_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}
+          APP_ID: ${{ secrets.CHROME_WEBSTORE_APP_ID }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIP_FILE="browser-extension/dist/sentinelpass-chrome-${VERSION}.zip"
+
+          # Install webstore-upload CLI
+          npm install -g chrome-webstore-upload
+
+          # Upload to Chrome Web Store
+          echo "Uploading extension to Chrome Web Store..."
+          chrome-webstore-upload upload \
+            --source "$ZIP_FILE" \
+            --extension-id "$EXTENSION_ID" \
+            --client-id "$CLIENT_ID" \
+            --client-secret "$CLIENT_SECRET" \
+            --refresh-token "$REFRESH_TOKEN" \
+            --app-id "$APP_ID" \
+            --publish
+
+          echo "Extension published to Chrome Web Store!"
