@@ -68,3 +68,5 @@ DerivedData/
 # iOS build artifacts
 ios/SentinelPass/SentinelPass/*.app/
 ios/**/build/
+build/android/*.apk
+build/android/*.aab

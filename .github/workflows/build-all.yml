@@ -57,6 +57,7 @@ jobs:
           cache-key-prefix: build-all-${{ matrix.platform }}
 
       - name: Build desktop platforms
+        shell: bash
         run: |
           bash scripts/build-desktop.sh \
             --${{ github.event.inputs.build_type || 'release' }} \
@@ -150,13 +151,13 @@ jobs:
 
       - name: Setup Android NDK
         run: |
-          # Install NDK
-          echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;29.0.13113405"
+          # Install NDK (version must match local setup-android-env.sh)
+          echo "y" | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install "ndk;29.0.14206865"
 
       - name: Build Android platform
         run: |
-          # Set up environment for NDK
-          export ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/29.0.13113405
+          # Set up environment for NDK (version must match local setup-android-env.sh)
+          export ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/29.0.14206865
           export PATH="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
           bash scripts/build-android.sh \
             --${{ github.event.inputs.build_type || 'release' }}
