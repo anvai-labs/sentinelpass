@@ -159,6 +159,11 @@ jobs:
           # Set up environment for NDK (version must match local setup-android-env.sh)
           export ANDROID_NDK_ROOT=${ANDROID_HOME}/ndk/29.0.14206865
           export PATH="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin:${PATH}"
+          # Set cargo target-specific toolchain environment variables
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_AR="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
           bash scripts/build-android.sh \
             --${{ github.event.inputs.build_type || 'release' }}
 
