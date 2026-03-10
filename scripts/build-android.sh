@@ -65,12 +65,14 @@ cd "$PROJECT_ROOT"
 # Setup Android Environment
 # ============================================================================
 
-# Source android-env.sh if it exists and NDK isn't already in PATH
+# Source android-env.sh if it exists and NDK isn't already in PATH or ANDROID_NDK_ROOT isn't set
 if [ -f "scripts/android-env.sh" ]; then
-    # Check if NDK bin is already in PATH
-    if ! echo "$PATH" | grep -q "ndk.*prebuilt.*bin"; then
+    # Check if NDK bin is already in PATH or ANDROID_NDK_ROOT is set
+    if ! echo "$PATH" | grep -q "ndk.*prebuilt.*bin" && [ -z "$ANDROID_NDK_ROOT" ]; then
         log_info "Loading Android environment..."
         source scripts/android-env.sh
+    else
+        log_info "Using existing Android environment (ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT)"
     fi
 fi
 
