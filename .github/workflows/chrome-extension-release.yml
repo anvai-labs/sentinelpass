@@ -75,9 +75,25 @@ jobs:
           mkdir -p dist
           zip -r "dist/sentinelpass-chrome-${VERSION}.zip" chrome/ \
             -x "chrome/*.ts" \
-            -x "chrome/dist" \
-            -x "chrome/DEBUGGING.md"
+            -x "chrome/dist/*" \
+            -x "chrome/DEBUGGING.md" \
+            -x "chrome/INSTALLATION.md"
           ls -lh dist/
+
+      - name: Verify package contents
+        working-directory: browser-extension
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Package contents:"
+          unzip -l "dist/sentinelpass-chrome-${VERSION}.zip"
+          echo ""
+          echo "Checking for TypeScript files..."
+          if unzip -l "dist/sentinelpass-chrome-${VERSION}.zip" | grep -q "\.ts$"; then
+            echo "ERROR: TypeScript files found in package!"
+            exit 1
+          else
+            echo "✓ No TypeScript files in package"
+          fi
 
       - name: Upload extension artifact
         uses: actions/upload-artifact@v4
