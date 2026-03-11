@@ -331,6 +331,39 @@ jobs:
           merge-multiple: true
 
       - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd release-assets
+          find . -type f -exec sha256sum {} + > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Copy Tauri bundles to release assets
+        shell: bash
+        run: |
+          VERSION="${{ needs.setup.outputs.version }}"
+          # Copy macOS DMG
+          if [ -f "tauri-assets/sentinelpass-ui_${VERSION}_x64.dmg" ]; then
+            cp "tauri-assets/sentinelpass-ui_${VERSION}_x64.dmg" "release-assets/sentinelpass-${VERSION}-macos.dmg"
+          fi
+          if [ -f "tauri-assets/bundle/dmg/SentinelPass_${VERSION}_x64.dmg" ]; then
+            cp "tauri-assets/bundle/dmg/SentinelPass_${VERSION}_x64.dmg" "release-assets/sentinelpass-${VERSION}-macos.dmg"
+          fi
+          find tauri-assets -name "*.dmg" -exec cp {} "release-assets/" \ 2>/dev/null || true
+
+          # Copy Windows MSI
+          if [ -f "tauri-assets/sentinelpass-ui_${VERSION}_x64_en-US.msi" ]; then
+            cp "tauri-assets/sentinelpass-ui_${VERSION}_x64_en-US.msi" "release-assets/sentinelpass-${VERSION}-windows.msi"
+          fi
+          if [ -f "tauri-assets/bundle/msi/SentinelPass_${VERSION}_x64_en-US.msi" ]; then
+            cp "tauri-assets/bundle/msi/SentinelPass_${VERSION}_x64_en-US.msi" "release-assets/sentinelpass-${VERSION}-windows.msi"
+          fi
+          find tauri-assets -name "*.msi" -exec cp {} "release-assets/" \ 2>/dev/null || true
+
+          echo "Tauri bundles copied:"
+          ls -la release-assets/*.{dmg,msi} 2>/dev/null || echo "No DMG or MSI files found"
+
+      - name: Regenerate SHA256 checksums with Tauri bundles
+        shell: bash
         run: |
           cd release-assets
           find . -type f -exec sha256sum {} + > sha256sums.txt
@@ -347,31 +380,29 @@ jobs:
 
           ## Installation
 
-          ### Linux
+          ### macOS DMG (Recommended)
           \`\`\`bash
-          # Download installer
+          # Download DMG installer
+          curl -LO https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-macos.dmg
+          # Open DMG and drag to Applications
+          open sentinelpass-${VERSION}-macos.dmg
+          \`\`\`
+
+          ### Windows MSI (Recommended)
+          \`\`\`powershell
+          # Download MSI installer
+          Invoke-WebRequest -Uri https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-windows.msi -OutFile installer.msi
+          # Run installer
+          msiexec /i installer.msi
+          \`\`\`
+
+          ### Linux (Tarball)
+          \`\`\`bash
+          # Download tarball installer
           wget https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-installer-${VERSION}-linux.tar.gz
           tar -xzf sentinelpass-installer-${VERSION}-linux.tar.gz
           cd installer-root
           ./install.sh
-          \`\`\`
-
-          ### macOS
-          \`\`\`bash
-          # Download installer
-          curl -LO https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-installer-${VERSION}-macos.tar.gz
-          tar -xzf sentinelpass-installer-${VERSION}-macos.tar.gz
-          cd installer-root
-          ./install-user.command
-          \`\`\`
-
-          ### Windows
-          \`\`\`powershell
-          # Download installer
-          Invoke-WebRequest -Uri https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-installer-${VERSION}-windows.zip -OutFile installer.zip
-          Expand-Archive -Path installer.zip
-          cd installer-root
-          .\install-user.cmd
           \`\`\`
 
           ## Browser Extensions
