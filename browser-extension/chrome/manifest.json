@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SentinelPass",
-  "version": "0.1.0",
+  "version": "0.6.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxZl9jJWkyhiES7yLVVbuhZ/Z8e6BXaunhM0DLYadri0bK4c97Pe0QbG9Z4UsMfDUKIYOae41NWs+uUAxcZWnIVz0ct7cDG40WP2HDtN59pd4ahpVhgsmfCQHOKGVZ1H3AjIdZAmhFYTY6/X7FIsYDyrSGplCk1wZCHymN9cHN1zNB3gh0WvA0oTGiTjohYq/iFamOIWYFd5qBF+tVSAu1xCNW9qvIaF+NRSQSLIYZ2nBcrfGGMat31TrAkwRxvFmsQR99vf0sfYoak7Iu9I2TfjE9ipKjM7Mpb+P0elZdmPETgO8axqKOXE+tQ8GnX6bTSx2Hl0trSOQ+PNG0BRAAQIDAQAB",
   "description": "Secure, local-first password manager with autofill support",
   "permissions": [
