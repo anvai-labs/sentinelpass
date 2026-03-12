@@ -286,7 +286,14 @@ jobs:
         shell: bash
         run: |
           echo "Tauri bundle outputs:"
-          find sentinelpass-ui/target/release/bundle -type f || echo "No bundles found"
+          # Check multiple possible locations due to GitHub Actions directory structure
+          if [ -d "sentinelpass-ui/target/release/bundle" ]; then
+            find sentinelpass-ui/target/release/bundle -type f || echo "No bundles found in sentinelpass-ui/target/release/bundle"
+          elif [ -d "target/release/bundle" ]; then
+            find target/release/bundle -type f || echo "No bundles found in target/release/bundle"
+          else
+            echo "Bundle directory not found"
+          fi
 
       - name: Upload Tauri bundle artifacts
         uses: actions/upload-artifact@v4
@@ -301,6 +308,14 @@ jobs:
             sentinelpass-ui/target/release/bundle/nsis/*.exe
             sentinelpass-ui/target/release/bundle/update/*.msi
             sentinelpass-ui/target/release/bundle/update/*.exe
+            target/release/bundle/*.deb
+            target/release/bundle/*.AppImage
+            target/release/bundle/*.dmg
+            target/release/bundle/*.app
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/update/*.msi
+            target/release/bundle/update/*.exe
           if-no-files-found: ignore
           retention-days: 7
 
@@ -341,26 +356,62 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ needs.setup.outputs.version }}"
+
+          # Function to find and copy bundles from potential locations
+          find_and_copy_bundles() {
+            local pattern="$1"
+            local dest_name="$2"
+
+            # Check tauri-assets directory
+            if [ -d "tauri-assets" ]; then
+              find tauri-assets -name "$pattern" -type f -print0 | xargs -0 -I {} cp {} "release-assets/$dest_name" 2>/dev/null && return 0
+            fi
+
+            # Check if tauri-assets has subdirectories
+            if [ -d "tauri-assets/bundle" ]; then
+              find tauri-assets/bundle -name "$pattern" -type f -print0 | xargs -0 -I {} cp {} "release-assets/$dest_name" 2>/dev/null && return 0
+            fi
+
+            # Check tauri-assets/deb, tauri-assets/appimage, etc.
+            for dir in deb appimage dmg app msi nsis update; do
+              if [ -d "tauri-assets/$dir" ]; then
+                find "tauri-assets/$dir" -name "$pattern" -type f -print0 | xargs -0 -I {} cp {} "release-assets/" 2>/dev/null
+              fi
+            done
+
+            return 0
+          }
+
+          echo "Searching for Tauri bundles..."
+
           # Copy macOS DMG
-          if [ -f "tauri-assets/sentinelpass-ui_${VERSION}_x64.dmg" ]; then
-            cp "tauri-assets/sentinelpass-ui_${VERSION}_x64.dmg" "release-assets/sentinelpass-${VERSION}-macos.dmg"
+          find_and_copy_bundles "*.dmg" ""
+          # Try to rename to expected filename
+          if ls release-assets/*.dmg 1> /dev/null 2>&1; then
+            FIRST_DMG=$(ls release-assets/*.dmg | head -1)
+            if [ ! -f "release-assets/sentinelpass-${VERSION}-macos.dmg" ]; then
+              cp "$FIRST_DMG" "release-assets/sentinelpass-${VERSION}-macos.dmg"
+            fi
           fi
-          if [ -f "tauri-assets/bundle/dmg/SentinelPass_${VERSION}_x64.dmg" ]; then
-            cp "tauri-assets/bundle/dmg/SentinelPass_${VERSION}_x64.dmg" "release-assets/sentinelpass-${VERSION}-macos.dmg"
-          fi
-          find tauri-assets -name "*.dmg" -exec cp {} "release-assets/" \ 2>/dev/null || true
 
           # Copy Windows MSI
-          if [ -f "tauri-assets/sentinelpass-ui_${VERSION}_x64_en-US.msi" ]; then
-            cp "tauri-assets/sentinelpass-ui_${VERSION}_x64_en-US.msi" "release-assets/sentinelpass-${VERSION}-windows.msi"
+          find_and_copy_bundles "*.msi" ""
+          # Try to rename to expected filename
+          if ls release-assets/*.msi 1> /dev/null 2>&1; then
+            FIRST_MSI=$(ls release-assets/*.msi | head -1)
+            if [ ! -f "release-assets/sentinelpass-${VERSION}-windows.msi" ]; then
+              cp "$FIRST_MSI" "release-assets/sentinelpass-${VERSION}-windows.msi"
+            fi
           fi
-          if [ -f "tauri-assets/bundle/msi/SentinelPass_${VERSION}_x64_en-US.msi" ]; then
-            cp "tauri-assets/bundle/msi/SentinelPass_${VERSION}_x64_en-US.msi" "release-assets/sentinelpass-${VERSION}-windows.msi"
-          fi
-          find tauri-assets -name "*.msi" -exec cp {} "release-assets/" \ 2>/dev/null || true
+
+          # Also copy other bundle types
+          find_and_copy_bundles "*.deb" ""
+          find_and_copy_bundles "*.AppImage" ""
+          find_and_copy_bundles "*.app" ""
+          find_and_copy_bundles "*.exe" ""
 
           echo "Tauri bundles copied:"
-          ls -la release-assets/*.{dmg,msi} 2>/dev/null || echo "No DMG or MSI files found"
+          ls -la release-assets/ | grep -E '\.(dmg|msi|deb|AppImage|exe)$' || echo "No bundle files found"
 
       - name: Regenerate SHA256 checksums with Tauri bundles
         shell: bash
