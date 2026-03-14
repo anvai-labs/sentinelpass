@@ -107,6 +107,11 @@ jobs:
           if [ "${{ needs.setup.outputs.is-release }}" == "true" ]; then
             sed -i.bak "/\[workspace\.package\]/,/^\[/{s/^version = \".*\"/version = \"${VERSION}\"/;}" Cargo.toml && rm -f Cargo.toml.bak
             cargo update --workspace
+            # Also inject version into tauri.conf.json so DMG/MSI filenames match
+            TAURI_CONF="sentinelpass-ui/tauri.conf.json"
+            if [ -f "$TAURI_CONF" ]; then
+              sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" "$TAURI_CONF" && rm -f "${TAURI_CONF}.bak"
+            fi
           fi
 
       - name: Package archives (Unix)
@@ -286,36 +291,30 @@ jobs:
         shell: bash
         run: |
           echo "Tauri bundle outputs:"
-          # Check multiple possible locations due to GitHub Actions directory structure
-          if [ -d "sentinelpass-ui/target/release/bundle" ]; then
-            find sentinelpass-ui/target/release/bundle -type f || echo "No bundles found in sentinelpass-ui/target/release/bundle"
-          elif [ -d "target/release/bundle" ]; then
-            find target/release/bundle -type f || echo "No bundles found in target/release/bundle"
-          else
-            echo "Bundle directory not found"
-          fi
+          for dir in sentinelpass-ui/target/release/bundle target/release/bundle; do
+            if [ -d "$dir" ]; then
+              echo "Found bundles in $dir:"
+              find "$dir" -type f -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.app' | head -20
+            fi
+          done
 
       - name: Upload Tauri bundle artifacts
         uses: actions/upload-artifact@v4
         with:
           name: tauri-bundles-${{ matrix.platform }}
           path: |
-            sentinelpass-ui/target/release/bundle/*.deb
-            sentinelpass-ui/target/release/bundle/*.AppImage
-            sentinelpass-ui/target/release/bundle/*.dmg
-            sentinelpass-ui/target/release/bundle/*.app
+            sentinelpass-ui/target/release/bundle/deb/*.deb
+            sentinelpass-ui/target/release/bundle/appimage/*.AppImage
+            sentinelpass-ui/target/release/bundle/dmg/*.dmg
+            sentinelpass-ui/target/release/bundle/macos/*.app
             sentinelpass-ui/target/release/bundle/msi/*.msi
             sentinelpass-ui/target/release/bundle/nsis/*.exe
-            sentinelpass-ui/target/release/bundle/update/*.msi
-            sentinelpass-ui/target/release/bundle/update/*.exe
-            target/release/bundle/*.deb
-            target/release/bundle/*.AppImage
-            target/release/bundle/*.dmg
-            target/release/bundle/*.app
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
-            target/release/bundle/update/*.msi
-            target/release/bundle/update/*.exe
           if-no-files-found: ignore
           retention-days: 7
 
