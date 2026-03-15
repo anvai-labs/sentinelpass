@@ -2,7 +2,7 @@
 //!
 //! Provides utilities to securely clear sensitive data from memory.
 
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// A secure buffer that automatically zeroizes on drop
 ///
@@ -41,12 +41,12 @@ impl SecureBuffer {
         &self.data
     }
 
-    /// Consume the buffer and return the data
-    ///
-    /// Note: The caller becomes responsible for zeroizing the data.
-    /// This clones the data since we can't move out of a Drop type.
-    pub fn into_inner(&self) -> Vec<u8> {
-        self.data.clone()
+    /// Consume the buffer and return the data wrapped in `Zeroizing`
+    /// so it is automatically zeroized when dropped.
+    pub fn into_inner(mut self) -> Zeroizing<Vec<u8>> {
+        let data = std::mem::take(&mut self.data);
+        std::mem::forget(self); // prevent double-zeroize in Drop
+        Zeroizing::new(data)
     }
 }
 
@@ -138,9 +138,8 @@ mod tests {
         let buffer = SecureBuffer::new(data.clone());
         let inner = buffer.into_inner();
 
-        assert_eq!(inner, data);
-
-        // Verify the original data is still accessible
-        assert_eq!(buffer.as_bytes(), &data[..]);
+        // inner is Zeroizing<Vec<u8>>, dereferences to the original data
+        assert_eq!(&*inner, &data);
+        // buffer is consumed — no longer accessible
     }
 }

@@ -105,10 +105,20 @@ pub async fn push(
     let mut accepted = 0u64;
     let mut rejected = 0u64;
 
+    /// Maximum size of a single encrypted payload (1 MB).
+    const MAX_ENTRY_PAYLOAD_SIZE: usize = 1_048_576;
+
     for entry in &req.entries {
         let payload = base64::engine::general_purpose::STANDARD
             .decode(&entry.encrypted_payload)
             .map_err(|e| RelayError::BadRequest(format!("Invalid payload: {}", e)))?;
+
+        if payload.len() > MAX_ENTRY_PAYLOAD_SIZE {
+            return Err(RelayError::BadRequest(format!(
+                "Entry payload exceeds maximum size of {} bytes",
+                MAX_ENTRY_PAYLOAD_SIZE
+            )));
+        }
 
         let sync_id_str = entry.sync_id.to_string();
 

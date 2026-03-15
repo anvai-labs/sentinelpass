@@ -114,13 +114,19 @@ pub async fn register_device(
     )
     .map_err(|e| RelayError::Database(e.to_string()))?;
 
-    // Register device
+    if req.device_name.len() > 255 {
+        return Err(RelayError::BadRequest(
+            "Device name must be 255 characters or fewer".to_string(),
+        ));
+    }
+
+    // Register device — public_key is immutable after registration;
+    // revoke + re-register through the pairing flow to rotate keys.
     tx.execute(
         "INSERT INTO devices (device_id, vault_id, device_name, device_type, public_key, registered_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(device_id) DO UPDATE SET
-            device_name = excluded.device_name,
-            public_key = excluded.public_key",
+            device_name = excluded.device_name",
         rusqlite::params![
             &device_id_str,
             &vault_id_str,
@@ -342,6 +348,98 @@ mod tests {
 
         match err {
             RelayError::Auth(msg) => assert!(msg.contains("Pairing token required")),
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn re_registration_does_not_update_public_key() {
+        let state = test_state();
+        let vault_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+
+        let original_key = [7u8; 32];
+        let new_key = [9u8; 32];
+
+        // First registration
+        let req = RegisterDeviceRequest {
+            device_id,
+            device_name: "Device A".to_string(),
+            device_type: "desktop".to_string(),
+            public_key: STANDARD.encode(original_key),
+            vault_id,
+            pairing_token: None,
+            registration_proof: None,
+        };
+        let _ = register_device(State(state.clone()), Json(req))
+            .await
+            .expect("first registration should succeed");
+
+        // Re-registration with a different public key requires pairing proof
+        // because the vault already has a device registered.
+        let pairing_token = "123456";
+        let registration_proof = STANDARD.encode([42u8; 32]);
+        seed_registration_proof(
+            &state,
+            vault_id,
+            pairing_token,
+            &registration_proof,
+            Utc::now().timestamp() + 300,
+        );
+
+        let req2 = RegisterDeviceRequest {
+            device_id,
+            device_name: "Device A Renamed".to_string(),
+            device_type: "desktop".to_string(),
+            public_key: STANDARD.encode(new_key),
+            vault_id,
+            pairing_token: Some(pairing_token.to_string()),
+            registration_proof: Some(registration_proof.clone()),
+        };
+        let _ = register_device(State(state.clone()), Json(req2))
+            .await
+            .expect("re-registration should succeed");
+
+        // Verify public_key was NOT updated
+        let conn = state.storage.conn().unwrap();
+        let stored_key: Vec<u8> = conn
+            .query_row(
+                "SELECT public_key FROM devices WHERE device_id = ?1",
+                [device_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_key,
+            original_key.to_vec(),
+            "public_key must not change on re-registration"
+        );
+
+        // Verify device_name WAS updated
+        let stored_name: String = conn
+            .query_row(
+                "SELECT device_name FROM devices WHERE device_id = ?1",
+                [device_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_name, "Device A Renamed");
+    }
+
+    #[tokio::test]
+    async fn rejects_device_name_exceeding_max_length() {
+        let state = test_state();
+        let vault_id = Uuid::new_v4();
+
+        let mut req = register_request(vault_id);
+        req.device_name = "x".repeat(256);
+
+        let err = register_device(State(state), Json(req))
+            .await
+            .expect_err("should reject oversized device name");
+
+        match err {
+            RelayError::BadRequest(msg) => assert!(msg.contains("255")),
             other => panic!("unexpected error: {}", other),
         }
     }
