@@ -184,24 +184,11 @@ pub async fn fetch_bootstrap(
     let (lookup_token, encrypted, salt) = if let Some((encrypted, salt)) = hashed_hit {
         (token_hash, encrypted, salt)
     } else {
-        let legacy_hit: Option<(Vec<u8>, Vec<u8>)> = tx
-            .query_row(
-                "SELECT encrypted_bootstrap, pairing_salt FROM pairing_bootstraps
-                 WHERE pairing_token = ?1 AND expires_at > ?2 AND consumed = 0",
-                rusqlite::params![token, now],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
+        tx.commit()
             .map_err(|e| RelayError::Database(e.to_string()))?;
-
-        let Some((encrypted, salt)) = legacy_hit else {
-            tx.commit()
-                .map_err(|e| RelayError::Database(e.to_string()))?;
-            return Err(RelayError::NotFound(
-                "Pairing token not found or expired".to_string(),
-            ));
-        };
-        (token, encrypted, salt)
+        return Err(RelayError::NotFound(
+            "Pairing token not found or expired".to_string(),
+        ));
     };
 
     // Mark as consumed
@@ -408,36 +395,6 @@ mod tests {
         assert_ne!(stored_token, req.pairing_token);
         assert_eq!(stored_vault, vault_id);
         assert!(proof_exists);
-    }
-
-    #[tokio::test]
-    async fn fetch_bootstrap_supports_legacy_raw_token_lookup() {
-        let state = state_with_config(300, 5);
-        {
-            let conn = state.storage.conn().unwrap();
-            let now = Utc::now().timestamp();
-            conn.execute(
-                "INSERT INTO pairing_bootstraps (pairing_token, vault_id, encrypted_bootstrap, pairing_salt, expires_at, consumed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-                rusqlite::params!["legacy-token", "v1", vec![1u8, 2, 3], vec![4u8; 16], now + 300],
-            )
-            .unwrap();
-        }
-
-        let Json(resp) = fetch_bootstrap(State(state.clone()), Path("legacy-token".to_string()))
-            .await
-            .expect("fetch legacy token");
-        assert_eq!(resp.encrypted_bootstrap, STANDARD.encode([1u8, 2, 3]));
-
-        let conn = state.storage.conn().unwrap();
-        let consumed: bool = conn
-            .query_row(
-                "SELECT consumed FROM pairing_bootstraps WHERE pairing_token = 'legacy-token'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(consumed);
     }
 
     #[tokio::test]

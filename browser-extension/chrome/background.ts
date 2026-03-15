@@ -741,6 +741,9 @@ async function handleSaveNotification(data, sender) {
 
 // Listen for messages from content scripts
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Validate sender is from this extension
+  if (sender.id !== chrome.runtime.id) { return; }
+
   debugLog('[SentinelPass Background] Received message:', request.type);
   debugLog('[SentinelPass Background] Request details:', redactForLog(request));
 

@@ -147,8 +147,9 @@ pub fn decrypt_entry(dek: &DataEncryptionKey, encrypted: &EncryptedEntry) -> Res
     // Reconstruct nonce
     let nonce = Nonce::from(encrypted.nonce);
 
-    // Combine ciphertext and auth tag
-    let mut ciphertext_with_tag = encrypted.ciphertext.clone();
+    // Combine ciphertext and auth tag (avoid redundant clone)
+    let mut ciphertext_with_tag = Vec::with_capacity(encrypted.ciphertext.len() + 16);
+    ciphertext_with_tag.extend_from_slice(&encrypted.ciphertext);
     ciphertext_with_tag.extend_from_slice(&encrypted.auth_tag);
 
     // Decrypt and verify

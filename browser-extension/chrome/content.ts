@@ -2,6 +2,12 @@
 
 import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger';
 
+function escapeHtml(str: string): string {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
 infoLog('Content script loaded');
 debugLog('Current URL:', sanitizeUrl(window.location.href));
 debugLog('Hostname:', sanitizeHostname(window.location.hostname));
@@ -617,8 +623,8 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
         <button type="button" class="pm-prompt-close">×</button>
       </div>
       <div class="pm-prompt-body">
-        <p>SentinelPass detected a new password for <strong>${domain}</strong></p>
-        ${username ? `<p>Username: <strong>${username}</strong></p>` : ''}
+        <p>SentinelPass detected a new password for <strong>${escapeHtml(domain)}</strong></p>
+        ${username ? `<p>Username: <strong>${escapeHtml(username)}</strong></p>` : ''}
         <div class="pm-prompt-actions">
           <button type="button" class="pm-prompt-btn pm-prompt-btn-save">Save</button>
           <button type="button" class="pm-prompt-btn pm-prompt-btn-never">Never for this site</button>

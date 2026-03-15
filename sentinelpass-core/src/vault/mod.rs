@@ -463,9 +463,13 @@ impl VaultManager {
 
         let now = chrono::Utc::now().timestamp();
 
-        // Get sync_id and sync_version before soft-deleting
-        let sync_info: Option<(String, i64)> = db
+        let tx = db
             .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+
+        // Get sync_id and sync_version before soft-deleting
+        let sync_info: Option<(String, i64)> = tx
             .query_row(
                 "SELECT sync_id, sync_version FROM entries WHERE entry_id = ?1",
                 [entry_id],
@@ -474,8 +478,7 @@ impl VaultManager {
             .ok();
 
         // Soft-delete: mark as deleted, bump sync_version
-        let rows_affected = db
-            .conn()
+        let rows_affected = tx
             .execute(
                 "UPDATE entries SET is_deleted = 1, deleted_at = ?1,
                  sync_version = sync_version + 1, sync_state = 'pending'
@@ -493,22 +496,22 @@ impl VaultManager {
 
         // Record tombstone for sync
         if let Some((sync_id, sync_version)) = sync_info {
-            db.conn()
-                .execute(
-                    "INSERT OR IGNORE INTO sync_tombstones (sync_id, entry_type, sync_version, deleted_at, origin_device_id)
-                     VALUES (?1, 'credential', ?2, ?3, '')",
-                    rusqlite::params![sync_id, sync_version + 1, now],
-                )
-                .map_err(DatabaseError::Sqlite)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO sync_tombstones (sync_id, entry_type, sync_version, deleted_at, origin_device_id)
+                 VALUES (?1, 'credential', ?2, ?3, '')",
+                rusqlite::params![sync_id, sync_version + 1, now],
+            )
+            .map_err(DatabaseError::Sqlite)?;
         }
 
         // Delete associated domain mappings (these are inside the credential blob for sync)
-        db.conn()
-            .execute(
-                "DELETE FROM domain_mappings WHERE entry_id = ?1",
-                [entry_id],
-            )
-            .map_err(DatabaseError::Sqlite)?;
+        tx.execute(
+            "DELETE FROM domain_mappings WHERE entry_id = ?1",
+            [entry_id],
+        )
+        .map_err(DatabaseError::Sqlite)?;
+
+        tx.commit().map_err(DatabaseError::Sqlite)?;
 
         // Log credential deletion
         if let Some(ref logger) = self.audit_logger {
