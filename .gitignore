@@ -49,3 +49,29 @@ blogs/
 audit/
 .victor/
 sentinelpass-ui/gen/
+
+# iOS / Swift
+*.app/
+*.ipa/
+*.dSYM.zip
+*.dSYM
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+.xcode_scheme/
+xcuserdata/
+DerivedData/
+.build/
+# Swift Package Manager
+.swiftpm/
+.build/
+# iOS build artifacts
+ios/SentinelPass/SentinelPass/*.app/
+ios/**/build/
+# iOS native libraries
+ios/SentinelPass/SentinelPass/Native/libs/*.a
+# Android build artifacts
+build/android/*.apk
+build/android/*.aab
+# All build artifacts
+build/

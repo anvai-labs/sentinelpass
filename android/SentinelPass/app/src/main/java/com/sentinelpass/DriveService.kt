@@ -224,7 +224,7 @@ class DriveService(
      */
     suspend fun registerDevice(): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val deviceId = currentDeviceId ?: return Result.failure(
+            val deviceId = currentDeviceId ?: return@withContext Result.failure(
                 IllegalStateException("Drive service not initialized")
             )
 
@@ -255,7 +255,7 @@ class DriveService(
                     .execute()
             } catch (e: Exception) {
                 // Ignore "already exists" errors
-                if (!e.message?.contains("already exists", ignoreCase = true) == true) {
+                if (e.message?.contains("already exists", ignoreCase = true) != true) {
                     throw e
                 }
             }
@@ -335,7 +335,7 @@ class DriveService(
     private fun convertDriveFileToSyncBlob(file: File): JSONObject {
         // Download file content
         val outputStream = ByteArrayOutputStream()
-        driveService.files()[file.id].execute(mediaHttpDownloader).download(outputStream)
+        driveService.files().get(file.id).executeMediaAndDownloadTo(outputStream)
         val content = String(outputStream.toByteArray())
 
         // Parse the content
@@ -346,14 +346,14 @@ class DriveService(
             put("id", file.name.removeSuffix(".json"))
             put("name", file.name)
             put("encryptedPayload", baseJson.optString("encryptedPayload"))
-            put("modifiedTime", (file.modifiedTime?.value ?: 0))
+            put("modifiedTime", file.modifiedTime?.value ?: 0L)
             put("md5Checksum", file.md5Checksum)
 
             // App properties
-            val appProps = file.appProperties ?: mapOf()
+            val appProps = file.appProperties ?: mapOf<String, String>()
             put("entryType", appProps["entryType"] ?: "Credential")
-            put("syncVersion", (appProps["syncVersion"]?.toLongOrNull() ?: 0))
-            put("isTombstone", (appProps["isTombstone"]?.toBoolean() ?: false))
+            put("syncVersion", appProps["syncVersion"]?.toLongOrNull() ?: 0L)
+            put("isTombstone", appProps["isTombstone"]?.toBoolean() ?: false)
             put("originDeviceId", appProps["originDeviceId"] ?: "")
         }
 

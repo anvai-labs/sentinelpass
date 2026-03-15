@@ -7,7 +7,9 @@
 
 import Foundation
 import SwiftData
+import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 @Model
 final class EntryModel {
     var id: String
@@ -45,11 +47,13 @@ final class EntryModel {
 
 // MARK: - Supporting Types
 
+@available(iOS 17.0, macOS 14.0, *)
 struct TotpCode {
     let code: String
     let secondsRemaining: UInt32
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 struct PasswordAnalysis {
     let score: Int
     let entropyBits: Double
@@ -81,8 +85,7 @@ struct PasswordAnalysis {
     }
 }
 
-import SwiftUI
-
+@available(iOS 17.0, macOS 14.0, *)
 struct EntrySummary {
     let id: String
     let title: String

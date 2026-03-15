@@ -61,6 +61,16 @@ header h1 {
   opacity: 1;
 }
 
+.status-indicator.status-error .status-text {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.status-indicator.status-error .status-dot {
+  background: #dc2626;
+  opacity: 1;
+}
+
 /* Main content */
 main {
   flex: 1;

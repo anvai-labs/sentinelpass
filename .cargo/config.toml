@@ -1,14 +1,20 @@
-[target.aarch64-linux-android]
-ar = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
-linker = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android34-clang"
-
-[target.armv7-linux-androideabi]
-ar = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
-linker = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/armv7-linux-androideabi34-clang"
-
-[target.x86_64-linux-android]
-ar = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
-linker = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android34-clang"
+# Cargo configuration for Android cross-compilation
+# Note: NDK r29 only supports ARM64 and x86_64 (ARMv7 was removed)
+#
+# Android toolchain paths are configured via environment variables:
+# - Source scripts/android-env.sh for local development
+# - CI workflows set ANDROID_NDK_ROOT and PATH automatically
+#
+# Required environment variables (set by scripts/android-env.sh or CI):
+# - ANDROID_NDK_ROOT: Path to NDK installation
+# - CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ARM64 linker
+# - CARGO_TARGET_AARCH64_LINUX_ANDROID_AR: ARM64 archiver
+# - CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER: x86_64 linker
+# - CARGO_TARGET_X86_64_LINUX_ANDROID_AR: x86_64 archiver
 
 [env]
-ANDROID_NDK_HOME = "/Users/vijaysingh/Library/Android/sdk/ndk/29.0.14206865"
+# This section is intentionally left empty
+# Android toolchain configuration is handled by:
+# 1. scripts/android-env.sh for local development
+# 2. CI workflow environment setup for CI builds
+# 3. The cc crate automatically finds tools from PATH

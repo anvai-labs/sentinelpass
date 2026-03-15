@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct SettingsView: View {
     @EnvironmentObject private var vaultState: VaultState
     @EnvironmentObject private var biometricAuth: BiometricAuth
@@ -19,7 +20,7 @@ struct SettingsView: View {
                 // Security Section
                 Section {
                     if biometricAuth.isAvailable {
-                        Toggle("Biometric Unlock", isOn: biometricEnabled)
+                        Toggle("Biometric Unlock", isOn: $biometricEnabled)
                             .onChange(of: biometricEnabled) { _, newValue in
                                 Task {
                                     if newValue {
@@ -131,6 +132,7 @@ struct SettingsView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 struct ExportOptionsView: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -156,7 +158,9 @@ struct ExportOptionsView: View {
                 }
             }
             .navigationTitle("Export Data")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -183,6 +187,7 @@ struct ExportOptionsView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     SettingsView()
         .environmentObject(VaultState.shared)

@@ -1,18 +1,32 @@
 // Popup script for Password Manager extension
 let currentDomain = '';
-
+const UNAVAILABLE_FEATURE_MESSAGE = 'This feature is not available in the current preview build.';
 document.addEventListener('DOMContentLoaded', async () => {
     // Get current tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     currentDomain = new URL(tab.url).hostname;
     // Initialize popup
     setupEventListeners();
+    applyUnavailableFeatureState();
     checkVaultStatus();
 });
 function setupEventListeners() {
     document.getElementById('lockBtn').addEventListener('click', lockVault);
     document.getElementById('settingsBtn').addEventListener('click', openSettings);
-    document.getElementById('searchInput').addEventListener('input', handleSearch);
+}
+function applyUnavailableFeatureState() {
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) {
+        searchInput.disabled = true;
+        searchInput.title = UNAVAILABLE_FEATURE_MESSAGE;
+        searchInput.classList.add('feature-disabled');
+    }
+    const addButton = document.getElementById('addCredentialBtn');
+    if (addButton) {
+        addButton.disabled = true;
+        addButton.title = UNAVAILABLE_FEATURE_MESSAGE;
+        addButton.classList.add('feature-disabled');
+    }
 }
 async function checkVaultStatus() {
     showLoading();
@@ -20,6 +34,13 @@ async function checkVaultStatus() {
         const response = await chrome.runtime.sendMessage({
             type: 'check_vault_status'
         });
+
+        // Check if native messaging is not available
+        if (response && response.error) {
+            showNativeMessagingNotAvailable();
+            return;
+        }
+
         if (response.unlocked) {
             showUnlockedView();
             loadCredentials();
@@ -30,7 +51,47 @@ async function checkVaultStatus() {
     }
     catch (error) {
         console.error('Failed to check vault status:', error);
-        showLockedView();
+        showNativeMessagingNotAvailable();
+    }
+}
+
+function showNativeMessagingNotAvailable() {
+    hideAllViews();
+    const credentialsList = document.getElementById('credentialsList');
+    const lockedView = document.getElementById('lockedView');
+
+    // Update vault status to show error
+    const statusElement = document.getElementById('vaultStatus');
+    statusElement.querySelector('.status-text').textContent = 'Native Host Not Found';
+    statusElement.classList.add('status-error');
+
+    // Show locked view with error message
+    lockedView.classList.remove('hidden');
+    const lockedMessage = lockedView.querySelector('.locked-message');
+    lockedMessage.innerHTML = `
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="currentColor" style="color: #dc2626;">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+        </svg>
+        <p style="color: #dc2626; font-weight: 600;">Native Host Not Found</p>
+        <p class="hint">SentinelPass requires the desktop application to be installed.</p>
+        <div style="margin-top: 16px; text-align: left; max-width: 320px;">
+          <p style="font-size: 13px; margin-bottom: 8px;"><strong>Installation Steps:</strong></p>
+          <ol style="font-size: 13px; padding-left: 20px; line-height: 1.5;">
+            <li>Download the desktop application from <a href="https://github.com/vjsingh1984/sentinelpass/releases" target="_blank" style="color: #2563eb;">GitHub Releases</a></li>
+            <li>Install and run the application</li>
+            <li>Initialize your vault: <code style="background: #f3f4f6; padding: 2px 6px; border-radius: 4px;">sentinelpass init</code></li>
+            <li>Reload this extension</li>
+          </ol>
+        </div>
+        <button id="openInstallationGuide" style="margin-top: 12px; font-size: 13px; padding: 8px 16px;">View Full Installation Guide</button>
+      `;
+
+    // Add event listener for installation guide button
+    const guideBtn = document.getElementById('openInstallationGuide');
+    if (guideBtn) {
+        guideBtn.addEventListener('click', () => {
+            chrome.tabs.create({ url: 'https://github.com/vjsingh1984/sentinelpass/blob/main/browser-extension/chrome/INSTALLATION.md' });
+        });
     }
 }
 async function loadCredentials() {
@@ -64,7 +125,7 @@ async function loadCredentials() {
             credentialsList.innerHTML = `
         <div class="empty-state">
           <p>No credentials found for <strong>${escapeHtml(currentDomain)}</strong></p>
-          <p class="hint">Use the search above to find credentials for other sites</p>
+          <button id="addCredentialBtn" class="btn btn-primary feature-disabled" disabled title="${escapeHtml(UNAVAILABLE_FEATURE_MESSAGE)}">Add Credential (Coming Soon)</button>
         </div>
       `;
         }
@@ -78,116 +139,6 @@ async function loadCredentials() {
     `;
     }
 }
-
-function handleSearch() {
-    const searchInput = document.getElementById('searchInput');
-    const searchTerm = searchInput.value.trim().toLowerCase();
-    const credentialsList = document.getElementById('credentialsList');
-
-    if (!searchTerm) {
-        // Clear search and show current domain credentials
-        loadCredentials();
-        return;
-    }
-
-    // Calculate base domain (e.g., mail.google.com → google.com)
-    const baseDomain = extractBaseDomain(currentDomain);
-
-    // Show searching state
-    credentialsList.innerHTML = '<div class="searching-state"><p>Searching...</p></div>';
-
-    // Request domain-scoped credentials from background script
-    chrome.runtime.sendMessage({
-        type: 'list_domain_credentials',
-        domain: baseDomain,
-        request_id: generateUUID()
-    }, (response) => {
-        if (response && response.success && response.credentials && response.credentials.length > 0) {
-            // Filter results by search term
-            const filtered = response.credentials.filter(cred =>
-                cred.title.toLowerCase().includes(searchTerm) ||
-                cred.username.toLowerCase().includes(searchTerm)
-            );
-            displaySearchResults(filtered, baseDomain);
-        } else {
-            credentialsList.innerHTML = `
-                <div class="empty-state">
-                    <p>No credentials found for <strong>${escapeHtml(baseDomain)}</strong> domains</p>
-                    <p class="hint">Search matches: ${escapeHtml(searchTerm)}</p>
-                </div>
-            `;
-        }
-    });
-}
-
-// Extract base domain from hostname (e.g., mail.google.com → google.com)
-function extractBaseDomain(hostname) {
-    const parts = hostname.split('.');
-    if (parts.length <= 2) {
-        return hostname;
-    }
-    // For domains like co.uk, com.au, etc., keep the last 3 parts
-    // For simple domains like mail.google.com, keep the last 2 parts
-    const commonTlds = ['co.uk', 'com.au', 'co.nz', 'co.jp', 'co.in', 'com.sg', 'co.za'];
-    const lastTwo = parts.slice(-2).join('.');
-    const lastThree = parts.slice(-3).join('.');
-
-    if (commonTlds.includes(lastTwo)) {
-        return parts.slice(-3).join('.');
-    }
-    if (commonTlds.includes(lastThree)) {
-        return parts.slice(-4).join('.');
-    }
-    return parts.slice(-2).join('.');
-}
-
-function displaySearchResults(credentials, baseDomain) {
-    const credentialsList = document.getElementById('credentialsList');
-
-    if (credentials.length === 0) {
-        credentialsList.innerHTML = `
-            <div class="empty-state">
-                <p>No credentials found</p>
-            </div>
-        `;
-        return;
-    }
-
-    credentialsList.innerHTML = credentials.map(cred => `
-        <div class="credential-item">
-            <div class="credential-info">
-                <div class="credential-username">${escapeHtml(cred.username)}</div>
-                <div class="credential-domain">${escapeHtml(cred.title || cred.url || baseDomain)}</div>
-            </div>
-            <button class="btn-copy" data-username="${escapeHtml(cred.username)}" data-domain="${escapeHtml(cred.url || baseDomain)}" data-request-id="${generateUUID()}">
-                Get Password
-            </button>
-        </div>
-    `).join('');
-
-    // Add button listeners for "Get Password" buttons
-    credentialsList.querySelectorAll('.btn-copy').forEach(button => {
-        button.addEventListener('click', (e) => {
-            const username = e.target.dataset.username;
-            const domain = e.target.dataset.domain;
-            const requestId = e.target.dataset.requestId;
-
-            // Request full credential including password
-            chrome.runtime.sendMessage({
-                type: 'get_credential',
-                domain: domain,
-                request_id: requestId
-            }, (response) => {
-                if (response && response.success && response.data) {
-                    copyToClipboard(response.data.username, response.data.password);
-                } else {
-                    showNotification('Failed to get password', 'error');
-                }
-            });
-        });
-    });
-}
-
 function showLockedView() {
     hideAllViews();
     document.getElementById('lockedView').classList.remove('hidden');
@@ -241,12 +192,7 @@ async function lockVault() {
     }
 }
 function openSettings() {
-    // Open extension options page
-    if (chrome.runtime.openOptionsPage) {
-        chrome.runtime.openOptionsPage();
-    } else {
-        showNotification('Settings page coming soon', 'info');
-    }
+    showNotification(UNAVAILABLE_FEATURE_MESSAGE, 'info');
 }
 async function copyToClipboard(username, password) {
     try {

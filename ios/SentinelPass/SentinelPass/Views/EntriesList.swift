@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct EntriesList: View {
     @EnvironmentObject private var vaultState: VaultState
     @State private var searchText = ""
@@ -29,6 +30,7 @@ struct EntriesList: View {
                 filterEntries()
             }
             .toolbar {
+                #if os(iOS)
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showingAddEntry = true
@@ -36,6 +38,15 @@ struct EntriesList: View {
                         Image(systemName: "plus")
                     }
                 }
+                #else
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        showingAddEntry = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+                #endif
             }
             .sheet(isPresented: $showingAddEntry) {
                 AddEntryView()
@@ -87,7 +98,9 @@ struct EntriesList: View {
                 }
             }
         }
+        #if os(iOS)
         .listStyle(.insetGrouped)
+        #endif
     }
 
     private var sortedEntries: [EntryModel] {
@@ -110,6 +123,7 @@ struct EntriesList: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 struct EntryRow: View {
     let entry: EntryModel
 
@@ -161,6 +175,7 @@ struct EntryRow: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     NavigationStack {
         EntriesList()

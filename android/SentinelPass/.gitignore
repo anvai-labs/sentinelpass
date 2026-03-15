@@ -9,8 +9,8 @@ local.properties
 *.ap_
 *.aab
 
-# Gradle wrapper JAR (generated - but you may want to commit gradlew scripts)
-gradle/wrapper/gradle-wrapper.jar
+# Gradle wrapper JAR (committed for CI/CD)
+# gradle/wrapper/gradle-wrapper.jar
 
 # Android Studio
 .idea/

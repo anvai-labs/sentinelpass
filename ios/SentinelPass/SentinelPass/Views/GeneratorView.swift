@@ -7,6 +7,7 @@
 
 import SwiftUI
 
+@available(iOS 17.0, macOS 14.0, *)
 struct GeneratorView: View {
     @EnvironmentObject private var vaultState: VaultState
     @State private var generatedPassword: String = ""
@@ -201,6 +202,7 @@ struct GeneratorView: View {
     }
 }
 
+@available(iOS 17.0, macOS 14.0, *)
 #Preview {
     GeneratorView()
         .environmentObject(VaultState.shared)

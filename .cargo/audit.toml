@@ -2,8 +2,13 @@
 # Tauri transitive advisories pending upstream resolution.
 # Track and remove ignores once dependencies are upgraded.
 ignore = [
+  "RUSTSEC-2021-0145",  # Potential unaligned read (via Tauri dependencies)
+  "RUSTSEC-2023-0071",  # Marvin Attack: rsa timing sidechannel (via Tauri dependencies, no fix available)
+  "RUSTSEC-2024-0370",  # proc-macro-error is unmaintained (via gtk3-macros → tauri)
+  "RUSTSEC-2024-0413",  # gtk-rs GTK3 bindings no longer maintained (via tauri)
   "RUSTSEC-2024-0429",
   "RUSTSEC-2025-0080",
   "RUSTSEC-2025-0098",
   "RUSTSEC-2025-0100",
+  "RUSTSEC-2026-0037",  # Quinn DoS vulnerability (via tauri → quinn, pending Tauri update to quinn-proto >=0.11.14)
 ]
