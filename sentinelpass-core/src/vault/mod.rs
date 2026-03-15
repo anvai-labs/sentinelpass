@@ -366,6 +366,31 @@ impl VaultManager {
         Ok(entries)
     }
 
+    /// Find entries matching a domain via the `domain_mappings` index.
+    ///
+    /// Returns only entries that have a domain mapping for the given domain.
+    /// Falls back to an empty list when no mappings exist (callers should
+    /// fall back to a full scan when domain_mappings are not yet populated).
+    pub fn find_entries_by_domain(&self, domain: &str) -> Result<Vec<Entry>> {
+        if !self.is_unlocked() {
+            return Err(PasswordManagerError::VaultLocked);
+        }
+
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let repo = SqliteEntryRepository::new(&db);
+        let raw_rows = repo.find_by_domain(domain)?;
+
+        drop(db);
+
+        raw_rows
+            .iter()
+            .map(|row| self.decrypt_entry_row(row))
+            .collect::<Result<Vec<_>>>()
+    }
+
     /// List entries with pagination to prevent performance issues with large vaults.
     /// Returns entries for the specified page, along with total count and whether more results exist.
     pub fn list_entries_paginated(

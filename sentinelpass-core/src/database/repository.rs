@@ -86,6 +86,9 @@ pub trait EntryRepository {
 
     /// Check if an entry exists
     fn exists(&self, id: i64) -> Result<bool, DatabaseError>;
+
+    /// Find entries by domain using the domain_mappings index
+    fn find_by_domain(&self, domain: &str) -> Result<Vec<RawEntryRow>, DatabaseError>;
 }
 
 /// SQLite implementation of EntryRepository
@@ -183,17 +186,25 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
 
         query.push_str(" ORDER BY entry_id ASC");
 
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut param_index = 1;
+
         if let Some(limit) = filter.limit {
-            query.push_str(&format!(" LIMIT {}", limit));
+            query.push_str(&format!(" LIMIT ?{}", param_index));
+            params.push(Box::new(limit));
+            param_index += 1;
         }
         if let Some(offset) = filter.offset {
-            query.push_str(&format!(" OFFSET {}", offset));
+            query.push_str(&format!(" OFFSET ?{}", param_index));
+            params.push(Box::new(offset));
+            let _ = param_index; // suppress unused warning
         }
 
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&query).map_err(DatabaseError::Sqlite)?;
 
         let rows = stmt
-            .query_map([], Self::parse_row)
+            .query_map(param_refs.as_slice(), Self::parse_row)
             .map_err(DatabaseError::Sqlite)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(DatabaseError::Sqlite)?;
@@ -326,6 +337,29 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
             .map_err(DatabaseError::Sqlite)?;
 
         Ok(exists)
+    }
+
+    fn find_by_domain(&self, domain: &str) -> Result<Vec<RawEntryRow>, DatabaseError> {
+        let conn = self.db.conn();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT e.entry_id, e.title, e.username, e.password, e.url, e.notes,
+                 e.entry_nonce, e.auth_tag, e.created_at, e.modified_at, e.favorite,
+                 e.sync_id, e.sync_version
+                 FROM entries e
+                 JOIN domain_mappings dm ON dm.entry_id = e.entry_id
+                 WHERE dm.domain = ?1 AND e.is_deleted = 0",
+            )
+            .map_err(DatabaseError::Sqlite)?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![domain], Self::parse_row)
+            .map_err(DatabaseError::Sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(DatabaseError::Sqlite)?;
+
+        Ok(rows)
     }
 }
 
@@ -495,6 +529,45 @@ mod tests {
         let entry_id = repo.create(new_entry).unwrap();
         assert!(repo.exists(entry_id).unwrap());
         assert!(!repo.exists(999).unwrap());
+    }
+
+    #[test]
+    fn test_repository_find_by_domain() {
+        let db = create_in_memory_db();
+        let repo = SqliteEntryRepository::new(&db);
+
+        // Create an entry
+        let new_entry = NewEntryParams {
+            title: b"Test Entry".to_vec(),
+            username: b"user@example.com".to_vec(),
+            password: b"password123".to_vec(),
+            url: Some(b"https://example.com".to_vec()),
+            notes: None,
+            entry_nonce: vec![0u8; 12],
+            auth_tag: vec![0u8; 16],
+            created_at: Utc::now().timestamp(),
+            modified_at: Utc::now().timestamp(),
+            favorite: false,
+            sync_id: None,
+        };
+        let entry_id = repo.create(new_entry).unwrap();
+
+        // Insert a domain mapping for this entry
+        db.conn()
+            .execute(
+                "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, ?2, 1)",
+                rusqlite::params![entry_id, "example.com"],
+            )
+            .unwrap();
+
+        // Find by domain should return the entry
+        let results = repo.find_by_domain("example.com").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].entry_id, entry_id);
+
+        // Non-matching domain returns empty
+        let results = repo.find_by_domain("other.com").unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]

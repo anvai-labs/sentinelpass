@@ -166,137 +166,183 @@ impl DaemonVault {
         matches!(*self.state.read().await, VaultState::Unlocked)
     }
 
-    /// Get credential by domain
+    /// Get credential by domain.
+    ///
+    /// Tries an indexed lookup via `domain_mappings` first (O(1) decryptions
+    /// for the matched rows). Falls back to a full entry scan when no
+    /// domain mappings exist (e.g. entries created before sync was enabled).
     pub async fn get_credential(&self, domain: &str) -> Result<Option<CredentialResponse>> {
-        if !self.is_unlocked().await {
-            return Ok(None);
-        }
-
+        let vault_guard = self.vault.lock().await;
+        let vault = match vault_guard.as_ref() {
+            Some(v) => v,
+            None => return Ok(None), // locked
+        };
         self.record_activity().await;
 
+        // Fast path: indexed lookup via domain_mappings
+        if let Some(host) = normalize_host(domain) {
+            let indexed = vault.find_entries_by_domain(&host)?;
+            if let Some(entry) = indexed.into_iter().next() {
+                return Ok(Some(CredentialResponse {
+                    username: entry.username,
+                    password: entry.password,
+                    title: entry.title,
+                }));
+            }
+        }
+
+        // Slow path: full scan (entries without domain_mappings)
+        let entries = vault.list_entries()?;
+        for summary in entries {
+            if let Ok(entry) = vault.get_entry(summary.entry_id) {
+                if let Some(ref url) = entry.url {
+                    if domains_match(domain, url) {
+                        return Ok(Some(CredentialResponse {
+                            username: entry.username,
+                            password: entry.password,
+                            title: entry.title,
+                        }));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get TOTP code by domain.
+    ///
+    /// Tries an indexed lookup via `domain_mappings` first, then falls back
+    /// to a full entry scan.
+    pub async fn get_totp_code(&self, domain: &str) -> Result<Option<TotpCodeResponse>> {
         let vault_guard = self.vault.lock().await;
+        let vault = match vault_guard.as_ref() {
+            Some(v) => v,
+            None => return Ok(None), // locked
+        };
+        self.record_activity().await;
 
-        if let Some(ref vault) = *vault_guard {
-            // List entries and search for matching domain
-            let entries = vault.list_entries()?;
-
-            // Search for entry with matching domain in URL
-            for summary in entries {
-                if let Ok(entry) = vault.get_entry(summary.entry_id) {
-                    if let Some(ref url) = entry.url {
-                        if domains_match(domain, url) {
-                            return Ok(Some(CredentialResponse {
-                                username: entry.username,
-                                password: entry.password,
-                                title: entry.title,
+        // Fast path: indexed lookup via domain_mappings
+        if let Some(host) = normalize_host(domain) {
+            let indexed = vault.find_entries_by_domain(&host)?;
+            for entry in &indexed {
+                if let Some(entry_id) = entry.entry_id {
+                    match vault.generate_totp_code(entry_id) {
+                        Ok(code) => {
+                            return Ok(Some(TotpCodeResponse {
+                                code: code.code,
+                                seconds_remaining: code.seconds_remaining,
                             }));
+                        }
+                        Err(PasswordManagerError::NotFound(_)) => continue,
+                        Err(e) => {
+                            warn!("Failed to generate TOTP for domain '{}': {}", domain, e);
+                            return Err(e);
                         }
                     }
                 }
             }
-
-            Ok(None)
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Get TOTP code by domain.
-    pub async fn get_totp_code(&self, domain: &str) -> Result<Option<TotpCodeResponse>> {
-        if !self.is_unlocked().await {
-            return Ok(None);
+            if !indexed.is_empty() {
+                return Ok(None);
+            }
         }
 
-        self.record_activity().await;
-
-        let vault_guard = self.vault.lock().await;
-
-        if let Some(ref vault) = *vault_guard {
-            let entries = vault.list_entries()?;
-
-            for summary in entries {
-                if let Ok(entry) = vault.get_entry(summary.entry_id) {
-                    if let Some(ref url) = entry.url {
-                        if domains_match(domain, url) {
-                            match vault.generate_totp_code(summary.entry_id) {
-                                Ok(code) => {
-                                    return Ok(Some(TotpCodeResponse {
-                                        code: code.code,
-                                        seconds_remaining: code.seconds_remaining,
-                                    }));
-                                }
-                                Err(PasswordManagerError::NotFound(_)) => {
-                                    // Matching entry without TOTP configured; keep scanning.
-                                    continue;
-                                }
-                                Err(e) => {
-                                    warn!("Failed to generate TOTP for domain '{}': {}", domain, e);
-                                    return Err(e);
-                                }
+        // Slow path: full scan
+        let entries = vault.list_entries()?;
+        for summary in entries {
+            if let Ok(entry) = vault.get_entry(summary.entry_id) {
+                if let Some(ref url) = entry.url {
+                    if domains_match(domain, url) {
+                        match vault.generate_totp_code(summary.entry_id) {
+                            Ok(code) => {
+                                return Ok(Some(TotpCodeResponse {
+                                    code: code.code,
+                                    seconds_remaining: code.seconds_remaining,
+                                }));
+                            }
+                            Err(PasswordManagerError::NotFound(_)) => continue,
+                            Err(e) => {
+                                warn!("Failed to generate TOTP for domain '{}': {}", domain, e);
+                                return Err(e);
                             }
                         }
                     }
                 }
             }
-
-            Ok(None)
-        } else {
-            Ok(None)
         }
+
+        Ok(None)
     }
 
-    /// List all credentials matching a base domain (e.g., "google.com" matches "gmail.google.com", "accounts.google.com")
+    /// List all credentials matching a base domain (e.g., "google.com" matches "gmail.google.com", "accounts.google.com").
+    ///
+    /// Tries an indexed lookup via `domain_mappings` first, then falls back
+    /// to a full entry scan.
     pub async fn list_domain_credentials(
         &self,
         base_domain: &str,
     ) -> Result<Vec<DomainCredentialResponse>> {
-        if !self.is_unlocked().await {
-            return Ok(Vec::new());
-        }
-
+        let vault_guard = self.vault.lock().await;
+        let vault = match vault_guard.as_ref() {
+            Some(v) => v,
+            None => return Ok(Vec::new()), // locked
+        };
         self.record_activity().await;
 
-        let vault_guard = self.vault.lock().await;
+        let mut matching_credentials = Vec::new();
 
-        if let Some(ref vault) = *vault_guard {
-            let entries = vault.list_entries()?;
-            let mut matching_credentials = Vec::new();
+        // Fast path: indexed lookup via domain_mappings
+        if let Some(host) = normalize_host(base_domain) {
+            let indexed = vault.find_entries_by_domain(&host)?;
+            if !indexed.is_empty() {
+                for entry in indexed {
+                    let domain = entry
+                        .url
+                        .as_ref()
+                        .and_then(|url| normalize_host(url))
+                        .unwrap_or_else(|| base_domain.to_string());
 
-            for summary in entries {
-                if let Ok(entry) = vault.get_entry(summary.entry_id) {
-                    // Check if this entry's domain matches the base domain
-                    let matches = if let Some(ref url) = entry.url {
-                        domains_match(base_domain, url)
-                    } else {
-                        // Entries without URL are excluded from domain-scoped search
-                        false
-                    };
+                    matching_credentials.push(DomainCredentialResponse {
+                        username: entry.username,
+                        title: entry.title,
+                        domain,
+                    });
+                }
+                matching_credentials
+                    .sort_by(|a, b| (&a.title, &a.username).cmp(&(&b.title, &b.username)));
+                return Ok(matching_credentials);
+            }
+        }
 
-                    if matches {
-                        // Extract the domain for this credential
-                        let domain = entry
-                            .url
-                            .as_ref()
-                            .and_then(|url| normalize_host(url))
-                            .unwrap_or_else(|| base_domain.to_string());
+        // Slow path: full scan
+        let entries = vault.list_entries()?;
+        for summary in entries {
+            if let Ok(entry) = vault.get_entry(summary.entry_id) {
+                let matches = if let Some(ref url) = entry.url {
+                    domains_match(base_domain, url)
+                } else {
+                    false
+                };
 
-                        matching_credentials.push(DomainCredentialResponse {
-                            username: entry.username,
-                            title: entry.title,
-                            domain,
-                        });
-                    }
+                if matches {
+                    let domain = entry
+                        .url
+                        .as_ref()
+                        .and_then(|url| normalize_host(url))
+                        .unwrap_or_else(|| base_domain.to_string());
+
+                    matching_credentials.push(DomainCredentialResponse {
+                        username: entry.username,
+                        title: entry.title,
+                        domain,
+                    });
                 }
             }
-
-            // Sort by title then username for consistent ordering
-            matching_credentials
-                .sort_by(|a, b| (&a.title, &a.username).cmp(&(&b.title, &b.username)));
-
-            Ok(matching_credentials)
-        } else {
-            Ok(Vec::new())
         }
+
+        matching_credentials.sort_by(|a, b| (&a.title, &a.username).cmp(&(&b.title, &b.username)));
+
+        Ok(matching_credentials)
     }
 
     /// Save credential to vault
@@ -307,71 +353,66 @@ impl DaemonVault {
         password: &str,
         url: Option<&str>,
     ) -> Result<()> {
-        if !self.is_unlocked().await {
-            return Err(PasswordManagerError::VaultLocked);
-        }
-
+        let vault_guard = self.vault.lock().await;
+        let vault = match vault_guard.as_ref() {
+            Some(v) => v,
+            None => return Err(PasswordManagerError::VaultLocked),
+        };
         self.record_activity().await;
 
-        let vault_guard = self.vault.lock().await;
+        use crate::vault::Entry;
+        use chrono::Utc;
 
-        if let Some(ref vault) = *vault_guard {
-            use crate::vault::Entry;
-            use chrono::Utc;
+        let now = Utc::now();
 
-            let now = Utc::now();
-
-            let mut existing_entry_id: Option<i64> = None;
-            if !username.trim().is_empty() {
-                let entries = vault.list_entries()?;
-                for summary in entries {
-                    if let Ok(existing_entry) = vault.get_entry(summary.entry_id) {
-                        let url_matches = existing_entry
-                            .url
-                            .as_ref()
-                            .map(|entry_url| domains_match(domain, entry_url))
-                            .unwrap_or(false);
-                        if url_matches && usernames_match(&existing_entry.username, username) {
-                            existing_entry_id = Some(summary.entry_id);
-                            break;
-                        }
+        let mut existing_entry_id: Option<i64> = None;
+        if !username.trim().is_empty() {
+            let entries = vault.list_entries()?;
+            for summary in entries {
+                if let Ok(existing_entry) = vault.get_entry(summary.entry_id) {
+                    let url_matches = existing_entry
+                        .url
+                        .as_ref()
+                        .map(|entry_url| domains_match(domain, entry_url))
+                        .unwrap_or(false);
+                    if url_matches && usernames_match(&existing_entry.username, username) {
+                        existing_entry_id = Some(summary.entry_id);
+                        break;
                     }
                 }
             }
-
-            if let Some(entry_id) = existing_entry_id {
-                let mut existing_entry = vault.get_entry(entry_id)?;
-                existing_entry.password = password.to_string();
-                if let Some(incoming_url) = url {
-                    existing_entry.url = Some(incoming_url.to_string());
-                }
-                existing_entry.modified_at = now;
-                vault.update_entry(entry_id, &existing_entry)?;
-                info!(
-                    "Credential updated for domain: {} (entry_id={})",
-                    domain, entry_id
-                );
-                return Ok(());
-            }
-
-            let entry = Entry {
-                entry_id: None, // Auto-assigned by database
-                title: format!("Credential for {}", domain),
-                username: username.to_string(),
-                password: password.to_string(),
-                url: url.map(|u| u.to_string()),
-                notes: None,
-                created_at: now,
-                modified_at: now,
-                favorite: false,
-            };
-
-            vault.add_entry(&entry)?;
-            info!("Credential saved for domain: {}", domain);
-            Ok(())
-        } else {
-            Err(PasswordManagerError::VaultLocked)
         }
+
+        if let Some(entry_id) = existing_entry_id {
+            let mut existing_entry = vault.get_entry(entry_id)?;
+            existing_entry.password = password.to_string();
+            if let Some(incoming_url) = url {
+                existing_entry.url = Some(incoming_url.to_string());
+            }
+            existing_entry.modified_at = now;
+            vault.update_entry(entry_id, &existing_entry)?;
+            info!(
+                "Credential updated for domain: {} (entry_id={})",
+                domain, entry_id
+            );
+            return Ok(());
+        }
+
+        let entry = Entry {
+            entry_id: None, // Auto-assigned by database
+            title: format!("Credential for {}", domain),
+            username: username.to_string(),
+            password: password.to_string(),
+            url: url.map(|u| u.to_string()),
+            notes: None,
+            created_at: now,
+            modified_at: now,
+            favorite: false,
+        };
+
+        vault.add_entry(&entry)?;
+        info!("Credential saved for domain: {}", domain);
+        Ok(())
     }
 
     /// Get sync status from the vault database.
