@@ -3,6 +3,7 @@
 use crate::{DatabaseError, PasswordManagerError, Result};
 use rusqlite::Connection;
 use std::path::Path;
+use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
 pub const CURRENT_SCHEMA_VERSION: i32 = 3;
@@ -243,6 +244,9 @@ impl Database {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_totp_secrets_sync_id ON totp_secrets(sync_id)",
             "CREATE INDEX IF NOT EXISTS idx_totp_secrets_sync_state ON totp_secrets(sync_state)",
             "CREATE INDEX IF NOT EXISTS idx_sync_tombstones_pushed ON sync_tombstones(pushed)",
+            // v3 indexes for pagination performance
+            "CREATE INDEX IF NOT EXISTS idx_entries_modified_at ON entries(modified_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at DESC)",
         ];
         for sql in &indexes {
             self.conn.execute(sql, []).map_err(DatabaseError::Sqlite)?;
@@ -277,7 +281,10 @@ impl Database {
 
     /// Validate the database schema version, running migrations if needed.
     ///
-    /// Supports auto-migration from v1 → v2. Returns error for unknown versions.
+    /// - Older databases are auto-migrated forward (v1 → v2 → v3).
+    /// - Newer databases (created by a newer binary) are allowed if they are
+    ///   within a forward-compatible range, since newer schema versions only add
+    ///   non-breaking changes (indexes, optional columns).
     pub fn validate_schema_version(&self) -> Result<()> {
         let version: i32 = self
             .conn
@@ -293,13 +300,35 @@ impl Database {
         // Auto-migrate from older versions
         if version < CURRENT_SCHEMA_VERSION {
             crate::database::migrations::run_migrations(&self.conn)?;
+
+            // Verify migration reached the expected version
+            let new_version: i32 = self
+                .conn
+                .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |row| {
+                    row.get(0)
+                })
+                .map_err(DatabaseError::Sqlite)?;
+
+            if new_version != CURRENT_SCHEMA_VERSION {
+                return Err(PasswordManagerError::from(DatabaseError::SchemaMismatch {
+                    expected: CURRENT_SCHEMA_VERSION,
+                    found: new_version,
+                }));
+            }
+
             return Ok(());
         }
 
-        Err(PasswordManagerError::from(DatabaseError::SchemaMismatch {
-            expected: CURRENT_SCHEMA_VERSION,
-            found: version,
-        }))
+        // Database was created/migrated by a newer binary. Allow it — newer
+        // schema versions only add non-breaking changes (indexes, optional
+        // columns, new tables). The code queries specific columns/tables and
+        // SQLite will produce a clear error if something is truly missing.
+        warn!(
+            db_version = version,
+            code_version = CURRENT_SCHEMA_VERSION,
+            "Database schema version is newer than this binary expects; proceeding anyway"
+        );
+        Ok(())
     }
 
     /// Get a reference to the underlying connection
@@ -349,6 +378,9 @@ mod tests {
         assert!(index_names.contains(&"idx_domain_mappings_entry_id".to_string()));
         assert!(index_names.contains(&"idx_domain_mappings_domain".to_string()));
         assert!(index_names.contains(&"idx_totp_secrets_entry_id".to_string()));
+        // v3 indexes must be present for new vaults too
+        assert!(index_names.contains(&"idx_entries_modified_at".to_string()));
+        assert!(index_names.contains(&"idx_entries_created_at".to_string()));
 
         // Verify triggers exist
         let trigger_names: Vec<String> = db
@@ -362,5 +394,113 @@ mod tests {
 
         assert!(trigger_names.contains(&"update_db_metadata_timestamp".to_string()));
         assert!(trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
+    }
+
+    #[test]
+    fn newer_db_version_does_not_error() {
+        // Simulates opening a DB that was migrated by a newer binary.
+        // The code should allow this instead of hard-failing.
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+
+        // Insert metadata at a future version (e.g., v99)
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
+                 VALUES (1, 99, X'00', X'00', X'00', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        // Should succeed (warn, not error)
+        db.validate_schema_version().unwrap();
+    }
+
+    #[test]
+    fn older_db_version_triggers_migration() {
+        // Create a genuine v1 database (no sync columns)
+        let db = Database::in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TABLE db_metadata (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    version INTEGER NOT NULL,
+                    kdf_params BLOB NOT NULL,
+                    wrapped_dek BLOB NOT NULL,
+                    dek_nonce BLOB NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_modified INTEGER NOT NULL,
+                    biometric_ref TEXT
+                );
+                CREATE TABLE entries (
+                    entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vault_id INTEGER NOT NULL,
+                    title BLOB NOT NULL,
+                    username BLOB NOT NULL,
+                    password BLOB NOT NULL,
+                    url BLOB,
+                    notes BLOB,
+                    entry_nonce BLOB NOT NULL,
+                    auth_tag BLOB NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    modified_at INTEGER NOT NULL,
+                    favorite INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE domain_mappings (
+                    mapping_id INTEGER PRIMARY KEY,
+                    entry_id INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    is_primary INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE
+                );
+                CREATE TABLE failed_attempts (
+                    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    attempt_time INTEGER NOT NULL,
+                    ip_address TEXT
+                );
+                CREATE TABLE ssh_keys (
+                    key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    comment TEXT,
+                    key_type TEXT NOT NULL,
+                    key_size INTEGER,
+                    public_key TEXT NOT NULL,
+                    private_key_encrypted BLOB NOT NULL,
+                    nonce BLOB NOT NULL,
+                    auth_tag BLOB NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    modified_at INTEGER NOT NULL
+                );
+                CREATE TABLE totp_secrets (
+                    totp_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id INTEGER NOT NULL UNIQUE,
+                    secret_encrypted BLOB NOT NULL,
+                    nonce BLOB NOT NULL,
+                    auth_tag BLOB NOT NULL,
+                    algorithm TEXT NOT NULL DEFAULT 'SHA1',
+                    digits INTEGER NOT NULL DEFAULT 6,
+                    period INTEGER NOT NULL DEFAULT 30,
+                    issuer TEXT,
+                    account_name TEXT,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE
+                );
+                INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
+                VALUES (1, 1, X'00', X'00', X'00', 0, 0);",
+            )
+            .unwrap();
+
+        // Should run migrations v1→v2→v3 and succeed
+        db.validate_schema_version().unwrap();
+
+        // Verify version was bumped to current
+        let version: i32 = db
+            .conn()
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
     }
 }
