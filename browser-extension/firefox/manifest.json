@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SentinelPass",
-  "version": "0.6.1",
+  "version": "0.6.3",
   "description": "Secure, local-first password manager with autofill support",
   "permissions": [
     "storage",
