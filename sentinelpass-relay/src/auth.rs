@@ -68,6 +68,13 @@ pub async fn auth_middleware(
             rusqlite::params![nonce, device_id.to_string(), now],
         )
         .map_err(|e| RelayError::Database(e.to_string()))?;
+
+        // Cleanup expired nonces (best-effort)
+        conn.execute(
+            "DELETE FROM seen_nonces WHERE seen_at < ?1",
+            [now - state.config.nonce_window_secs],
+        )
+        .ok();
     }
 
     // Per-device rate limiting after auth verification and nonce consumption.

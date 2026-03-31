@@ -83,7 +83,7 @@ jobs:
           cache-key-prefix: ci-${{ matrix.os }}
 
       - name: Build release binaries
-        run: cargo build --release --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
+        run: cargo build --release --locked --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

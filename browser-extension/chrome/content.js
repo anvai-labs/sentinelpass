@@ -1,7 +1,25 @@
 // Content script for password field detection and autofill
-console.log('[SentinelPass] Content script loaded');
-console.log('[SentinelPass] Current URL:', window.location.href);
-console.log('[SentinelPass] Hostname:', window.location.hostname);
+import { debugLog, infoLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger';
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
+function createLockIcon(width, height) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', String(width));
+    svg.setAttribute('height', String(height));
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'currentColor');
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', 'M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z');
+    svg.appendChild(path);
+    return svg;
+}
+infoLog('Content script loaded');
+debugLog('Current URL:', sanitizeUrl(window.location.href));
+debugLog('Hostname:', sanitizeHostname(window.location.hostname));
 // Configuration
 const AUTOFILL_BUTTON_CLASS = 'pm-autofill-button';
 const AUTOFILL_BUTTON_STYLE = `
@@ -102,7 +120,7 @@ function getNeverSaveDomains() {
     return new Promise((resolve) => {
         chrome.storage.local.get([NEVER_SAVE_DOMAINS_KEY], (result) => {
             if (chrome.runtime.lastError) {
-                console.log('[SentinelPass] Failed reading never-save domains:', chrome.runtime.lastError.message);
+                errorLog('Failed reading never-save domains:', chrome.runtime.lastError?.message);
                 resolve({});
                 return;
             }
@@ -165,22 +183,22 @@ function requestPersistentSaveNotification(data, sourceLabel, onComplete = null)
         request_source: data?.request_source || sourceLabel
     };
     if (isDuplicateSaveNotificationRequest(data)) {
-        console.log('[SentinelPass] Skipping duplicate save notification request from', sourceLabel);
+        debugLog('Skipping duplicate save notification request from', sourceLabel);
         if (typeof onComplete === 'function') {
             onComplete({ success: true, deduped: true });
         }
         return;
     }
-    console.log('[SentinelPass] Requesting persistent save notification from', sourceLabel);
+    debugLog('Requesting persistent save notification from', sourceLabel);
     chrome.runtime.sendMessage({
         type: 'request_save_notification',
         data: payload
     }, (response) => {
         if (chrome.runtime.lastError) {
-            console.log('[SentinelPass] Message error:', chrome.runtime.lastError.message);
+            errorLog('Message error:', chrome.runtime.lastError.message);
         }
         else {
-            console.log('[SentinelPass] Save notification response:', redactForLog(response));
+            debugLog('Save notification response:', redactForLog(response));
         }
         if (typeof onComplete === 'function') {
             onComplete(response);
@@ -200,14 +218,14 @@ function reportSavePromptOutcome(outcome, data = {}) {
     try {
         chrome.runtime.sendMessage(payload, (response) => {
             if (chrome.runtime.lastError) {
-                console.log('[SentinelPass] Failed to report save prompt outcome:', chrome.runtime.lastError.message);
+                errorLog('Failed to report save prompt outcome:', chrome.runtime.lastError.message);
                 return;
             }
-            console.log('[SentinelPass] Save prompt outcome reported:', redactForLog(payload.data), redactForLog(response));
+            debugLog('Save prompt outcome reported:', redactForLog(payload.data), redactForLog(response));
         });
     }
     catch (error) {
-        console.log('[SentinelPass] Exception while reporting save prompt outcome:', error.message);
+        errorLog('Exception while reporting save prompt outcome:', error.message);
     }
 }
 // Track form submissions to detect new passwords
@@ -221,7 +239,7 @@ else {
     init();
 }
 function init() {
-    console.log('[SentinelPass] Initializing...');
+    infoLog('Extension initializing...');
     // Observe DOM changes for dynamically added forms
     observeDOMChanges();
     // Scan for password fields immediately
@@ -232,7 +250,11 @@ function init() {
     checkPendingCredentials();
     // Listen for messages from background script
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        console.log('[SentinelPass] Received message:', request.type);
+        // Validate sender is from this extension
+        if (sender.id !== chrome.runtime.id) {
+            return;
+        }
+        debugLog('Received message:', request.type);
         if (request.type === 'trigger_autofill') {
             performAutofill();
         }
@@ -249,97 +271,97 @@ function init() {
                 sendResponse({ success: false, error: 'Missing password for inline save prompt' });
                 return false;
             }
-            console.log('[SentinelPass] Showing inline save prompt fallback');
+            infoLog('Showing inline save prompt fallback');
             showSavePrompt(username, domain, password, sourceUrl);
             sendResponse({ success: true });
             return true;
         }
     });
-    console.log('[SentinelPass] Initialization complete');
+    infoLog('Initialization complete');
 }
 // Check if there's a pending credential from a previous page login
 function checkPendingCredentials() {
     // Check if we're in a valid context (not an iframe/blank page)
     if (window.location.protocol === 'about:' || window.location.protocol === 'data:') {
-        console.log('[SentinelPass] Skipping pending credentials check in restricted context');
+        debugLog('Skipping pending credentials check in restricted context');
         return;
     }
     // Check if we're in an iframe
     if (window.self !== window.top) {
-        console.log('[SentinelPass] Skipping pending credentials check in iframe');
+        debugLog('Skipping pending credentials check in iframe');
         return;
     }
     try {
-        chrome.storage.local.get(['pendingLogin'], (result) => {
+        chrome.storage.session.get(['pendingCredential'], (result) => {
             if (chrome.runtime.lastError) {
-                console.log('[SentinelPass] Storage access error:', chrome.runtime.lastError.message);
+                errorLog('Storage access error:', chrome.runtime.lastError.message);
                 return;
             }
-            if (result && result.pendingLogin) {
-                const pending = result.pendingLogin;
+            if (result && result.pendingCredential) {
+                const pending = result.pendingCredential;
                 const age = Date.now() - pending.timestamp;
-                console.log('[SentinelPass] Found pending login, age:', age, 'ms');
-                console.log('[SentinelPass] Pending domain:', pending.domain);
-                console.log('[SentinelPass] Current domain:', window.location.hostname);
+                debugLog('Found pending login, age:', age, 'ms');
+                debugLog('Pending domain (sanitized):', sanitizeHostname(pending.domain));
+                debugLog('Current domain (sanitized):', sanitizeHostname(window.location.hostname));
                 // Only show prompt if less than 30 seconds old and on a different page
                 if (age < 30000 && window.location.hostname === pending.domain && window.location.href !== pending.url) {
                     void (async () => {
                         if (await shouldSuppressSavePrompt(pending.domain || pending.url || '')) {
-                            console.log('[SentinelPass] Skipping pending save notification due to never-save policy');
-                            chrome.storage.local.remove('pendingLogin');
+                            debugLog('Skipping pending save notification due to never-save policy');
+                            chrome.storage.session.remove('pendingCredential');
                             return;
                         }
-                        console.log('[SentinelPass] Successful login detected, showing save notification...');
+                        infoLog('Successful login detected, showing save notification...');
                         // Request notification
-                        console.log('[SentinelPass] ========== SENDING NOTIFICATION FROM 2FA PAGE ==========');
+                        debugLog('[SentinelPass] ========== SENDING NOTIFICATION FROM 2FA PAGE ==========');
                         requestPersistentSaveNotification(pending, 'pending-login-check', () => {
                             // Clear the pending login regardless of callback result.
-                            chrome.storage.local.remove('pendingLogin');
+                            chrome.storage.session.remove('pendingCredential');
                         });
                     })();
                 }
                 else if (age >= 30000) {
-                    console.log('[SentinelPass] Clearing stale pending login');
-                    chrome.storage.local.remove('pendingLogin');
+                    debugLog('[SentinelPass] Clearing stale pending login');
+                    chrome.storage.session.remove('pendingCredential');
                 }
             }
         });
     }
     catch (error) {
-        console.log('[SentinelPass] Error checking pending credentials:', error.message);
+        debugLog('[SentinelPass] Error checking pending credentials:', error.message);
     }
 }
 // Track form submissions to detect new/changed passwords
 function trackFormSubmissions() {
-    console.log('[SentinelPass] Setting up form submission tracking...');
+    debugLog('[SentinelPass] Setting up form submission tracking...');
     // Listen for form submissions
     document.addEventListener('submit', (e) => {
         const form = e.target;
         if (!form) {
-            console.log('[SentinelPass] Form submission: no form target');
+            debugLog('[SentinelPass] Form submission: no form target');
             return;
         }
-        console.log('[SentinelPass] Form submission detected!');
-        console.log('[SentinelPass] Form action:', form.action);
-        console.log('[SentinelPass] Form ID:', form.id);
+        debugLog('[SentinelPass] Form submission detected!');
+        debugLog('[SentinelPass] Form action:', form.action);
+        debugLog('[SentinelPass] Form ID:', form.id);
         const passwordField = form.querySelector('input[type="password"]');
         if (!passwordField) {
-            console.log('[SentinelPass] No password field found in form');
+            debugLog('[SentinelPass] No password field found in form');
             return;
         }
         if (!passwordField.value) {
-            console.log('[SentinelPass] Password field is empty');
+            debugLog('[SentinelPass] Password field is empty');
             return;
         }
-        console.log('[SentinelPass] Password field has value length:', passwordField.value.length);
+        debugLog('[SentinelPass] Password field has value length:', passwordField.value.length);
         // Find username field
         const usernameField = findUsernameField(passwordField);
         const username = usernameField ? usernameField.value : '';
-        console.log('[SentinelPass] Username field found:', !!usernameField);
+        debugLog('[SentinelPass] Username field found:', !!usernameField);
         // Detect if this is a new password or password change
         const domain = window.location.hostname;
         const isNewPassword = isNewPasswordForm(form, passwordField);
-        console.log('[SentinelPass] Is new password form:', isNewPassword);
+        debugLog('[SentinelPass] Is new password form:', isNewPassword);
         // Store credentials in session storage (persists across navigation)
         const inputMethod = detectInputMethod(username, passwordField.value, domain);
         const submissionData = {
@@ -352,21 +374,13 @@ function trackFormSubmissions() {
             input_method: inputMethod,
             isNewPassword: isNewPassword
         };
-        console.log('[SentinelPass] Submission input method:', inputMethod);
+        debugLog('[SentinelPass] Submission input method:', inputMethod);
         chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
-            console.log('[SentinelPass] Stored credentials in session storage');
-        });
-        chrome.storage.local.set({ 'pendingLogin': submissionData }, () => {
-            if (chrome.runtime.lastError) {
-                console.log('[SentinelPass] Failed to store pendingLogin from submit event:', chrome.runtime.lastError.message);
-            }
-            else {
-                console.log('[SentinelPass] Stored pendingLogin from submit event');
-            }
+            debugLog('[SentinelPass] Stored credentials in session storage');
         });
         // Show save prompt immediately for new password forms
         if (isNewPassword) {
-            console.log('[SentinelPass] Scheduling save prompt in 500ms...');
+            debugLog('[SentinelPass] Scheduling save prompt in 500ms...');
             setTimeout(() => {
                 showSavePrompt(username, domain, passwordField.value, submissionData.url);
             }, 500);
@@ -376,10 +390,10 @@ function trackFormSubmissions() {
             // This survives page navigation
             void (async () => {
                 if (await shouldSuppressSavePrompt(domain)) {
-                    console.log('[SentinelPass] Suppressing login save notification due to never-save policy');
+                    debugLog('[SentinelPass] Suppressing login save notification due to never-save policy');
                     return;
                 }
-                console.log('[SentinelPass] Login form submitted, requesting persistent notification...');
+                debugLog('[SentinelPass] Login form submitted, requesting persistent notification...');
                 requestPersistentSaveNotification(submissionData, 'form-submit');
             })();
         }
@@ -395,7 +409,7 @@ function trackFormSubmissions() {
         const passwordField = form.querySelector('input[type="password"]');
         if (!passwordField || !passwordField.value)
             return;
-        console.log('[SentinelPass] Submit button clicked in form with password field');
+        debugLog('[SentinelPass] Submit button clicked in form with password field');
         // Get credentials IMMEDIATELY - no delays
         const usernameField = findUsernameField(passwordField);
         const domain = window.location.hostname;
@@ -411,39 +425,31 @@ function trackFormSubmissions() {
             input_method: inputMethod,
             isNewPassword: isNewPasswordForm(form, passwordField)
         };
-        console.log('[SentinelPass] Submission input method:', inputMethod);
-        console.log('[SentinelPass] Button click - capturing credentials immediately');
-        console.log('[SentinelPass] Domain:', submissionData.domain);
+        debugLog('[SentinelPass] Submission input method:', inputMethod);
+        debugLog('[SentinelPass] Button click - capturing credentials immediately');
+        debugLog('[SentinelPass] Domain:', submissionData.domain);
         // Store in session storage
         try {
             chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
                 if (chrome.runtime.lastError) {
-                    console.log('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
+                    debugLog('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
                 }
                 else {
-                    console.log('[SentinelPass] Stored credentials from button click');
+                    debugLog('[SentinelPass] Stored credentials from button click');
                 }
             });
         }
         catch (error) {
-            console.log('[SentinelPass] Storage exception:', error.message);
+            debugLog('[SentinelPass] Storage exception:', error.message);
         }
-        chrome.storage.local.set({ 'pendingLogin': submissionData }, () => {
-            if (chrome.runtime.lastError) {
-                console.log('[SentinelPass] Failed to store pendingLogin from click event:', chrome.runtime.lastError.message);
-            }
-            else {
-                console.log('[SentinelPass] Stored pendingLogin from click event');
-            }
-        });
         // Request notification IMMEDIATELY - no delays
         if (!submissionData.isNewPassword) {
             void (async () => {
                 if (await shouldSuppressSavePrompt(submissionData.domain || submissionData.url || '')) {
-                    console.log('[SentinelPass] Suppressing button-click save notification due to never-save policy');
+                    debugLog('[SentinelPass] Suppressing button-click save notification due to never-save policy');
                     return;
                 }
-                console.log('[SentinelPass] Requesting save notification from button click');
+                debugLog('[SentinelPass] Requesting save notification from button click');
                 requestPersistentSaveNotification(submissionData, 'submit-button-click');
             })();
         }
@@ -451,14 +457,14 @@ function trackFormSubmissions() {
 }
 // Detect if form is for new account creation
 function isNewPasswordForm(form, passwordField) {
-    console.log('[SentinelPass] Checking if new password form...');
+    debugLog('[SentinelPass] Checking if new password form...');
     // Check for common registration indicators
     const formText = form.textContent.toLowerCase();
     const formId = (form.id || '').toLowerCase();
     const formAction = (form.action || '').toLowerCase();
-    console.log('[SentinelPass] Form text sample:', formText.substring(0, 200));
-    console.log('[SentinelPass] Form ID:', formId);
-    console.log('[SentinelPass] Form action:', formAction);
+    debugLog('[SentinelPass] Form text sample:', formText.substring(0, 200));
+    debugLog('[SentinelPass] Form ID:', formId);
+    debugLog('[SentinelPass] Form action:', formAction);
     // Indicators of new account creation
     const newAccountIndicators = [
         'register', 'signup', 'sign-up', 'sign up', 'create account',
@@ -467,31 +473,31 @@ function isNewPasswordForm(form, passwordField) {
     const hasNewAccountIndicator = newAccountIndicators.some(indicator => formText.includes(indicator) ||
         formId.includes(indicator) ||
         formAction.includes(indicator));
-    console.log('[SentinelPass] Has new account indicator:', hasNewAccountIndicator);
+    debugLog('[SentinelPass] Has new account indicator:', hasNewAccountIndicator);
     // Check if password confirmation field exists (common in registration)
     const passwordFields = form.querySelectorAll('input[type="password"]');
     const hasPasswordConfirm = passwordFields.length > 1;
-    console.log('[SentinelPass] Password fields count:', passwordFields.length);
-    console.log('[SentinelPass] Has password confirm:', hasPasswordConfirm);
+    debugLog('[SentinelPass] Password fields count:', passwordFields.length);
+    debugLog('[SentinelPass] Has password confirm:', hasPasswordConfirm);
     // Check if current password field is empty (might be password change)
     const isNewPassword = hasNewAccountIndicator || hasPasswordConfirm;
-    console.log('[SentinelPass] Is new password:', isNewPassword);
+    debugLog('[SentinelPass] Is new password:', isNewPassword);
     return isNewPassword;
 }
 // Show prompt to save credentials
 function showSavePrompt(username, domain, password, sourceUrl = window.location.href) {
     void (async () => {
         if (await shouldSuppressSavePrompt(domain)) {
-            console.log('[SentinelPass] Suppressing save prompt due to never-save policy');
+            debugLog('[SentinelPass] Suppressing save prompt due to never-save policy');
             reportSavePromptOutcome('no_save_suppressed_policy', {
                 domain: domain,
                 url: sourceUrl
             });
             return;
         }
-        console.log('[SentinelPass] showSavePrompt called!');
-        console.log('[SentinelPass] Domain:', domain);
-        console.log('[SentinelPass] Password length:', password.length);
+        debugLog('[SentinelPass] showSavePrompt called!');
+        debugLog('[SentinelPass] Domain:', domain);
+        debugLog('[SentinelPass] Password length:', password.length);
         const promptId = `inline-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
         let outcomeReported = false;
         const reportOnce = (outcome, extra = {}) => {
@@ -513,36 +519,69 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
         // Remove existing prompt if any
         const existingPrompt = document.querySelector('.pm-save-prompt');
         if (existingPrompt) {
-            console.log('[SentinelPass] Removing existing prompt');
+            debugLog('[SentinelPass] Removing existing prompt');
             reportSavePromptOutcome('no_save_prompt_replaced', {
                 domain: domain,
                 url: sourceUrl
             });
             existingPrompt.remove();
         }
-        console.log('[SentinelPass] Creating save prompt element...');
+        debugLog('[SentinelPass] Creating save prompt element...');
         const prompt = document.createElement('div');
         prompt.className = 'pm-save-prompt';
-        prompt.innerHTML = `
-    <div class="pm-prompt-content">
-      <div class="pm-prompt-header">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/>
-        </svg>
-        <span class="pm-prompt-title">Save Password?</span>
-        <button type="button" class="pm-prompt-close">×</button>
-      </div>
-      <div class="pm-prompt-body">
-        <p>SentinelPass detected a new password for <strong>${domain}</strong></p>
-        ${username ? `<p>Username: <strong>${username}</strong></p>` : ''}
-        <div class="pm-prompt-actions">
-          <button type="button" class="pm-prompt-btn pm-prompt-btn-save">Save</button>
-          <button type="button" class="pm-prompt-btn pm-prompt-btn-never">Never for this site</button>
-          <button type="button" class="pm-prompt-btn pm-prompt-btn-notnow">Not now</button>
-        </div>
-      </div>
-    </div>
-  `;
+        const content = document.createElement('div');
+        content.className = 'pm-prompt-content';
+        // Header
+        const header = document.createElement('div');
+        header.className = 'pm-prompt-header';
+        header.appendChild(createLockIcon(20, 20));
+        const title = document.createElement('span');
+        title.className = 'pm-prompt-title';
+        title.textContent = 'Save Password?';
+        header.appendChild(title);
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'pm-prompt-close';
+        closeBtn.textContent = '\u00d7';
+        header.appendChild(closeBtn);
+        // Body
+        const body = document.createElement('div');
+        body.className = 'pm-prompt-body';
+        const domainP = document.createElement('p');
+        domainP.textContent = 'SentinelPass detected a new password for ';
+        const domainStrong = document.createElement('strong');
+        domainStrong.textContent = domain;
+        domainP.appendChild(domainStrong);
+        body.appendChild(domainP);
+        if (username) {
+            const userP = document.createElement('p');
+            userP.textContent = 'Username: ';
+            const userStrong = document.createElement('strong');
+            userStrong.textContent = username;
+            userP.appendChild(userStrong);
+            body.appendChild(userP);
+        }
+        const actions = document.createElement('div');
+        actions.className = 'pm-prompt-actions';
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'pm-prompt-btn pm-prompt-btn-save';
+        saveBtn.textContent = 'Save';
+        const neverBtn = document.createElement('button');
+        neverBtn.type = 'button';
+        neverBtn.className = 'pm-prompt-btn pm-prompt-btn-never';
+        neverBtn.textContent = 'Never for this site';
+        const notNowBtn = document.createElement('button');
+        notNowBtn.type = 'button';
+        notNowBtn.className = 'pm-prompt-btn pm-prompt-btn-notnow';
+        notNowBtn.textContent = 'Not now';
+        actions.appendChild(saveBtn);
+        actions.appendChild(neverBtn);
+        actions.appendChild(notNowBtn);
+        body.appendChild(actions);
+        content.appendChild(header);
+        content.appendChild(body);
+        prompt.appendChild(content);
         prompt.style.cssText = `
     position: fixed;
     top: 20px;
@@ -629,19 +668,15 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
   `;
         document.head.appendChild(style);
         document.body.appendChild(prompt);
-        console.log('[SentinelPass] Save prompt appended to DOM');
+        debugLog('[SentinelPass] Save prompt appended to DOM');
         reportSavePromptOutcome('prompt_shown', {
             promptId: promptId,
             domain: domain,
             url: sourceUrl
         });
         // Add event listeners
-        const closeBtn = prompt.querySelector('.pm-prompt-close');
-        const saveBtn = prompt.querySelector('.pm-prompt-btn-save');
-        const neverBtn = prompt.querySelector('.pm-prompt-btn-never');
-        const notNowBtn = prompt.querySelector('.pm-prompt-btn-notnow');
         closeBtn.addEventListener('click', () => {
-            console.log('[SentinelPass] Prompt close button clicked');
+            debugLog('[SentinelPass] Prompt close button clicked');
             window.removeEventListener('beforeunload', onBeforeUnload);
             reportOnce('no_save_closed', {
                 usernamePresent: Boolean(username)
@@ -649,7 +684,7 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
             prompt.remove();
         });
         saveBtn.addEventListener('click', () => {
-            console.log('[SentinelPass] Save button clicked!');
+            debugLog('[SentinelPass] Save button clicked!');
             window.removeEventListener('beforeunload', onBeforeUnload);
             reportOnce('save_clicked', {
                 usernamePresent: Boolean(username)
@@ -658,7 +693,7 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
             prompt.remove();
         });
         neverBtn.addEventListener('click', () => {
-            console.log('[SentinelPass] Never button clicked');
+            debugLog('[SentinelPass] Never button clicked');
             window.removeEventListener('beforeunload', onBeforeUnload);
             reportOnce('no_save_never_for_site');
             void addNeverSaveDomain(domain)
@@ -673,12 +708,12 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
             prompt.remove();
         });
         notNowBtn.addEventListener('click', () => {
-            console.log('[SentinelPass] Not now button clicked');
+            debugLog('[SentinelPass] Not now button clicked');
             window.removeEventListener('beforeunload', onBeforeUnload);
             reportOnce('no_save_not_now');
             prompt.remove();
         });
-        console.log('[SentinelPass] Event listeners attached to save prompt');
+        debugLog('[SentinelPass] Event listeners attached to save prompt');
         // Auto-dismiss after 30 seconds
         setTimeout(() => {
             if (prompt.parentNode) {
@@ -692,8 +727,8 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
 }
 // Save credentials to vault via native messaging
 async function saveCredentials(username, password, domain, sourceUrl = window.location.href) {
-    console.log('[SentinelPass] saveCredentials called');
-    console.log('[SentinelPass] Sending message to background script...');
+    debugLog('[SentinelPass] saveCredentials called');
+    debugLog('[SentinelPass] Sending message to background script...');
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'save_credential',
@@ -706,14 +741,14 @@ async function saveCredentials(username, password, domain, sourceUrl = window.lo
                 save_trigger: 'inline_prompt_button'
             }
         });
-        console.log('[SentinelPass] Received response from background:', redactForLog(response));
+        debugLog('[SentinelPass] Received response from background:', redactForLog(response));
         if (response.success) {
             if (response.unchanged) {
-                console.log('[SentinelPass] Credential unchanged, skipping duplicate save');
+                debugLog('[SentinelPass] Credential unchanged, skipping duplicate save');
                 showNotification('Password already up to date', 'info');
             }
             else {
-                console.log('[SentinelPass] Password saved successfully!');
+                debugLog('[SentinelPass] Password saved successfully!');
                 showNotification('Password saved successfully!', 'success');
             }
         }
@@ -750,12 +785,12 @@ function observeDOMChanges() {
 // Detect password fields and inject autofill buttons
 function detectAndInjectButtons() {
     const passwordFields = document.querySelectorAll('input[type="password"]');
-    console.log('[SentinelPass] Password fields detected:', passwordFields.length);
+    debugLog('[SentinelPass] Password fields detected:', passwordFields.length);
     passwordFields.forEach((field, index) => {
-        console.log('[SentinelPass] Processing password field', index);
+        debugLog('[SentinelPass] Processing password field', index);
         // Skip if button already exists
         if (field.parentElement.querySelector(`.${AUTOFILL_BUTTON_CLASS}`)) {
-            console.log('[SentinelPass] Button already exists for field', index);
+            debugLog('[SentinelPass] Button already exists for field', index);
             return;
         }
         // Make parent relative for absolute positioning
@@ -764,7 +799,7 @@ function detectAndInjectButtons() {
         if (computedStyle.position === 'static') {
             parent.style.position = 'relative';
         }
-        console.log('[SentinelPass] Injecting autofill button for field', index);
+        debugLog('[SentinelPass] Injecting autofill button for field', index);
         injectAutofillButton(field, parent);
         // NEW: Monitor password field for changes to capture credentials
         monitorPasswordField(field);
@@ -772,30 +807,30 @@ function detectAndInjectButtons() {
 }
 // Monitor password field and store credentials as user types
 function monitorPasswordField(passwordField) {
-    console.log('[SentinelPass] monitorPasswordField called');
+    debugLog('[SentinelPass] monitorPasswordField called');
     const form = passwordField.form;
     if (!form) {
-        console.log('[SentinelPass] No form found for password field');
+        debugLog('[SentinelPass] No form found for password field');
         return;
     }
-    console.log('[SentinelPass] Form found:', form.action || form.id || 'unnamed');
+    debugLog('[SentinelPass] Form found:', form.action || form.id || 'unnamed');
     // Get the form's submit button to monitor clicks
     const submitButton = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
     if (!submitButton) {
-        console.log('[SentinelPass] No submit button found');
+        debugLog('[SentinelPass] No submit button found');
         return;
     }
-    console.log('[SentinelPass] Submit button found, setting up mousedown listener');
-    console.log('[SentinelPass] Submit button text:', submitButton.textContent || submitButton.value);
+    debugLog('[SentinelPass] Submit button found, setting up mousedown listener');
+    debugLog('[SentinelPass] Submit button text:', submitButton.textContent || submitButton.value);
     // Use mousedown on submit button (fires before click and before navigation)
     submitButton.addEventListener('mousedown', (e) => {
-        console.log('[SentinelPass] Mousedown fired!');
+        debugLog('[SentinelPass] Mousedown fired!');
         if (!passwordField.value) {
-            console.log('[SentinelPass] Password field is empty, skipping');
+            debugLog('Password field is empty, skipping');
             return;
         }
-        console.log('[SentinelPass] Submit button mousedown - capturing credentials!');
-        console.log('[SentinelPass] Password value length:', passwordField.value.length);
+        debugLog('Submit button mousedown - capturing credentials');
+        debugLog('Password value length:', sanitizePasswordLength(passwordField.value));
         const usernameField = findUsernameField(passwordField);
         const domain = window.location.hostname;
         const submittedUsername = usernameField ? usernameField.value : '';
@@ -810,40 +845,40 @@ function monitorPasswordField(passwordField) {
             input_method: inputMethod,
             isNewPassword: isNewPasswordForm(form, passwordField)
         };
-        console.log('[SentinelPass] Captured credentials on mousedown');
-        console.log('[SentinelPass] Domain:', domain);
-        console.log('[SentinelPass] Username detected:', Boolean(submissionData.username));
-        console.log('[SentinelPass] Submission input method:', inputMethod);
-        // Store in chrome.storage.local (persists across sessions)
-        chrome.storage.local.set({ 'pendingLogin': submissionData }, () => {
+        debugLog('[SentinelPass] Captured credentials on mousedown');
+        debugLog('[SentinelPass] Domain:', domain);
+        debugLog('[SentinelPass] Username detected:', Boolean(submissionData.username));
+        debugLog('[SentinelPass] Submission input method:', inputMethod);
+        // Store in session storage (cleared when browser closes — no plaintext on disk)
+        chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
             if (chrome.runtime.lastError) {
-                console.log('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
+                debugLog('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
             }
             else {
-                console.log('[SentinelPass] Credentials stored in local storage');
+                debugLog('[SentinelPass] Credentials stored in session storage');
             }
         });
         // Request notification immediately
         if (!submissionData.isNewPassword) {
             void (async () => {
                 if (await shouldSuppressSavePrompt(submissionData.domain || submissionData.url || '')) {
-                    console.log('[SentinelPass] Suppressing mousedown save notification due to never-save policy');
+                    debugLog('[SentinelPass] Suppressing mousedown save notification due to never-save policy');
                     return;
                 }
-                console.log('[SentinelPass] ========== REQUESTING SAVE NOTIFICATION ==========');
-                console.log('[SentinelPass] Message type: request_save_notification');
-                console.log('[SentinelPass] Message data:', redactForLog(submissionData));
+                debugLog('[SentinelPass] ========== REQUESTING SAVE NOTIFICATION ==========');
+                debugLog('[SentinelPass] Message type: request_save_notification');
+                debugLog('[SentinelPass] Message data:', redactForLog(submissionData));
                 requestPersistentSaveNotification(submissionData, 'submit-button-mousedown');
             })();
         }
     }, { once: false, capture: true });
-    console.log('[SentinelPass] Mousedown listener attached');
+    debugLog('[SentinelPass] Mousedown listener attached');
 }
 // Inject autofill button next to password field
 function injectAutofillButton(passwordField, parent) {
     const button = document.createElement('button');
     button.className = AUTOFILL_BUTTON_CLASS;
-    button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+    button.appendChild(createLockIcon(16, 16));
     button.setAttribute('type', 'button');
     button.setAttribute('aria-label', 'Fill password from Password Manager');
     // Apply styles
@@ -881,14 +916,14 @@ function injectAutofillButton(passwordField, parent) {
 async function requestAutofill(passwordField) {
     const domain = window.location.hostname;
     const requestId = generateUUID();
-    console.log('[SentinelPass] Requesting autofill for domain:', domain);
+    debugLog('[SentinelPass] Requesting autofill for domain:', domain);
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'get_credential',
             domain: domain,
             request_id: requestId
         });
-        console.log('[SentinelPass] Autofill response:', redactForLog(response));
+        debugLog('[SentinelPass] Autofill response:', redactForLog(response));
         if (response.success && response.data) {
             fillCredentials(response.data.username, response.data.password);
             let statusMessage = 'Password filled successfully!';
@@ -903,7 +938,7 @@ async function requestAutofill(passwordField) {
             showNotification(statusMessage, 'success');
         }
         else {
-            console.log('[SentinelPass] No credentials found for', domain);
+            debugLog('[SentinelPass] No credentials found for', domain);
             showNotification('No credentials found for this site', 'info');
         }
     }
@@ -920,11 +955,11 @@ async function requestTotpCode(domain, requestId) {
             domain: domain,
             request_id: requestId
         });
-        console.log('[SentinelPass] TOTP response:', redactForLog(response));
+        debugLog('[SentinelPass] TOTP response:', redactForLog(response));
         return response;
     }
     catch (error) {
-        console.log('[SentinelPass] TOTP request failed:', error);
+        debugLog('[SentinelPass] TOTP request failed:', error);
         return null;
     }
 }
@@ -933,13 +968,20 @@ function fillCredentials(username, password) {
     const passwordField = document.querySelector('input[type="password"]');
     if (!passwordField)
         return;
+    const contextTimestamp = Date.now();
     lastAutofillContext = {
         username: username || '',
         password: password || '',
         domain: window.location.hostname,
-        timestamp: Date.now()
+        timestamp: contextTimestamp
     };
-    console.log('[SentinelPass] Updated autofill context for submit tracking');
+    debugLog('[SentinelPass] Updated autofill context for submit tracking');
+    // Clear plaintext credentials from memory after the submission window expires
+    setTimeout(() => {
+        if (lastAutofillContext && lastAutofillContext.timestamp === contextTimestamp) {
+            lastAutofillContext = null;
+        }
+    }, AUTOFILL_SUBMISSION_WINDOW_MS);
     // Fill password
     passwordField.value = password;
     passwordField.dispatchEvent(new Event('input', { bubbles: true }));

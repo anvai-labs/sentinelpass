@@ -108,7 +108,31 @@ pub async fn push(
     /// Maximum size of a single encrypted payload (1 MB).
     const MAX_ENTRY_PAYLOAD_SIZE: usize = 1_048_576;
 
+    if req.entries.len() > 1000 {
+        return Err(RelayError::BadRequest(
+            "Too many entries per push (max 1000)".into(),
+        ));
+    }
+
     for entry in &req.entries {
+        // Validate origin_device_id matches authenticated device
+        if entry.origin_device_id != *device_id {
+            return Err(RelayError::BadRequest(
+                "origin_device_id must match authenticated device".into(),
+            ));
+        }
+
+        // Validate entry_type whitelist
+        match entry.entry_type.as_str() {
+            "credential" | "ssh_key" | "totp_secret" => {}
+            _ => {
+                return Err(RelayError::BadRequest(format!(
+                    "Unknown entry_type: {}",
+                    entry.entry_type
+                )));
+            }
+        }
+
         let payload = base64::engine::general_purpose::STANDARD
             .decode(&entry.encrypted_payload)
             .map_err(|e| RelayError::BadRequest(format!("Invalid payload: {}", e)))?;
@@ -440,6 +464,7 @@ mod tests {
         version: u64,
         modified_at: i64,
         payload: &[u8],
+        device_id: Uuid,
     ) -> SyncEntryBlob {
         SyncEntryBlob {
             sync_id,
@@ -448,7 +473,7 @@ mod tests {
             modified_at,
             encrypted_payload: STANDARD.encode(payload),
             is_tombstone: false,
-            origin_device_id: Uuid::new_v4(),
+            origin_device_id: device_id,
         }
     }
 
@@ -524,7 +549,7 @@ mod tests {
         // Try to push same entry at version 3 (lower)
         let req = PushRequest {
             device_sequence: 1,
-            entries: vec![sample_entry(sync_id, 3, now - 50, &[4u8, 5, 6])],
+            entries: vec![sample_entry(sync_id, 3, now - 50, &[4u8, 5, 6], device_id)],
         };
 
         let resp = push(State(state), auth_extensions(device_id), Json(req))
@@ -567,7 +592,7 @@ mod tests {
         // Try to push same entry at version 5, modified_at = 150 (newer)
         let req = PushRequest {
             device_sequence: 1,
-            entries: vec![sample_entry(sync_id, 5, 150, &[4u8, 5, 6])],
+            entries: vec![sample_entry(sync_id, 5, 150, &[4u8, 5, 6], device_id)],
         };
 
         let resp = push(State(state.clone()), auth_extensions(device_id), Json(req))
@@ -597,9 +622,9 @@ mod tests {
         let req = PushRequest {
             device_sequence: 1,
             entries: vec![
-                sample_entry(Uuid::new_v4(), 1, 100, &[1u8]),
-                sample_entry(Uuid::new_v4(), 1, 101, &[2u8]),
-                sample_entry(Uuid::new_v4(), 1, 102, &[3u8]),
+                sample_entry(Uuid::new_v4(), 1, 100, &[1u8], device_id),
+                sample_entry(Uuid::new_v4(), 1, 101, &[2u8], device_id),
+                sample_entry(Uuid::new_v4(), 1, 102, &[3u8], device_id),
             ],
         };
 

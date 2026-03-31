@@ -12,6 +12,8 @@ use argon2::{
     password_hash::{PasswordHasher, SaltString},
     Algorithm, Argon2, Params, Version,
 };
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 /// Parameters for Argon2id key derivation
@@ -38,8 +40,10 @@ pub struct KdfParams {
 
 impl Default for KdfParams {
     fn default() -> Self {
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
         Self {
-            salt: rand::random(),
+            salt,
             mem_cost: 262_144, // 256 MB
             time_cost: 3,
             parallelism: 4,

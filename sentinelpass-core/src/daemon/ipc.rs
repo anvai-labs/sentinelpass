@@ -1038,6 +1038,7 @@ pub fn load_or_create_ipc_token() -> Result<String> {
     let mut token_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut token_bytes);
     let token = hex::encode(token_bytes);
+    token_bytes.zeroize();
 
     let mut file = std::fs::OpenOptions::new()
         .write(true)

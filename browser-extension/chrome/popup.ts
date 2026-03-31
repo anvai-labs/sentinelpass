@@ -2,6 +2,11 @@
 
 let currentDomain = '';
 const UNAVAILABLE_FEATURE_MESSAGE = 'This feature is not available in the current preview build.';
+const CLIPBOARD_CLEAR_TIMEOUT_MS = 10000;
+
+// Store credentials in memory only — never expose in DOM attributes
+const credentialStore = new Map<string, { username: string; password: string }>();
+let credentialIdCounter = 0;
 
 document.addEventListener('DOMContentLoaded', async () => {
   // Get current tab
@@ -64,41 +69,78 @@ async function loadCredentials() {
     });
 
     const credentialsList = document.getElementById('credentialsList');
+    credentialsList.textContent = '';
 
     if (response.success && response.data) {
-      credentialsList.innerHTML = `
-        <div class="credential-item">
-          <div class="credential-info">
-            <div class="credential-username">${escapeHtml(response.data.username)}</div>
-            <div class="credential-domain">${escapeHtml(currentDomain)}</div>
-          </div>
-          <button class="btn-copy" data-username="${escapeHtml(response.data.username)}" data-password="${escapeHtml(response.data.password)}">
-            Copy
-          </button>
-        </div>
-      `;
-
-      // Add copy button listeners
-      credentialsList.querySelector('.btn-copy').addEventListener('click', (e) => {
-        const username = e.target.dataset.username;
-        const password = e.target.dataset.password;
-        copyToClipboard(username, password);
+      // Store credentials in memory — never expose in DOM
+      const credId = 'cred-' + (++credentialIdCounter);
+      credentialStore.set(credId, {
+        username: response.data.username,
+        password: response.data.password
       });
+
+      const item = document.createElement('div');
+      item.className = 'credential-item';
+
+      const info = document.createElement('div');
+      info.className = 'credential-info';
+
+      const usernameDiv = document.createElement('div');
+      usernameDiv.className = 'credential-username';
+      usernameDiv.textContent = response.data.username;
+
+      const domainDiv = document.createElement('div');
+      domainDiv.className = 'credential-domain';
+      domainDiv.textContent = currentDomain;
+
+      info.appendChild(usernameDiv);
+      info.appendChild(domainDiv);
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn-copy';
+      copyBtn.textContent = 'Copy';
+      copyBtn.dataset.credId = credId;
+      copyBtn.addEventListener('click', () => {
+        const cred = credentialStore.get(credId);
+        if (cred) {
+          copyToClipboard(cred.username, cred.password);
+        }
+      });
+
+      item.appendChild(info);
+      item.appendChild(copyBtn);
+      credentialsList.appendChild(item);
     } else {
-      credentialsList.innerHTML = `
-        <div class="empty-state">
-          <p>No credentials found for <strong>${escapeHtml(currentDomain)}</strong></p>
-          <button id="addCredentialBtn" class="btn btn-primary feature-disabled" disabled title="${escapeHtml(UNAVAILABLE_FEATURE_MESSAGE)}">Add Credential (Coming Soon)</button>
-        </div>
-      `;
+      const emptyState = document.createElement('div');
+      emptyState.className = 'empty-state';
+
+      const p = document.createElement('p');
+      p.textContent = 'No credentials found for ';
+      const strong = document.createElement('strong');
+      strong.textContent = currentDomain;
+      p.appendChild(strong);
+
+      const addBtn = document.createElement('button');
+      addBtn.id = 'addCredentialBtn';
+      addBtn.className = 'btn btn-primary feature-disabled';
+      addBtn.disabled = true;
+      addBtn.title = UNAVAILABLE_FEATURE_MESSAGE;
+      addBtn.textContent = 'Add Credential (Coming Soon)';
+
+      emptyState.appendChild(p);
+      emptyState.appendChild(addBtn);
+      credentialsList.appendChild(emptyState);
     }
   } catch (error) {
     console.error('Failed to load credentials:', error);
-    document.getElementById('credentialsList').innerHTML = `
-      <div class="error-state">
-        <p>Failed to load credentials</p>
-      </div>
-    `;
+    const credentialsList = document.getElementById('credentialsList');
+    credentialsList.textContent = '';
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'error-state';
+    const p = document.createElement('p');
+    p.textContent = 'Failed to load credentials';
+    errorDiv.appendChild(p);
+    credentialsList.appendChild(errorDiv);
   }
 }
 
@@ -168,17 +210,14 @@ async function copyToClipboard(username, password) {
     await navigator.clipboard.writeText(password);
     showNotification('Password copied to clipboard');
 
-    // Auto-clear after 30 seconds
+    // Auto-clear clipboard after timeout
     setTimeout(async () => {
       try {
-        const current = await navigator.clipboard.readText();
-        if (current === password) {
-          await navigator.clipboard.writeText('');
-        }
-      } catch (e) {
-        // Clipboard read may fail if focus changed
+        await navigator.clipboard.writeText('');
+      } catch {
+        // Clipboard write may fail if focus changed
       }
-    }, 30000);
+    }, CLIPBOARD_CLEAR_TIMEOUT_MS);
   } catch (error) {
     console.error('Failed to copy:', error);
     showNotification('Failed to copy password', 'error');
@@ -199,12 +238,6 @@ function showNotification(message, type = 'success') {
     notification.classList.remove('show');
     setTimeout(() => notification.remove(), 300);
   }, 3000);
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 function generateUUID() {

@@ -9,7 +9,8 @@ export default defineConfig({
       reportsDirectory: 'coverage/ts',
       include: [
         'sentinelpass-ui/url-utils.ts',
-        'browser-extension/chrome/save-heuristics.ts'
+        'browser-extension/chrome/save-heuristics.ts',
+        'browser-extension/chrome/logger.ts'
       ],
       thresholds: {
         lines: 90,

@@ -96,5 +96,11 @@ toml_dep = { package = "toml", version = "0.8" }
 # System
 hostname = "0.4"
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
 # Mobile bridge build-only (not in workspace dependencies to avoid optional issues)
 # These are added directly to sentinelpass-mobile-bridge/Cargo.toml

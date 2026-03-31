@@ -44,7 +44,15 @@ impl UnixSocketTransport {
 
     /// Bind the listener to the socket path
     pub fn bind(&mut self) -> TransportResult<()> {
+        // Set restrictive umask before bind to prevent brief window with default permissions
+        #[cfg(unix)]
+        let old_umask = unsafe { libc::umask(0o177) }; // Only owner r/w
+
         let listener = tokio::net::UnixListener::bind(&self.socket_path).map_err(|e| {
+            #[cfg(unix)]
+            unsafe {
+                libc::umask(old_umask)
+            };
             TransportError::ConnectionFailed(format!(
                 "Failed to bind to {}: {}",
                 self.socket_path.display(),
@@ -52,18 +60,11 @@ impl UnixSocketTransport {
             ))
         })?;
 
-        // Set permissions to user-only (0o600)
+        // Restore original umask
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| {
-                    TransportError::Io(std::io::Error::other(format!(
-                        "Failed to set socket permissions: {}",
-                        e
-                    )))
-                })?;
-        }
+        unsafe {
+            libc::umask(old_umask)
+        };
 
         self.listener = Some(listener);
         Ok(())

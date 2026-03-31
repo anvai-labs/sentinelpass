@@ -2,6 +2,25 @@
 
 import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger';
 
+function escapeHtml(str: string): string {
+  const div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
+function createLockIcon(width: number, height: number): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', String(width));
+  svg.setAttribute('height', String(height));
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'currentColor');
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', 'M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z');
+  svg.appendChild(path);
+  return svg;
+}
+
 infoLog('Content script loaded');
 debugLog('Current URL:', sanitizeUrl(window.location.href));
 debugLog('Hostname:', sanitizeHostname(window.location.hostname));
@@ -274,6 +293,9 @@ function init() {
 
   // Listen for messages from background script
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // Validate sender is from this extension
+    if (sender.id !== chrome.runtime.id) { return; }
+
     debugLog('Received message:', request.type);
     if (request.type === 'trigger_autofill') {
       performAutofill();
@@ -318,14 +340,14 @@ function checkPendingCredentials() {
   }
 
   try {
-    chrome.storage.local.get(['pendingLogin'], (result) => {
+    chrome.storage.session.get(['pendingCredential'], (result) => {
       if (chrome.runtime.lastError) {
         errorLog('Storage access error:', chrome.runtime.lastError.message);
         return;
       }
 
-      if (result && result.pendingLogin) {
-        const pending = result.pendingLogin;
+      if (result && result.pendingCredential) {
+        const pending = result.pendingCredential;
         const age = Date.now() - pending.timestamp;
 
         debugLog('Found pending login, age:', age, 'ms');
@@ -337,7 +359,7 @@ function checkPendingCredentials() {
           void (async () => {
             if (await shouldSuppressSavePrompt(pending.domain || pending.url || '')) {
               debugLog('Skipping pending save notification due to never-save policy');
-              chrome.storage.local.remove('pendingLogin');
+              chrome.storage.session.remove('pendingCredential');
               return;
             }
 
@@ -347,12 +369,12 @@ function checkPendingCredentials() {
             debugLog('[SentinelPass] ========== SENDING NOTIFICATION FROM 2FA PAGE ==========');
             requestPersistentSaveNotification(pending, 'pending-login-check', () => {
               // Clear the pending login regardless of callback result.
-              chrome.storage.local.remove('pendingLogin');
+              chrome.storage.session.remove('pendingCredential');
             });
           })();
         } else if (age >= 30000) {
           debugLog('[SentinelPass] Clearing stale pending login');
-          chrome.storage.local.remove('pendingLogin');
+          chrome.storage.session.remove('pendingCredential');
         }
       }
     });
@@ -417,13 +439,6 @@ function trackFormSubmissions() {
 
     chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
       debugLog('[SentinelPass] Stored credentials in session storage');
-    });
-    chrome.storage.local.set({ 'pendingLogin': submissionData }, () => {
-      if (chrome.runtime.lastError) {
-        debugLog('[SentinelPass] Failed to store pendingLogin from submit event:', chrome.runtime.lastError.message);
-      } else {
-        debugLog('[SentinelPass] Stored pendingLogin from submit event');
-      }
     });
 
     // Show save prompt immediately for new password forms
@@ -494,14 +509,6 @@ function trackFormSubmissions() {
     } catch (error) {
       debugLog('[SentinelPass] Storage exception:', error.message);
     }
-    chrome.storage.local.set({ 'pendingLogin': submissionData }, () => {
-      if (chrome.runtime.lastError) {
-        debugLog('[SentinelPass] Failed to store pendingLogin from click event:', chrome.runtime.lastError.message);
-      } else {
-        debugLog('[SentinelPass] Stored pendingLogin from click event');
-      }
-    });
-
     // Request notification IMMEDIATELY - no delays
     if (!submissionData.isNewPassword) {
       void (async () => {
@@ -607,26 +614,72 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
   debugLog('[SentinelPass] Creating save prompt element...');
   const prompt = document.createElement('div');
   prompt.className = 'pm-save-prompt';
-  prompt.innerHTML = `
-    <div class="pm-prompt-content">
-      <div class="pm-prompt-header">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10z"/>
-        </svg>
-        <span class="pm-prompt-title">Save Password?</span>
-        <button type="button" class="pm-prompt-close">×</button>
-      </div>
-      <div class="pm-prompt-body">
-        <p>SentinelPass detected a new password for <strong>${domain}</strong></p>
-        ${username ? `<p>Username: <strong>${username}</strong></p>` : ''}
-        <div class="pm-prompt-actions">
-          <button type="button" class="pm-prompt-btn pm-prompt-btn-save">Save</button>
-          <button type="button" class="pm-prompt-btn pm-prompt-btn-never">Never for this site</button>
-          <button type="button" class="pm-prompt-btn pm-prompt-btn-notnow">Not now</button>
-        </div>
-      </div>
-    </div>
-  `;
+
+  const content = document.createElement('div');
+  content.className = 'pm-prompt-content';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'pm-prompt-header';
+  header.appendChild(createLockIcon(20, 20));
+
+  const title = document.createElement('span');
+  title.className = 'pm-prompt-title';
+  title.textContent = 'Save Password?';
+  header.appendChild(title);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'pm-prompt-close';
+  closeBtn.textContent = '\u00d7';
+  header.appendChild(closeBtn);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'pm-prompt-body';
+
+  const domainP = document.createElement('p');
+  domainP.textContent = 'SentinelPass detected a new password for ';
+  const domainStrong = document.createElement('strong');
+  domainStrong.textContent = domain;
+  domainP.appendChild(domainStrong);
+  body.appendChild(domainP);
+
+  if (username) {
+    const userP = document.createElement('p');
+    userP.textContent = 'Username: ';
+    const userStrong = document.createElement('strong');
+    userStrong.textContent = username;
+    userP.appendChild(userStrong);
+    body.appendChild(userP);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'pm-prompt-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'pm-prompt-btn pm-prompt-btn-save';
+  saveBtn.textContent = 'Save';
+
+  const neverBtn = document.createElement('button');
+  neverBtn.type = 'button';
+  neverBtn.className = 'pm-prompt-btn pm-prompt-btn-never';
+  neverBtn.textContent = 'Never for this site';
+
+  const notNowBtn = document.createElement('button');
+  notNowBtn.type = 'button';
+  notNowBtn.className = 'pm-prompt-btn pm-prompt-btn-notnow';
+  notNowBtn.textContent = 'Not now';
+
+  actions.appendChild(saveBtn);
+  actions.appendChild(neverBtn);
+  actions.appendChild(notNowBtn);
+  body.appendChild(actions);
+
+  content.appendChild(header);
+  content.appendChild(body);
+  prompt.appendChild(content);
 
   prompt.style.cssText = `
     position: fixed;
@@ -725,11 +778,6 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
   });
 
   // Add event listeners
-  const closeBtn = prompt.querySelector('.pm-prompt-close');
-  const saveBtn = prompt.querySelector('.pm-prompt-btn-save');
-  const neverBtn = prompt.querySelector('.pm-prompt-btn-never');
-  const notNowBtn = prompt.querySelector('.pm-prompt-btn-notnow');
-
   closeBtn.addEventListener('click', () => {
     debugLog('[SentinelPass] Prompt close button clicked');
     window.removeEventListener('beforeunload', onBeforeUnload);
@@ -929,12 +977,12 @@ function monitorPasswordField(passwordField) {
     debugLog('[SentinelPass] Username detected:', Boolean(submissionData.username));
     debugLog('[SentinelPass] Submission input method:', inputMethod);
 
-    // Store in chrome.storage.local (persists across sessions)
-    chrome.storage.local.set({ 'pendingLogin': submissionData }, () => {
+    // Store in session storage (cleared when browser closes — no plaintext on disk)
+    chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
       if (chrome.runtime.lastError) {
         debugLog('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
       } else {
-        debugLog('[SentinelPass] Credentials stored in local storage');
+        debugLog('[SentinelPass] Credentials stored in session storage');
       }
     });
 
@@ -962,7 +1010,7 @@ function monitorPasswordField(passwordField) {
 function injectAutofillButton(passwordField, parent) {
   const button = document.createElement('button');
   button.className = AUTOFILL_BUTTON_CLASS;
-  button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM9 6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9V6zm9 14H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z"/></svg>';
+  button.appendChild(createLockIcon(16, 16));
   button.setAttribute('type', 'button');
   button.setAttribute('aria-label', 'Fill password from Password Manager');
 
@@ -1065,13 +1113,21 @@ function fillCredentials(username, password) {
   const passwordField = document.querySelector('input[type="password"]');
   if (!passwordField) return;
 
+  const contextTimestamp = Date.now();
   lastAutofillContext = {
     username: username || '',
     password: password || '',
     domain: window.location.hostname,
-    timestamp: Date.now()
+    timestamp: contextTimestamp
   };
   debugLog('[SentinelPass] Updated autofill context for submit tracking');
+
+  // Clear plaintext credentials from memory after the submission window expires
+  setTimeout(() => {
+    if (lastAutofillContext && lastAutofillContext.timestamp === contextTimestamp) {
+      lastAutofillContext = null;
+    }
+  }, AUTOFILL_SUBMISSION_WINDOW_MS);
 
   // Fill password
   passwordField.value = password;
