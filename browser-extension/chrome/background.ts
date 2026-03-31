@@ -28,6 +28,33 @@ const PENDING_UNLOCK_RETRY_TTL_MS = 2 * 60 * 1000;
 const VAULT_LOCKED_NOTIFICATION_PREFIX = 'vault-locked-';
 const recentSaveNotificationRequests = new Map();
 const handledSaveNotifications = new Set();
+
+// Rate limiting for message handlers
+const MESSAGE_RATE_LIMIT_MAX = 30;
+const MESSAGE_RATE_LIMIT_WINDOW_MS = 5000;
+const messageRateTracker = new Map<number, number[]>();
+
+function isMessageRateLimited(tabId: number): boolean {
+  const now = Date.now();
+  const timestamps = messageRateTracker.get(tabId) || [];
+  const recent = timestamps.filter(t => now - t < MESSAGE_RATE_LIMIT_WINDOW_MS);
+  recent.push(now);
+  messageRateTracker.set(tabId, recent);
+  return recent.length > MESSAGE_RATE_LIMIT_MAX;
+}
+
+// Periodic cleanup of stale rate-limit entries
+setInterval(() => {
+  const now = Date.now();
+  for (const [tabId, timestamps] of messageRateTracker) {
+    const recent = timestamps.filter(t => now - t < MESSAGE_RATE_LIMIT_WINDOW_MS);
+    if (recent.length === 0) {
+      messageRateTracker.delete(tabId);
+    } else {
+      messageRateTracker.set(tabId, recent);
+    }
+  }
+}, 60000);
 let lastVaultLockedNotificationAt = 0;
 const ALLOWED_WEB_PROTOCOLS = new Set(['http:', 'https:']);
 
@@ -743,6 +770,14 @@ async function handleSaveNotification(data, sender) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // Validate sender is from this extension
   if (sender.id !== chrome.runtime.id) { return; }
+
+  // Rate limit per tab
+  const tabId = sender.tab?.id ?? -1;
+  if (isMessageRateLimited(tabId)) {
+    warnLog('Rate limited messages from tab ' + tabId);
+    sendResponse({ success: false, error: 'Rate limited' });
+    return true;
+  }
 
   debugLog('[SentinelPass Background] Received message:', request.type);
   debugLog('[SentinelPass Background] Request details:', redactForLog(request));

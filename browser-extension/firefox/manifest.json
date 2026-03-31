@@ -1,25 +1,24 @@
 {
-  "manifest_version": 2,
-  "name": "SentinelPass Password Manager",
-  "version": "0.1.0",
-  "description": "Secure, local-first password manager with browser autofill",
-  "icons": {
-    "16": "icon16.png",
-    "48": "icon48.png",
-    "128": "icon128.png"
-  },
+  "manifest_version": 3,
+  "name": "SentinelPass",
+  "version": "0.6.1",
+  "description": "Secure, local-first password manager with autofill support",
   "permissions": [
     "storage",
-    "tabs",
     "activeTab",
-    "webNavigation",
     "notifications",
-    "nativeMessaging",
-    "clipboardRead",
-    "<all_urls>"
+    "nativeMessaging"
   ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none';"
+  },
   "background": {
-    "scripts": ["background.js"]
+    "scripts": ["background.js"],
+    "type": "module"
   },
   "content_scripts": [
     {
@@ -29,13 +28,18 @@
       "all_frames": true
     }
   ],
-  "browser_action": {
+  "action": {
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon16.png",
       "48": "icon48.png",
       "128": "icon128.png"
     }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
   },
   "commands": {
     "autofill": {
@@ -46,10 +50,10 @@
       "description": "Trigger autofill"
     }
   },
-  "applications": {
+  "browser_specific_settings": {
     "gecko": {
-      "id": "sentinelpass@localhost",
-      "strict_min_version": "91.0"
+      "id": "sentinelpass@sentinelpass.org",
+      "strict_min_version": "109.0"
     }
   }
 }
