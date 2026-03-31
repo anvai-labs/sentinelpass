@@ -4938,7 +4938,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-cli"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4958,7 +4958,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5003,7 +5003,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-daemon"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -5017,7 +5017,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-host"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "sentinelpass-core",
@@ -5028,7 +5028,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-mobile-bridge"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5046,7 +5046,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-relay"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -5072,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-ui"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
