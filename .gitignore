@@ -75,3 +75,19 @@ build/android/*.apk
 build/android/*.aab
 # All build artifacts
 build/
+
+# Browser extension builds
+browser-extension/dist/
+browser-extension/**/*.zip
+
+# Browser extension demo/recording scripts
+browser-extension/chrome/*demo*.sh
+browser-extension/chrome/*demo*.mjs
+browser-extension/chrome/*demo*.md
+browser-extension/chrome/*record*.sh
+browser-extension/chrome/capture-slides.mjs
+browser-extension/chrome/create-*.sh
+browser-extension/chrome/demo-slides.html
+browser-extension/chrome/voiceover-generator.sh
+browser-extension/chrome/package-lock.json
+browser-extension/chrome/package.json
