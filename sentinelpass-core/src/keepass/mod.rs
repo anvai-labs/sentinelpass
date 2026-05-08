@@ -155,6 +155,9 @@ pub fn export_to_keepass_xml(vault: &VaultManager, output: &Path) -> Result<()> 
     let mut ke_entries = Vec::new();
 
     for summary in summaries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
         match vault.get_entry(summary.entry_id) {
             Ok(entry) => {
                 ke_entries.push(KeePassEntry::from(entry));
@@ -189,6 +192,27 @@ pub fn export_to_keepass_xml(vault: &VaultManager, output: &Path) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn temp_export_path(name: &str) -> std::path::PathBuf {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        std::env::temp_dir().join(format!("sentinelpass_keepass_{name}_{suffix}"))
+    }
+
+    fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
+        Entry {
+            entry_id: None,
+            title: title.to_string(),
+            username: "user@example.com".to_string(),
+            password: password.to_string(),
+            url: Some("https://example.com".to_string()),
+            notes: None,
+            credential_type,
+            created_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            modified_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            favorite: false,
+        }
+    }
 
     #[test]
     fn test_parse_tags_from_notes() {
@@ -255,5 +279,36 @@ mod tests {
         assert_eq!(ke.password, "password123");
         // Tags should be extracted
         assert!(ke.tags.as_ref().unwrap().contains(&"work".to_string()));
+    }
+
+    #[test]
+    fn export_keepass_xml_excludes_passkey_references_from_password_backup() {
+        let vault_path = temp_export_path("vault.db");
+        let output_path = temp_export_path("export.xml");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        export_to_keepass_xml(&vault, &output_path).unwrap();
+
+        let exported = std::fs::read_to_string(&output_path).unwrap();
+        assert!(exported.contains("Example Password"));
+        assert!(!exported.contains("Example Passkey"));
+        assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
+
+        let _ = std::fs::remove_file(vault_path);
+        let _ = std::fs::remove_file(output_path);
     }
 }

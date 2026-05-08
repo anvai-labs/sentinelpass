@@ -43,6 +43,9 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     let mut export_entries = Vec::new();
 
     for summary in entries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
         match vault.get_entry(summary.entry_id) {
             Ok(entry) => {
                 export_entries.push(ExportEntry::from(entry));
@@ -100,6 +103,9 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
     })?;
 
     for summary in entries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
         let entry = vault.get_entry(summary.entry_id)?;
 
         // Escape CSV fields
@@ -327,6 +333,27 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn temp_export_path(name: &str) -> std::path::PathBuf {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        std::env::temp_dir().join(format!("sentinelpass_{name}_{suffix}"))
+    }
+
+    fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
+        Entry {
+            entry_id: None,
+            title: title.to_string(),
+            username: "user@example.com".to_string(),
+            password: password.to_string(),
+            url: Some("https://example.com".to_string()),
+            notes: None,
+            credential_type,
+            created_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            modified_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            favorite: false,
+        }
+    }
 
     #[test]
     fn test_parse_csv_simple() {
@@ -358,8 +385,6 @@ mod tests {
 
     #[test]
     fn test_export_entry_from_entry() {
-        use chrono::TimeZone;
-
         let entry = Entry {
             entry_id: Some(1),
             title: "Test".to_string(),
@@ -377,5 +402,67 @@ mod tests {
         assert_eq!(export.title, "Test");
         assert_eq!(export.username, "user@example.com");
         assert!(export.favorite);
+    }
+
+    #[test]
+    fn export_json_excludes_passkey_references_from_password_backup() {
+        let vault_path = temp_export_path("vault_json.db");
+        let output_path = temp_export_path("export.json");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        export_to_json(&vault, &output_path).unwrap();
+
+        let exported = std::fs::read_to_string(&output_path).unwrap();
+        assert!(exported.contains("Example Password"));
+        assert!(!exported.contains("Example Passkey"));
+        assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
+
+        let _ = std::fs::remove_file(vault_path);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn export_csv_excludes_passkey_references_from_password_backup() {
+        let vault_path = temp_export_path("vault_csv.db");
+        let output_path = temp_export_path("export.csv");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        export_to_csv(&vault, &output_path).unwrap();
+
+        let exported = std::fs::read_to_string(&output_path).unwrap();
+        assert!(exported.contains("Example Password"));
+        assert!(!exported.contains("Example Passkey"));
+        assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
+
+        let _ = std::fs::remove_file(vault_path);
+        let _ = std::fs::remove_file(output_path);
     }
 }

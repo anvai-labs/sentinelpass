@@ -53,6 +53,14 @@ impl CredentialType {
             ))),
         }
     }
+
+    pub fn is_retrievable_secret(self) -> bool {
+        matches!(self, Self::Password | Self::ApiKey)
+    }
+
+    pub fn is_generic_password_exportable(self) -> bool {
+        self.is_retrievable_secret()
+    }
 }
 
 /// Vault manager handles all vault operations

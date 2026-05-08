@@ -255,3 +255,4 @@ Completed TDD slice:
 - Daemon IPC integration coverage now starts a real server against a temp vault and verifies a Victor-style authorized SentinelPass lookup plus denied field access.
 - Authorized secret lookup now supports opt-in structured output via `--output json` while preserving plaintext stdout as the default shell contract.
 - Passkey references are now excluded from daemon password/API-key secret lookup and fillable domain credential listing, including authorized external-secret IPC coverage.
+- Generic JSON, CSV, and KeePass password-backup exports now exclude `passkey_reference` entries so references are not serialized as recoverable password secrets.

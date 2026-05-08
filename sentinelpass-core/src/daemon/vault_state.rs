@@ -93,13 +93,6 @@ fn domains_match(request_domain: &str, entry_url_or_domain: &str) -> bool {
     request_host.ends_with(&entry_suffix) || entry_host.ends_with(&request_suffix)
 }
 
-fn supports_secret_lookup(credential_type: CredentialType) -> bool {
-    matches!(
-        credential_type,
-        CredentialType::Password | CredentialType::ApiKey
-    )
-}
-
 fn usernames_match(lhs: &str, rhs: &str) -> bool {
     lhs.trim().eq_ignore_ascii_case(rhs.trim())
 }
@@ -194,7 +187,7 @@ impl DaemonVault {
             let indexed = vault.find_entries_by_domain(&host)?;
             if let Some(entry) = indexed
                 .into_iter()
-                .find(|entry| supports_secret_lookup(entry.credential_type))
+                .find(|entry| entry.credential_type.is_retrievable_secret())
             {
                 return Ok(Some(CredentialResponse {
                     username: entry.username,
@@ -207,7 +200,7 @@ impl DaemonVault {
         // Slow path: full scan (entries without domain_mappings)
         let entries = vault.list_entries()?;
         for summary in entries {
-            if !supports_secret_lookup(summary.credential_type) {
+            if !summary.credential_type.is_retrievable_secret() {
                 continue;
             }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
@@ -312,7 +305,7 @@ impl DaemonVault {
             let indexed = vault.find_entries_by_domain(&host)?;
             if !indexed.is_empty() {
                 for entry in indexed {
-                    if !supports_secret_lookup(entry.credential_type) {
+                    if !entry.credential_type.is_retrievable_secret() {
                         continue;
                     }
                     let domain = entry
@@ -336,7 +329,7 @@ impl DaemonVault {
         // Slow path: full scan
         let entries = vault.list_entries()?;
         for summary in entries {
-            if !supports_secret_lookup(summary.credential_type) {
+            if !summary.credential_type.is_retrievable_secret() {
                 continue;
             }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
