@@ -101,6 +101,12 @@ enum Commands {
         command: SecretCommands,
     },
 
+    /// Manage metadata-only passkey references
+    Passkey {
+        #[command(subcommand)]
+        command: PasskeyCommands,
+    },
+
     /// Add a private key file to SSH agent
     SshAgentAdd {
         /// Path to private key file
@@ -441,6 +447,40 @@ enum SecretCommands {
 }
 
 #[derive(Subcommand)]
+enum PasskeyCommands {
+    /// Add a metadata-only reference to a platform passkey
+    Add {
+        /// WebAuthn relying party ID, for example example.com
+        #[arg(long)]
+        relying_party_id: String,
+
+        /// Account label shown by the platform authenticator
+        #[arg(long)]
+        account_label: String,
+
+        /// Source platform, for example icloud-keychain, windows-hello, android, or security-key
+        #[arg(long, default_value = "unknown")]
+        platform: String,
+
+        /// Optional display-safe credential identifier hint or fingerprint
+        #[arg(long)]
+        credential_id_hint: Option<String>,
+
+        /// Optional expected sync source, for example icloud-keychain or external-authenticator
+        #[arg(long)]
+        sync_source: Option<String>,
+
+        /// Notes about this passkey reference; do not include private key material
+        #[arg(long)]
+        notes: Option<String>,
+
+        /// Mark as favorite
+        #[arg(long)]
+        favorite: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum SyncCommands {
     /// Initialize sync for this vault (generates device identity, sets relay URL)
     Init {
@@ -575,6 +615,63 @@ fn render_secret_lookup(result: &SecretLookupResult, output: SecretOutputFormat)
         }))
         .map_err(|e| anyhow::anyhow!("Failed to render secret lookup JSON: {}", e)),
     }
+}
+
+fn require_non_empty(value: &str, label: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{} must not be empty", label);
+    }
+    Ok(trimmed.to_string())
+}
+
+fn trim_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn build_passkey_reference_entry(
+    relying_party_id: &str,
+    account_label: &str,
+    platform: &str,
+    credential_id_hint: Option<&str>,
+    sync_source: Option<&str>,
+    notes: Option<&str>,
+    favorite: bool,
+) -> Result<VaultEntry> {
+    let relying_party_id = require_non_empty(relying_party_id, "relying party ID")?;
+    let account_label = require_non_empty(account_label, "account label")?;
+    let platform = require_non_empty(platform, "platform")?;
+    let credential_id_hint = trim_optional(credential_id_hint);
+    let sync_source = trim_optional(sync_source);
+    let notes = trim_optional(notes);
+    let now = chrono::Utc::now();
+
+    let reference = serde_json::to_string(&serde_json::json!({
+        "kind": "passkey_reference",
+        "relying_party_id": relying_party_id,
+        "account_label": account_label,
+        "platform": platform,
+        "credential_id_hint": credential_id_hint,
+        "sync_source": sync_source,
+        "metadata_only": true,
+    }))
+    .map_err(|e| anyhow::anyhow!("Failed to render passkey reference metadata: {}", e))?;
+
+    Ok(VaultEntry {
+        entry_id: None,
+        title: format!("Passkey reference: {}", relying_party_id),
+        username: account_label,
+        password: reference,
+        url: Some(relying_party_id),
+        notes,
+        credential_type: CredentialType::PasskeyReference,
+        created_at: now,
+        modified_at: now,
+        favorite,
+    })
 }
 
 fn get_vault_path(cli: &Cli, dev: bool) -> PathBuf {
@@ -874,6 +971,40 @@ fn main() -> Result<()> {
                     purpose,
                 ))??;
                 println!("{}", render_secret_lookup(&result, output)?);
+            }
+        },
+
+        Commands::Passkey { ref command } => match command {
+            PasskeyCommands::Add {
+                relying_party_id,
+                account_label,
+                platform,
+                credential_id_hint,
+                sync_source,
+                notes,
+                favorite,
+            } => {
+                let vault_path = get_vault_path(&cli, false);
+
+                if !vault_path.exists() {
+                    anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
+                }
+
+                let master_password = prompt_password("Enter master password to unlock vault: ")?;
+                let vault = open_vault_with_password(&vault_path, master_password.as_bytes())?;
+                let entry = build_passkey_reference_entry(
+                    relying_party_id,
+                    account_label,
+                    platform,
+                    credential_id_hint.as_deref(),
+                    sync_source.as_deref(),
+                    notes.as_deref(),
+                    *favorite,
+                )?;
+
+                let entry_id = vault.add_entry(&entry)?;
+                println!("✓ Passkey reference created with ID: {}", entry_id);
+                println!("This is metadata only. Authentication remains with the platform authenticator.");
             }
         },
 
@@ -2429,6 +2560,74 @@ mod tests {
             Err(err) => assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue),
             Ok(_) => panic!("expected generic add to reject passkey-reference"),
         }
+    }
+
+    #[test]
+    fn parses_passkey_reference_add_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "passkey",
+            "add",
+            "--relying-party-id",
+            "example.com",
+            "--account-label",
+            "user@example.com",
+            "--platform",
+            "icloud-keychain",
+            "--credential-id-hint",
+            "cred-123",
+            "--sync-source",
+            "icloud-keychain",
+            "--notes",
+            "created on MacBook",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Passkey {
+                command:
+                    PasskeyCommands::Add {
+                        relying_party_id,
+                        account_label,
+                        platform,
+                        credential_id_hint,
+                        sync_source,
+                        notes,
+                        ..
+                    },
+            } => {
+                assert_eq!(relying_party_id, "example.com");
+                assert_eq!(account_label, "user@example.com");
+                assert_eq!(platform, "icloud-keychain");
+                assert_eq!(credential_id_hint, Some("cred-123".to_string()));
+                assert_eq!(sync_source, Some("icloud-keychain".to_string()));
+                assert_eq!(notes, Some("created on MacBook".to_string()));
+            }
+            _ => panic!("expected passkey add command"),
+        }
+    }
+
+    #[test]
+    fn passkey_reference_entry_is_metadata_only() {
+        let entry = build_passkey_reference_entry(
+            "example.com",
+            "user@example.com",
+            "icloud-keychain",
+            Some("cred-123"),
+            Some("icloud-keychain"),
+            Some("created on MacBook"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(entry.title, "Passkey reference: example.com");
+        assert_eq!(entry.username, "user@example.com");
+        assert_eq!(entry.url, Some("example.com".to_string()));
+        assert_eq!(entry.notes, Some("created on MacBook".to_string()));
+        assert_eq!(entry.credential_type, CredentialType::PasskeyReference);
+        assert!(entry.password.contains("\"kind\":\"passkey_reference\""));
+        assert!(entry.password.contains("\"platform\":\"icloud-keychain\""));
+        assert!(!entry.credential_type.is_retrievable_secret());
     }
 
     #[test]

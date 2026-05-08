@@ -257,3 +257,4 @@ Completed TDD slice:
 - Passkey references are now excluded from daemon password/API-key secret lookup and fillable domain credential listing, including authorized external-secret IPC coverage.
 - Generic JSON, CSV, and KeePass password-backup exports now exclude `passkey_reference` entries so references are not serialized as recoverable password secrets.
 - CLI entry creation now supports typed API-key entries via `sentinelpass add --credential-type api-key`, while generic add rejects passkey references and list/get/search output surfaces entry type.
+- Passkey reference creation now has a dedicated metadata-only CLI path via `sentinelpass passkey add`, avoiding generic password-entry creation while preserving platform-authenticator custody.

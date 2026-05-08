@@ -92,7 +92,7 @@ Interchange:
 ## Implementation Phases
 
 1. Metadata foundation: keep `passkey_reference` as a typed credential and add dedicated metadata fields/table when needed.
-2. Product surfaces: add UI/CLI display and creation flows that clearly label references as metadata-only.
+2. Product surfaces: add UI/CLI display and creation flows that clearly label references as metadata-only. The CLI now supports `sentinelpass passkey add` for metadata-only reference creation; desktop/browser UI surfaces remain pending.
 3. Platform handoff: integrate with AuthenticationServices, WebAuthn, or Windows platform APIs only for flows where SentinelPass is not taking private key custody.
 4. Interoperability evaluation: evaluate FIDO Credential Exchange for standards-aligned import/export.
 5. Credential provider evaluation: decide whether SentinelPass should become a credential provider; if yes, produce a separate security architecture before implementation.
@@ -101,7 +101,7 @@ Interchange:
 
 Before any passkey implementation beyond metadata/reference storage:
 
-- Product copy states that `passkey_reference` is metadata only.
+- Product copy states that `passkey_reference` is metadata only. The CLI `passkey add` path prints metadata-only copy after creation and stores a `metadata_only` reference payload.
 - Tests prove passkey references are not returned by password-only secret lookup flows. Current daemon coverage gates `GetCredential`, authorized `GetExternalSecret`, and fillable domain credential listing to password/API-key entries only.
 - Import/export tests prevent passkey references from being serialized as generic password backups unless explicitly metadata-only. Current JSON, CSV, and KeePass password-backup exports exclude `passkey_reference` entries.
 - Platform integration has origin/RP ID validation tests.
