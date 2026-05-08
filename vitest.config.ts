@@ -8,6 +8,7 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
       reportsDirectory: 'coverage/ts',
       include: [
+        'sentinelpass-ui/credential-types.ts',
         'sentinelpass-ui/url-utils.ts',
         'browser-extension/chrome/save-heuristics.ts',
         'browser-extension/chrome/logger.ts'

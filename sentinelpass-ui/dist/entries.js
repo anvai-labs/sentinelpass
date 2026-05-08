@@ -7,6 +7,70 @@
 import { invoke, confirm, currentEntry, setCurrentEntry, entries, setEntries, setCurrentTotpMetadata, currentFilter, entriesRefreshInFlight, setEntriesRefreshInFlight, vaultScreen, entryList, searchInput, noSelection, entryDetail } from './state.js';
 import { showToast, escapeHtml, formatDate } from './utils.js';
 import { updateTotpAvailability, setTotpButtonState } from './totp.js';
+import { credentialTypeForEntry, credentialTypeLabel, credentialTypeUiState, buildEntrySaveDraft, isPasskeyReferenceEntry } from './credential-types.js';
+function setText(id, value) {
+    const element = document.getElementById(id);
+    if (!element) {
+        return;
+    }
+    const text = typeof value === 'string' && value.trim() ? value.trim() : '-';
+    element.textContent = text;
+}
+function updatePasskeyMetadataPanel(metadata) {
+    setText('passkey-rp-id', metadata?.relyingPartyId);
+    setText('passkey-account-label', metadata?.accountLabel);
+    setText('passkey-platform', metadata?.platform);
+    setText('passkey-credential-hint', metadata?.credentialIdHint);
+    setText('passkey-sync-source', metadata?.syncSource);
+}
+export function applyCredentialTypeDisplay(entry = currentEntry) {
+    const uiState = credentialTypeUiState(entry);
+    const typeSelect = document.getElementById('detail-credential-type');
+    const secretGroup = document.getElementById('detail-secret-group');
+    const passkeyPanel = document.getElementById('passkey-reference-panel');
+    const secretLabel = document.getElementById('detail-secret-label');
+    const usernameLabel = document.getElementById('detail-username-label');
+    const passwordInput = document.getElementById('detail-password');
+    const generateButton = document.getElementById('generate-password-btn');
+    const copyPasswordButton = document.getElementById('copy-password');
+    const togglePasswordButton = document.getElementById('toggle-detail-password');
+    if (typeSelect) {
+        typeSelect.innerHTML = '';
+        for (const option of uiState.typeOptions) {
+            typeSelect.add(new Option(option.label, option.value));
+        }
+        typeSelect.value = uiState.credentialType;
+        typeSelect.disabled = uiState.typeSelectDisabled;
+        typeSelect.title = uiState.typeSelectTitle;
+    }
+    if (secretLabel) {
+        secretLabel.textContent = uiState.secretLabel;
+    }
+    if (usernameLabel) {
+        usernameLabel.textContent = uiState.usernameLabel;
+    }
+    if (passwordInput) {
+        passwordInput.placeholder = uiState.secretPlaceholder;
+    }
+    passkeyPanel?.classList.toggle('hidden', uiState.passkeyPanelHidden);
+    secretGroup?.classList.toggle('hidden', uiState.secretGroupHidden);
+    if (!uiState.totpAllowed) {
+        updatePasskeyMetadataPanel(uiState.passkeyMetadata);
+        setTotpButtonState(false, false);
+    }
+    for (const button of [generateButton, copyPasswordButton, togglePasswordButton]) {
+        if (button) {
+            button.disabled = uiState.secretActionsDisabled;
+        }
+    }
+}
+export function handleCredentialTypeChanged() {
+    const typeSelect = document.getElementById('detail-credential-type');
+    applyCredentialTypeDisplay({
+        ...(currentEntry || {}),
+        credential_type: typeSelect?.value || 'password'
+    });
+}
 /**
  * Load all vault entries from the backend, preserving the current selection.
  *
@@ -32,7 +96,8 @@ export function applyEntryFilters() {
     const query = (searchInput?.value || '').trim().toLowerCase();
     if (query) {
         filtered = filtered.filter(entry => entry.title.toLowerCase().includes(query) ||
-            entry.username.toLowerCase().includes(query));
+            entry.username.toLowerCase().includes(query) ||
+            credentialTypeLabel(credentialTypeForEntry(entry)).toLowerCase().includes(query));
     }
     renderEntryList(filtered);
 }
@@ -135,7 +200,10 @@ export function renderEntryList(filteredEntries = null) {
     }
     entryList.innerHTML = listToRender.map(entry => `
         <div class="entry-item ${currentEntry?.entry_id === entry.entry_id ? 'active' : ''}" data-id="${entry.entry_id}">
-            <div class="entry-item-title">${escapeHtml(entry.title)}</div>
+            <div class="entry-item-row">
+                <div class="entry-item-title">${escapeHtml(entry.title)}</div>
+                <span class="entry-type-pill">${escapeHtml(credentialTypeLabel(credentialTypeForEntry(entry)))}</span>
+            </div>
             <div class="entry-item-username">${escapeHtml(entry.username)}</div>
         </div>
     `).join('');
@@ -170,6 +238,7 @@ export async function loadEntry(entryId) {
         document.getElementById('detail-password').value = entry.password;
         document.getElementById('detail-url').value = entry.url || '';
         document.getElementById('detail-notes').value = entry.notes || '';
+        applyCredentialTypeDisplay(entry);
         // Notify app.ts to update URL button state
         document.getElementById('detail-url').dispatchEvent(new Event('input'));
         // Update favorite button
@@ -178,7 +247,12 @@ export async function loadEntry(entryId) {
         // Update metadata
         document.getElementById('detail-created').textContent = `Created: ${formatDate(entry.created_at)}`;
         document.getElementById('detail-modified').textContent = `Modified: ${formatDate(entry.modified_at)}`;
-        await updateTotpAvailability(entry.entry_id);
+        if (isPasskeyReferenceEntry(entry)) {
+            setTotpButtonState(false, false);
+        }
+        else {
+            await updateTotpAvailability(entry.entry_id);
+        }
     }
     catch (error) {
         showToast(error, 'error');
@@ -204,6 +278,8 @@ export function createNewEntry() {
     document.getElementById('detail-password').value = '';
     document.getElementById('detail-url').value = '';
     document.getElementById('detail-notes').value = '';
+    document.getElementById('detail-credential-type').value = 'password';
+    applyCredentialTypeDisplay({ credential_type: 'password' });
     // Notify app.ts to update URL button state
     document.getElementById('detail-url').dispatchEvent(new Event('input'));
     // Reset favorite button
@@ -222,13 +298,20 @@ export function createNewEntry() {
  * and re-selects the saved entry on success.
  */
 export async function saveEntry() {
+    const typeSelect = document.getElementById('detail-credential-type');
+    const saveDraft = buildEntrySaveDraft({
+        currentEntry,
+        selectedCredentialType: typeSelect?.value,
+        formPassword: document.getElementById('detail-password').value
+    });
     const entry = {
         entry_id: currentEntry?.entry_id || null,
         title: document.getElementById('detail-title').value,
         username: document.getElementById('detail-username').value,
-        password: document.getElementById('detail-password').value,
+        password: saveDraft.password,
         url: document.getElementById('detail-url').value || null,
         notes: document.getElementById('detail-notes').value || null,
+        credential_type: saveDraft.credentialType,
         favorite: document.getElementById('detail-favorite').classList.contains('active'),
         created_at: currentEntry?.created_at || new Date().toISOString(),
         modified_at: new Date().toISOString()

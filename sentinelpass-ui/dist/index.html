@@ -155,7 +155,44 @@
                         </div>
 
                         <div class="form-group">
-                            <label>Username</label>
+                            <label>Type</label>
+                            <select id="detail-credential-type" class="input">
+                                <option value="password">Password</option>
+                                <option value="api_key">API key</option>
+                            </select>
+                        </div>
+
+                        <div id="passkey-reference-panel" class="metadata-panel hidden" aria-live="polite">
+                            <div class="metadata-panel-header">
+                                <span class="entry-type-pill">Passkey reference</span>
+                                <span class="metadata-muted">Metadata only</span>
+                            </div>
+                            <dl class="metadata-grid">
+                                <div>
+                                    <dt>Relying party</dt>
+                                    <dd id="passkey-rp-id">-</dd>
+                                </div>
+                                <div>
+                                    <dt>Account</dt>
+                                    <dd id="passkey-account-label">-</dd>
+                                </div>
+                                <div>
+                                    <dt>Platform</dt>
+                                    <dd id="passkey-platform">-</dd>
+                                </div>
+                                <div>
+                                    <dt>Credential hint</dt>
+                                    <dd id="passkey-credential-hint">-</dd>
+                                </div>
+                                <div>
+                                    <dt>Sync source</dt>
+                                    <dd id="passkey-sync-source">-</dd>
+                                </div>
+                            </dl>
+                        </div>
+
+                        <div class="form-group">
+                            <label id="detail-username-label">Username</label>
                             <div class="input-group">
                                 <input type="text" id="detail-username" class="input" placeholder="username@example.com">
                                 <button id="copy-username" class="btn-icon" title="Copy username">
@@ -167,8 +204,8 @@
                             </div>
                         </div>
 
-                        <div class="form-group">
-                            <label>Password</label>
+                        <div id="detail-secret-group" class="form-group">
+                            <label id="detail-secret-label">Password</label>
                             <div class="input-group">
                                 <input type="password" id="detail-password" class="input" placeholder="Password">
                                 <button id="toggle-detail-password" class="btn-icon" title="Show password">

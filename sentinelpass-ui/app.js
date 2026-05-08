@@ -18,7 +18,7 @@ import { normalizeLaunchUrl } from './url-utils.js';
 import { initTauriAPI, invoke, confirm, setCurrentEntry, setCurrentTotpMetadata, setCurrentFilter, vaultScreen, searchInput } from './state.js';
 import { showToast, togglePasswordVisibility, copyToClipboard } from './utils.js';
 import { setTotpButtonState, closeTotpModal, copyTotpForEntry, openTotpModal, saveTotpForEntry, removeTotpForEntry } from './totp.js';
-import { loadEntries, createNewEntry, saveEntry, deleteEntry, refreshEntriesNow, backgroundRefreshEntries, applyEntryFilters } from './entries.js';
+import { loadEntries, createNewEntry, saveEntry, deleteEntry, refreshEntriesNow, backgroundRefreshEntries, applyEntryFilters, handleCredentialTypeChanged } from './entries.js';
 // ──────────────────────────────────────────────────────────────────────────────
 // Local State (not shared across modules)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -112,6 +112,7 @@ function setupEventListeners() {
     }
     searchInput.addEventListener('input', handleSearch);
     document.getElementById('detail-url').addEventListener('input', updateUrlOpenButtonState);
+    document.getElementById('detail-credential-type')?.addEventListener('change', handleCredentialTypeChanged);
     // Filter buttons
     document.querySelectorAll('.filter-btn').forEach(btn => {
         btn.addEventListener('click', (e) => handleFilter(e.target.dataset.filter));
@@ -123,7 +124,7 @@ function setupEventListeners() {
     document.getElementById('toggle-detail-password').addEventListener('click', () => togglePasswordVisibility('detail-password'));
     document.getElementById('generate-password-btn').addEventListener('click', generatePasswordForEntry);
     document.getElementById('copy-username').addEventListener('click', () => copyToClipboard(document.getElementById('detail-username').value, 'Username'));
-    document.getElementById('copy-password').addEventListener('click', () => copyToClipboard(document.getElementById('detail-password').value, 'Password'));
+    document.getElementById('copy-password').addEventListener('click', () => copyToClipboard(document.getElementById('detail-password').value, getDetailSecretLabel()));
     document.getElementById('copy-totp').addEventListener('click', copyTotpForEntry);
     document.getElementById('configure-totp').addEventListener('click', openTotpModal);
     document.getElementById('remove-totp').addEventListener('click', removeTotpForEntry);
@@ -538,11 +539,15 @@ async function generatePasswordForEntry() {
             includeSymbols: true
         });
         document.getElementById('detail-password').value = password;
-        showToast('Password generated!', 'success');
+        showToast(`${getDetailSecretLabel()} generated!`, 'success');
     }
     catch (error) {
         showToast(error, 'error');
     }
+}
+function getDetailSecretLabel() {
+    const typeSelect = document.getElementById('detail-credential-type');
+    return typeSelect?.value === 'api_key' ? 'API key' : 'Password';
 }
 // ──────────────────────────────────────────────────────────────────────────────
 // URL Handling
