@@ -7,8 +7,8 @@ use sentinelpass_core::{
     daemon::ipc::{default_ipc_socket_path, IpcClient, IpcMessage},
     export_to_csv, export_to_json, export_to_keepass_xml, import_from_csv, import_from_json,
     import_from_keepass_xml, parse_otpauth_uri, CredentialType, Entry as VaultEntry, EntrySummary,
-    ExternalSecretAllowlist, ExternalSecretField, SshAgentClient, SshKeyImporter, TotpAlgorithm,
-    VaultManager,
+    ExternalSecretAllowlist, ExternalSecretField, ExternalSecretGrant, SshAgentClient,
+    SshKeyImporter, TotpAlgorithm, VaultManager,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -412,6 +412,27 @@ enum SecretCommands {
         /// Field the client may retrieve
         #[arg(long, value_enum, default_value_t = SecretField::Password)]
         field: SecretField,
+    },
+
+    /// Revoke a local tool's access to one field for one domain/service
+    Revoke {
+        /// Local tool client id, for example `victor`
+        client_id: String,
+
+        /// Domain or service key the client may no longer access
+        #[arg(long)]
+        domain: String,
+
+        /// Field to revoke
+        #[arg(long, value_enum, default_value_t = SecretField::Password)]
+        field: SecretField,
+    },
+
+    /// List local-tool secret access grants
+    List {
+        /// Optional client id filter
+        #[arg(long)]
+        client_id: Option<String>,
     },
 
     /// Retrieve a single authorized secret field through the unlocked daemon
@@ -838,6 +859,43 @@ fn allow_external_secret(
         .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))
 }
 
+fn revoke_external_secret(
+    client_id: String,
+    domain: String,
+    field: SecretField,
+) -> Result<Option<sentinelpass_core::ExternalSecretGrant>> {
+    ExternalSecretAllowlist::revoke_default(&client_id, &domain, field.into())
+        .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))
+}
+
+fn list_external_secret_grants(client_id: Option<&str>) -> Result<Vec<ExternalSecretGrant>> {
+    ExternalSecretAllowlist::load_default()
+        .and_then(|allowlist| allowlist.grants_for_client(client_id))
+        .map_err(|e| anyhow::anyhow!("Failed to load external secret allowlist: {}", e))
+}
+
+fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
+    if grants.is_empty() {
+        return "No external secret grants configured".to_string();
+    }
+
+    let mut output = format!("{:<20} {:<30} Field\n", "Client", "Domain");
+    output.push_str(&"-".repeat(64));
+    output.push('\n');
+
+    for grant in grants {
+        output.push_str(&format!(
+            "{:<20} {:<30} {}\n",
+            grant.client_id,
+            grant.domain,
+            grant.field.as_str()
+        ));
+    }
+
+    output.push_str(&format!("Total: {} grants", grants.len()));
+    output
+}
+
 fn default_public_key_path(
     private_key_path: &Path,
     explicit_public_key: Option<&PathBuf>,
@@ -952,6 +1010,23 @@ fn main() -> Result<()> {
                     grant.field.as_str(),
                     grant.domain
                 );
+            }
+            SecretCommands::Revoke {
+                client_id,
+                domain,
+                field,
+            } => match revoke_external_secret(client_id, domain, field)? {
+                Some(grant) => println!(
+                    "Revoked client '{}' access to {} for {}",
+                    grant.client_id,
+                    grant.field.as_str(),
+                    grant.domain
+                ),
+                None => println!("No matching external secret grant found"),
+            },
+            SecretCommands::List { ref client_id } => {
+                let grants = list_external_secret_grants(client_id.as_deref())?;
+                println!("{}", render_external_secret_grants(&grants));
             }
             SecretCommands::Get {
                 client_id,
@@ -2497,6 +2572,52 @@ mod tests {
                 assert!(matches!(field, SecretField::Password));
             }
             _ => panic!("expected secret allow command"),
+        }
+    }
+
+    #[test]
+    fn parses_secret_revoke_contract_for_local_tools() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "secret",
+            "revoke",
+            "victor",
+            "--domain",
+            "anthropic",
+            "--field",
+            "password",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command:
+                    SecretCommands::Revoke {
+                        client_id,
+                        domain,
+                        field,
+                    },
+            } => {
+                assert_eq!(client_id, "victor");
+                assert_eq!(domain, "anthropic");
+                assert!(matches!(field, SecretField::Password));
+            }
+            _ => panic!("expected secret revoke command"),
+        }
+    }
+
+    #[test]
+    fn parses_secret_list_contract_for_local_tools() {
+        let cli = Cli::try_parse_from(["sentinelpass", "secret", "list", "--client-id", "victor"])
+            .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command: SecretCommands::List { client_id },
+            } => {
+                assert_eq!(client_id, Some("victor".to_string()));
+            }
+            _ => panic!("expected secret list command"),
         }
     }
 

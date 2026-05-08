@@ -259,3 +259,4 @@ Completed TDD slice:
 - CLI entry creation now supports typed API-key entries via `sentinelpass add --credential-type api-key`, while generic add rejects passkey references and list/get/search output surfaces entry type.
 - Passkey reference creation now has a dedicated metadata-only CLI path via `sentinelpass passkey add`, avoiding generic password-entry creation while preserving platform-authenticator custody.
 - External secret audit events now record local-tool client id, requested domain, field, purpose, and success as structured data instead of relying only on free-form audit context.
+- External secret policy lifecycle now supports allowlist inspection and revocation through `sentinelpass secret list` and `sentinelpass secret revoke <client_id> --domain <domain> --field <field>`.

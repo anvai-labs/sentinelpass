@@ -96,6 +96,18 @@ impl ExternalSecretAllowlist {
         Ok(grant)
     }
 
+    pub fn revoke_default(
+        client_id: &str,
+        domain: &str,
+        field: ExternalSecretField,
+    ) -> Result<Option<ExternalSecretGrant>> {
+        let path = Self::default_path();
+        let mut allowlist = Self::load_from_path(&path)?;
+        let revoked = allowlist.revoke(client_id, domain, field)?;
+        allowlist.save_to_path(&path)?;
+        Ok(revoked)
+    }
+
     pub fn allow(
         &mut self,
         client_id: &str,
@@ -113,6 +125,48 @@ impl ExternalSecretAllowlist {
         }
 
         Ok(grant)
+    }
+
+    pub fn revoke(
+        &mut self,
+        client_id: &str,
+        domain: &str,
+        field: ExternalSecretField,
+    ) -> Result<Option<ExternalSecretGrant>> {
+        let target = ExternalSecretGrant {
+            client_id: normalize_client_id(client_id)?,
+            domain: normalize_domain(domain)?,
+            field,
+        };
+
+        let Some(index) = self.grants.iter().position(|grant| grant == &target) else {
+            return Ok(None);
+        };
+
+        Ok(Some(self.grants.remove(index)))
+    }
+
+    pub fn grants_for_client(&self, client_id: Option<&str>) -> Result<Vec<ExternalSecretGrant>> {
+        let client_id = client_id.map(normalize_client_id).transpose()?;
+        let mut grants: Vec<ExternalSecretGrant> = self
+            .grants
+            .iter()
+            .filter(|grant| {
+                client_id
+                    .as_ref()
+                    .is_none_or(|client_id| grant.client_id == *client_id)
+            })
+            .cloned()
+            .collect();
+
+        grants.sort_by(|a, b| {
+            a.client_id
+                .cmp(&b.client_id)
+                .then_with(|| a.domain.cmp(&b.domain))
+                .then_with(|| a.field.as_str().cmp(b.field.as_str()))
+        });
+
+        Ok(grants)
     }
 
     pub fn is_allowed(&self, client_id: &str, domain: &str, field: ExternalSecretField) -> bool {
@@ -190,6 +244,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(allowlist.grants.len(), 1);
+    }
+
+    #[test]
+    fn revoke_grant_removes_exact_client_domain_and_field() {
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Username)
+            .unwrap();
+
+        let revoked = allowlist
+            .revoke("Victor", "Anthropic.", ExternalSecretField::Password)
+            .unwrap();
+
+        assert_eq!(
+            revoked,
+            Some(ExternalSecretGrant {
+                client_id: "victor".to_string(),
+                domain: "anthropic".to_string(),
+                field: ExternalSecretField::Password,
+            })
+        );
+        assert!(!allowlist.is_allowed("victor", "anthropic", ExternalSecretField::Password));
+        assert!(allowlist.is_allowed("victor", "anthropic", ExternalSecretField::Username));
+    }
+
+    #[test]
+    fn revoke_missing_grant_is_idempotent() {
+        let mut allowlist = ExternalSecretAllowlist::default();
+
+        let revoked = allowlist
+            .revoke("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+
+        assert_eq!(revoked, None);
+        assert!(allowlist.grants.is_empty());
+    }
+
+    #[test]
+    fn grants_for_client_filters_and_sorts() {
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "openai", ExternalSecretField::Password)
+            .unwrap();
+        allowlist
+            .allow("other", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Username)
+            .unwrap();
+
+        let grants = allowlist.grants_for_client(Some("VICTOR")).unwrap();
+
+        assert_eq!(grants.len(), 2);
+        assert_eq!(grants[0].domain, "anthropic");
+        assert_eq!(grants[0].field, ExternalSecretField::Username);
+        assert_eq!(grants[1].domain, "openai");
+        assert_eq!(grants[1].field, ExternalSecretField::Password);
     }
 
     #[test]
