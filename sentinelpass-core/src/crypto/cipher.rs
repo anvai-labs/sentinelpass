@@ -12,7 +12,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// A data encryption key (DEK) used to encrypt individual entries
 ///
@@ -42,9 +42,10 @@ impl DataEncryptionKey {
         &self.key
     }
 
-    /// Convert to raw bytes
-    pub fn into_bytes(self) -> [u8; 32] {
-        self.key
+    /// Convert to raw bytes, wrapped in a zeroizing guard so the caller
+    /// can't accidentally leak key material on the stack.
+    pub fn into_bytes(self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.key)
     }
 }
 

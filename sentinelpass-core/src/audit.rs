@@ -142,7 +142,7 @@ impl AuditLogger {
             event_type,
             severity,
             context: context.to_string(),
-            pid: std::env::var("PID").ok().and_then(|p| p.parse().ok()),
+            pid: Some(std::process::id()),
             tid: None, // ThreadId cannot be converted to u64, using None
         };
 
