@@ -1,0 +1,26 @@
+# Security Status Matrix
+
+**Last reviewed:** 2026-05-08
+
+This matrix separates implemented security controls from partial and planned target-state controls. It is intended to keep public security claims aligned with code and tests.
+
+Status definitions:
+
+- `Implemented`: the control exists in code and has relevant automated coverage.
+- `Partial`: the control exists, but important hardening or platform coverage is incomplete.
+- `Planned`: the control is documented as desired behavior but is not yet implemented.
+
+| Control | Status | Code Location | Test Location | Residual Risk | Next Action |
+|---------|--------|---------------|---------------|---------------|-------------|
+| Biometric Storage Model | Partial | `sentinelpass-core/src/biometric.rs`; `sentinelpass-core/src/vault/biometric_ops.rs`; `sentinelpass-core/src/crypto/keyring.rs` | `sentinelpass-core/src/biometric.rs`; `sentinelpass-core/src/crypto/keyring.rs`; `sentinelpass-core/src/vault/tests.rs` | Biometric unlock stores vault DEK material instead of the master password, but it still uses generic OS keyring storage rather than platform-native non-exportable key wrapping with enrollment-change invalidation. | Add macOS `SecAccessControl` / Secure Enclave-backed wrapping where appropriate, Windows Hello/DPAPI policy hardening, and enrollment-change invalidation tests where supported. |
+| Memory Locking / Zeroization | Partial | `sentinelpass-core/src/crypto/zero.rs`; `sentinelpass-core/src/crypto/keyring.rs`; `sentinelpass-daemon/src/main.rs` | `sentinelpass-core/src/crypto/zero.rs`; `sentinelpass-core/src/crypto/keyring.rs` | Zeroization wrappers and explicit zeroize calls exist, but current evidence does not prove all sensitive paths avoid `String` copies or that locked-page behavior is consistently enforced across platforms. | Audit secret lifetimes across CLI, daemon, UI, sync, and import/export paths; add tests or platform probes for locked memory behavior; downgrade broad claims until verified. |
+| Windows IPC Named Pipes and ACLs | Partial | `sentinelpass-core/src/daemon/transport/windows.rs`; `sentinelpass-core/src/daemon/transport/mod.rs` | `sentinelpass-core/src/daemon/transport/windows.rs`; `sentinelpass-core/src/daemon/ipc.rs` | Named pipe transport exists with size-framed messages, but explicit ACL/security descriptor enforcement is not evident in the current implementation. | Add owner-only pipe ACLs or equivalent Windows security descriptors, plus Windows-specific tests or documented manual verification. |
+| Extension Sender Validation | Implemented | `browser-extension/chrome/background.ts`; `browser-extension/chrome/content.ts`; `sentinelpass-core/src/daemon/native_messaging.rs`; `sentinelpass-core/src/daemon/vault_state.rs` | `tests/web/url-utils.test.ts`; `tests/web/save-heuristics.test.ts`; `browser-extension/e2e/tests/save-prompt.spec.ts`; `sentinelpass-core/src/daemon/vault_state.rs` | Chrome sender/domain validation is explicit. Residual risk remains around Firefox parity and store-manifest/native-host registration drift. | Add Firefox-focused tests and keep native-host manifests synchronized with extension IDs during release. |
+| Relay Abuse Controls | Partial | `sentinelpass-relay/src/auth.rs`; `sentinelpass-relay/src/rate_limit.rs`; `sentinelpass-relay/src/server.rs`; `sentinelpass-relay/src/handlers/pairing.rs`; `sentinelpass-relay/src/cleanup.rs` | `sentinelpass-relay/src/auth.rs`; `sentinelpass-relay/src/rate_limit.rs`; `sentinelpass-relay/src/handlers/pairing.rs`; `sentinelpass-relay/src/cleanup.rs`; `sentinelpass-relay/src/handlers/sync.rs` | Ed25519 request auth, nonce replay protection, request-size limits, rate limiting, pairing attempt throttling, and cleanup exist. Operational abuse controls still need production deployment guidance, observability, and config validation. | Add relay ops hardening docs, config validation tests, metrics/logging guidance, and deployment defaults for public relay operation. |
+| Passkey Support State | Partial | `sentinelpass-core/src/vault/mod.rs`; `sentinelpass-core/src/database/schema.rs`; `sentinelpass-core/src/database/migrations.rs`; `sentinelpass-core/src/sync/models.rs` | `sentinelpass-core/src/vault/tests.rs`; `sentinelpass-core/src/database/migrations.rs`; `sentinelpass-core/src/sync/models.rs` | `passkey_reference` is represented as metadata/reference only. SentinelPass does not currently act as a WebAuthn authenticator or credential provider and must not claim custody of passkey private keys. | Write the passkey product design doc before implementation; keep raw passkey private material out of generic vault entries unless a platform-authenticator-compatible architecture is approved. |
+
+## Notes
+
+- This document should be updated whenever security-relevant code or public claims change.
+- `SECURITY_ARCHITECTURE.md` may describe target-state design; this matrix records current implementation status.
+- The 2026-05-08 gap review is the current plan source for remaining security hardening work.

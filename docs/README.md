@@ -18,6 +18,7 @@ Quick reference to all project documentation. Most docs live at the repository r
 |----------|-------------|----------|
 | [SECURITY.md](../SECURITY.md) | Vulnerability reporting policy | CVE, vulnerability, disclosure, reporting |
 | [SECURITY_ARCHITECTURE.md](../SECURITY_ARCHITECTURE.md) | Cryptographic design, threat model, hardening | Argon2id, AES-256-GCM, key hierarchy, KDF, nonce, zeroize, IPC token, biometric, threat model |
+| [docs/SECURITY_STATUS_MATRIX.md](./SECURITY_STATUS_MATRIX.md) | Code-linked status for implemented, partial, and planned security controls | security status, evidence, residual risk, biometric, IPC, relay, passkeys |
 
 ## Development
 
@@ -64,6 +65,7 @@ Looking for something specific? Use these pointers:
 |-------|---------------|
 | **Vault CRUD** | [CLAUDE.md](../CLAUDE.md) § Architecture Overview, `sentinelpass-core/src/vault/` |
 | **Crypto (KDF, cipher)** | [SECURITY_ARCHITECTURE.md](../SECURITY_ARCHITECTURE.md), `sentinelpass-core/src/crypto/` |
+| **Security status evidence** | [docs/SECURITY_STATUS_MATRIX.md](./SECURITY_STATUS_MATRIX.md) |
 | **IPC protocol** | [CLAUDE.md](../CLAUDE.md) § IPC, `sentinelpass-core/src/daemon/ipc.rs` |
 | **Native messaging** | [CLAUDE.md](../CLAUDE.md) § Native Messaging Protocol, `sentinelpass-core/src/daemon/native_messaging.rs` |
 | **Browser extension** | [DEBUGGING.md](../browser-extension/chrome/DEBUGGING.md), `browser-extension/chrome/` |

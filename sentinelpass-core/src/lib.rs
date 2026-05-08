@@ -100,3 +100,32 @@ pub enum PasswordManagerError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+#[cfg(test)]
+mod documentation_status_tests {
+    use std::path::Path;
+
+    #[test]
+    fn security_status_matrix_exists_with_required_controls() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let matrix_path = manifest_dir.join("../docs/SECURITY_STATUS_MATRIX.md");
+        let contents = std::fs::read_to_string(&matrix_path)
+            .expect("docs/SECURITY_STATUS_MATRIX.md must exist");
+
+        for required in [
+            "| Control | Status | Code Location | Test Location | Residual Risk | Next Action |",
+            "Biometric Storage Model",
+            "Memory Locking / Zeroization",
+            "Windows IPC Named Pipes and ACLs",
+            "Extension Sender Validation",
+            "Relay Abuse Controls",
+            "Passkey Support State",
+        ] {
+            assert!(
+                contents.contains(required),
+                "security status matrix is missing required content: {}",
+                required
+            );
+        }
+    }
+}
