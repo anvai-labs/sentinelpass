@@ -7,7 +7,8 @@ use sentinelpass_core::{
     daemon::ipc::{default_ipc_socket_path, IpcClient, IpcMessage},
     export_to_csv, export_to_json, export_to_keepass_xml, import_from_csv, import_from_json,
     import_from_keepass_xml, parse_otpauth_uri, CredentialType, Entry as VaultEntry, EntrySummary,
-    SshAgentClient, SshKeyImporter, TotpAlgorithm, VaultManager,
+    ExternalSecretAllowlist, ExternalSecretField, SshAgentClient, SshKeyImporter, TotpAlgorithm,
+    VaultManager,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -77,9 +78,23 @@ enum Commands {
         #[arg(long)]
         biometric_unlock: bool,
 
+        /// Local tool client id to enforce external-secret allowlist authorization
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// Purpose label recorded in daemon audit context
+        #[arg(long)]
+        purpose: Option<String>,
+
         /// Prompt shown by the OS biometric dialog
         #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
         prompt_reason: String,
+    },
+
+    /// Manage least-privilege external secret access for local tools
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommands,
     },
 
     /// Add a private key file to SSH agent
@@ -370,6 +385,50 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum SecretCommands {
+    /// Allow a local tool to retrieve one field for one domain/service
+    Allow {
+        /// Local tool client id, for example `victor`
+        client_id: String,
+
+        /// Domain or service key the client may access
+        #[arg(long)]
+        domain: String,
+
+        /// Field the client may retrieve
+        #[arg(long, value_enum, default_value_t = SecretField::Password)]
+        field: SecretField,
+    },
+
+    /// Retrieve a single authorized secret field through the unlocked daemon
+    Get {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+
+        /// Domain or service key used to look up the credential
+        #[arg(long)]
+        domain: String,
+
+        /// Field to print
+        #[arg(long, value_enum, default_value_t = SecretField::Password)]
+        field: SecretField,
+
+        /// Purpose label recorded in daemon audit context
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Prompt shown by the OS biometric dialog
+        #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
+        prompt_reason: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SyncCommands {
     /// Initialize sync for this vault (generates device identity, sets relay URL)
     Init {
@@ -419,11 +478,21 @@ enum SyncCommands {
     Disable,
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum SecretField {
     Username,
     Password,
     Title,
+}
+
+impl From<SecretField> for ExternalSecretField {
+    fn from(field: SecretField) -> Self {
+        match field {
+            SecretField::Username => Self::Username,
+            SecretField::Password => Self::Password,
+            SecretField::Title => Self::Title,
+        }
+    }
 }
 
 fn get_vault_path(cli: &Cli, dev: bool) -> PathBuf {
@@ -508,9 +577,41 @@ async fn get_secret_from_daemon(
     field: SecretField,
     biometric_unlock: bool,
     prompt_reason: String,
+    client_id: Option<String>,
+    purpose: Option<String>,
 ) -> Result<String> {
     let client = IpcClient::new(default_ipc_socket_path())?;
     unlock_daemon_with_biometric_if_requested(&client, biometric_unlock, &prompt_reason).await?;
+
+    if let Some(client_id) = client_id {
+        return match client
+            .send(IpcMessage::GetExternalSecret {
+                client_id,
+                domain,
+                field: field.into(),
+                purpose,
+            })
+            .await?
+        {
+            IpcMessage::GetExternalSecretResponse {
+                value,
+                authorized: true,
+                error: None,
+            } => value.ok_or_else(|| anyhow::anyhow!("Requested secret field is not available")),
+            IpcMessage::GetExternalSecretResponse {
+                authorized: false,
+                error,
+                ..
+            } => {
+                let detail = error.unwrap_or_else(|| "external secret access denied".to_string());
+                anyhow::bail!("{}", detail)
+            }
+            IpcMessage::GetExternalSecretResponse {
+                error: Some(error), ..
+            } => anyhow::bail!("{}", error),
+            _ => anyhow::bail!("Unexpected daemon response during external secret lookup"),
+        };
+    }
 
     match client.send(IpcMessage::GetCredential { domain }).await? {
         IpcMessage::GetCredentialResponse {
@@ -528,6 +629,15 @@ async fn get_secret_from_daemon(
         }
         _ => anyhow::bail!("Unexpected daemon response during secret lookup"),
     }
+}
+
+fn allow_external_secret(
+    client_id: String,
+    domain: String,
+    field: SecretField,
+) -> Result<sentinelpass_core::ExternalSecretGrant> {
+    ExternalSecretAllowlist::allow_default(&client_id, &domain, field.into())
+        .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))
 }
 
 fn default_public_key_path(
@@ -615,6 +725,8 @@ fn main() -> Result<()> {
             domain,
             field,
             biometric_unlock,
+            client_id,
+            purpose,
             prompt_reason,
         } => {
             let value = run_async(get_secret_from_daemon(
@@ -622,9 +734,45 @@ fn main() -> Result<()> {
                 field,
                 biometric_unlock,
                 prompt_reason,
+                client_id,
+                purpose,
             ))??;
             println!("{}", value);
         }
+
+        Commands::Secret { command } => match command {
+            SecretCommands::Allow {
+                client_id,
+                domain,
+                field,
+            } => {
+                let grant = allow_external_secret(client_id, domain, field)?;
+                println!(
+                    "Allowed client '{}' to retrieve {} for {}",
+                    grant.client_id,
+                    grant.field.as_str(),
+                    grant.domain
+                );
+            }
+            SecretCommands::Get {
+                client_id,
+                domain,
+                field,
+                purpose,
+                biometric_unlock,
+                prompt_reason,
+            } => {
+                let value = run_async(get_secret_from_daemon(
+                    domain,
+                    field,
+                    biometric_unlock,
+                    prompt_reason,
+                    Some(client_id),
+                    purpose,
+                ))??;
+                println!("{}", value);
+            }
+        },
 
         Commands::Unlock => {
             let vault_path = get_vault_path(&cli, false);

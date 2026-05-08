@@ -7,6 +7,7 @@
 
 use crate::daemon::transport::{TransportConfig, TransportError};
 use crate::daemon::DaemonVault;
+use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
 use crate::{get_config_dir, DatabaseError, PasswordManagerError, Result};
 use crate::{AuditEventType, AuditLogger};
 
@@ -52,6 +53,17 @@ fn log_daemon_audit(event_type: AuditEventType, context: &str) {
 pub enum IpcMessage {
     GetCredential {
         domain: String,
+    },
+    GetExternalSecret {
+        client_id: String,
+        domain: String,
+        field: ExternalSecretField,
+        purpose: Option<String>,
+    },
+    GetExternalSecretResponse {
+        value: Option<String>,
+        authorized: bool,
+        error: Option<String>,
     },
     GetCredentialResponse {
         username: Option<String>,
@@ -568,6 +580,114 @@ impl IpcServer {
     #[allow(dead_code)]
     async fn handle_message(&self, msg: IpcMessage) -> IpcMessage {
         match msg {
+            IpcMessage::GetExternalSecret {
+                client_id,
+                domain,
+                field,
+                purpose,
+            } => {
+                debug!(
+                    "IPC: GetExternalSecret client='{}' domain='{}' field='{}'",
+                    client_id,
+                    domain,
+                    field.as_str()
+                );
+
+                let purpose = purpose.unwrap_or_else(|| "external-secret-access".to_string());
+                match ExternalSecretAllowlist::load_default() {
+                    Ok(allowlist) if allowlist.is_allowed(&client_id, &domain, field) => {
+                        match self.vault.get_credential(&domain).await {
+                            Ok(Some(cred)) => {
+                                let value = match field {
+                                    ExternalSecretField::Username => Some(cred.username),
+                                    ExternalSecretField::Password => Some(cred.password),
+                                    ExternalSecretField::Title => Some(cred.title),
+                                };
+                                log_daemon_audit(
+                                    AuditEventType::ExternalSecretAccess {
+                                        domain: domain.clone(),
+                                        success: value.is_some(),
+                                    },
+                                    &format!(
+                                        "External secret access granted for client '{}' purpose '{}'",
+                                        client_id, purpose
+                                    ),
+                                );
+                                IpcMessage::GetExternalSecretResponse {
+                                    value,
+                                    authorized: true,
+                                    error: None,
+                                }
+                            }
+                            Ok(None) => {
+                                log_daemon_audit(
+                                    AuditEventType::ExternalSecretAccess {
+                                        domain: domain.clone(),
+                                        success: false,
+                                    },
+                                    &format!(
+                                        "External secret access found no credential for client '{}' purpose '{}'",
+                                        client_id, purpose
+                                    ),
+                                );
+                                IpcMessage::GetExternalSecretResponse {
+                                    value: None,
+                                    authorized: true,
+                                    error: None,
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to get external secret: {}", e);
+                                log_daemon_audit(
+                                    AuditEventType::ExternalSecretAccess {
+                                        domain: domain.clone(),
+                                        success: false,
+                                    },
+                                    &format!(
+                                        "External secret access failed for client '{}' purpose '{}'",
+                                        client_id, purpose
+                                    ),
+                                );
+                                IpcMessage::GetExternalSecretResponse {
+                                    value: None,
+                                    authorized: true,
+                                    error: Some("Credential lookup failed".to_string()),
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        log_daemon_audit(
+                            AuditEventType::ExternalSecretAccess {
+                                domain: domain.clone(),
+                                success: false,
+                            },
+                            &format!(
+                                "External secret access denied for client '{}' purpose '{}'",
+                                client_id, purpose
+                            ),
+                        );
+                        IpcMessage::GetExternalSecretResponse {
+                            value: None,
+                            authorized: false,
+                            error: Some(format!(
+                                "Client '{}' is not authorized for {} {}",
+                                client_id,
+                                domain,
+                                field.as_str()
+                            )),
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to load external secret allowlist: {}", e);
+                        IpcMessage::GetExternalSecretResponse {
+                            value: None,
+                            authorized: false,
+                            error: Some("Failed to load external secret allowlist".to_string()),
+                        }
+                    }
+                }
+            }
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
@@ -1147,6 +1267,12 @@ mod tests {
             IpcMessage::GetCredential {
                 domain: "example.com".to_string(),
             },
+            IpcMessage::GetExternalSecret {
+                client_id: "victor".to_string(),
+                domain: "anthropic".to_string(),
+                field: ExternalSecretField::Password,
+                purpose: Some("victor-auth".to_string()),
+            },
             IpcMessage::CheckVault,
             IpcMessage::LockVault,
             IpcMessage::Shutdown,
@@ -1166,6 +1292,25 @@ mod tests {
                     IpcMessage::GetCredential { domain: d2 },
                 ) => {
                     assert_eq!(d1, d2);
+                }
+                (
+                    IpcMessage::GetExternalSecret {
+                        client_id: c1,
+                        domain: d1,
+                        field: f1,
+                        purpose: p1,
+                    },
+                    IpcMessage::GetExternalSecret {
+                        client_id: c2,
+                        domain: d2,
+                        field: f2,
+                        purpose: p2,
+                    },
+                ) => {
+                    assert_eq!(c1, c2);
+                    assert_eq!(d1, d2);
+                    assert_eq!(f1, f2);
+                    assert_eq!(p1, p2);
                 }
                 (
                     IpcMessage::ListDomainCredentials { base_domain: b1 },
@@ -1201,6 +1346,31 @@ mod tests {
                 assert_eq!(username, Some("user@example.com".to_string()));
                 assert_eq!(password, Some("password123".to_string()));
                 assert_eq!(title, Some("Example".to_string()));
+            }
+            _ => panic!("Wrong response type"),
+        }
+    }
+
+    #[test]
+    fn test_get_external_secret_response_serialization() {
+        let response = IpcMessage::GetExternalSecretResponse {
+            value: Some("secret-value".to_string()),
+            authorized: true,
+            error: None,
+        };
+
+        let serialized = serde_json::to_string(&response).unwrap();
+        let deserialized: IpcMessage = serde_json::from_str(&serialized).unwrap();
+
+        match deserialized {
+            IpcMessage::GetExternalSecretResponse {
+                value,
+                authorized,
+                error,
+            } => {
+                assert_eq!(value, Some("secret-value".to_string()));
+                assert!(authorized);
+                assert_eq!(error, None);
             }
             _ => panic!("Wrong response type"),
         }

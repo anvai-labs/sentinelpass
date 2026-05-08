@@ -9,6 +9,7 @@ pub mod biometric;
 pub mod crypto;
 pub mod daemon;
 pub mod database;
+pub mod external_secret_access;
 pub mod import_export;
 pub mod keepass;
 pub mod lockout;
@@ -25,6 +26,9 @@ pub use crypto::{
     decrypt_entry, derive_master_key, encrypt_entry, verify_master_password, CryptoError,
     CryptoResult, DataEncryptionKey, EncryptedEntry, KdfParams, KeyHierarchy, MasterKey,
     WrappedKey,
+};
+pub use external_secret_access::{
+    ExternalSecretAllowlist, ExternalSecretField, ExternalSecretGrant,
 };
 pub use import_export::{
     export_to_csv, export_to_json, import_from_csv, import_from_json, ExportEntry,

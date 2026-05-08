@@ -245,3 +245,5 @@ Completed TDD slice:
 - `api_key` and `passkey_reference` credential types are now represented in the core schema/model via an `entries.credential_type` discriminator and vault roundtrip coverage.
 - `docs/SECURITY_STATUS_MATRIX.md` now records code-linked status, tests, residual risk, and next actions for the priority security controls.
 - `docs/PASSKEY_PRODUCT_DESIGN.md` now defines the metadata-only passkey boundary, non-goals, platform strategy, phases, and acceptance gates before implementation.
+- macOS biometric DEK storage now uses platform Keychain access control with `biometryCurrentSet` and passcode-set-this-device-only protection.
+- External local-tool secret access now has a daemon-enforced allowlist and CLI management path via `sentinelpass secret allow <client_id> --domain <domain> --field <field>`.
