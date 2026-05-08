@@ -102,7 +102,7 @@ Interchange:
 Before any passkey implementation beyond metadata/reference storage:
 
 - Product copy states that `passkey_reference` is metadata only.
-- Tests prove passkey references are not returned by password-only secret lookup flows.
+- Tests prove passkey references are not returned by password-only secret lookup flows. Current daemon coverage gates `GetCredential`, authorized `GetExternalSecret`, and fillable domain credential listing to password/API-key entries only.
 - Import/export tests prevent passkey references from being serialized as generic password backups unless explicitly metadata-only.
 - Platform integration has origin/RP ID validation tests.
 - Security review confirms no raw passkey private key material is stored in generic vault entries.

@@ -1432,11 +1432,28 @@ mod tests {
                 favorite: false,
             })
             .unwrap();
+        vault
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "Example Passkey".to_string(),
+                username: "user@example.com".to_string(),
+                password: "passkey-ref:example.com:user@example.com".to_string(),
+                url: Some("https://example.com".to_string()),
+                notes: Some("Reference only; no WebAuthn private key material".to_string()),
+                credential_type: CredentialType::PasskeyReference,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
         drop(vault);
 
         let mut allowlist = ExternalSecretAllowlist::default();
         allowlist
             .allow("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+        allowlist
+            .allow("victor", "example.com", ExternalSecretField::Password)
             .unwrap();
         allowlist.save_to_path(&allowlist_path).unwrap();
 
@@ -1501,6 +1518,24 @@ mod tests {
                 error: Some(error),
             } => assert!(error.contains("not authorized")),
             other => panic!("unexpected denied lookup response: {:?}", other),
+        }
+
+        let response = client
+            .send(IpcMessage::GetExternalSecret {
+                client_id: "victor".to_string(),
+                domain: "example.com".to_string(),
+                field: ExternalSecretField::Password,
+                purpose: Some("victor-auth".to_string()),
+            })
+            .await
+            .unwrap();
+        match response {
+            IpcMessage::GetExternalSecretResponse {
+                value: None,
+                authorized: true,
+                error: None,
+            } => {}
+            other => panic!("unexpected passkey lookup response: {:?}", other),
         }
 
         server_task.abort();

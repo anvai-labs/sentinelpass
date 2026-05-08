@@ -93,6 +93,13 @@ fn domains_match(request_domain: &str, entry_url_or_domain: &str) -> bool {
     request_host.ends_with(&entry_suffix) || entry_host.ends_with(&request_suffix)
 }
 
+fn supports_secret_lookup(credential_type: CredentialType) -> bool {
+    matches!(
+        credential_type,
+        CredentialType::Password | CredentialType::ApiKey
+    )
+}
+
 fn usernames_match(lhs: &str, rhs: &str) -> bool {
     lhs.trim().eq_ignore_ascii_case(rhs.trim())
 }
@@ -185,7 +192,10 @@ impl DaemonVault {
         // Fast path: indexed lookup via domain_mappings
         if let Some(host) = normalize_host(domain) {
             let indexed = vault.find_entries_by_domain(&host)?;
-            if let Some(entry) = indexed.into_iter().next() {
+            if let Some(entry) = indexed
+                .into_iter()
+                .find(|entry| supports_secret_lookup(entry.credential_type))
+            {
                 return Ok(Some(CredentialResponse {
                     username: entry.username,
                     password: entry.password,
@@ -197,6 +207,9 @@ impl DaemonVault {
         // Slow path: full scan (entries without domain_mappings)
         let entries = vault.list_entries()?;
         for summary in entries {
+            if !supports_secret_lookup(summary.credential_type) {
+                continue;
+            }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
                 if let Some(ref url) = entry.url {
                     if domains_match(domain, url) {
@@ -299,6 +312,9 @@ impl DaemonVault {
             let indexed = vault.find_entries_by_domain(&host)?;
             if !indexed.is_empty() {
                 for entry in indexed {
+                    if !supports_secret_lookup(entry.credential_type) {
+                        continue;
+                    }
                     let domain = entry
                         .url
                         .as_ref()
@@ -320,6 +336,9 @@ impl DaemonVault {
         // Slow path: full scan
         let entries = vault.list_entries()?;
         for summary in entries {
+            if !supports_secret_lookup(summary.credential_type) {
+                continue;
+            }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
                 let matches = if let Some(ref url) = entry.url {
                     domains_match(base_domain, url)
@@ -497,6 +516,112 @@ pub struct DomainCredentialResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Entry, VaultManager};
+    use chrono::Utc;
+
+    fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
+        Entry {
+            entry_id: None,
+            title: title.to_string(),
+            username: "user@example.com".to_string(),
+            password: password.to_string(),
+            url: Some("https://example.com/login".to_string()),
+            notes: None,
+            credential_type,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            favorite: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_credential_does_not_return_passkey_reference_secret() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_passkey_{suffix}.db"));
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        let credential = daemon_vault.get_credential("example.com").await.unwrap();
+
+        assert!(credential.is_none());
+        let _ = std::fs::remove_file(vault_path);
+    }
+
+    #[tokio::test]
+    async fn get_credential_skips_passkey_reference_and_returns_password_entry() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_password_{suffix}.db"));
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        let credential = daemon_vault
+            .get_credential("example.com")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(credential.password, "password-secret");
+        let _ = std::fs::remove_file(vault_path);
+    }
+
+    #[tokio::test]
+    async fn list_domain_credentials_does_not_include_passkey_references() {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_list_{suffix}.db"));
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        let credentials = daemon_vault
+            .list_domain_credentials("example.com")
+            .await
+            .unwrap();
+
+        assert!(credentials.is_empty());
+        let _ = std::fs::remove_file(vault_path);
+    }
 
     #[test]
     fn test_vault_state() {

@@ -254,3 +254,4 @@ Completed TDD slice:
 - External local-tool secret access now has a daemon-enforced allowlist and CLI management path via `sentinelpass secret allow <client_id> --domain <domain> --field <field>`.
 - Daemon IPC integration coverage now starts a real server against a temp vault and verifies a Victor-style authorized SentinelPass lookup plus denied field access.
 - Authorized secret lookup now supports opt-in structured output via `--output json` while preserving plaintext stdout as the default shell contract.
+- Passkey references are now excluded from daemon password/API-key secret lookup and fillable domain credential listing, including authorized external-secret IPC coverage.
