@@ -1,9 +1,10 @@
 use anyhow::Result;
 use base64::Engine;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rpassword::prompt_password;
 use sentinelpass_core::{
     crypto::{analyze_password, generate_password, PasswordGeneratorConfig},
+    daemon::ipc::{default_ipc_socket_path, IpcClient, IpcMessage},
     export_to_csv, export_to_json, export_to_keepass_xml, import_from_csv, import_from_json,
     import_from_keepass_xml, parse_otpauth_uri, Entry as VaultEntry, EntrySummary, SshAgentClient,
     SshKeyImporter, TotpAlgorithm, VaultManager,
@@ -61,6 +62,25 @@ enum Commands {
 
     /// Check whether SSH agent integration is available
     SshAgentStatus,
+
+    /// Retrieve a single secret field through the unlocked daemon
+    SecretGet {
+        /// Domain or service key used to look up the credential
+        #[arg(long)]
+        domain: String,
+
+        /// Field to print
+        #[arg(long, value_enum, default_value_t = SecretField::Password)]
+        field: SecretField,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Prompt shown by the OS biometric dialog
+        #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
+        prompt_reason: String,
+    },
 
     /// Add a private key file to SSH agent
     SshAgentAdd {
@@ -399,6 +419,13 @@ enum SyncCommands {
     Disable,
 }
 
+#[derive(Clone, Debug, ValueEnum)]
+enum SecretField {
+    Username,
+    Password,
+    Title,
+}
+
 fn get_vault_path(cli: &Cli, dev: bool) -> PathBuf {
     if let Some(ref path) = cli.vault {
         path.clone()
@@ -438,6 +465,69 @@ fn run_async<T>(future: impl std::future::Future<Output = T>) -> Result<T> {
         .enable_all()
         .build()?;
     Ok(runtime.block_on(future))
+}
+
+async fn unlock_daemon_with_biometric_if_requested(
+    client: &IpcClient,
+    biometric_unlock: bool,
+    prompt_reason: &str,
+) -> Result<()> {
+    let status = client.send(IpcMessage::CheckVault).await?;
+    let unlocked = matches!(status, IpcMessage::VaultStatusResponse { unlocked: true });
+
+    if unlocked {
+        return Ok(());
+    }
+
+    if !biometric_unlock {
+        anyhow::bail!(
+            "SentinelPass daemon is locked. Unlock the vault first or pass --biometric-unlock."
+        );
+    }
+
+    match client
+        .send(IpcMessage::UnlockVaultBiometric {
+            prompt_reason: Some(prompt_reason.to_string()),
+        })
+        .await?
+    {
+        IpcMessage::UnlockVaultResponse { success: true, .. } => Ok(()),
+        IpcMessage::UnlockVaultResponse {
+            success: false,
+            error,
+        } => {
+            let detail = error.unwrap_or_else(|| "unknown error".to_string());
+            anyhow::bail!("Biometric unlock failed: {}", detail)
+        }
+        _ => anyhow::bail!("Unexpected daemon response during biometric unlock"),
+    }
+}
+
+async fn get_secret_from_daemon(
+    domain: String,
+    field: SecretField,
+    biometric_unlock: bool,
+    prompt_reason: String,
+) -> Result<String> {
+    let client = IpcClient::new(default_ipc_socket_path())?;
+    unlock_daemon_with_biometric_if_requested(&client, biometric_unlock, &prompt_reason).await?;
+
+    match client.send(IpcMessage::GetCredential { domain }).await? {
+        IpcMessage::GetCredentialResponse {
+            username,
+            password,
+            title,
+        } => {
+            let value = match field {
+                SecretField::Username => username,
+                SecretField::Password => password,
+                SecretField::Title => title,
+            };
+
+            value.ok_or_else(|| anyhow::anyhow!("Requested secret field is not available"))
+        }
+        _ => anyhow::bail!("Unexpected daemon response during secret lookup"),
+    }
 }
 
 fn default_public_key_path(
@@ -519,6 +609,21 @@ fn main() -> Result<()> {
 
             // Vault is dropped here, which locks it
             drop(vault);
+        }
+
+        Commands::SecretGet {
+            domain,
+            field,
+            biometric_unlock,
+            prompt_reason,
+        } => {
+            let value = run_async(get_secret_from_daemon(
+                domain,
+                field,
+                biometric_unlock,
+                prompt_reason,
+            ))??;
+            println!("{}", value);
         }
 
         Commands::Unlock => {

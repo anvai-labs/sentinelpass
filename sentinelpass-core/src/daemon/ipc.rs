@@ -8,6 +8,7 @@
 use crate::daemon::transport::{TransportConfig, TransportError};
 use crate::daemon::DaemonVault;
 use crate::{get_config_dir, DatabaseError, PasswordManagerError, Result};
+use crate::{AuditEventType, AuditLogger};
 
 #[cfg(unix)]
 use crate::daemon::transport::unix::UnixSocketConnection;
@@ -34,6 +35,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
+
+fn log_daemon_audit(event_type: AuditEventType, context: &str) {
+    match AuditLogger::new(crate::get_audit_log_dir()) {
+        Ok(logger) => {
+            if let Err(e) = logger.log(event_type, context) {
+                warn!("Failed to write daemon audit event: {}", e);
+            }
+        }
+        Err(e) => warn!("Failed to initialize daemon audit logger: {}", e),
+    }
+}
 
 /// IPC message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -560,13 +572,29 @@ impl IpcServer {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
                 match self.vault.get_credential(&domain).await {
-                    Ok(Some(cred)) => IpcMessage::GetCredentialResponse {
-                        username: Some(cred.username),
-                        password: Some(cred.password),
-                        title: Some(cred.title),
-                    },
+                    Ok(Some(cred)) => {
+                        log_daemon_audit(
+                            AuditEventType::ExternalSecretAccess {
+                                domain: domain.clone(),
+                                success: true,
+                            },
+                            "Credential secret retrieved through daemon IPC",
+                        );
+                        IpcMessage::GetCredentialResponse {
+                            username: Some(cred.username),
+                            password: Some(cred.password),
+                            title: Some(cred.title),
+                        }
+                    }
                     Ok(None) => {
                         debug!("No credential found for domain '{}'", domain);
+                        log_daemon_audit(
+                            AuditEventType::ExternalSecretAccess {
+                                domain: domain.clone(),
+                                success: false,
+                            },
+                            "Credential secret lookup through daemon IPC returned no match",
+                        );
                         IpcMessage::GetCredentialResponse {
                             username: None,
                             password: None,
@@ -575,6 +603,13 @@ impl IpcServer {
                     }
                     Err(e) => {
                         error!("Failed to get credential: {}", e);
+                        log_daemon_audit(
+                            AuditEventType::ExternalSecretAccess {
+                                domain: domain.clone(),
+                                success: false,
+                            },
+                            "Credential secret lookup through daemon IPC failed",
+                        );
                         IpcMessage::GetCredentialResponse {
                             username: None,
                             password: None,
@@ -698,12 +733,22 @@ impl IpcServer {
                 let reason =
                     prompt_reason.unwrap_or_else(|| "Unlock SentinelPass daemon".to_string());
                 match self.vault.unlock_with_biometric(&reason).await {
-                    Ok(_) => IpcMessage::UnlockVaultResponse {
-                        success: true,
-                        error: None,
-                    },
+                    Ok(_) => {
+                        log_daemon_audit(
+                            AuditEventType::BiometricUnlockRequested { success: true },
+                            "Daemon biometric unlock succeeded",
+                        );
+                        IpcMessage::UnlockVaultResponse {
+                            success: true,
+                            error: None,
+                        }
+                    }
                     Err(e) => {
                         warn!("Failed biometric unlock via IPC: {}", e);
+                        log_daemon_audit(
+                            AuditEventType::BiometricUnlockRequested { success: false },
+                            "Daemon biometric unlock failed",
+                        );
                         IpcMessage::UnlockVaultResponse {
                             success: false,
                             error: Some(e.to_string()),

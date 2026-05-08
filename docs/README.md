@@ -32,6 +32,7 @@ Quick reference to all project documentation. Most docs live at the repository r
 
 | Document | Description | Keywords |
 |----------|-------------|----------|
+| [docs/GAP_REVIEW_2026-05-08.md](./GAP_REVIEW_2026-05-08.md) | Current gap review and integration plan for developer secrets, passkeys, and biometrics | audit, victor, api keys, passkeys, biometric, typed credentials |
 | [docs/GAP_REVIEW_2026-02-26.md](./GAP_REVIEW_2026-02-26.md) | Evidence-based gap audit across security, features, design, and implementation | audit, review, gaps, security posture |
 | [docs/PRD.md](./PRD.md) | Product requirements document (vision, users, scope, metrics, tiers) | prd, vision, users, scope, metrics |
 | [docs/REQUIREMENTS.md](./REQUIREMENTS.md) | Traceable functional/security/ops/commercial requirements | requirements, acceptance criteria, security requirements |
