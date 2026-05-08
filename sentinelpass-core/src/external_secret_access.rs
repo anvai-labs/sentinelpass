@@ -1,6 +1,7 @@
 //! Least-privilege authorization for local tools requesting vault secrets.
 
 use crate::{get_config_dir, DatabaseError, PasswordManagerError, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,18 @@ pub struct ExternalSecretGrant {
     pub client_id: String,
     pub domain: String,
     pub field: ExternalSecretField,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl ExternalSecretGrant {
+    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
+
+    fn matches_scope(&self, client_id: &str, domain: &str, field: ExternalSecretField) -> bool {
+        self.client_id == client_id && self.domain == domain && self.field == field
+    }
 }
 
 /// JSON-backed allowlist for external secret access.
@@ -89,9 +102,18 @@ impl ExternalSecretAllowlist {
         domain: &str,
         field: ExternalSecretField,
     ) -> Result<ExternalSecretGrant> {
+        Self::allow_until_default(client_id, domain, field, None)
+    }
+
+    pub fn allow_until_default(
+        client_id: &str,
+        domain: &str,
+        field: ExternalSecretField,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ExternalSecretGrant> {
         let path = Self::default_path();
         let mut allowlist = Self::load_from_path(&path)?;
-        let grant = allowlist.allow(client_id, domain, field)?;
+        let grant = allowlist.allow_until(client_id, domain, field, expires_at)?;
         allowlist.save_to_path(&path)?;
         Ok(grant)
     }
@@ -114,13 +136,32 @@ impl ExternalSecretAllowlist {
         domain: &str,
         field: ExternalSecretField,
     ) -> Result<ExternalSecretGrant> {
+        self.allow_until(client_id, domain, field, None)
+    }
+
+    pub fn allow_until(
+        &mut self,
+        client_id: &str,
+        domain: &str,
+        field: ExternalSecretField,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ExternalSecretGrant> {
+        let client_id = normalize_client_id(client_id)?;
+        let domain = normalize_domain(domain)?;
         let grant = ExternalSecretGrant {
-            client_id: normalize_client_id(client_id)?,
-            domain: normalize_domain(domain)?,
+            client_id,
+            domain,
             field,
+            expires_at,
         };
 
-        if !self.grants.contains(&grant) {
+        if let Some(existing) = self
+            .grants
+            .iter_mut()
+            .find(|existing| existing.matches_scope(&grant.client_id, &grant.domain, grant.field))
+        {
+            *existing = grant.clone();
+        } else {
             self.grants.push(grant.clone());
         }
 
@@ -137,9 +178,14 @@ impl ExternalSecretAllowlist {
             client_id: normalize_client_id(client_id)?,
             domain: normalize_domain(domain)?,
             field,
+            expires_at: None,
         };
 
-        let Some(index) = self.grants.iter().position(|grant| grant == &target) else {
+        let Some(index) = self
+            .grants
+            .iter()
+            .position(|grant| grant.matches_scope(&target.client_id, &target.domain, target.field))
+        else {
             return Ok(None);
         };
 
@@ -170,6 +216,16 @@ impl ExternalSecretAllowlist {
     }
 
     pub fn is_allowed(&self, client_id: &str, domain: &str, field: ExternalSecretField) -> bool {
+        self.is_allowed_at(client_id, domain, field, Utc::now())
+    }
+
+    pub fn is_allowed_at(
+        &self,
+        client_id: &str,
+        domain: &str,
+        field: ExternalSecretField,
+        now: DateTime<Utc>,
+    ) -> bool {
         let Ok(client_id) = normalize_client_id(client_id) else {
             return false;
         };
@@ -178,7 +234,7 @@ impl ExternalSecretAllowlist {
         };
 
         self.grants.iter().any(|grant| {
-            grant.client_id == client_id && grant.domain == domain && grant.field == field
+            grant.matches_scope(&client_id, &domain, field) && !grant.is_expired_at(now)
         })
     }
 }
@@ -247,6 +303,33 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_grants_update_expiry() {
+        let now = chrono::Utc::now();
+        let mut allowlist = ExternalSecretAllowlist::default();
+
+        allowlist
+            .allow_until(
+                "victor",
+                "anthropic",
+                ExternalSecretField::Password,
+                Some(now + chrono::Duration::minutes(5)),
+            )
+            .unwrap();
+        allowlist
+            .allow("VICTOR", "ANTHROPIC", ExternalSecretField::Password)
+            .unwrap();
+
+        assert_eq!(allowlist.grants.len(), 1);
+        assert_eq!(allowlist.grants[0].expires_at, None);
+        assert!(allowlist.is_allowed_at(
+            "victor",
+            "anthropic",
+            ExternalSecretField::Password,
+            now + chrono::Duration::minutes(6)
+        ));
+    }
+
+    #[test]
     fn revoke_grant_removes_exact_client_domain_and_field() {
         let mut allowlist = ExternalSecretAllowlist::default();
         allowlist
@@ -266,6 +349,7 @@ mod tests {
                 client_id: "victor".to_string(),
                 domain: "anthropic".to_string(),
                 field: ExternalSecretField::Password,
+                expires_at: None,
             })
         );
         assert!(!allowlist.is_allowed("victor", "anthropic", ExternalSecretField::Password));
@@ -330,6 +414,24 @@ mod tests {
     }
 
     #[test]
+    fn load_accepts_legacy_grants_without_expiry() {
+        let path = temp_allowlist_path();
+        std::fs::write(
+            &path,
+            r#"{"grants":[{"client_id":"victor","domain":"anthropic","field":"password"}]}"#,
+        )
+        .unwrap();
+
+        let loaded = ExternalSecretAllowlist::load_from_path(&path).unwrap();
+
+        assert_eq!(loaded.grants.len(), 1);
+        assert_eq!(loaded.grants[0].expires_at, None);
+        assert!(loaded.is_allowed("victor", "anthropic", ExternalSecretField::Password));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn invalid_client_or_domain_is_rejected() {
         let mut allowlist = ExternalSecretAllowlist::default();
 
@@ -343,5 +445,28 @@ mod tests {
                 ExternalSecretField::Password
             )
             .is_err());
+    }
+
+    #[test]
+    fn expired_grants_are_not_authorized() {
+        let now = chrono::Utc::now();
+        let mut allowlist = ExternalSecretAllowlist::default();
+
+        allowlist
+            .allow_until(
+                "victor",
+                "anthropic",
+                ExternalSecretField::Password,
+                Some(now + chrono::Duration::minutes(5)),
+            )
+            .unwrap();
+
+        assert!(allowlist.is_allowed_at("victor", "anthropic", ExternalSecretField::Password, now));
+        assert!(!allowlist.is_allowed_at(
+            "victor",
+            "anthropic",
+            ExternalSecretField::Password,
+            now + chrono::Duration::minutes(6)
+        ));
     }
 }

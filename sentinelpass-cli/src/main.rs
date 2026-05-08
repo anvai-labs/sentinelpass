@@ -412,6 +412,10 @@ enum SecretCommands {
         /// Field the client may retrieve
         #[arg(long, value_enum, default_value_t = SecretField::Password)]
         field: SecretField,
+
+        /// Optional grant duration, for example 30m, 8h, or 7d
+        #[arg(long)]
+        expires_in: Option<String>,
     },
 
     /// Revoke a local tool's access to one field for one domain/service
@@ -869,8 +873,15 @@ fn allow_external_secret(
     client_id: String,
     domain: String,
     field: SecretField,
+    expires_in: Option<String>,
 ) -> Result<sentinelpass_core::ExternalSecretGrant> {
-    ExternalSecretAllowlist::allow_default(&client_id, &domain, field.into())
+    let expires_at = expires_in
+        .as_deref()
+        .map(parse_external_secret_grant_duration)
+        .transpose()?
+        .map(|duration| chrono::Utc::now() + duration);
+
+    ExternalSecretAllowlist::allow_until_default(&client_id, &domain, field.into(), expires_at)
         .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))
 }
 
@@ -894,21 +905,52 @@ fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
         return "No external secret grants configured".to_string();
     }
 
-    let mut output = format!("{:<20} {:<30} Field\n", "Client", "Domain");
-    output.push_str(&"-".repeat(64));
+    let mut output = format!(
+        "{:<20} {:<30} {:<10} Expires\n",
+        "Client", "Domain", "Field"
+    );
+    output.push_str(&"-".repeat(90));
     output.push('\n');
 
     for grant in grants {
+        let expires = grant
+            .expires_at
+            .map(|expires_at| expires_at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "never".to_string());
         output.push_str(&format!(
-            "{:<20} {:<30} {}\n",
+            "{:<20} {:<30} {:<10} {}\n",
             grant.client_id,
             grant.domain,
-            grant.field.as_str()
+            grant.field.as_str(),
+            expires
         ));
     }
 
     output.push_str(&format!("Total: {} grants", grants.len()));
     output
+}
+
+fn parse_external_secret_grant_duration(value: &str) -> Result<chrono::Duration> {
+    let value = value.trim();
+    if value.len() < 2 {
+        anyhow::bail!("Grant duration must use a positive number plus s, m, h, or d");
+    }
+
+    let (amount, unit) = value.split_at(value.len() - 1);
+    let amount: i64 = amount
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Grant duration amount must be a positive integer"))?;
+    if amount <= 0 {
+        anyhow::bail!("Grant duration amount must be greater than zero");
+    }
+
+    match unit {
+        "s" => Ok(chrono::Duration::seconds(amount)),
+        "m" => Ok(chrono::Duration::minutes(amount)),
+        "h" => Ok(chrono::Duration::hours(amount)),
+        "d" => Ok(chrono::Duration::days(amount)),
+        _ => anyhow::bail!("Grant duration unit must be one of s, m, h, or d"),
+    }
 }
 
 fn load_external_secret_audit_events(limit: usize) -> Result<Vec<sentinelpass_core::AuditEntry>> {
@@ -1096,13 +1138,21 @@ fn main() -> Result<()> {
                 client_id,
                 domain,
                 field,
+                expires_in,
             } => {
-                let grant = allow_external_secret(client_id, domain, field)?;
+                let grant = allow_external_secret(client_id, domain, field, expires_in)?;
+                let expiry = grant
+                    .expires_at
+                    .map(|expires_at| {
+                        format!(" until {}", expires_at.format("%Y-%m-%d %H:%M:%S UTC"))
+                    })
+                    .unwrap_or_default();
                 println!(
-                    "Allowed client '{}' to retrieve {} for {}",
+                    "Allowed client '{}' to retrieve {} for {}{}",
                     grant.client_id,
                     grant.field.as_str(),
-                    grant.domain
+                    grant.domain,
+                    expiry
                 );
             }
             SecretCommands::Revoke {
@@ -2674,14 +2724,70 @@ mod tests {
                         client_id,
                         domain,
                         field,
+                        expires_in,
                     },
             } => {
                 assert_eq!(client_id, "victor");
                 assert_eq!(domain, "anthropic");
                 assert!(matches!(field, SecretField::Password));
+                assert_eq!(expires_in, None);
             }
             _ => panic!("expected secret allow command"),
         }
+    }
+
+    #[test]
+    fn parses_secret_allow_with_expiry_for_local_tools() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "secret",
+            "allow",
+            "victor",
+            "--domain",
+            "anthropic",
+            "--field",
+            "password",
+            "--expires-in",
+            "8h",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command:
+                    SecretCommands::Allow {
+                        client_id,
+                        domain,
+                        field,
+                        expires_in,
+                    },
+            } => {
+                assert_eq!(client_id, "victor");
+                assert_eq!(domain, "anthropic");
+                assert!(matches!(field, SecretField::Password));
+                assert_eq!(expires_in, Some("8h".to_string()));
+            }
+            _ => panic!("expected expiring secret allow command"),
+        }
+    }
+
+    #[test]
+    fn parses_external_secret_grant_duration_units() {
+        assert_eq!(
+            parse_external_secret_grant_duration("30m").unwrap(),
+            chrono::Duration::minutes(30)
+        );
+        assert_eq!(
+            parse_external_secret_grant_duration("8h").unwrap(),
+            chrono::Duration::hours(8)
+        );
+        assert_eq!(
+            parse_external_secret_grant_duration("7d").unwrap(),
+            chrono::Duration::days(7)
+        );
+        assert!(parse_external_secret_grant_duration("0h").is_err());
+        assert!(parse_external_secret_grant_duration("-1h").is_err());
+        assert!(parse_external_secret_grant_duration("1w").is_err());
     }
 
     #[test]

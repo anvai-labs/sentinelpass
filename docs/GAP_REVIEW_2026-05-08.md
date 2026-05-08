@@ -261,3 +261,4 @@ Completed TDD slice:
 - External secret audit events now record local-tool client id, requested domain, field, purpose, and success as structured data instead of relying only on free-form audit context.
 - External secret policy lifecycle now supports allowlist inspection and revocation through `sentinelpass secret list` and `sentinelpass secret revoke <client_id> --domain <domain> --field <field>`.
 - Local-tool secret access now has a human-readable audit surface via `sentinelpass secret audit [--client-id <id>] [--failures-only]`.
+- Local-tool grants now support optional expiry via `sentinelpass secret allow <client_id> --domain <domain> --expires-in <duration>`, and daemon authorization denies expired grants.
