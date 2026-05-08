@@ -247,3 +247,4 @@ Completed TDD slice:
 - `docs/PASSKEY_PRODUCT_DESIGN.md` now defines the metadata-only passkey boundary, non-goals, platform strategy, phases, and acceptance gates before implementation.
 - macOS biometric DEK storage now uses platform Keychain access control with `biometryCurrentSet` and passcode-set-this-device-only protection.
 - External local-tool secret access now has a daemon-enforced allowlist and CLI management path via `sentinelpass secret allow <client_id> --domain <domain> --field <field>`.
+- Daemon IPC integration coverage now starts a real server against a temp vault and verifies a Victor-style authorized SentinelPass lookup plus denied field access.

@@ -233,15 +233,32 @@ pub struct IpcServer {
     socket_path: PathBuf,
     vault: Arc<DaemonVault>,
     auth_token: String,
+    external_secret_allowlist_path: PathBuf,
 }
 
 impl IpcServer {
     /// Create a new IPC server
     pub fn new(socket_path: PathBuf, vault: Arc<DaemonVault>, auth_token: String) -> Self {
+        Self::new_with_allowlist_path(
+            socket_path,
+            vault,
+            auth_token,
+            ExternalSecretAllowlist::default_path(),
+        )
+    }
+
+    /// Create a new IPC server with an explicit external secret allowlist path.
+    pub fn new_with_allowlist_path(
+        socket_path: PathBuf,
+        vault: Arc<DaemonVault>,
+        auth_token: String,
+        external_secret_allowlist_path: PathBuf,
+    ) -> Self {
         Self {
             socket_path,
             vault,
             auth_token,
+            external_secret_allowlist_path,
         }
     }
 
@@ -594,7 +611,8 @@ impl IpcServer {
                 );
 
                 let purpose = purpose.unwrap_or_else(|| "external-secret-access".to_string());
-                match ExternalSecretAllowlist::load_default() {
+                match ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path)
+                {
                     Ok(allowlist) if allowlist.is_allowed(&client_id, &domain, field) => {
                         match self.vault.get_credential(&domain).await {
                             Ok(Some(cred)) => {
@@ -930,10 +948,15 @@ impl IpcClient {
     /// Create a new IPC client
     pub fn new(socket_path: PathBuf) -> Result<Self> {
         let auth_token = load_ipc_token()?;
-        Ok(Self {
+        Ok(Self::new_with_token(socket_path, auth_token))
+    }
+
+    /// Create a new IPC client with an explicit auth token.
+    pub fn new_with_token(socket_path: PathBuf, auth_token: String) -> Self {
+        Self {
             socket_path,
             auth_token,
-        })
+        }
     }
 
     /// Send a message and wait for response
@@ -1374,6 +1397,116 @@ mod tests {
             }
             _ => panic!("Wrong response type"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_ipc_external_secret_lookup_requires_victor_allowlist() {
+        use crate::{
+            CredentialType, Entry, ExternalSecretAllowlist, ExternalSecretField, VaultManager,
+        };
+        use chrono::Utc;
+        use tokio::time::{sleep, Duration};
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let short_suffix = &suffix[..12];
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_ipc_{short_suffix}.db"));
+        let socket_path = PathBuf::from(format!("/tmp/sp-{short_suffix}.sock"));
+        let allowlist_path =
+            std::env::temp_dir().join(format!("sentinelpass_ipc_allowlist_{short_suffix}.json"));
+        let password = b"test_password_123!";
+        let auth_token = format!("test-token-{short_suffix}");
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "Anthropic API".to_string(),
+                username: "anthropic".to_string(),
+                password: "sk-ant-test".to_string(),
+                url: Some("anthropic".to_string()),
+                notes: None,
+                credential_type: CredentialType::ApiKey,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        drop(vault);
+
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+        allowlist.save_to_path(&allowlist_path).unwrap();
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        daemon_vault.unlock(password).await.unwrap();
+
+        let server = Arc::new(IpcServer::new_with_allowlist_path(
+            socket_path.clone(),
+            daemon_vault,
+            auth_token.clone(),
+            allowlist_path.clone(),
+        ));
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(
+                !server_task.is_finished(),
+                "IPC server task exited before creating socket"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(socket_path.exists(), "IPC server did not create socket");
+
+        let client = IpcClient::new_with_token(socket_path.clone(), auth_token);
+        let response = client
+            .send(IpcMessage::GetExternalSecret {
+                client_id: "victor".to_string(),
+                domain: "anthropic".to_string(),
+                field: ExternalSecretField::Password,
+                purpose: Some("victor-auth".to_string()),
+            })
+            .await
+            .unwrap();
+        match response {
+            IpcMessage::GetExternalSecretResponse {
+                value,
+                authorized: true,
+                error: None,
+            } => assert_eq!(value, Some("sk-ant-test".to_string())),
+            other => panic!("unexpected authorized lookup response: {:?}", other),
+        }
+
+        let response = client
+            .send(IpcMessage::GetExternalSecret {
+                client_id: "victor".to_string(),
+                domain: "anthropic".to_string(),
+                field: ExternalSecretField::Username,
+                purpose: Some("victor-auth".to_string()),
+            })
+            .await
+            .unwrap();
+        match response {
+            IpcMessage::GetExternalSecretResponse {
+                value: None,
+                authorized: false,
+                error: Some(error),
+            } => assert!(error.contains("not authorized")),
+            other => panic!("unexpected denied lookup response: {:?}", other),
+        }
+
+        server_task.abort();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_file(allowlist_path);
+        let _ = std::fs::remove_file(vault_path);
     }
 
     #[test]
