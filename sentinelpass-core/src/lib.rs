@@ -128,4 +128,35 @@ mod documentation_status_tests {
             );
         }
     }
+
+    #[test]
+    fn passkey_product_design_exists_with_required_boundaries() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let design_path = manifest_dir.join("../docs/PASSKEY_PRODUCT_DESIGN.md");
+        let contents = std::fs::read_to_string(&design_path)
+            .expect("docs/PASSKEY_PRODUCT_DESIGN.md must exist before passkey implementation");
+
+        for required in [
+            "# Passkey Product Design",
+            "## Product Decision",
+            "## Non-Goals",
+            "## Data Model",
+            "## User Flows",
+            "## Platform Strategy",
+            "## Security Constraints",
+            "## Implementation Phases",
+            "## Acceptance Gates",
+            "passkey_reference",
+            "SentinelPass does not store passkey private keys",
+            "WebAuthn",
+            "AuthenticationServices",
+            "FIDO Credential Exchange",
+        ] {
+            assert!(
+                contents.contains(required),
+                "passkey product design is missing required content: {}",
+                required
+            );
+        }
+    }
 }
