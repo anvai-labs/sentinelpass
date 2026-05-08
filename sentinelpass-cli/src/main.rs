@@ -172,6 +172,10 @@ enum Commands {
         #[arg(long)]
         password: Option<String>,
 
+        /// Credential type for this entry
+        #[arg(long, value_enum, default_value_t = CliCredentialType::Password)]
+        credential_type: CliCredentialType,
+
         /// URL
         #[arg(long)]
         url: Option<String>,
@@ -507,6 +511,37 @@ impl SecretField {
 enum SecretOutputFormat {
     Plain,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliCredentialType {
+    Password,
+    ApiKey,
+}
+
+impl From<CliCredentialType> for CredentialType {
+    fn from(value: CliCredentialType) -> Self {
+        match value {
+            CliCredentialType::Password => Self::Password,
+            CliCredentialType::ApiKey => Self::ApiKey,
+        }
+    }
+}
+
+fn credential_type_label(credential_type: CredentialType) -> &'static str {
+    match credential_type {
+        CredentialType::Password => "password",
+        CredentialType::ApiKey => "api_key",
+        CredentialType::PasskeyReference => "passkey_reference",
+    }
+}
+
+fn secret_value_label(credential_type: CredentialType) -> &'static str {
+    match credential_type {
+        CredentialType::Password => "Password",
+        CredentialType::ApiKey => "API key",
+        CredentialType::PasskeyReference => "Reference",
+    }
 }
 
 impl From<SecretField> for ExternalSecretField {
@@ -1128,6 +1163,7 @@ fn main() -> Result<()> {
             ref title,
             ref username,
             ref password,
+            credential_type,
             ref url,
             ref notes,
             favorite,
@@ -1138,9 +1174,13 @@ fn main() -> Result<()> {
                 anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
             }
 
+            let credential_type = CredentialType::from(credential_type);
             let password_str = match password {
                 Some(p) => p.to_string(),
-                None => prompt_password("Enter password for entry: ")?,
+                None => prompt_password(format!(
+                    "Enter {} for entry: ",
+                    secret_value_label(credential_type)
+                ))?,
             };
 
             let master_password = prompt_password("Enter master password to unlock vault: ")?;
@@ -1154,7 +1194,7 @@ fn main() -> Result<()> {
                 password: password_str,
                 url: url.clone(),
                 notes: notes.clone(),
-                credential_type: CredentialType::Password,
+                credential_type,
                 created_at: chrono::Utc::now(),
                 modified_at: chrono::Utc::now(),
                 favorite,
@@ -1188,13 +1228,20 @@ fn main() -> Result<()> {
                         println!("No entries found. Add one with 'sentinelpass add'");
                     } else {
                         println!();
-                        println!("{:<5} {:<30} {:<30} Fav", "ID", "Title", "Username");
-                        println!("{}", "-".repeat(80));
+                        println!(
+                            "{:<5} {:<16} {:<30} {:<30} Fav",
+                            "ID", "Type", "Title", "Username"
+                        );
+                        println!("{}", "-".repeat(96));
                         for entry in &entries {
                             let fav = if entry.favorite { "⭐" } else { "" };
                             println!(
-                                "{:<5} {:<30} {:<30} {}",
-                                entry.entry_id, entry.title, entry.username, fav
+                                "{:<5} {:<16} {:<30} {:<30} {}",
+                                entry.entry_id,
+                                credential_type_label(entry.credential_type),
+                                entry.title,
+                                entry.username,
+                                fav
                             );
                         }
                         println!();
@@ -1209,7 +1256,11 @@ fn main() -> Result<()> {
                             for summary in &entries {
                                 if let Ok(entry) = vault.get_entry(summary.entry_id) {
                                     println!("--- ID {} ---", summary.entry_id);
-                                    println!("Password: {}", entry.password);
+                                    println!(
+                                        "{}: {}",
+                                        secret_value_label(entry.credential_type),
+                                        entry.password
+                                    );
                                 }
                             }
                         }
@@ -1237,8 +1288,13 @@ fn main() -> Result<()> {
                 Ok(entry) => {
                     println!();
                     println!("Title: {}", entry.title);
+                    println!("Type: {}", credential_type_label(entry.credential_type));
                     println!("Username: {}", entry.username);
-                    println!("Password: {}", entry.password);
+                    println!(
+                        "{}: {}",
+                        secret_value_label(entry.credential_type),
+                        entry.password
+                    );
                     if let Some(url) = entry.url {
                         println!("URL: {}", url);
                     }
@@ -1292,12 +1348,18 @@ fn main() -> Result<()> {
                         println!();
                         println!("Found {} entries matching '{}':", filtered.len(), query);
                         println!();
-                        println!("{:<5} {:<30} {:<30}", "ID", "Title", "Username");
-                        println!("{}", "-".repeat(60));
+                        println!(
+                            "{:<5} {:<16} {:<30} {:<30}",
+                            "ID", "Type", "Title", "Username"
+                        );
+                        println!("{}", "-".repeat(88));
                         for entry in filtered {
                             println!(
-                                "{:<5} {:<30} {:<30}",
-                                entry.entry_id, entry.title, entry.username
+                                "{:<5} {:<16} {:<30} {:<30}",
+                                entry.entry_id,
+                                credential_type_label(entry.credential_type),
+                                entry.title,
+                                entry.username
                             );
                         }
                     }
@@ -2304,6 +2366,68 @@ mod tests {
                 assert!(matches!(field, SecretField::Password));
             }
             _ => panic!("expected secret allow command"),
+        }
+    }
+
+    #[test]
+    fn parses_add_api_key_entry_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "add",
+            "--title",
+            "Anthropic API",
+            "--username",
+            "ANTHROPIC_API_KEY",
+            "--password",
+            "sk-ant-test",
+            "--url",
+            "anthropic",
+            "--credential-type",
+            "api-key",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Add {
+                title,
+                username,
+                password,
+                url,
+                credential_type,
+                ..
+            } => {
+                assert_eq!(title, "Anthropic API");
+                assert_eq!(username, "ANTHROPIC_API_KEY");
+                assert_eq!(password, Some("sk-ant-test".to_string()));
+                assert_eq!(url, Some("anthropic".to_string()));
+                assert_eq!(credential_type, CliCredentialType::ApiKey);
+                assert_eq!(
+                    CredentialType::from(credential_type),
+                    CredentialType::ApiKey
+                );
+            }
+            _ => panic!("expected add command"),
+        }
+    }
+
+    #[test]
+    fn generic_add_rejects_passkey_reference_type() {
+        let result = Cli::try_parse_from([
+            "sentinelpass",
+            "add",
+            "--title",
+            "Example Passkey",
+            "--username",
+            "user@example.com",
+            "--password",
+            "passkey-ref:example.com:user@example.com",
+            "--credential-type",
+            "passkey-reference",
+        ]);
+
+        match result {
+            Err(err) => assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue),
+            Ok(_) => panic!("expected generic add to reject passkey-reference"),
         }
     }
 
