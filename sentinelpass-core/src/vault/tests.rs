@@ -26,7 +26,7 @@ fn test_vault_add_and_get_entry() {
         entry_id: None,
         title: "Test Entry".to_string(),
         username: "user@example.com".to_string(),
-        password: "secret123".to_string(),
+        password: "secret123".to_string().into(),
         url: Some("https://example.com".to_string()),
         notes: Some("Test notes".to_string()),
         credential_type: CredentialType::Password,
@@ -41,7 +41,7 @@ fn test_vault_add_and_get_entry() {
     let retrieved = vault.get_entry(entry_id).unwrap();
     assert_eq!(retrieved.title, "Test Entry");
     assert_eq!(retrieved.username, "user@example.com");
-    assert_eq!(retrieved.password, "secret123");
+    assert_eq!(retrieved.password.as_str(), "secret123");
     assert_eq!(retrieved.url, Some("https://example.com".to_string()));
     assert_eq!(retrieved.notes, Some("Test notes".to_string()));
 }
@@ -57,7 +57,7 @@ fn test_vault_add_and_get_api_key_entry_type() {
         entry_id: None,
         title: "Anthropic API".to_string(),
         username: "anthropic".to_string(),
-        password: "sk-ant-test".to_string(),
+        password: "sk-ant-test".to_string().into(),
         url: Some("https://console.anthropic.com".to_string()),
         notes: None,
         created_at: Utc::now(),
@@ -70,7 +70,7 @@ fn test_vault_add_and_get_api_key_entry_type() {
     let retrieved = vault.get_entry(entry_id).unwrap();
 
     assert_eq!(retrieved.credential_type, CredentialType::ApiKey);
-    assert_eq!(retrieved.password, "sk-ant-test");
+    assert_eq!(retrieved.password.as_str(), "sk-ant-test");
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn test_vault_add_and_get_passkey_reference_entry_type() {
         entry_id: None,
         title: "Example Passkey".to_string(),
         username: "user@example.com".to_string(),
-        password: "passkey-ref:example.com:user@example.com".to_string(),
+        password: "passkey-ref:example.com:user@example.com".to_string().into(),
         url: Some("https://example.com".to_string()),
         notes: Some("Reference only; no WebAuthn private key material".to_string()),
         credential_type: CredentialType::PasskeyReference,
@@ -98,7 +98,7 @@ fn test_vault_add_and_get_passkey_reference_entry_type() {
 
     assert_eq!(retrieved.credential_type, CredentialType::PasskeyReference);
     assert_eq!(
-        retrieved.password,
+        retrieved.password.as_str(),
         "passkey-ref:example.com:user@example.com"
     );
 }
@@ -114,7 +114,7 @@ fn test_vault_list_entries() {
         entry_id: None,
         title: "Alpha Entry".to_string(),
         username: "user1@example.com".to_string(),
-        password: "pass1".to_string(),
+        password: "pass1".to_string().into(),
         url: None,
         notes: None,
         credential_type: CredentialType::Password,
@@ -127,7 +127,7 @@ fn test_vault_list_entries() {
         entry_id: None,
         title: "Zeta Entry".to_string(),
         username: "user2@example.com".to_string(),
-        password: "pass2".to_string(),
+        password: "pass2".to_string().into(),
         url: None,
         notes: None,
         credential_type: CredentialType::Password,
@@ -170,7 +170,7 @@ fn test_vault_locked_operations_fail() {
             entry_id: None,
             title: "Test".to_string(),
             username: "test".to_string(),
-            password: "test".to_string(),
+            password: "test".to_string().into(),
             url: None,
             notes: None,
             credential_type: CredentialType::Password,
@@ -224,7 +224,7 @@ fn test_totp_add_generate_remove() {
         entry_id: None,
         title: "TOTP Entry".to_string(),
         username: "user@example.com".to_string(),
-        password: "secret123".to_string(),
+        password: "secret123".to_string().into(),
         url: Some("https://example.com".to_string()),
         notes: None,
         credential_type: CredentialType::Password,
@@ -394,7 +394,7 @@ fn test_import_pairing_bootstrap_rejects_non_empty_vault() {
         entry_id: None,
         title: "Local data".to_string(),
         username: "user".to_string(),
-        password: "pass".to_string(),
+        password: "pass".to_string().into(),
         url: None,
         notes: None,
         credential_type: CredentialType::Password,
@@ -542,7 +542,7 @@ fn test_pagination_first_page() {
             entry_id: None,
             title: format!("Entry {:03}", i),
             username: format!("user{}@example.com", i),
-            password: format!("pass{}", i),
+            password: format!("pass{}", i).into(),
             url: Some(format!("https://example{}.com", i)),
             notes: None,
             credential_type: CredentialType::Password,
@@ -575,7 +575,7 @@ fn test_pagination_second_page() {
             entry_id: None,
             title: format!("Site {:03}", i),
             username: "user@example.com".to_string(),
-            password: "secret".to_string(),
+            password: "secret".to_string().into(),
             url: None,
             notes: None,
             credential_type: CredentialType::Password,
@@ -608,7 +608,7 @@ fn test_pagination_last_page() {
             entry_id: None,
             title: format!("Item {:03}", i),
             username: "user@example.com".to_string(),
-            password: "pass".to_string(),
+            password: "pass".to_string().into(),
             url: None,
             notes: None,
             credential_type: CredentialType::Password,
@@ -641,7 +641,7 @@ fn test_pagination_large_page_size_capped() {
             entry_id: None,
             title: format!("Test {}", i),
             username: "user@example.com".to_string(),
-            password: "pass".to_string(),
+            password: "pass".to_string().into(),
             url: None,
             notes: None,
             credential_type: CredentialType::Password,

@@ -191,7 +191,7 @@ impl DaemonVault {
             {
                 return Ok(Some(CredentialResponse {
                     username: entry.username,
-                    password: entry.password,
+                    password: entry.password.as_str().to_string(),
                     title: entry.title,
                 }));
             }
@@ -208,7 +208,7 @@ impl DaemonVault {
                     if domains_match(domain, url) {
                         return Ok(Some(CredentialResponse {
                             username: entry.username,
-                            password: entry.password,
+                            password: entry.password.as_str().to_string(),
                             title: entry.title,
                         }));
                     }
@@ -400,7 +400,7 @@ impl DaemonVault {
 
         if let Some(entry_id) = existing_entry_id {
             let mut existing_entry = vault.get_entry(entry_id)?;
-            existing_entry.password = password.to_string();
+            existing_entry.password = password.to_string().into();
             if let Some(incoming_url) = url {
                 existing_entry.url = Some(incoming_url.to_string());
             }
@@ -417,7 +417,7 @@ impl DaemonVault {
             entry_id: None, // Auto-assigned by database
             title: format!("Credential for {}", domain),
             username: username.to_string(),
-            password: password.to_string(),
+            password: password.to_string().into(),
             url: url.map(|u| u.to_string()),
             notes: None,
             credential_type: CredentialType::Password,
@@ -517,7 +517,7 @@ mod tests {
             entry_id: None,
             title: title.to_string(),
             username: "user@example.com".to_string(),
-            password: password.to_string(),
+            password: password.to_string().into(),
             url: Some("https://example.com/login".to_string()),
             notes: None,
             credential_type,

@@ -22,6 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Credential category stored with a vault entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -248,7 +249,8 @@ impl VaultManager {
             username: decrypt_to_string(dek, &username_encrypted)
                 .map_err(PasswordManagerError::from)?,
             password: decrypt_to_string(dek, &password_encrypted)
-                .map_err(PasswordManagerError::from)?,
+                .map_err(PasswordManagerError::from)?
+                .into(),
             url,
             notes,
             credential_type: CredentialType::parse(&row.credential_type)?,
@@ -1121,7 +1123,7 @@ pub struct Entry {
     pub entry_id: Option<i64>,
     pub title: String,
     pub username: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
     pub url: Option<String>,
     pub notes: Option<String>,
     #[serde(default)]

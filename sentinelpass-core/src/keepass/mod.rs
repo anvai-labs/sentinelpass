@@ -69,7 +69,7 @@ impl From<KeePassEntry> for Entry {
             entry_id: None,
             title: ke.title,
             username: ke.username,
-            password: ke.password,
+            password: ke.password.into(),
             url: ke.url,
             notes: if notes.is_empty() { None } else { Some(notes) },
             credential_type: CredentialType::Password,
@@ -87,7 +87,7 @@ impl From<Entry> for KeePassEntry {
         Self {
             title: entry.title,
             username: entry.username,
-            password: entry.password,
+            password: entry.password.as_str().to_string(),
             url: entry.url,
             notes: Some(notes),
             tags: if tags.is_empty() { None } else { Some(tags) },
@@ -204,7 +204,7 @@ mod tests {
             entry_id: None,
             title: title.to_string(),
             username: "user@example.com".to_string(),
-            password: password.to_string(),
+            password: password.to_string().into(),
             url: Some("https://example.com".to_string()),
             notes: None,
             credential_type,
@@ -252,7 +252,7 @@ mod tests {
         let entry: Entry = ke.into();
         assert_eq!(entry.title, "Test Site");
         assert_eq!(entry.username, "user@example.com");
-        assert_eq!(entry.password, "password123");
+        assert_eq!(entry.password.as_str(), "password123");
         assert_eq!(entry.url, Some("https://example.com".to_string()));
         assert!(entry.notes.as_ref().unwrap().contains("Tags:"));
     }
@@ -264,7 +264,7 @@ mod tests {
             entry_id: None,
             title: "Test Site".to_string(),
             username: "user@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "password123".to_string().into(),
             url: Some("https://example.com".to_string()),
             notes: Some("My notes\n\nTags: work".to_string()),
             credential_type: CredentialType::Password,

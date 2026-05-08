@@ -23,7 +23,7 @@ impl From<Entry> for ExportEntry {
         Self {
             title: entry.title,
             username: entry.username,
-            password: entry.password,
+            password: entry.password.as_str().to_string(),
             url: entry.url,
             notes: entry.notes,
             created_at: entry.created_at.to_rfc3339(),
@@ -174,7 +174,7 @@ pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize>
             entry_id: None,
             title: export_entry.title,
             username: export_entry.username,
-            password: export_entry.password,
+            password: export_entry.password.into(),
             url: export_entry.url,
             notes: export_entry.notes,
             credential_type: CredentialType::Password,
@@ -257,7 +257,7 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
             entry_id: None,
             title: record.first().unwrap_or(empty).to_string(),
             username: record.get(1).unwrap_or(empty).to_string(),
-            password: record.get(2).unwrap_or(empty).to_string(),
+            password: record.get(2).unwrap_or(empty).to_string().into(),
             url: {
                 let url_str = record.get(3).unwrap_or(empty);
                 if url_str.is_empty() {
@@ -345,7 +345,7 @@ mod tests {
             entry_id: None,
             title: title.to_string(),
             username: "user@example.com".to_string(),
-            password: password.to_string(),
+            password: password.to_string().into(),
             url: Some("https://example.com".to_string()),
             notes: None,
             credential_type,
@@ -389,7 +389,7 @@ mod tests {
             entry_id: Some(1),
             title: "Test".to_string(),
             username: "user@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "password123".to_string().into(),
             url: Some("https://example.com".to_string()),
             notes: Some("Test notes".to_string()),
             credential_type: CredentialType::Password,
