@@ -86,6 +86,10 @@ enum Commands {
         #[arg(long)]
         purpose: Option<String>,
 
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SecretOutputFormat::Plain)]
+        output: SecretOutputFormat,
+
         /// Prompt shown by the OS biometric dialog
         #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
         prompt_reason: String,
@@ -418,6 +422,10 @@ enum SecretCommands {
         #[arg(long)]
         purpose: Option<String>,
 
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SecretOutputFormat::Plain)]
+        output: SecretOutputFormat,
+
         /// If the daemon is locked, request biometric unlock before lookup
         #[arg(long)]
         biometric_unlock: bool,
@@ -478,11 +486,27 @@ enum SyncCommands {
     Disable,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum SecretField {
     Username,
     Password,
     Title,
+}
+
+impl SecretField {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Username => "username",
+            Self::Password => "password",
+            Self::Title => "title",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SecretOutputFormat {
+    Plain,
+    Json,
 }
 
 impl From<SecretField> for ExternalSecretField {
@@ -492,6 +516,29 @@ impl From<SecretField> for ExternalSecretField {
             SecretField::Password => Self::Password,
             SecretField::Title => Self::Title,
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SecretLookupResult {
+    domain: String,
+    field: SecretField,
+    client_id: Option<String>,
+    purpose: Option<String>,
+    value: String,
+}
+
+fn render_secret_lookup(result: &SecretLookupResult, output: SecretOutputFormat) -> Result<String> {
+    match output {
+        SecretOutputFormat::Plain => Ok(result.value.clone()),
+        SecretOutputFormat::Json => serde_json::to_string(&serde_json::json!({
+            "domain": &result.domain,
+            "field": result.field.as_str(),
+            "client_id": &result.client_id,
+            "purpose": &result.purpose,
+            "value": &result.value,
+        }))
+        .map_err(|e| anyhow::anyhow!("Failed to render secret lookup JSON: {}", e)),
     }
 }
 
@@ -579,9 +626,12 @@ async fn get_secret_from_daemon(
     prompt_reason: String,
     client_id: Option<String>,
     purpose: Option<String>,
-) -> Result<String> {
+) -> Result<SecretLookupResult> {
     let client = IpcClient::new(default_ipc_socket_path())?;
     unlock_daemon_with_biometric_if_requested(&client, biometric_unlock, &prompt_reason).await?;
+    let lookup_domain = domain.clone();
+    let lookup_client_id = client_id.clone();
+    let lookup_purpose = purpose.clone();
 
     if let Some(client_id) = client_id {
         return match client
@@ -597,7 +647,15 @@ async fn get_secret_from_daemon(
                 value,
                 authorized: true,
                 error: None,
-            } => value.ok_or_else(|| anyhow::anyhow!("Requested secret field is not available")),
+            } => value
+                .map(|value| SecretLookupResult {
+                    domain: lookup_domain,
+                    field,
+                    client_id: lookup_client_id,
+                    purpose: lookup_purpose,
+                    value,
+                })
+                .ok_or_else(|| anyhow::anyhow!("Requested secret field is not available")),
             IpcMessage::GetExternalSecretResponse {
                 authorized: false,
                 error,
@@ -625,7 +683,15 @@ async fn get_secret_from_daemon(
                 SecretField::Title => title,
             };
 
-            value.ok_or_else(|| anyhow::anyhow!("Requested secret field is not available"))
+            value
+                .map(|value| SecretLookupResult {
+                    domain: lookup_domain,
+                    field,
+                    client_id: lookup_client_id,
+                    purpose: lookup_purpose,
+                    value,
+                })
+                .ok_or_else(|| anyhow::anyhow!("Requested secret field is not available"))
         }
         _ => anyhow::bail!("Unexpected daemon response during secret lookup"),
     }
@@ -727,9 +793,10 @@ fn main() -> Result<()> {
             biometric_unlock,
             client_id,
             purpose,
+            output,
             prompt_reason,
         } => {
-            let value = run_async(get_secret_from_daemon(
+            let result = run_async(get_secret_from_daemon(
                 domain,
                 field,
                 biometric_unlock,
@@ -737,7 +804,7 @@ fn main() -> Result<()> {
                 client_id,
                 purpose,
             ))??;
-            println!("{}", value);
+            println!("{}", render_secret_lookup(&result, output)?);
         }
 
         Commands::Secret { command } => match command {
@@ -759,10 +826,11 @@ fn main() -> Result<()> {
                 domain,
                 field,
                 purpose,
+                output,
                 biometric_unlock,
                 prompt_reason,
             } => {
-                let value = run_async(get_secret_from_daemon(
+                let result = run_async(get_secret_from_daemon(
                     domain,
                     field,
                     biometric_unlock,
@@ -770,7 +838,7 @@ fn main() -> Result<()> {
                     Some(client_id),
                     purpose,
                 ))??;
-                println!("{}", value);
+                println!("{}", render_secret_lookup(&result, output)?);
             }
         },
 
@@ -2178,6 +2246,8 @@ mod tests {
             "password",
             "--purpose",
             "victor-auth",
+            "--output",
+            "json",
             "--biometric-unlock",
         ])
         .unwrap();
@@ -2190,6 +2260,7 @@ mod tests {
                         domain,
                         field,
                         purpose,
+                        output,
                         biometric_unlock,
                         ..
                     },
@@ -2198,6 +2269,7 @@ mod tests {
                 assert_eq!(domain, "anthropic");
                 assert!(matches!(field, SecretField::Password));
                 assert_eq!(purpose, Some("victor-auth".to_string()));
+                assert_eq!(output, SecretOutputFormat::Json);
                 assert!(biometric_unlock);
             }
             _ => panic!("expected authorized secret get command"),
@@ -2248,6 +2320,8 @@ mod tests {
             "victor",
             "--purpose",
             "victor-auth",
+            "--output",
+            "json",
         ])
         .unwrap();
 
@@ -2257,14 +2331,51 @@ mod tests {
                 field,
                 client_id,
                 purpose,
+                output,
                 ..
             } => {
                 assert_eq!(domain, "anthropic");
                 assert!(matches!(field, SecretField::Password));
                 assert_eq!(client_id, Some("victor".to_string()));
                 assert_eq!(purpose, Some("victor-auth".to_string()));
+                assert_eq!(output, SecretOutputFormat::Json);
             }
             _ => panic!("expected legacy secret-get command"),
         }
+    }
+
+    #[test]
+    fn renders_plain_secret_lookup_as_secret_value_only() {
+        let result = SecretLookupResult {
+            domain: "anthropic".to_string(),
+            field: SecretField::Password,
+            client_id: Some("victor".to_string()),
+            purpose: Some("victor-auth".to_string()),
+            value: "sk-ant-test".to_string(),
+        };
+
+        let rendered = render_secret_lookup(&result, SecretOutputFormat::Plain).unwrap();
+
+        assert_eq!(rendered, "sk-ant-test");
+    }
+
+    #[test]
+    fn renders_json_secret_lookup_with_metadata() {
+        let result = SecretLookupResult {
+            domain: "anthropic".to_string(),
+            field: SecretField::Password,
+            client_id: Some("victor".to_string()),
+            purpose: Some("victor-auth".to_string()),
+            value: "sk-ant-test".to_string(),
+        };
+
+        let rendered = render_secret_lookup(&result, SecretOutputFormat::Json).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(json["domain"], "anthropic");
+        assert_eq!(json["field"], "password");
+        assert_eq!(json["client_id"], "victor");
+        assert_eq!(json["purpose"], "victor-auth");
+        assert_eq!(json["value"], "sk-ant-test");
     }
 }

@@ -38,7 +38,7 @@ Treat SentinelPass as a local secrets broker for developer tools:
 
 ### Current implementation step
 
-`sentinelpass secret get --client-id victor --domain <domain> --field password --purpose victor-auth [--biometric-unlock]` now provides the least-privilege CLI contract Victor should call after `sentinelpass secret allow victor --domain <domain> --field password`.
+`sentinelpass secret get --client-id victor --domain <domain> --field password --purpose victor-auth [--biometric-unlock] [--output json]` now provides the least-privilege CLI contract Victor should call after `sentinelpass secret allow victor --domain <domain> --field password`.
 
 `sentinelpass secret-get --domain <domain> --field password [--biometric-unlock]` remains as a compatibility path and can opt into allowlist enforcement with `--client-id victor --purpose victor-auth`.
 
@@ -180,6 +180,7 @@ Use:
 sentinelpass secret allow victor --domain anthropic --field password
 sentinelpass secret get --client-id victor --domain anthropic --field password --purpose victor-auth
 sentinelpass secret get --client-id victor --domain anthropic --field password --purpose victor-auth --biometric-unlock
+sentinelpass secret get --client-id victor --domain anthropic --field password --purpose victor-auth --output json
 ```
 
 Expected behavior:
@@ -187,6 +188,7 @@ Expected behavior:
 - Connects to the local daemon via the existing IPC token and socket.
 - Fails if the daemon is locked unless `--biometric-unlock` is supplied.
 - Prints only the requested field to stdout.
+- Defaults to plaintext stdout; `--output json` emits `domain`, `field`, `client_id`, `purpose`, and `value` for structured automation.
 - Does not prompt for the master password.
 - Enforces local-tool authorization via `client_id + domain + field`.
 - Emits daemon audit events for credential secret lookup, denied external secret access, and biometric unlock attempts.
@@ -195,7 +197,7 @@ Legacy compatibility:
 
 - `sentinelpass secret-get --domain anthropic --field password` remains available for direct user invocation.
 - Prefer `sentinelpass secret-get --client-id victor --purpose victor-auth ...` only as a transition path; new integrations should use `sentinelpass secret get`.
-- JSON output only when needed; plaintext stdout is useful for shell integration but should be opt-in in docs.
+- `sentinelpass secret-get ... --output json` is available during the transition for callers that still use the legacy command shape.
 
 ## Victor Side
 
@@ -251,3 +253,4 @@ Completed TDD slice:
 - macOS biometric DEK storage now uses platform Keychain access control with `biometryCurrentSet` and passcode-set-this-device-only protection.
 - External local-tool secret access now has a daemon-enforced allowlist and CLI management path via `sentinelpass secret allow <client_id> --domain <domain> --field <field>`.
 - Daemon IPC integration coverage now starts a real server against a temp vault and verifies a Victor-style authorized SentinelPass lookup plus denied field access.
+- Authorized secret lookup now supports opt-in structured output via `--output json` while preserving plaintext stdout as the default shell contract.
