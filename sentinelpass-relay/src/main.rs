@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(database) = cli.database {
         cfg.storage_path = database;
     }
+    cfg.validate()?;
 
     tracing::info!("Starting SentinelPass relay on {}", cfg.listen_addr);
 
