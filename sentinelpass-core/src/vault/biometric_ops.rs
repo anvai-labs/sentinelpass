@@ -21,35 +21,11 @@ impl VaultManager {
             PasswordManagerError::NotFound("Biometric unlock configuration".to_string())
         })?;
 
-        match crate::biometric::BiometricManager::authenticate(reason) {
-            crate::biometric::BiometricResult::Success => {}
-            crate::biometric::BiometricResult::Cancelled => {
-                return Err(PasswordManagerError::InvalidInput(
-                    "Biometric authentication was cancelled".to_string(),
-                ));
-            }
-            crate::biometric::BiometricResult::NotAvailable => {
-                return Err(PasswordManagerError::NotFound(format!(
-                    "{} is not available on this system",
-                    crate::biometric::BiometricManager::get_method_name()
-                )));
-            }
-            crate::biometric::BiometricResult::NotEnrolled => {
-                return Err(PasswordManagerError::NotFound(format!(
-                    "{} is not enrolled on this system",
-                    crate::biometric::BiometricManager::get_method_name()
-                )));
-            }
-            crate::biometric::BiometricResult::Failed(err) => {
-                return Err(PasswordManagerError::from(DatabaseError::Other(format!(
-                    "Biometric authentication failed: {}",
-                    err
-                ))));
-            }
-        }
-
         let mut key_hierarchy = KeyHierarchy::new();
-        let dek = crate::biometric::BiometricManager::load_vault_dek(&biometric_ref)?;
+        let dek = crate::biometric::BiometricManager::authenticate_and_load_vault_dek(
+            &biometric_ref,
+            reason,
+        )?;
         key_hierarchy.unlock_vault_with_dek(dek);
 
         Self::clear_failed_attempts(&db)?;
@@ -89,34 +65,7 @@ impl VaultManager {
             PasswordManagerError::NotFound("Biometric unlock configuration".to_string())
         })?;
 
-        match crate::biometric::BiometricManager::authenticate(reason) {
-            crate::biometric::BiometricResult::Success => {}
-            crate::biometric::BiometricResult::Cancelled => {
-                return Err(PasswordManagerError::InvalidInput(
-                    "Biometric authentication was cancelled".to_string(),
-                ));
-            }
-            crate::biometric::BiometricResult::NotAvailable => {
-                return Err(PasswordManagerError::NotFound(format!(
-                    "{} is not available on this system",
-                    crate::biometric::BiometricManager::get_method_name()
-                )));
-            }
-            crate::biometric::BiometricResult::NotEnrolled => {
-                return Err(PasswordManagerError::NotFound(format!(
-                    "{} is not enrolled on this system",
-                    crate::biometric::BiometricManager::get_method_name()
-                )));
-            }
-            crate::biometric::BiometricResult::Failed(err) => {
-                return Err(PasswordManagerError::from(DatabaseError::Other(format!(
-                    "Biometric authentication failed: {}",
-                    err
-                ))));
-            }
-        }
-
-        crate::biometric::BiometricManager::load_vault_dek(&biometric_ref)
+        crate::biometric::BiometricManager::authenticate_and_load_vault_dek(&biometric_ref, reason)
     }
 
     /// Check whether biometric unlock is configured for a vault path.

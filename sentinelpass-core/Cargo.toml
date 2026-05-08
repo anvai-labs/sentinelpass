@@ -76,6 +76,7 @@ objc = "0.2"
 cocoa = "0.25"
 core-foundation = "0.10"
 security-framework = "2.11"
+security-framework-sys = "2.17"
 keyring = "2.3"
 block = "0.1"
 
