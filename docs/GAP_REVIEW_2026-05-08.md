@@ -38,7 +38,9 @@ Treat SentinelPass as a local secrets broker for developer tools:
 
 ### Current implementation step
 
-`sentinelpass secret-get --domain <domain> --field password [--biometric-unlock]` now provides a narrow CLI contract Victor can call.
+`sentinelpass secret get --client-id victor --domain <domain> --field password --purpose victor-auth [--biometric-unlock]` now provides the least-privilege CLI contract Victor should call after `sentinelpass secret allow victor --domain <domain> --field password`.
+
+`sentinelpass secret-get --domain <domain> --field password [--biometric-unlock]` remains as a compatibility path and can opt into allowlist enforcement with `--client-id victor --purpose victor-auth`.
 
 `../codingagent` now has an opt-in SentinelPass resolver path and `victor auth add --source sentinelpass`, storing the SentinelPass lookup reference rather than the API key.
 
@@ -175,8 +177,9 @@ Keep the next product slices small and trust-boundary-aligned:
 Use:
 
 ```bash
-sentinelpass secret-get --domain anthropic --field password
-sentinelpass secret-get --domain anthropic --field password --biometric-unlock
+sentinelpass secret allow victor --domain anthropic --field password
+sentinelpass secret get --client-id victor --domain anthropic --field password --purpose victor-auth
+sentinelpass secret get --client-id victor --domain anthropic --field password --purpose victor-auth --biometric-unlock
 ```
 
 Expected behavior:
@@ -185,13 +188,13 @@ Expected behavior:
 - Fails if the daemon is locked unless `--biometric-unlock` is supplied.
 - Prints only the requested field to stdout.
 - Does not prompt for the master password.
-- Emits daemon audit events for credential secret lookup and biometric unlock attempts.
+- Enforces local-tool authorization via `client_id + domain + field`.
+- Emits daemon audit events for credential secret lookup, denied external secret access, and biometric unlock attempts.
 
-Recommended future additions:
+Legacy compatibility:
 
-- `--purpose victor-auth` for audit labeling.
-- `--client-id victor` and a local client allowlist.
-- `secret allow victor --domain anthropic --field password` for least-privilege authorization.
+- `sentinelpass secret-get --domain anthropic --field password` remains available for direct user invocation.
+- Prefer `sentinelpass secret-get --client-id victor --purpose victor-auth ...` only as a transition path; new integrations should use `sentinelpass secret get`.
 - JSON output only when needed; plaintext stdout is useful for shell integration but should be opt-in in docs.
 
 ## Victor Side
@@ -201,7 +204,7 @@ Implemented in `../codingagent/victor/providers/resolution.py`:
 - Adds a SentinelPass backend after env vars and before Victor keyring/file fallback.
 - Supports `VICTOR_SENTINELPASS_ENABLED=true`.
 - Supports provider-specific domain overrides through `VICTOR_SENTINELPASS_DOMAIN_<PROVIDER>`.
-- Invokes `sentinelpass secret-get --domain <domain> --field password`.
+- Should invoke `sentinelpass secret get --client-id victor --domain <domain> --field password --purpose victor-auth`.
 - Never log stdout or command details containing returned values.
 - Cache only in memory for the current process, using existing secret masking.
 

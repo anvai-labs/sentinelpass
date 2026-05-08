@@ -2158,3 +2158,113 @@ fn handle_sync_command(cli: &Cli, cmd: &SyncCommands) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_authorized_secret_get_contract_for_victor() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "secret",
+            "get",
+            "--client-id",
+            "victor",
+            "--domain",
+            "anthropic",
+            "--field",
+            "password",
+            "--purpose",
+            "victor-auth",
+            "--biometric-unlock",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command:
+                    SecretCommands::Get {
+                        client_id,
+                        domain,
+                        field,
+                        purpose,
+                        biometric_unlock,
+                        ..
+                    },
+            } => {
+                assert_eq!(client_id, "victor");
+                assert_eq!(domain, "anthropic");
+                assert!(matches!(field, SecretField::Password));
+                assert_eq!(purpose, Some("victor-auth".to_string()));
+                assert!(biometric_unlock);
+            }
+            _ => panic!("expected authorized secret get command"),
+        }
+    }
+
+    #[test]
+    fn parses_secret_allow_contract_for_local_tools() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "secret",
+            "allow",
+            "victor",
+            "--domain",
+            "anthropic",
+            "--field",
+            "password",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command:
+                    SecretCommands::Allow {
+                        client_id,
+                        domain,
+                        field,
+                    },
+            } => {
+                assert_eq!(client_id, "victor");
+                assert_eq!(domain, "anthropic");
+                assert!(matches!(field, SecretField::Password));
+            }
+            _ => panic!("expected secret allow command"),
+        }
+    }
+
+    #[test]
+    fn legacy_secret_get_can_opt_into_client_allowlist() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "secret-get",
+            "--domain",
+            "anthropic",
+            "--field",
+            "password",
+            "--client-id",
+            "victor",
+            "--purpose",
+            "victor-auth",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::SecretGet {
+                domain,
+                field,
+                client_id,
+                purpose,
+                ..
+            } => {
+                assert_eq!(domain, "anthropic");
+                assert!(matches!(field, SecretField::Password));
+                assert_eq!(client_id, Some("victor".to_string()));
+                assert_eq!(purpose, Some("victor-auth".to_string()));
+            }
+            _ => panic!("expected legacy secret-get command"),
+        }
+    }
+}
