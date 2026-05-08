@@ -48,6 +48,26 @@ fn log_daemon_audit(event_type: AuditEventType, context: &str) {
     }
 }
 
+fn log_external_secret_audit(
+    client_id: Option<&str>,
+    domain: &str,
+    field: Option<&str>,
+    purpose: Option<&str>,
+    success: bool,
+    context: &str,
+) {
+    log_daemon_audit(
+        AuditEventType::ExternalSecretAccess {
+            client_id: client_id.map(ToString::to_string),
+            domain: domain.to_string(),
+            field: field.map(ToString::to_string),
+            purpose: purpose.map(ToString::to_string),
+            success,
+        },
+        context,
+    );
+}
+
 /// IPC message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IpcMessage {
@@ -621,11 +641,12 @@ impl IpcServer {
                                     ExternalSecretField::Password => Some(cred.password),
                                     ExternalSecretField::Title => Some(cred.title),
                                 };
-                                log_daemon_audit(
-                                    AuditEventType::ExternalSecretAccess {
-                                        domain: domain.clone(),
-                                        success: value.is_some(),
-                                    },
+                                log_external_secret_audit(
+                                    Some(&client_id),
+                                    &domain,
+                                    Some(field.as_str()),
+                                    Some(&purpose),
+                                    value.is_some(),
                                     &format!(
                                         "External secret access granted for client '{}' purpose '{}'",
                                         client_id, purpose
@@ -638,11 +659,12 @@ impl IpcServer {
                                 }
                             }
                             Ok(None) => {
-                                log_daemon_audit(
-                                    AuditEventType::ExternalSecretAccess {
-                                        domain: domain.clone(),
-                                        success: false,
-                                    },
+                                log_external_secret_audit(
+                                    Some(&client_id),
+                                    &domain,
+                                    Some(field.as_str()),
+                                    Some(&purpose),
+                                    false,
                                     &format!(
                                         "External secret access found no credential for client '{}' purpose '{}'",
                                         client_id, purpose
@@ -656,11 +678,12 @@ impl IpcServer {
                             }
                             Err(e) => {
                                 error!("Failed to get external secret: {}", e);
-                                log_daemon_audit(
-                                    AuditEventType::ExternalSecretAccess {
-                                        domain: domain.clone(),
-                                        success: false,
-                                    },
+                                log_external_secret_audit(
+                                    Some(&client_id),
+                                    &domain,
+                                    Some(field.as_str()),
+                                    Some(&purpose),
+                                    false,
                                     &format!(
                                         "External secret access failed for client '{}' purpose '{}'",
                                         client_id, purpose
@@ -675,11 +698,12 @@ impl IpcServer {
                         }
                     }
                     Ok(_) => {
-                        log_daemon_audit(
-                            AuditEventType::ExternalSecretAccess {
-                                domain: domain.clone(),
-                                success: false,
-                            },
+                        log_external_secret_audit(
+                            Some(&client_id),
+                            &domain,
+                            Some(field.as_str()),
+                            Some(&purpose),
+                            false,
                             &format!(
                                 "External secret access denied for client '{}' purpose '{}'",
                                 client_id, purpose
@@ -711,11 +735,12 @@ impl IpcServer {
 
                 match self.vault.get_credential(&domain).await {
                     Ok(Some(cred)) => {
-                        log_daemon_audit(
-                            AuditEventType::ExternalSecretAccess {
-                                domain: domain.clone(),
-                                success: true,
-                            },
+                        log_external_secret_audit(
+                            None,
+                            &domain,
+                            None,
+                            None,
+                            true,
                             "Credential secret retrieved through daemon IPC",
                         );
                         IpcMessage::GetCredentialResponse {
@@ -726,11 +751,12 @@ impl IpcServer {
                     }
                     Ok(None) => {
                         debug!("No credential found for domain '{}'", domain);
-                        log_daemon_audit(
-                            AuditEventType::ExternalSecretAccess {
-                                domain: domain.clone(),
-                                success: false,
-                            },
+                        log_external_secret_audit(
+                            None,
+                            &domain,
+                            None,
+                            None,
+                            false,
                             "Credential secret lookup through daemon IPC returned no match",
                         );
                         IpcMessage::GetCredentialResponse {
@@ -741,11 +767,12 @@ impl IpcServer {
                     }
                     Err(e) => {
                         error!("Failed to get credential: {}", e);
-                        log_daemon_audit(
-                            AuditEventType::ExternalSecretAccess {
-                                domain: domain.clone(),
-                                success: false,
-                            },
+                        log_external_secret_audit(
+                            None,
+                            &domain,
+                            None,
+                            None,
+                            false,
                             "Credential secret lookup through daemon IPC failed",
                         );
                         IpcMessage::GetCredentialResponse {

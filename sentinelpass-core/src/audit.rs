@@ -36,7 +36,10 @@ pub enum AuditEventType {
         count: usize,
     },
     ExternalSecretAccess {
+        client_id: Option<String>,
         domain: String,
+        field: Option<String>,
+        purpose: Option<String>,
         success: bool,
     },
 
@@ -403,7 +406,10 @@ mod tests {
         );
         assert_eq!(
             AuditLogger::severity_for_event(&AuditEventType::ExternalSecretAccess {
+                client_id: Some("victor".to_string()),
                 domain: "anthropic".to_string(),
+                field: Some("password".to_string()),
+                purpose: Some("victor-auth".to_string()),
                 success: true,
             }),
             3
@@ -534,7 +540,10 @@ mod tests {
         let entry = AuditEntry {
             timestamp: Utc::now(),
             event_type: AuditEventType::ExternalSecretAccess {
+                client_id: Some("victor".to_string()),
                 domain: "anthropic".to_string(),
+                field: Some("password".to_string()),
+                purpose: Some("victor-auth".to_string()),
                 success: true,
             },
             severity: 3,
@@ -547,8 +556,17 @@ mod tests {
         let deserialized: AuditEntry = serde_json::from_str(&json).unwrap();
 
         match deserialized.event_type {
-            AuditEventType::ExternalSecretAccess { domain, success } => {
+            AuditEventType::ExternalSecretAccess {
+                client_id,
+                domain,
+                field,
+                purpose,
+                success,
+            } => {
+                assert_eq!(client_id, Some("victor".to_string()));
                 assert_eq!(domain, "anthropic");
+                assert_eq!(field, Some("password".to_string()));
+                assert_eq!(purpose, Some("victor-auth".to_string()));
                 assert!(success);
             }
             other => panic!("unexpected event: {:?}", other),
