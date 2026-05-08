@@ -9,7 +9,6 @@ use crate::{
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use zeroize::Zeroize;
 
 impl VaultManager {
     /// Open an existing vault using biometric authentication and OS key storage.
@@ -18,7 +17,6 @@ impl VaultManager {
         let db = Database::open(&vault_path)?;
         db.validate_schema_version()?;
 
-        let (kdf_params, wrapped_dek) = Self::load_vault_metadata(&db)?;
         let biometric_ref = Self::load_biometric_ref(&db)?.ok_or_else(|| {
             PasswordManagerError::NotFound("Biometric unlock configuration".to_string())
         })?;
@@ -50,13 +48,9 @@ impl VaultManager {
             }
         }
 
-        let mut master_password =
-            crate::biometric::BiometricManager::load_master_password(&biometric_ref)?;
-
         let mut key_hierarchy = KeyHierarchy::new();
-        let unlock_result = key_hierarchy.unlock_vault(&master_password, &kdf_params, &wrapped_dek);
-        master_password.zeroize();
-        unlock_result.map_err(PasswordManagerError::Crypto)?;
+        let dek = crate::biometric::BiometricManager::load_vault_dek(&biometric_ref)?;
+        key_hierarchy.unlock_vault_with_dek(dek);
 
         Self::clear_failed_attempts(&db)?;
 
@@ -79,16 +73,15 @@ impl VaultManager {
         Ok(vault_manager)
     }
 
-    /// Perform biometric authentication and retrieve the stored master password.
+    /// Perform biometric authentication and retrieve the stored vault DEK.
     ///
-    /// This is intended for scenarios where the caller needs the master password
-    /// to relay it to another process (e.g. the daemon) that cannot perform its
-    /// own biometric prompt because it runs headless.  The caller is responsible
-    /// for zeroizing the returned password after use.
-    pub fn retrieve_master_password_via_biometric<P: AsRef<Path>>(
+    /// This is intended for scenarios where a caller needs local key material
+    /// after platform authentication without persisting or exposing the master
+    /// password.
+    pub fn retrieve_dek_via_biometric<P: AsRef<Path>>(
         path: P,
         reason: &str,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<crate::crypto::DataEncryptionKey> {
         let vault_path = path.as_ref().to_path_buf();
         let db = Database::open(&vault_path)?;
 
@@ -123,7 +116,7 @@ impl VaultManager {
             }
         }
 
-        crate::biometric::BiometricManager::load_master_password(&biometric_ref)
+        crate::biometric::BiometricManager::load_vault_dek(&biometric_ref)
     }
 
     /// Check whether biometric unlock is configured for a vault path.
@@ -134,8 +127,8 @@ impl VaultManager {
 
     /// Enable biometric unlock for this vault.
     ///
-    /// This stores the provided master password in the OS key storage and
-    /// links it via `biometric_ref` metadata.
+    /// This validates the provided master password, then stores the vault DEK
+    /// in OS key storage and links it via `biometric_ref` metadata.
     pub fn enable_biometric_unlock(&self, master_password: &[u8]) -> Result<()> {
         if master_password.is_empty() {
             return Err(PasswordManagerError::InvalidInput(
@@ -169,12 +162,11 @@ impl VaultManager {
         verifier
             .unlock_vault(master_password, &kdf_params, &wrapped_dek)
             .map_err(PasswordManagerError::Crypto)?;
-        verifier.lock_vault();
 
-        let biometric_ref = crate::biometric::BiometricManager::store_master_password(
-            &self.vault_path,
-            master_password,
-        )?;
+        let dek = verifier.dek()?.clone();
+        verifier.lock_vault();
+        let biometric_ref =
+            crate::biometric::BiometricManager::store_vault_dek(&self.vault_path, &dek)?;
         Self::set_biometric_ref(&db, Some(&biometric_ref))?;
         Ok(())
     }
@@ -188,7 +180,7 @@ impl VaultManager {
         })?;
 
         if let Some(biometric_ref) = Self::load_biometric_ref(&db)? {
-            let _ = crate::biometric::BiometricManager::clear_master_password(&biometric_ref);
+            let _ = crate::biometric::BiometricManager::clear_vault_dek(&biometric_ref);
         }
 
         Self::set_biometric_ref(&db, None)?;

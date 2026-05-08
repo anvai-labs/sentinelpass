@@ -1,6 +1,6 @@
 //! Biometric authentication support (Windows Hello, Touch ID)
 
-#[cfg(any(windows, target_os = "macos"))]
+use crate::crypto::DataEncryptionKey;
 use crate::DatabaseError;
 use crate::{PasswordManagerError, Result};
 use std::path::Path;
@@ -89,18 +89,44 @@ impl BiometricManager {
         format!("vault-{}", hex::encode(hasher.finalize()))
     }
 
-    /// Store the master password in an OS-protected key store for biometric unlock.
-    pub fn store_master_password(vault_path: &Path, master_password: &[u8]) -> Result<String> {
-        if master_password.is_empty() {
+    fn encode_vault_dek(dek: &DataEncryptionKey) -> String {
+        use base64::Engine;
+
+        base64::engine::general_purpose::STANDARD.encode(dek.as_bytes())
+    }
+
+    fn decode_vault_dek(encoded: &str) -> Result<DataEncryptionKey> {
+        use base64::Engine;
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Keyring(format!(
+                    "Stored biometric keyring secret is invalid: {}",
+                    e
+                )))
+            })?;
+
+        let key_bytes: [u8; 32] = decoded.try_into().map_err(|bytes: Vec<u8>| {
+            PasswordManagerError::from(DatabaseError::Keyring(format!(
+                "Stored biometric keyring secret has invalid length: expected 32 bytes, got {}",
+                bytes.len()
+            )))
+        })?;
+
+        Ok(DataEncryptionKey::from_bytes(key_bytes))
+    }
+
+    /// Store the vault DEK in an OS-protected key store for biometric unlock.
+    pub fn store_vault_dek(vault_path: &Path, dek: &DataEncryptionKey) -> Result<String> {
+        if dek.as_bytes().is_empty() {
             return Err(PasswordManagerError::InvalidInput(
-                "Master password cannot be empty".to_string(),
+                "Vault DEK cannot be empty".to_string(),
             ));
         }
 
         #[cfg(any(windows, target_os = "macos"))]
         {
-            use base64::Engine;
-
             let biometric_ref = Self::biometric_ref_for_vault(vault_path);
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, &biometric_ref).map_err(|e| {
@@ -111,7 +137,7 @@ impl BiometricManager {
                 })?;
 
             // Store base64 to keep storage UTF-8 safe across keychain backends.
-            let mut encoded = base64::engine::general_purpose::STANDARD.encode(master_password);
+            let mut encoded = Self::encode_vault_dek(dek);
             let set_result = entry.set_password(&encoded).map_err(|e| {
                 PasswordManagerError::from(DatabaseError::Keyring(format!(
                     "Failed to store biometric keyring secret: {}",
@@ -126,19 +152,17 @@ impl BiometricManager {
 
         #[cfg(not(any(windows, target_os = "macos")))]
         {
-            let _ = (vault_path, master_password);
+            let _ = (vault_path, dek);
             Err(PasswordManagerError::NotFound(
                 "Biometric key storage is not supported on this platform".to_string(),
             ))
         }
     }
 
-    /// Load a previously stored master password from the OS key store.
-    pub fn load_master_password(biometric_ref: &str) -> Result<Vec<u8>> {
+    /// Load a previously stored vault DEK from the OS key store.
+    pub fn load_vault_dek(biometric_ref: &str) -> Result<DataEncryptionKey> {
         #[cfg(any(windows, target_os = "macos"))]
         {
-            use base64::Engine;
-
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, biometric_ref).map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Keyring(format!(
@@ -154,17 +178,10 @@ impl BiometricManager {
                 ))
             })?;
 
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded.as_bytes())
-                .map_err(|e| {
-                    PasswordManagerError::from(DatabaseError::Keyring(format!(
-                        "Stored biometric keyring secret is invalid: {}",
-                        e
-                    )))
-                })?;
+            let dek = Self::decode_vault_dek(&encoded)?;
             encoded.zeroize();
 
-            Ok(decoded)
+            Ok(dek)
         }
 
         #[cfg(not(any(windows, target_os = "macos")))]
@@ -176,8 +193,8 @@ impl BiometricManager {
         }
     }
 
-    /// Remove a stored biometric master password secret.
-    pub fn clear_master_password(biometric_ref: &str) -> Result<()> {
+    /// Remove a stored biometric vault DEK secret.
+    pub fn clear_vault_dek(biometric_ref: &str) -> Result<()> {
         #[cfg(any(windows, target_os = "macos"))]
         {
             let entry =
@@ -510,5 +527,27 @@ mod tests {
     fn test_is_enrolled() {
         // This test will pass on supported platforms
         let _ = BiometricManager::is_enrolled();
+    }
+
+    #[test]
+    fn test_vault_dek_encoding_roundtrip() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let encoded = BiometricManager::encode_vault_dek(&dek);
+        let decoded = BiometricManager::decode_vault_dek(&encoded).unwrap();
+
+        assert_eq!(decoded.as_bytes(), dek.as_bytes());
+    }
+
+    #[test]
+    fn test_vault_dek_decode_rejects_legacy_master_password_length() {
+        use base64::Engine;
+
+        let legacy_encoded = base64::engine::general_purpose::STANDARD.encode(b"master-password");
+        let err = match BiometricManager::decode_vault_dek(&legacy_encoded) {
+            Ok(_) => panic!("legacy master-password-sized secret should not decode as a DEK"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("invalid length"));
     }
 }

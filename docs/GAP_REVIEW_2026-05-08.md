@@ -49,22 +49,22 @@ Suggested Victor resolution order:
 3. Victor keyring.
 4. Victor file fallback.
 
-## 2. Biometric Unlock Should Stop Storing the Master Password as the Long-Term Secret
+## 2. Biometric Unlock Should Continue Moving Toward Platform-Native Key Wrapping
 
-### Gap
+### Current State
 
-The current biometric helper stores the master password through a generic keyring API. That is convenient, but weaker than the documented target state of wrapping the DEK with OS-protected key material.
+The biometric unlock path no longer stores the master password as the long-term secret. Enrollment validates the supplied master password, unwraps the vault DEK, and stores DEK material behind the OS keyring reference used for biometric unlock. Biometric unlock retrieves the DEK and unlocks the in-memory key hierarchy without re-deriving from or exposing the master password.
 
-### Recommendation
+### Remaining Gap
 
-Move biometric unlock to a platform-native key hierarchy:
+The remaining gap is moving from generic keyring-backed DEK storage to a stricter platform-native key hierarchy:
 
 - macOS: Keychain item or Secure Enclave-backed key with `SecAccessControl` requiring Touch ID / device owner authentication.
 - Windows: DPAPI or Windows Hello-protected key material.
-- Store only a wrapped vault DEK or key-encryption-key reference, not the master password.
+- Store only a wrapped vault DEK or key-encryption-key reference where the platform supports non-exportable material.
 - Invalidate biometric unlock when biometric enrollment changes where the platform supports that policy.
 
-This should be treated as a security hardening item before heavily promoting biometric unlock.
+This is now a defense-in-depth hardening item rather than a master-password exposure blocker.
 
 ## 3. Passkeys Are a Product Opportunity, But Not a Simple "Store Password Field" Feature
 
@@ -236,9 +236,9 @@ References:
 
 ## Recommended Next 30 Days
 
-1. Replace biometric master-password storage with wrapped DEK / OS-protected key material.
-2. Add `api_key` and `passkey_reference` credential types to the schema/model.
-3. Create `docs/SECURITY_STATUS_MATRIX.md`.
-4. Add passkey product design doc before implementation.
+1. Add `api_key` and `passkey_reference` credential types to the schema/model.
+2. Create `docs/SECURITY_STATUS_MATRIX.md`.
+3. Add passkey product design doc before implementation.
+4. Add platform-native biometric DEK wrapping and biometric-enrollment invalidation where supported.
 5. Add least-privilege local-tool authorization, for example `secret allow victor --domain anthropic`.
 6. Add broader integration tests covering daemon startup plus Victor SentinelPass lookup.
