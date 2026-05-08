@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::CredentialType;
+
 /// Type of syncable entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +73,8 @@ pub struct CredentialPayload {
     pub title: String,
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub credential_type: CredentialType,
     pub url: Option<String>,
     pub notes: Option<String>,
     pub favorite: bool,
@@ -239,6 +243,7 @@ mod tests {
             title: "Test".to_string(),
             username: "user".to_string(),
             password: "pass".to_string(),
+            credential_type: CredentialType::Password,
             url: Some("https://example.com".to_string()),
             notes: None,
             favorite: false,

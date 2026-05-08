@@ -279,15 +279,17 @@ impl SyncEngine {
             conn.execute(
                 "UPDATE entries SET
                     title = ?1, username = ?2, password = ?3, url = ?4, notes = ?5,
-                    entry_nonce = ?6, auth_tag = ?7, modified_at = ?8, favorite = ?9,
-                    sync_version = ?10, sync_state = 'synced', last_synced_at = ?11
-                 WHERE entry_id = ?12",
+                    credential_type = ?6, entry_nonce = ?7, auth_tag = ?8,
+                    modified_at = ?9, favorite = ?10, sync_version = ?11,
+                    sync_state = 'synced', last_synced_at = ?12
+                 WHERE entry_id = ?13",
                 rusqlite::params![
                     title_blob,
                     username_blob,
                     password_blob,
                     url_blob.as_deref().unwrap_or(&[]),
                     notes_blob.as_deref().unwrap_or(&[]),
+                    payload.credential_type.as_str(),
                     nonce_blob,
                     auth_tag_blob,
                     payload.modified_at,
@@ -368,16 +370,17 @@ impl SyncEngine {
 
             conn.execute(
                 "INSERT INTO entries (
-                    vault_id, title, username, password, url, notes,
+                    vault_id, title, username, password, url, notes, credential_type,
                     entry_nonce, auth_tag, created_at, modified_at, favorite,
                     sync_id, sync_version, sync_state, last_synced_at, is_deleted
-                ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'synced', ?13, 0)",
+                ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'synced', ?14, 0)",
                 rusqlite::params![
                     title_blob,
                     username_blob,
                     password_blob,
                     url_blob.as_deref().unwrap_or(&[]),
                     notes_blob.as_deref().unwrap_or(&[]),
+                    payload.credential_type.as_str(),
                     nonce_blob,
                     auth_tag_blob,
                     payload.created_at,

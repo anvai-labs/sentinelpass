@@ -24,7 +24,7 @@
 
 pub mod xml;
 
-use crate::{Entry, PasswordManagerError, Result, VaultManager};
+use crate::{CredentialType, Entry, PasswordManagerError, Result, VaultManager};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
@@ -72,6 +72,7 @@ impl From<KeePassEntry> for Entry {
             password: ke.password,
             url: ke.url,
             notes: if notes.is_empty() { None } else { Some(notes) },
+            credential_type: CredentialType::Password,
             created_at: ke.created_at.unwrap_or(now),
             modified_at: ke.modified_at.unwrap_or(now),
             favorite: false,
@@ -242,6 +243,7 @@ mod tests {
             password: "password123".to_string(),
             url: Some("https://example.com".to_string()),
             notes: Some("My notes\n\nTags: work".to_string()),
+            credential_type: CredentialType::Password,
             created_at: now,
             modified_at: now,
             favorite: false,

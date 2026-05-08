@@ -1,7 +1,7 @@
 // Core bridge functionality shared between iOS and Android
 
 use crate::error::{BridgeError, BridgeResult};
-use sentinelpass_core::vault::{Entry, EntrySummary, VaultManager};
+use sentinelpass_core::vault::{CredentialType, Entry, EntrySummary, VaultManager};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -171,6 +171,7 @@ pub fn bridge_entry_add(
         } else {
             Some(notes.to_string())
         },
+        credential_type: CredentialType::Password,
         created_at: chrono::Utc::now(),
         modified_at: chrono::Utc::now(),
         favorite: false,

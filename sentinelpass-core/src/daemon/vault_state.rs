@@ -3,7 +3,10 @@
 //! The daemon maintains the vault in memory, handling lock/unlock
 //! and responding to credential requests.
 
-use crate::{get_default_vault_path, DatabaseError, PasswordManagerError, Result, VaultManager};
+use crate::{
+    get_default_vault_path, CredentialType, DatabaseError, PasswordManagerError, Result,
+    VaultManager,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -405,6 +408,7 @@ impl DaemonVault {
             password: password.to_string(),
             url: url.map(|u| u.to_string()),
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: now,
             modified_at: now,
             favorite: false,

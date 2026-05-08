@@ -6,8 +6,8 @@ use sentinelpass_core::{
     crypto::{analyze_password, generate_password, PasswordGeneratorConfig},
     daemon::ipc::{default_ipc_socket_path, IpcClient, IpcMessage},
     export_to_csv, export_to_json, export_to_keepass_xml, import_from_csv, import_from_json,
-    import_from_keepass_xml, parse_otpauth_uri, Entry as VaultEntry, EntrySummary, SshAgentClient,
-    SshKeyImporter, TotpAlgorithm, VaultManager,
+    import_from_keepass_xml, parse_otpauth_uri, CredentialType, Entry as VaultEntry, EntrySummary,
+    SshAgentClient, SshKeyImporter, TotpAlgorithm, VaultManager,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -938,6 +938,7 @@ fn main() -> Result<()> {
                 password: password_str,
                 url: url.clone(),
                 notes: notes.clone(),
+                credential_type: CredentialType::Password,
                 created_at: chrono::Utc::now(),
                 modified_at: chrono::Utc::now(),
                 favorite,
@@ -1187,6 +1188,7 @@ fn main() -> Result<()> {
                 password: new_password,
                 url: new_url,
                 notes: new_notes,
+                credential_type: existing_entry.credential_type,
                 created_at: existing_entry.created_at,
                 modified_at: Utc::now(),
                 favorite: new_favorite,

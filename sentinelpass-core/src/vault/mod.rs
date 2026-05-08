@@ -23,6 +23,38 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Credential category stored with a vault entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialType {
+    #[default]
+    Password,
+    ApiKey,
+    PasskeyReference,
+}
+
+impl CredentialType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::ApiKey => "api_key",
+            Self::PasskeyReference => "passkey_reference",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "password" => Ok(Self::Password),
+            "api_key" => Ok(Self::ApiKey),
+            "passkey_reference" => Ok(Self::PasskeyReference),
+            other => Err(PasswordManagerError::InvalidInput(format!(
+                "Unsupported credential type: {}",
+                other
+            ))),
+        }
+    }
+}
+
 /// Vault manager handles all vault operations
 pub struct VaultManager {
     pub(super) key_hierarchy: KeyHierarchy,
@@ -163,6 +195,7 @@ impl VaultManager {
             entry_id: row.entry_id,
             title,
             username,
+            credential_type: CredentialType::parse(&row.credential_type)?,
             favorite: row.favorite,
         })
     }
@@ -210,6 +243,7 @@ impl VaultManager {
                 .map_err(PasswordManagerError::from)?,
             url,
             notes,
+            credential_type: CredentialType::parse(&row.credential_type)?,
             created_at: DateTime::from_timestamp(row.created_at, 0).unwrap_or_else(Utc::now),
             modified_at: DateTime::from_timestamp(row.modified_at, 0).unwrap_or_else(Utc::now),
             favorite: row.favorite,
@@ -277,6 +311,7 @@ impl VaultManager {
             password: password_blob,
             url: url_blob,
             notes: notes_blob,
+            credential_type: entry.credential_type.as_str().to_string(),
             entry_nonce: nonce_blob,
             auth_tag: auth_tag_blob,
             created_at: now,
@@ -585,6 +620,7 @@ impl VaultManager {
             password: Some(password_blob),
             url: url_blob,
             notes: notes_blob,
+            credential_type: Some(entry.credential_type.as_str().to_string()),
             entry_nonce: Some(nonce_blob),
             auth_tag: Some(auth_tag_blob),
             modified_at: now,
@@ -1080,6 +1116,8 @@ pub struct Entry {
     pub password: String,
     pub url: Option<String>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub credential_type: CredentialType,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub favorite: bool,
@@ -1091,6 +1129,7 @@ pub struct EntrySummary {
     pub entry_id: i64,
     pub title: String,
     pub username: String,
+    pub credential_type: CredentialType,
     pub favorite: bool,
 }
 

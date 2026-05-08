@@ -29,6 +29,7 @@ fn test_vault_add_and_get_entry() {
         password: "secret123".to_string(),
         url: Some("https://example.com".to_string()),
         notes: Some("Test notes".to_string()),
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -46,6 +47,63 @@ fn test_vault_add_and_get_entry() {
 }
 
 #[test]
+fn test_vault_add_and_get_api_key_entry_type() {
+    let temp_path = ":memory:";
+    let password = b"test_password";
+
+    let vault = VaultManager::create(temp_path, password).unwrap();
+
+    let entry = Entry {
+        entry_id: None,
+        title: "Anthropic API".to_string(),
+        username: "anthropic".to_string(),
+        password: "sk-ant-test".to_string(),
+        url: Some("https://console.anthropic.com".to_string()),
+        notes: None,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+        credential_type: CredentialType::ApiKey,
+    };
+
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let retrieved = vault.get_entry(entry_id).unwrap();
+
+    assert_eq!(retrieved.credential_type, CredentialType::ApiKey);
+    assert_eq!(retrieved.password, "sk-ant-test");
+}
+
+#[test]
+fn test_vault_add_and_get_passkey_reference_entry_type() {
+    let temp_path = ":memory:";
+    let password = b"test_password";
+
+    let vault = VaultManager::create(temp_path, password).unwrap();
+
+    let entry = Entry {
+        entry_id: None,
+        title: "Example Passkey".to_string(),
+        username: "user@example.com".to_string(),
+        password: "passkey-ref:example.com:user@example.com".to_string(),
+        url: Some("https://example.com".to_string()),
+        notes: Some("Reference only; no WebAuthn private key material".to_string()),
+        credential_type: CredentialType::PasskeyReference,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let retrieved = vault.get_entry(entry_id).unwrap();
+
+    assert_eq!(retrieved.credential_type, CredentialType::PasskeyReference);
+    assert_eq!(
+        retrieved.password,
+        "passkey-ref:example.com:user@example.com"
+    );
+}
+
+#[test]
 fn test_vault_list_entries() {
     let temp_path = ":memory:";
     let password = b"test_password";
@@ -59,6 +117,7 @@ fn test_vault_list_entries() {
         password: "pass1".to_string(),
         url: None,
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -71,6 +130,7 @@ fn test_vault_list_entries() {
         password: "pass2".to_string(),
         url: None,
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: true,
@@ -113,6 +173,7 @@ fn test_vault_locked_operations_fail() {
             password: "test".to_string(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -166,6 +227,7 @@ fn test_totp_add_generate_remove() {
         password: "secret123".to_string(),
         url: Some("https://example.com".to_string()),
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -335,6 +397,7 @@ fn test_import_pairing_bootstrap_rejects_non_empty_vault() {
         password: "pass".to_string(),
         url: None,
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -482,6 +545,7 @@ fn test_pagination_first_page() {
             password: format!("pass{}", i),
             url: Some(format!("https://example{}.com", i)),
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: i % 2 == 0,
@@ -514,6 +578,7 @@ fn test_pagination_second_page() {
             password: "secret".to_string(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -546,6 +611,7 @@ fn test_pagination_last_page() {
             password: "pass".to_string(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -578,6 +644,7 @@ fn test_pagination_large_page_size_capped() {
             password: "pass".to_string(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,

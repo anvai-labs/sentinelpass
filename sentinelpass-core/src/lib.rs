@@ -37,7 +37,7 @@ pub use platform::{
 };
 pub use ssh::{SshAgentClient, SshKey, SshKeyGenerator, SshKeyImporter, SshKeySummary, SshKeyType};
 pub use totp::{parse_otpauth_uri, ParsedTotpUri, TotpAlgorithm, TotpCode, TotpSecretMetadata};
-pub use vault::{Entry, EntrySummary, VaultManager};
+pub use vault::{CredentialType, Entry, EntrySummary, VaultManager};
 
 // Re-export common types
 use thiserror::Error;

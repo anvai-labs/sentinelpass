@@ -236,9 +236,12 @@ References:
 
 ## Recommended Next 30 Days
 
-1. Add `api_key` and `passkey_reference` credential types to the schema/model.
-2. Create `docs/SECURITY_STATUS_MATRIX.md`.
-3. Add passkey product design doc before implementation.
-4. Add platform-native biometric DEK wrapping and biometric-enrollment invalidation where supported.
-5. Add least-privilege local-tool authorization, for example `secret allow victor --domain anthropic`.
-6. Add broader integration tests covering daemon startup plus Victor SentinelPass lookup.
+1. Create `docs/SECURITY_STATUS_MATRIX.md`.
+2. Add passkey product design doc before implementation.
+3. Add platform-native biometric DEK wrapping and biometric-enrollment invalidation where supported.
+4. Add least-privilege local-tool authorization, for example `secret allow victor --domain anthropic`.
+5. Add broader integration tests covering daemon startup plus Victor SentinelPass lookup.
+
+Completed TDD slice:
+
+- `api_key` and `passkey_reference` credential types are now represented in the core schema/model via an `entries.credential_type` discriminator and vault roundtrip coverage.

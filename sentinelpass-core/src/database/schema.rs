@@ -6,7 +6,7 @@ use std::path::Path;
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -79,6 +79,8 @@ impl Database {
                 password BLOB NOT NULL,
                 url BLOB,
                 notes BLOB,
+                credential_type TEXT NOT NULL DEFAULT 'password'
+                    CHECK (credential_type IN ('password', 'api_key', 'passkey_reference')),
                 entry_nonce BLOB NOT NULL,
                 auth_tag BLOB NOT NULL,
                 created_at INTEGER NOT NULL,
@@ -247,6 +249,8 @@ impl Database {
             // v3 indexes for pagination performance
             "CREATE INDEX IF NOT EXISTS idx_entries_modified_at ON entries(modified_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at DESC)",
+            // v4 index for credential category filtering
+            "CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type)",
         ];
         for sql in &indexes {
             self.conn.execute(sql, []).map_err(DatabaseError::Sqlite)?;
@@ -381,6 +385,8 @@ mod tests {
         // v3 indexes must be present for new vaults too
         assert!(index_names.contains(&"idx_entries_modified_at".to_string()));
         assert!(index_names.contains(&"idx_entries_created_at".to_string()));
+        // v4 index must be present for new vaults too
+        assert!(index_names.contains(&"idx_entries_credential_type".to_string()));
 
         // Verify triggers exist
         let trigger_names: Vec<String> = db

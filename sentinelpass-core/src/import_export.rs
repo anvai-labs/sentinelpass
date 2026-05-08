@@ -1,6 +1,6 @@
 //! Import/export functionality for password vault
 
-use crate::{DatabaseError, Entry, PasswordManagerError, Result, VaultManager};
+use crate::{CredentialType, DatabaseError, Entry, PasswordManagerError, Result, VaultManager};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -171,6 +171,7 @@ pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize>
             password: export_entry.password,
             url: export_entry.url,
             notes: export_entry.notes,
+            credential_type: CredentialType::Password,
             created_at: export_entry.created_at.parse().map_err(|e| {
                 PasswordManagerError::from(DatabaseError::Serialization(format!(
                     "Invalid created_at date: {}",
@@ -267,6 +268,7 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
                     Some(notes_str.to_string())
                 }
             },
+            credential_type: CredentialType::Password,
             created_at: chrono::Utc::now(),
             modified_at: chrono::Utc::now(),
             favorite: record.get(7).map(|s| s == "true").unwrap_or(false),
@@ -365,6 +367,7 @@ mod tests {
             password: "password123".to_string(),
             url: Some("https://example.com".to_string()),
             notes: Some("Test notes".to_string()),
+            credential_type: CredentialType::Password,
             created_at: chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             modified_at: chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             favorite: true,
