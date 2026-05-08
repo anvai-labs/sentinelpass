@@ -435,6 +435,21 @@ enum SecretCommands {
         client_id: Option<String>,
     },
 
+    /// Show local-tool secret access audit events
+    Audit {
+        /// Optional client id filter
+        #[arg(long)]
+        client_id: Option<String>,
+
+        /// Maximum audit rows to inspect
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// Show only denied or failed access events
+        #[arg(long)]
+        failures_only: bool,
+    },
+
     /// Retrieve a single authorized secret field through the unlocked daemon
     Get {
         /// Local tool client id, for example `victor`
@@ -896,6 +911,85 @@ fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
     output
 }
 
+fn load_external_secret_audit_events(limit: usize) -> Result<Vec<sentinelpass_core::AuditEntry>> {
+    let logger = sentinelpass_core::AuditLogger::new(sentinelpass_core::get_audit_log_dir())
+        .map_err(|e| anyhow::anyhow!("Failed to open audit log: {}", e))?;
+    logger
+        .get_entries(limit)
+        .map_err(|e| anyhow::anyhow!("Failed to read audit log: {}", e))
+}
+
+fn render_external_secret_audit_report(
+    entries: &[sentinelpass_core::AuditEntry],
+    client_id: Option<&str>,
+    failures_only: bool,
+) -> String {
+    let client_id = client_id.map(|value| value.trim().to_ascii_lowercase());
+    let events: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match &entry.event_type {
+            sentinelpass_core::AuditEventType::ExternalSecretAccess {
+                client_id: event_client_id,
+                domain,
+                field,
+                purpose,
+                success,
+            } => {
+                if failures_only && *success {
+                    return None;
+                }
+
+                let event_client_normalized = event_client_id
+                    .as_deref()
+                    .map(|value| value.trim().to_ascii_lowercase());
+                if client_id
+                    .as_ref()
+                    .is_some_and(|client_id| event_client_normalized.as_ref() != Some(client_id))
+                {
+                    return None;
+                }
+
+                Some((
+                    entry,
+                    event_client_id.as_deref().unwrap_or("legacy"),
+                    domain.as_str(),
+                    field.as_deref().unwrap_or("unknown"),
+                    purpose.as_deref().unwrap_or("-"),
+                    *success,
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+
+    if events.is_empty() {
+        return "No external secret audit events found".to_string();
+    }
+
+    let mut output = format!(
+        "{:<20} {:<8} {:<16} {:<24} {:<10} Purpose\n",
+        "Timestamp", "Status", "Client", "Domain", "Field"
+    );
+    output.push_str(&"-".repeat(96));
+    output.push('\n');
+
+    for (entry, client_id, domain, field, purpose, success) in &events {
+        let status = if *success { "allowed" } else { "denied" };
+        output.push_str(&format!(
+            "{:<20} {:<8} {:<16} {:<24} {:<10} {}\n",
+            entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            status,
+            client_id,
+            domain,
+            field,
+            purpose
+        ));
+    }
+
+    output.push_str(&format!("Total: {} events", events.len()));
+    output
+}
+
 fn default_public_key_path(
     private_key_path: &Path,
     explicit_public_key: Option<&PathBuf>,
@@ -1027,6 +1121,21 @@ fn main() -> Result<()> {
             SecretCommands::List { ref client_id } => {
                 let grants = list_external_secret_grants(client_id.as_deref())?;
                 println!("{}", render_external_secret_grants(&grants));
+            }
+            SecretCommands::Audit {
+                ref client_id,
+                limit,
+                failures_only,
+            } => {
+                let entries = load_external_secret_audit_events(limit)?;
+                println!(
+                    "{}",
+                    render_external_secret_audit_report(
+                        &entries,
+                        client_id.as_deref(),
+                        failures_only
+                    )
+                );
             }
             SecretCommands::Get {
                 client_id,
@@ -2619,6 +2728,80 @@ mod tests {
             }
             _ => panic!("expected secret list command"),
         }
+    }
+
+    #[test]
+    fn parses_secret_audit_contract_for_local_tools() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "secret",
+            "audit",
+            "--client-id",
+            "victor",
+            "--limit",
+            "25",
+            "--failures-only",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command:
+                    SecretCommands::Audit {
+                        client_id,
+                        limit,
+                        failures_only,
+                    },
+            } => {
+                assert_eq!(client_id, Some("victor".to_string()));
+                assert_eq!(limit, 25);
+                assert!(failures_only);
+            }
+            _ => panic!("expected secret audit command"),
+        }
+    }
+
+    #[test]
+    fn renders_external_secret_audit_report_with_filters() {
+        let entries = vec![
+            sentinelpass_core::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                event_type: sentinelpass_core::AuditEventType::ExternalSecretAccess {
+                    client_id: Some("victor".to_string()),
+                    domain: "anthropic".to_string(),
+                    field: Some("password".to_string()),
+                    purpose: Some("victor-auth".to_string()),
+                    success: true,
+                },
+                severity: 3,
+                context: "granted".to_string(),
+                pid: None,
+                tid: None,
+            },
+            sentinelpass_core::AuditEntry {
+                timestamp: chrono::Utc::now(),
+                event_type: sentinelpass_core::AuditEventType::ExternalSecretAccess {
+                    client_id: Some("other".to_string()),
+                    domain: "anthropic".to_string(),
+                    field: Some("password".to_string()),
+                    purpose: Some("test".to_string()),
+                    success: false,
+                },
+                severity: 2,
+                context: "denied".to_string(),
+                pid: None,
+                tid: None,
+            },
+        ];
+
+        let rendered = render_external_secret_audit_report(&entries, Some("victor"), false);
+
+        assert!(rendered.contains("victor"));
+        assert!(rendered.contains("anthropic"));
+        assert!(rendered.contains("password"));
+        assert!(rendered.contains("victor-auth"));
+        assert!(!rendered.contains("other"));
+        assert!(rendered.contains("Total: 1 events"));
     }
 
     #[test]

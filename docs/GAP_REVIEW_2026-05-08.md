@@ -260,3 +260,4 @@ Completed TDD slice:
 - Passkey reference creation now has a dedicated metadata-only CLI path via `sentinelpass passkey add`, avoiding generic password-entry creation while preserving platform-authenticator custody.
 - External secret audit events now record local-tool client id, requested domain, field, purpose, and success as structured data instead of relying only on free-form audit context.
 - External secret policy lifecycle now supports allowlist inspection and revocation through `sentinelpass secret list` and `sentinelpass secret revoke <client_id> --domain <domain> --field <field>`.
+- Local-tool secret access now has a human-readable audit surface via `sentinelpass secret audit [--client-id <id>] [--failures-only]`.
