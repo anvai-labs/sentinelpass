@@ -263,3 +263,4 @@ Completed TDD slice:
 - Local-tool secret access now has a human-readable audit surface via `sentinelpass secret audit [--client-id <id>] [--failures-only]`.
 - Local-tool grants now support optional expiry via `sentinelpass secret allow <client_id> --domain <domain> --expires-in <duration>`, and daemon authorization denies expired grants.
 - Relay startup now validates config values for listener address, payload/rate/pairing limits, cleanup retention, and nonce freshness before opening storage or binding the server.
+- Relay health checks now return structured JSON with status, service, and version fields for self-host observability.
