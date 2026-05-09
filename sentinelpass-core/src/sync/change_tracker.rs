@@ -5,7 +5,7 @@ use crate::sync::crypto::encrypt_for_sync;
 use crate::sync::models::{
     CredentialPayload, DomainPayload, SshKeyPayload, SyncEntryBlob, SyncEntryType, TotpPayload,
 };
-use crate::{CredentialType, DatabaseError, Result};
+use crate::{CredentialType, DatabaseError, PasswordManagerError, Result};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -64,7 +64,7 @@ pub fn collect_pending_credential_blobs(
         ) = row.map_err(DatabaseError::Sqlite)?;
 
         let sync_id = Uuid::parse_str(&sync_id_str)
-            .map_err(|e| DatabaseError::Other(format!("Invalid sync_id: {}", e)))?;
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
             // Tombstone: empty encrypted payload
@@ -196,7 +196,7 @@ pub fn collect_pending_ssh_key_blobs(
         ) = row.map_err(DatabaseError::Sqlite)?;
 
         let sync_id = Uuid::parse_str(&sync_id_str)
-            .map_err(|e| DatabaseError::Other(format!("Invalid sync_id: {}", e)))?;
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
             let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
@@ -308,7 +308,7 @@ pub fn collect_pending_totp_blobs(
         ) = row.map_err(DatabaseError::Sqlite)?;
 
         let sync_id = Uuid::parse_str(&sync_id_str)
-            .map_err(|e| DatabaseError::Other(format!("Invalid sync_id: {}", e)))?;
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
             let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
