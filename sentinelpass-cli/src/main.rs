@@ -704,7 +704,7 @@ fn build_passkey_reference_entry(
         entry_id: None,
         title: format!("Passkey reference: {}", relying_party_id),
         username: account_label,
-        password: reference,
+        password: reference.into(),
         url: Some(relying_party_id),
         notes,
         credential_type: CredentialType::PasskeyReference,
@@ -1556,7 +1556,7 @@ fn main() -> Result<()> {
                 entry_id: None,
                 title: title.to_string(),
                 username: username.to_string(),
-                password: password_str,
+                password: password_str.into(),
                 url: url.clone(),
                 notes: notes.clone(),
                 credential_type,
@@ -1624,7 +1624,7 @@ fn main() -> Result<()> {
                                     println!(
                                         "{}: {}",
                                         secret_value_label(entry.credential_type),
-                                        entry.password
+                                        entry.password.as_str()
                                     );
                                 }
                             }
@@ -1658,7 +1658,7 @@ fn main() -> Result<()> {
                     println!(
                         "{}: {}",
                         secret_value_label(entry.credential_type),
-                        entry.password
+                        entry.password.as_str()
                     );
                     if let Some(url) = entry.url {
                         println!("URL: {}", url);
@@ -1828,7 +1828,7 @@ fn main() -> Result<()> {
                 entry_id: Some(id),
                 title: new_title,
                 username: new_username,
-                password: new_password,
+                password: new_password.into(),
                 url: new_url,
                 notes: new_notes,
                 credential_type: existing_entry.credential_type,

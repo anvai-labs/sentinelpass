@@ -160,7 +160,7 @@ pub fn bridge_entry_add(
         entry_id: None,
         title: title.to_string(),
         username: username.to_string(),
-        password: password.to_string(),
+        password: password.to_string().into(),
         url: if url.is_empty() {
             None
         } else {
@@ -217,7 +217,7 @@ pub fn bridge_entry_update(
         existing.username = u.to_string();
     }
     if let Some(p) = password {
-        existing.password = p.to_string();
+        existing.password = p.to_string().into();
     }
     if let Some(u) = url {
         existing.url = if u.is_empty() {
