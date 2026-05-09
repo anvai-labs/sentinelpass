@@ -210,8 +210,12 @@ jobs:
 
       - name: Run integration tests
         run: |
-          # Run mobile bridge integration tests
-          cargo test --package sentinelpass-mobile-bridge --test integration_test --target aarch64-apple-ios-sim -- --nocapture
+          # Run mobile bridge integration tests on the host (macOS) target.
+          # The aarch64-apple-ios-sim target produces binaries that cannot be
+          # executed directly on macOS (DYLD_ROOT_PATH not set for simulator
+          # program); the host target exercises the same logic without requiring
+          # a running simulator.
+          cargo test --package sentinelpass-mobile-bridge --test integration_test -- --nocapture
 
       - name: Test bridge API
         run: |
