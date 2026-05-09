@@ -5,7 +5,7 @@ use crate::{
     audit::{get_audit_log_dir, AuditEventType, AuditLogger},
     crypto::KeyHierarchy,
     database::Database,
-    DatabaseError, PasswordManagerError, Result,
+    PasswordManagerError, Result,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -99,11 +99,7 @@ impl VaultManager {
             )));
         }
 
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         // Validate that the provided master password can actually unlock this vault.
         let (kdf_params, wrapped_dek) = Self::load_vault_metadata(&db)?;
@@ -122,11 +118,7 @@ impl VaultManager {
 
     /// Disable biometric unlock and clear keychain stored secret.
     pub fn disable_biometric_unlock(&self) -> Result<()> {
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         if let Some(biometric_ref) = Self::load_biometric_ref(&db)? {
             let _ = crate::biometric::BiometricManager::clear_vault_dek(&biometric_ref);
@@ -138,11 +130,7 @@ impl VaultManager {
 
     /// Check whether biometric unlock is enabled for this vault instance.
     pub fn biometric_unlock_enabled(&self) -> Result<bool> {
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
         Ok(Self::load_biometric_ref(&db)?.is_some())
     }
 }

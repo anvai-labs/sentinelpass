@@ -509,6 +509,7 @@ mod tests {
     use super::*;
     use crate::{Entry, VaultManager};
     use chrono::Utc;
+    use tempfile::TempDir;
 
     fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
         Entry {
@@ -527,8 +528,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_credential_does_not_return_passkey_reference_secret() {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let vault_path = std::env::temp_dir().join(format!("sentinelpass_passkey_{suffix}.db"));
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
         let password = b"test_password";
 
         let vault = VaultManager::create(&vault_path, password).unwrap();
@@ -547,13 +548,12 @@ mod tests {
         let credential = daemon_vault.get_credential("example.com").await.unwrap();
 
         assert!(credential.is_none());
-        let _ = std::fs::remove_file(vault_path);
     }
 
     #[tokio::test]
     async fn get_credential_skips_passkey_reference_and_returns_password_entry() {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let vault_path = std::env::temp_dir().join(format!("sentinelpass_password_{suffix}.db"));
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
         let password = b"test_password";
 
         let vault = VaultManager::create(&vault_path, password).unwrap();
@@ -583,13 +583,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(credential.password, "password-secret");
-        let _ = std::fs::remove_file(vault_path);
     }
 
     #[tokio::test]
     async fn list_domain_credentials_does_not_include_passkey_references() {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let vault_path = std::env::temp_dir().join(format!("sentinelpass_list_{suffix}.db"));
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
         let password = b"test_password";
 
         let vault = VaultManager::create(&vault_path, password).unwrap();
@@ -611,7 +610,6 @@ mod tests {
             .unwrap();
 
         assert!(credentials.is_empty());
-        let _ = std::fs::remove_file(vault_path);
     }
 
     #[test]

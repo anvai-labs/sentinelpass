@@ -266,13 +266,7 @@ fn normalize_domain(domain: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_allowlist_path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "sentinelpass_external_secret_allowlist_{}.json",
-            uuid::Uuid::new_v4()
-        ))
-    }
+    use tempfile::TempDir;
 
     #[test]
     fn allow_grant_authorizes_exact_client_domain_and_field() {
@@ -392,7 +386,8 @@ mod tests {
 
     #[test]
     fn save_and_load_preserves_grants_with_private_file_permissions() {
-        let path = temp_allowlist_path();
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("allowlist.json");
         let mut allowlist = ExternalSecretAllowlist::default();
         allowlist
             .allow("victor", "anthropic", ExternalSecretField::Password)
@@ -409,13 +404,12 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn load_accepts_legacy_grants_without_expiry() {
-        let path = temp_allowlist_path();
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("allowlist.json");
         std::fs::write(
             &path,
             r#"{"grants":[{"client_id":"victor","domain":"anthropic","field":"password"}]}"#,
@@ -427,8 +421,6 @@ mod tests {
         assert_eq!(loaded.grants.len(), 1);
         assert_eq!(loaded.grants[0].expires_at, None);
         assert!(loaded.is_allowed("victor", "anthropic", ExternalSecretField::Password));
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]

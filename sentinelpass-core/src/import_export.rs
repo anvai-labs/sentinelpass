@@ -378,11 +378,7 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-
-    fn temp_export_path(name: &str) -> std::path::PathBuf {
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        std::env::temp_dir().join(format!("sentinelpass_{name}_{suffix}"))
-    }
+    use tempfile::TempDir;
 
     fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
         Entry {
@@ -450,8 +446,9 @@ mod tests {
 
     #[test]
     fn export_json_excludes_passkey_references_from_password_backup() {
-        let vault_path = temp_export_path("vault_json.db");
-        let output_path = temp_export_path("export.json");
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let output_path = tmp.path().join("export.json");
         let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
         vault
             .add_entry(&test_entry(
@@ -474,15 +471,13 @@ mod tests {
         assert!(exported.contains("Example Password"));
         assert!(!exported.contains("Example Passkey"));
         assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
-
-        let _ = std::fs::remove_file(vault_path);
-        let _ = std::fs::remove_file(output_path);
     }
 
     #[test]
     fn export_csv_excludes_passkey_references_from_password_backup() {
-        let vault_path = temp_export_path("vault_csv.db");
-        let output_path = temp_export_path("export.csv");
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let output_path = tmp.path().join("export.csv");
         let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
         vault
             .add_entry(&test_entry(
@@ -505,8 +500,5 @@ mod tests {
         assert!(exported.contains("Example Password"));
         assert!(!exported.contains("Example Passkey"));
         assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
-
-        let _ = std::fs::remove_file(vault_path);
-        let _ = std::fs::remove_file(output_path);
     }
 }

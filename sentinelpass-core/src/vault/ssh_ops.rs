@@ -43,11 +43,7 @@ impl VaultManager {
         }
 
         let _dek = self.key_hierarchy.dek()?;
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         let now = Utc::now().timestamp();
 
@@ -83,11 +79,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         let mut stmt = db
             .conn()
@@ -183,11 +175,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         let mut stmt = db
             .conn()
@@ -233,11 +221,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         let rows_affected = db
             .conn()
@@ -261,11 +245,7 @@ impl VaultManager {
         }
 
         let dek = self.key_hierarchy.dek()?;
-        let db = self.db.lock().map_err(|_| {
-            PasswordManagerError::from(DatabaseError::LockPoisoned(
-                "Failed to lock database".to_string(),
-            ))
-        })?;
+        let db = self.lock_db()?;
 
         let mut stmt = db
             .conn()

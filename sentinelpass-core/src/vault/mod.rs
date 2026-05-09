@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// Credential category stored with a vault entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -187,6 +187,13 @@ impl VaultManager {
         self.key_hierarchy.is_unlocked()
     }
 
+    /// Acquire the database lock, mapping a poison error to a structured error.
+    fn lock_db(&self) -> Result<std::sync::MutexGuard<'_, Database>> {
+        self.db
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned("db lock poisoned".to_string()).into())
+    }
+
     /// Convert raw entry row to summary (decrypt only title and username)
     fn row_to_summary(&self, row: &RawEntryRow) -> Result<EntrySummary> {
         let dek = self.key_hierarchy.dek()?;
@@ -310,10 +317,7 @@ impl VaultManager {
         let sync_id = uuid::Uuid::new_v4().to_string();
 
         // Use repository to insert the entry
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
         let repo = SqliteEntryRepository::new(&db);
         let params = NewEntryParams {
             title: title_blob,
@@ -349,10 +353,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
         let repo = SqliteEntryRepository::new(&db);
         let raw_row = repo
             .get_raw(entry_id)?
@@ -379,10 +380,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
         let repo = SqliteEntryRepository::new(&db);
         let raw_rows = repo.list_raw(EntryFilter::default())?;
 
@@ -421,10 +419,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
         let repo = SqliteEntryRepository::new(&db);
         let raw_rows = repo.find_by_domain(domain)?;
 
@@ -446,10 +441,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
         let repo = SqliteEntryRepository::new(&db);
 
         // Get total count
@@ -501,10 +493,7 @@ impl VaultManager {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
 
         let now = chrono::Utc::now().timestamp();
 
@@ -618,10 +607,7 @@ impl VaultManager {
         let now = Utc::now().timestamp();
 
         // Use repository pattern to update
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("Failed to lock database".to_string()))?;
+        let db = self.lock_db()?;
         let repo = SqliteEntryRepository::new(&db);
 
         let params = UpdateEntryParams {
@@ -653,10 +639,7 @@ impl VaultManager {
 
     /// Get sync status from the database.
     pub fn get_sync_status(&self) -> Result<crate::sync::models::SyncStatus> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig::load(db.conn())?;
         let pending = crate::sync::change_tracker::count_pending_changes(db.conn())?;
 
@@ -673,19 +656,13 @@ impl VaultManager {
     /// Load the local sync device identity (Ed25519 signing key + metadata) if present.
     pub fn load_sync_device_identity(&self) -> Result<Option<crate::sync::device::DeviceIdentity>> {
         let dek = self.key_hierarchy.dek()?;
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         crate::sync::device::DeviceIdentity::load_from_db(db.conn(), dek)
     }
 
     /// Export the encrypted pairing bootstrap payload used to onboard a new sync device.
     pub fn export_pairing_bootstrap(&self) -> Result<crate::sync::models::VaultBootstrap> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig::load(db.conn())?;
         let relay_url = config.relay_url.ok_or_else(|| {
             PasswordManagerError::InvalidInput("Sync relay URL not set".to_string())
@@ -731,10 +708,7 @@ impl VaultManager {
         let mut imported_hierarchy = KeyHierarchy::new();
         imported_hierarchy.unlock_vault(master_password, &imported_kdf, &imported_wrapped)?;
 
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let conn = db.conn();
 
         let entry_count: i64 = conn
@@ -791,10 +765,7 @@ impl VaultManager {
         vault_id: uuid::Uuid,
         identity: &crate::sync::device::DeviceIdentity,
     ) -> Result<()> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig {
             sync_enabled: true,
             vault_id: Some(vault_id),
@@ -813,10 +784,7 @@ impl VaultManager {
 
     /// Disable sync (preserves identity but sets enabled = false).
     pub fn disable_sync(&self) -> Result<()> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let mut config = crate::sync::config::SyncConfig::load(db.conn())?;
         config.sync_enabled = false;
         config.save(db.conn())?;
@@ -894,10 +862,7 @@ impl VaultManager {
 
     /// List sync devices from local cache.
     pub fn list_sync_devices(&self) -> Result<Vec<crate::sync::models::SyncDeviceInfo>> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let mut stmt = db.conn().prepare(
             "SELECT device_id, device_name, device_type, public_key, registered_at, last_sync, revoked, revoked_at
              FROM sync_devices ORDER BY registered_at"
@@ -926,10 +891,7 @@ impl VaultManager {
 
     /// Revoke a sync device locally.
     pub fn revoke_sync_device(&self, device_id: &str) -> Result<()> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| DatabaseError::LockPoisoned(e.to_string()))?;
+        let db = self.lock_db()?;
         let now = Utc::now().timestamp();
         db.conn()
             .execute(

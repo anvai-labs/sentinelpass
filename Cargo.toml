@@ -73,6 +73,7 @@ home = "0.5"
 
 # Testing
 proptest = "1.4"
+tempfile = "3.10"
 
 # SSH keys
 ssh-key = { version = "0.6", features = ["crypto", "encryption"] }

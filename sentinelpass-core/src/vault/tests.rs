@@ -1,5 +1,6 @@
 use super::*;
 use crate::database::Database;
+use tempfile::TempDir;
 
 #[test]
 fn test_vault_create_and_open() {
@@ -186,8 +187,8 @@ fn test_vault_locked_operations_fail() {
 
 #[test]
 fn test_vault_lockout_after_repeated_failed_unlocks() {
-    let temp_path =
-        std::env::temp_dir().join(format!("sentinelpass_lockout_{}.db", uuid::Uuid::new_v4()));
+    let tmp = TempDir::new().unwrap();
+    let temp_path = tmp.path().join("vault.db");
     let password = b"test_password";
 
     let vault = VaultManager::create(&temp_path, password).unwrap();
@@ -209,8 +210,6 @@ fn test_vault_lockout_after_repeated_failed_unlocks() {
         still_locked_with_correct_password,
         Err(PasswordManagerError::LockedOut(_))
     ));
-
-    let _ = std::fs::remove_file(&temp_path);
 }
 
 #[test]
