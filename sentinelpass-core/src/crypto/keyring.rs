@@ -213,7 +213,7 @@ impl KeyHierarchy {
             .try_into()
             .map_err(|_| CryptoError::DecryptionFailed("Invalid DEK format".to_string()))?;
 
-        Ok(DataEncryptionKey::from_bytes(dek_array))
+        Ok(DataEncryptionKey::from_bytes(&mut { dek_array }))
     }
 }
 

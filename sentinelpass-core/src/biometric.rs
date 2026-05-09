@@ -150,7 +150,7 @@ impl BiometricManager {
             )))
         })?;
 
-        Ok(DataEncryptionKey::from_bytes(key_bytes))
+        Ok(DataEncryptionKey::from_bytes(&mut { key_bytes }))
     }
 
     /// Store the vault DEK in an OS-protected key store for biometric unlock.

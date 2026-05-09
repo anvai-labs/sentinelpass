@@ -51,6 +51,7 @@ pub type Result<T> = std::result::Result<T, PasswordManagerError>;
 
 /// Structured error type for database and I/O operations
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum DatabaseError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -79,6 +80,7 @@ pub enum DatabaseError {
 
 /// General error type for password manager operations
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum PasswordManagerError {
     #[error("Crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),

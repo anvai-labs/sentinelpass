@@ -2,8 +2,34 @@
 
 use crate::{CredentialType, DatabaseError, Entry, PasswordManagerError, Result, VaultManager};
 use serde::{Deserialize, Serialize};
+use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+const PLAINTEXT_EXPORT_WARNING: &str =
+    "WARNING: This file contains UNENCRYPTED passwords. \
+     Treat it like a master password. Delete it immediately after use.";
+
+/// Restrict an export file to owner-read/write only (mode 0600 on Unix).
+/// On non-Unix platforms this is a no-op; the caller's OS-level protections apply.
+fn set_export_permissions(file: &std::fs::File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        file.set_permissions(Permissions::from_mode(0o600))
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::FileIo(format!(
+                    "Failed to restrict export file permissions: {}",
+                    e
+                )))
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
 
 /// Export format for vault data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +95,16 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
         )))
     })?;
 
+    set_export_permissions(&file)?;
+
+    // Prepend a plaintext warning so the file is obviously sensitive.
+    write!(file, "// {}\n", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
+        PasswordManagerError::from(DatabaseError::FileIo(format!(
+            "Failed to write export warning: {}",
+            e
+        )))
+    })?;
+
     file.write_all(json.as_bytes()).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to write export: {}",
@@ -93,7 +129,15 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
         )))
     })?;
 
-    // Write CSV header
+    set_export_permissions(&file)?;
+
+    // Write CSV header with plaintext warning prepended.
+    writeln!(file, "# {}", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
+        PasswordManagerError::from(DatabaseError::FileIo(format!(
+            "Failed to write export warning: {}",
+            e
+        )))
+    })?;
     writeln!(
         file,
         "Title,Username,Password,URL,Notes,Created At,Modified At,Favorite"

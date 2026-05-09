@@ -4997,6 +4997,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "windows 0.58.0",
  "x11",

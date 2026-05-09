@@ -37,18 +37,17 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOpti
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
 
-fn log_daemon_audit(event_type: AuditEventType, context: &str) {
-    match AuditLogger::new(crate::get_audit_log_dir()) {
-        Ok(logger) => {
-            if let Err(e) = logger.log(event_type, context) {
-                warn!("Failed to write daemon audit event: {}", e);
-            }
+fn log_daemon_audit(logger: Option<&AuditLogger>, event_type: AuditEventType, context: &str) {
+    if let Some(lg) = logger {
+        if let Err(e) = lg.log(event_type, context) {
+            warn!("Failed to write daemon audit event: {}", e);
         }
-        Err(e) => warn!("Failed to initialize daemon audit logger: {}", e),
     }
+    // No logger → init failed at startup; that warning was already emitted then.
 }
 
 fn log_external_secret_audit(
+    logger: Option<&AuditLogger>,
     client_id: Option<&str>,
     domain: &str,
     field: Option<&str>,
@@ -57,6 +56,7 @@ fn log_external_secret_audit(
     context: &str,
 ) {
     log_daemon_audit(
+        logger,
         AuditEventType::ExternalSecretAccess {
             client_id: client_id.map(ToString::to_string),
             domain: domain.to_string(),
@@ -254,6 +254,9 @@ pub struct IpcServer {
     vault: Arc<DaemonVault>,
     auth_token: String,
     external_secret_allowlist_path: PathBuf,
+    /// Shared audit logger — initialised once at startup so every IPC request
+    /// reuses the open file handle instead of reopening it per-call.
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl IpcServer {
@@ -274,11 +277,19 @@ impl IpcServer {
         auth_token: String,
         external_secret_allowlist_path: PathBuf,
     ) -> Self {
+        let audit_logger = match AuditLogger::new(crate::get_audit_log_dir()) {
+            Ok(lg) => Some(Arc::new(lg)),
+            Err(e) => {
+                warn!("IpcServer: audit logger unavailable — audit events will be dropped: {}", e);
+                None
+            }
+        };
         Self {
             socket_path,
             vault,
             auth_token,
             external_secret_allowlist_path,
+            audit_logger,
         }
     }
 
@@ -642,6 +653,7 @@ impl IpcServer {
                                     ExternalSecretField::Title => Some(cred.title),
                                 };
                                 log_external_secret_audit(
+                                    self.audit_logger.as_deref(),
                                     Some(&client_id),
                                     &domain,
                                     Some(field.as_str()),
@@ -660,6 +672,7 @@ impl IpcServer {
                             }
                             Ok(None) => {
                                 log_external_secret_audit(
+                                    self.audit_logger.as_deref(),
                                     Some(&client_id),
                                     &domain,
                                     Some(field.as_str()),
@@ -679,6 +692,7 @@ impl IpcServer {
                             Err(e) => {
                                 error!("Failed to get external secret: {}", e);
                                 log_external_secret_audit(
+                                    self.audit_logger.as_deref(),
                                     Some(&client_id),
                                     &domain,
                                     Some(field.as_str()),
@@ -699,6 +713,7 @@ impl IpcServer {
                     }
                     Ok(_) => {
                         log_external_secret_audit(
+                            self.audit_logger.as_deref(),
                             Some(&client_id),
                             &domain,
                             Some(field.as_str()),
@@ -736,6 +751,7 @@ impl IpcServer {
                 match self.vault.get_credential(&domain).await {
                     Ok(Some(cred)) => {
                         log_external_secret_audit(
+                            self.audit_logger.as_deref(),
                             None,
                             &domain,
                             None,
@@ -752,6 +768,7 @@ impl IpcServer {
                     Ok(None) => {
                         debug!("No credential found for domain '{}'", domain);
                         log_external_secret_audit(
+                            self.audit_logger.as_deref(),
                             None,
                             &domain,
                             None,
@@ -768,6 +785,7 @@ impl IpcServer {
                     Err(e) => {
                         error!("Failed to get credential: {}", e);
                         log_external_secret_audit(
+                            self.audit_logger.as_deref(),
                             None,
                             &domain,
                             None,
@@ -900,6 +918,7 @@ impl IpcServer {
                 match self.vault.unlock_with_biometric(&reason).await {
                     Ok(_) => {
                         log_daemon_audit(
+                            self.audit_logger.as_deref(),
                             AuditEventType::BiometricUnlockRequested { success: true },
                             "Daemon biometric unlock succeeded",
                         );
@@ -911,6 +930,7 @@ impl IpcServer {
                     Err(e) => {
                         warn!("Failed biometric unlock via IPC: {}", e);
                         log_daemon_audit(
+                            self.audit_logger.as_deref(),
                             AuditEventType::BiometricUnlockRequested { success: false },
                             "Daemon biometric unlock failed",
                         );

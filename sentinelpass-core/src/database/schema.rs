@@ -17,22 +17,40 @@ impl Database {
     /// Open a database at the specified path
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
-
-        // Enable foreign key constraints
-        conn.execute("PRAGMA foreign_keys = ON", [])
-            .map_err(DatabaseError::Sqlite)?;
-
+        Self::apply_pragmas(&conn)?;
         Ok(Self { conn })
     }
 
     /// Create a new in-memory database for testing
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(DatabaseError::Sqlite)?;
-
+        // WAL and busy_timeout are no-ops for in-memory; foreign_keys still matters.
         conn.execute("PRAGMA foreign_keys = ON", [])
             .map_err(DatabaseError::Sqlite)?;
-
         Ok(Self { conn })
+    }
+
+    /// Apply connection-level PRAGMAs that improve reliability and performance.
+    ///
+    /// WAL mode — allows concurrent readers while a writer is active.
+    /// busy_timeout — retries for up to 5 s before returning SQLITE_BUSY instead
+    ///   of failing immediately under concurrent daemon access.
+    /// synchronous = NORMAL — safe with WAL (the WAL itself is always fsynced);
+    ///   faster than FULL without sacrificing durability for typical workloads.
+    ///
+    /// Uses `pragma_update` (not `execute`) for pragmas that return a result row
+    /// such as `journal_mode`, which would cause an error with plain `execute`.
+    fn apply_pragmas(conn: &Connection) -> Result<()> {
+        use rusqlite::DatabaseName;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(Some(DatabaseName::Main), "journal_mode", "WAL")
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(None, "busy_timeout", 5000i64)
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
     }
 
     /// Initialize the database schema (creates v2 tables for new vaults)

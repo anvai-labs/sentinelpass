@@ -13,6 +13,7 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Duration};
 use tracing::{info, warn};
+use url::Url;
 
 /// Vault state for the daemon
 #[derive(Clone, Copy, Debug)]
@@ -30,50 +31,47 @@ pub struct DaemonVault {
     inactivity_timeout: Duration,
 }
 
+/// Extract the bare hostname from a URL or hostname string.
+///
+/// Tries the `url` crate first (handles schemes, auth, ports, IPv6, encoding).
+/// Falls back to treating the input as a bare hostname so that plain domain
+/// strings like `"example.com"` still work without a scheme prefix.
 fn normalize_host(value: &str) -> Option<String> {
-    let normalized = value.trim().trim_matches('.').to_ascii_lowercase();
-    if normalized.is_empty() {
+    let trimmed = value.trim().trim_matches('.').to_ascii_lowercase();
+    if trimmed.is_empty() {
         return None;
     }
 
-    let mut host = normalized.as_str();
+    // Extract the host string from a parsed URL, stripping IPv6 brackets that
+    // url::Url includes in host_str() (e.g. "[::1]" → "::1").
+    let extract = |url: Url| -> Option<String> {
+        let h = url.host_str()?.trim_matches('.');
+        let h = h.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(h);
+        if h.is_empty() { None } else { Some(h.to_string()) }
+    };
 
-    if let Some(scheme_pos) = host.find("://") {
-        host = &host[(scheme_pos + 3)..];
-    }
-
-    if let Some(at_pos) = host.rfind('@') {
-        host = &host[(at_pos + 1)..];
-    }
-
-    let host_end = host.find(['/', '?', '#']).unwrap_or(host.len());
-    host = &host[..host_end];
-    host = host.trim_end_matches('.');
-
-    // Bracketed IPv6 URL host: [::1]:443
-    if host.starts_with('[') {
-        if let Some(end) = host.find(']') {
-            let ipv6 = &host[1..end];
-            if !ipv6.is_empty() {
-                return Some(ipv6.to_string());
-            }
-        }
-        return None;
-    }
-
-    // Strip port for host:port. Skip for non-bracketed IPv6.
-    if let Some(colon_pos) = host.rfind(':') {
-        if !host[..colon_pos].contains(':') {
-            host = &host[..colon_pos];
+    // Try parsing as a full URL first; only use the result if a host was found.
+    // "example.com:8443" parses as scheme="example.com" with no host — skip it.
+    if let Ok(url) = Url::parse(&trimmed) {
+        if let Some(host) = extract(url) {
+            return Some(host);
         }
     }
 
-    let host = host.trim().trim_matches('.');
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
+    // No scheme, or scheme-only parse produced no host — prepend a dummy scheme.
+    if let Ok(url) = Url::parse(&format!("dummy://{}", trimmed)) {
+        if let Some(host) = extract(url) {
+            return Some(host);
+        }
     }
+
+    // Last resort: bare hostname. Strip stray brackets (e.g. "[]" → "") and dots.
+    let host = trimmed
+        .trim_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_matches('.');
+    if host.is_empty() { None } else { Some(host.to_string()) }
 }
 
 fn domains_match(request_domain: &str, entry_url_or_domain: &str) -> bool {
