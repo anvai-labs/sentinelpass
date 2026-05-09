@@ -8,9 +8,9 @@ use crate::{
     VaultManager,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use tracing::{info, warn};
 use url::Url;
@@ -25,8 +25,8 @@ pub enum VaultState {
 /// Daemon vault manager with auto-lock functionality
 pub struct DaemonVault {
     vault: Arc<Mutex<Option<VaultManager>>>,
-    state: Arc<RwLock<VaultState>>,
-    last_activity: Arc<RwLock<Instant>>,
+    state: Arc<SyncMutex<VaultState>>,
+    last_activity: Arc<SyncMutex<Instant>>,
     vault_path: PathBuf,
     inactivity_timeout: Duration,
 }
@@ -109,8 +109,8 @@ impl DaemonVault {
 
         Ok(Self {
             vault: Arc::new(Mutex::new(None)),
-            state: Arc::new(RwLock::new(VaultState::Locked)),
-            last_activity: Arc::new(RwLock::new(Instant::now())),
+            state: Arc::new(SyncMutex::new(VaultState::Locked)),
+            last_activity: Arc::new(SyncMutex::new(Instant::now())),
             vault_path,
             inactivity_timeout: Duration::from_secs(inactivity_timeout_sec),
         })
@@ -132,8 +132,8 @@ impl DaemonVault {
     /// Unlock the daemon with an already opened vault manager.
     pub async fn unlock_with_manager(&self, vault: VaultManager) {
         *self.vault.lock().await = Some(vault);
-        *self.state.write().await = VaultState::Unlocked;
-        *self.last_activity.write().await = Instant::now();
+        *self.state.lock().unwrap() = VaultState::Unlocked;
+        *self.last_activity.lock().unwrap() = Instant::now();
 
         info!("Vault unlocked successfully");
 
@@ -158,13 +158,13 @@ impl DaemonVault {
     /// Lock the vault
     pub async fn lock(&self) {
         *self.vault.lock().await = None;
-        *self.state.write().await = VaultState::Locked;
+        *self.state.lock().unwrap() = VaultState::Locked;
         info!("Vault locked");
     }
 
     /// Check if vault is unlocked
     pub async fn is_unlocked(&self) -> bool {
-        matches!(*self.state.read().await, VaultState::Unlocked)
+        matches!(*self.state.lock().unwrap(), VaultState::Unlocked)
     }
 
     /// Get credential by domain.
@@ -449,7 +449,7 @@ impl DaemonVault {
 
     /// Record activity (resets the auto-lock timer)
     pub async fn record_activity(&self) {
-        *self.last_activity.write().await = Instant::now();
+        *self.last_activity.lock().unwrap() = Instant::now();
     }
 
     /// Start the auto-lock background task
@@ -470,11 +470,11 @@ impl DaemonVault {
 
             loop {
                 timer.tick().await;
-                let unlocked = matches!(*state.read().await, VaultState::Unlocked);
-                if unlocked && last_activity.read().await.elapsed() >= timeout {
+                let unlocked = matches!(*state.lock().unwrap(), VaultState::Unlocked);
+                if unlocked && last_activity.lock().unwrap().elapsed() >= timeout {
                     warn!("Auto-locking vault due to inactivity");
                     *vault.lock().await = None;
-                    *state.write().await = VaultState::Locked;
+                    *state.lock().unwrap() = VaultState::Locked;
                 }
             }
         });
