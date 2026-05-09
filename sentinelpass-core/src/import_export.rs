@@ -98,7 +98,7 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     set_export_permissions(&file)?;
 
     // Prepend a plaintext warning so the file is obviously sensitive.
-    write!(file, "// {}\n", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
+    writeln!(file, "// {}", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to write export warning: {}",
             e

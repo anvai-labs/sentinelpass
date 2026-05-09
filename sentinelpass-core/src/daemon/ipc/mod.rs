@@ -231,7 +231,6 @@ pub(super) fn windows_named_pipe_path() -> String {
 }
 
 /// IPC server for daemon communication
-
 pub mod client;
 pub mod server;
 pub use client::IpcClient;

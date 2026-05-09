@@ -1,6 +1,6 @@
 //! SSH key management operations for VaultManager
 
-use super::VaultManager;
+use super::{PaginatedResult, PaginationParams, VaultManager};
 use crate::{DatabaseError, PasswordManagerError, Result};
 use chrono::{DateTime, Utc};
 
@@ -213,6 +213,72 @@ impl VaultManager {
             .map_err(|e| PasswordManagerError::from(DatabaseError::Sqlite(e)))?;
 
         Ok(keys)
+    }
+
+    /// List SSH key summaries with pagination to prevent performance issues with large collections.
+    pub fn list_ssh_keys_paginated(
+        &self,
+        pagination: PaginationParams,
+    ) -> Result<PaginatedResult<crate::ssh::SshKeySummary>> {
+        if !self.is_unlocked() {
+            return Err(PasswordManagerError::VaultLocked);
+        }
+
+        let db = self.lock_db()?;
+
+        let total_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM ssh_keys", [], |row| row.get(0))
+            .map_err(|e| PasswordManagerError::from(DatabaseError::Sqlite(e)))?;
+
+        let limit = i64::from(pagination.limit());
+        let offset = i64::from(pagination.offset());
+
+        let mut stmt = db
+            .conn()
+            .prepare(
+                "SELECT key_id, name, comment, key_type, fingerprint FROM ssh_keys
+                 ORDER BY name LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| PasswordManagerError::from(DatabaseError::Sqlite(e)))?;
+
+        let items = stmt
+            .query_map([limit, offset], |row: &rusqlite::Row<'_>| {
+                let key_id: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let comment: Option<String> = row.get(2)?;
+                let key_type_str: String = row.get(3)?;
+                let fingerprint: String = row.get(4)?;
+
+                let key_type = match key_type_str.as_str() {
+                    "RSA" => crate::ssh::SshKeyType::Rsa,
+                    "ED25519" => crate::ssh::SshKeyType::Ed25519,
+                    "ECDSA" => crate::ssh::SshKeyType::Ecdsa,
+                    "ECDSA-SHA2-NISTP256" => crate::ssh::SshKeyType::EcdsaSha256,
+                    "ECDSA-SHA2-NISTP384" => crate::ssh::SshKeyType::EcdsaSha384,
+                    "ECDSA-SHA2-NISTP521" => crate::ssh::SshKeyType::EcdsaSha521,
+                    _ => crate::ssh::SshKeyType::Rsa,
+                };
+
+                Ok(crate::ssh::SshKeySummary {
+                    key_id,
+                    name,
+                    comment,
+                    key_type,
+                    fingerprint,
+                })
+            })
+            .map_err(|e| PasswordManagerError::from(DatabaseError::Sqlite(e)))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| PasswordManagerError::from(DatabaseError::Sqlite(e)))?;
+
+        let has_more = (offset + items.len() as i64) < total_count;
+
+        Ok(PaginatedResult {
+            items,
+            total_count,
+            has_more,
+        })
     }
 
     /// Delete an SSH key

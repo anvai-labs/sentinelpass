@@ -683,3 +683,96 @@ fn test_pagination_default_params() {
     assert_eq!(params.offset(), 0);
     assert_eq!(params.limit(), 50);
 }
+
+fn add_test_ssh_key(vault: &VaultManager, name: &str) -> i64 {
+    vault
+        .add_ssh_key_plaintext(
+            name.to_string(),
+            None,
+            crate::ssh::SshKeyType::Ed25519,
+            None,
+            "ssh-ed25519 AAAA test".to_string(),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----"
+                .to_string(),
+            format!("SHA256:{}", name),
+        )
+        .unwrap()
+}
+
+#[test]
+fn test_ssh_pagination_first_page() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    for i in 0..30 {
+        add_test_ssh_key(&vault, &format!("key_{:03}", i));
+    }
+
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::new(0, 10))
+        .unwrap();
+
+    assert_eq!(result.items.len(), 10);
+    assert_eq!(result.total_count, 30);
+    assert!(result.has_more);
+}
+
+#[test]
+fn test_ssh_pagination_last_page() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    for i in 0..25 {
+        add_test_ssh_key(&vault, &format!("key_{:03}", i));
+    }
+
+    // Page 2 of page_size=10 → items 20-24 (5 items)
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::new(2, 10))
+        .unwrap();
+
+    assert_eq!(result.items.len(), 5);
+    assert_eq!(result.total_count, 25);
+    assert!(!result.has_more);
+}
+
+#[test]
+fn test_ssh_pagination_empty() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::default())
+        .unwrap();
+
+    assert_eq!(result.items.len(), 0);
+    assert_eq!(result.total_count, 0);
+    assert!(!result.has_more);
+}
+
+#[test]
+fn test_ssh_pagination_sorted_by_name() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    // Insert in reverse order
+    for i in (0..5).rev() {
+        add_test_ssh_key(&vault, &format!("key_{:03}", i));
+    }
+
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::new(0, 10))
+        .unwrap();
+
+    let names: Vec<&str> = result.items.iter().map(|k| k.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "results should be sorted by name");
+}
+
+#[test]
+fn test_ssh_pagination_locked_vault_fails() {
+    let mut vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    vault.lock();
+
+    let err = vault
+        .list_ssh_keys_paginated(PaginationParams::default())
+        .unwrap_err();
+    assert!(
+        matches!(err, PasswordManagerError::VaultLocked),
+        "expected VaultLocked"
+    );
+}
