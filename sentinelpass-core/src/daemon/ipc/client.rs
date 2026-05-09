@@ -6,7 +6,10 @@ use super::{load_ipc_token, IpcEnvelope, IpcMessage};
 #[cfg(unix)]
 use crate::daemon::transport::unix::UnixSocketConnection;
 #[cfg(windows)]
-use crate::daemon::transport::{windows::WindowsNamedPipeConnection, TransportConfig};
+use crate::daemon::transport::{
+    windows::{WindowsNamedPipeConnection, WindowsNamedPipeTransport},
+    TransportConfig,
+};
 use crate::{DatabaseError, PasswordManagerError, Result};
 use std::path::PathBuf;
 #[allow(unused_imports)]

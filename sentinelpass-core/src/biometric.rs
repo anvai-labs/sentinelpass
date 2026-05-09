@@ -142,6 +142,7 @@ impl BiometricManager {
         Self::decode_vault_dek_bytes(decoded)
     }
 
+    #[cfg(any(windows, target_os = "macos", test))]
     fn decode_vault_dek_bytes(decoded: Vec<u8>) -> Result<DataEncryptionKey> {
         let key_bytes: [u8; 32] = decoded.try_into().map_err(|bytes: Vec<u8>| {
             PasswordManagerError::from(DatabaseError::Keyring(format!(
