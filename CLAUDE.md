@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Current Date:** 2026-02-24 (This context may or may not be relevant to your task)
+**Current Date:** 2026-05-09 (This context may or may not be relevant to your task)
 
 ## Project Overview
 
@@ -430,7 +430,7 @@ sqlite3 ~/.sentinelpass/vault.db ".schema"
 1. Single-user vault (multi-user schema exists but not implemented)
 2. TOTP is available in core + CLI; browser/UI setup flows are still maturing
 3. SSH key storage and CLI management are implemented; advanced SSH workflows (UI, richer key lifecycle ops) remain limited
-4. No KeePass import/export yet (schema exists)
+4. KeePass XML import/export is implemented in core + CLI; KDBX (encrypted) format is not yet supported
 5. Biometric unlock is integrated with Windows Hello and macOS LocalAuthentication (Touch ID); Linux remains unsupported
 6. Multi-device sync is feature-gated (`sync`); relay server does not include TLS by default (use a reverse proxy for production)
 7. Sync conflict resolution is Last-Write-Wins only; no manual merge UI
