@@ -4,9 +4,9 @@ use sentinelpass_core::{
     export_to_csv, export_to_json, export_to_keepass_xml, import_from_csv, import_from_json,
     import_from_keepass_xml,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn handle_export(vault_path: PathBuf, output: &PathBuf, format: &str) -> Result<()> {
+pub fn handle_export(vault_path: PathBuf, output: &Path, format: &str) -> Result<()> {
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
@@ -38,7 +38,7 @@ pub fn handle_export(vault_path: PathBuf, output: &PathBuf, format: &str) -> Res
     Ok(())
 }
 
-pub fn handle_import(vault_path: PathBuf, input: &PathBuf, format: &str) -> Result<()> {
+pub fn handle_import(vault_path: PathBuf, input: &Path, format: &str) -> Result<()> {
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
@@ -70,7 +70,7 @@ pub fn handle_import(vault_path: PathBuf, input: &PathBuf, format: &str) -> Resu
     Ok(())
 }
 
-pub fn handle_keepass_import(vault_path: PathBuf, input: &PathBuf) -> Result<()> {
+pub fn handle_keepass_import(vault_path: PathBuf, input: &Path) -> Result<()> {
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
@@ -86,7 +86,7 @@ pub fn handle_keepass_import(vault_path: PathBuf, input: &PathBuf) -> Result<()>
     Ok(())
 }
 
-pub fn handle_keepass_export(vault_path: PathBuf, output: &PathBuf) -> Result<()> {
+pub fn handle_keepass_export(vault_path: PathBuf, output: &Path) -> Result<()> {
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }

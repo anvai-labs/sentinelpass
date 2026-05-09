@@ -47,6 +47,7 @@ pub fn build_passkey_reference_entry(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_passkey_add(
     vault_path: PathBuf,
     relying_party_id: &str,

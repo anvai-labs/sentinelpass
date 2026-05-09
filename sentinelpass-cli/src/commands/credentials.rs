@@ -35,6 +35,7 @@ pub fn trim_optional(value: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_add(
     vault_path: PathBuf,
     title: &str,
@@ -277,6 +278,7 @@ pub fn handle_delete(vault_path: PathBuf, id: i64, force: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_edit(
     vault_path: PathBuf,
     id: i64,
@@ -301,11 +303,9 @@ pub fn handle_edit(
     let existing_entry = vault.get_entry(id)?;
 
     // Determine new values (use existing if not provided)
-    let new_title = title
-        .unwrap_or_else(|| existing_entry.title.as_str())
-        .to_string();
+    let new_title = title.unwrap_or(existing_entry.title.as_str()).to_string();
     let new_username = username
-        .unwrap_or_else(|| existing_entry.username.as_str())
+        .unwrap_or(existing_entry.username.as_str())
         .to_string();
 
     // Handle password

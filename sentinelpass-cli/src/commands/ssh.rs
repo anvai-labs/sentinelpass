@@ -60,7 +60,7 @@ pub fn handle_ssh_agent_status() -> Result<()> {
     Ok(())
 }
 
-pub fn handle_ssh_agent_add(key_path: &PathBuf) -> Result<()> {
+pub fn handle_ssh_agent_add(key_path: &Path) -> Result<()> {
     let client = SshAgentClient::new()?;
     client
         .add_identity(key_path)

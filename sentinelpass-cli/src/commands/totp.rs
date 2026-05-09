@@ -3,6 +3,7 @@ use rpassword::prompt_password;
 use sentinelpass_core::{parse_otpauth_uri, TotpAlgorithm};
 use std::path::PathBuf;
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_totp_add(
     vault_path: PathBuf,
     entry_id: i64,
