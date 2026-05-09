@@ -108,6 +108,26 @@ main {
   color: #5f6368;
 }
 
+/* Toolbar: search + add button */
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.toolbar .search-box {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.btn-add {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  font-size: 18px;
+  line-height: 1;
+}
+
 /* Search box */
 .search-box {
   margin-bottom: 16px;
@@ -198,11 +218,19 @@ main {
 .btn-copy {
   background: #f1f3f4;
   color: #202124;
-  padding: 6px 12px;
+  padding: 5px 10px;
+  font-size: 12px;
 }
 
 .btn-copy:hover {
   background: #e8eaed;
+}
+
+/* Credential action buttons (copy user / copy pass) */
+.credential-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .feature-disabled,
@@ -291,6 +319,89 @@ footer {
 
 .notification-info {
   background: #1a73e8;
+}
+
+/* Panel header (add / settings views) */
+.panel-header {
+  margin-bottom: 16px;
+}
+
+.panel-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #202124;
+}
+
+/* Add-credential form */
+.add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.add-form label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #5f6368;
+  margin-top: 8px;
+}
+
+.add-form input {
+  padding: 8px 10px;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.add-form input:focus {
+  outline: none;
+  border-color: #1a73e8;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* Settings panel */
+.settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.settings-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #f1f3f4;
+}
+
+.settings-label {
+  font-size: 13px;
+  color: #5f6368;
+}
+
+.settings-value {
+  font-size: 13px;
+  color: #202124;
+  font-weight: 500;
+}
+
+.settings-value-hint {
+  color: #80868b;
+  font-weight: normal;
+  font-style: italic;
+}
+
+.settings-hint {
+  margin-top: 16px;
+  font-size: 12px;
+  color: #80868b;
+  line-height: 1.5;
 }
 
 /* Scrollbar */

@@ -116,7 +116,7 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | Issue | File(s) | Status | Target |
 |-------|---------|--------|--------|
 | IPC token uses `!=` instead of constant-time compare | `daemon/ipc.rs:122` | Done (v0.2.0) | v0.2.0 |
-| IPC master password sent in plaintext (Windows TCP risk) | `daemon/ipc.rs` | Open | v0.3.0 |
+| IPC master password sent in plaintext (Windows TCP risk) | `daemon/ipc/client.rs` | Done (v0.3.0) | v0.3.0 |
 | Browser extension popup lacks clipboard auto-clear | `browser-extension/chrome/popup.ts` | Done (v0.2.0) | v0.2.0 |
 | `schema.rs` uses `CryptoError` for database errors | `database/schema.rs` | Done (v0.2.0) | v0.2.0 |
 
@@ -157,8 +157,8 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 - [x] Extract TOTP, SSH, biometric from vault.rs into dedicated modules
 - [x] Proper error typing for database operations (`DatabaseError` enum)
 - [ ] UI state management refactor (if UI grows)
-- [ ] Pagination for `list_entries()` and `list_ssh_keys()`
-- [ ] Browser extension: enable search, add credential, settings
+- [x] Pagination for `list_entries()` and `list_ssh_keys()`
+- [x] Browser extension: enable search, add credential, settings
 
 ### v0.4.0 -- Features (from blog roadmap)
 
@@ -178,3 +178,4 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | 2026-02-16 | v0.1.3 | DeepSeek analysis verification, TECHNICAL_DEBT.md created | -- |
 | 2026-02-16 | v0.2.0 | Hardening: constant-time IPC token, schema error types, indexes/triggers, version validation, remove refinery, proptest, clipboard auto-clear | #16 |
 | 2026-02-16 | v0.3.0 | Architecture: extract vault.rs into vault/ directory module (mod.rs + biometric_ops.rs + totp_ops.rs + ssh_ops.rs + tests.rs), add structured DatabaseError enum with 8 variants replacing catch-all String, migrate ~152 call sites across 10 files. CI fix: gate DatabaseError import for biometric platforms, exclude binary entry points from coverage. | #16 |
+| 2026-05-09 | v0.3.0 | Code quality: IPC split (ipc/mod.rs + server.rs + client.rs), CLI command extraction (9 modules), vault sync/health ops, error refinement (anyhow removed, DatabaseError::Other→InvalidInput), DB PRAGMAs + WAL checkpoint, list_ssh_keys_paginated + crate-root re-exports, popup search/add/settings + sender validation fix, Windows TCP IPC encryption verified Done | -- |

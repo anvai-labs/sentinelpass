@@ -65,6 +65,16 @@ function generateRequestId() {
   return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
+// Returns true when the message was sent from this extension's own popup or options
+// page rather than from a content script embedded in a web page. Popup messages are
+// already authenticated (same extension ID) and have no meaningful "sender domain"
+// to validate against, so domain-context checks must be skipped for them.
+function isPopupSender(sender): boolean {
+  return !sender.tab &&
+    typeof sender.url === 'string' &&
+    sender.url.startsWith(`chrome-extension://${chrome.runtime.id}`);
+}
+
 function normalizeHostForSenderValidation(value) {
   if (!value || typeof value !== 'string') {
     return null;
@@ -784,11 +794,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'get_credential') {
     debugLog('[SentinelPass Background] Handling get_credential for domain:', request.domain);
-    const validation = validateSenderDomainContext(sender, request.domain, 'get_credential');
-    if (!validation.ok) {
-      console.warn('[SentinelPass Background] Blocked get_credential:', validation.error);
-      sendResponse({ success: false, error: validation.error });
-      return true;
+    if (!isPopupSender(sender)) {
+      const validation = validateSenderDomainContext(sender, request.domain, 'get_credential');
+      if (!validation.ok) {
+        console.warn('[SentinelPass Background] Blocked get_credential:', validation.error);
+        sendResponse({ success: false, error: validation.error });
+        return true;
+      }
     }
     handleGetCredential(request.domain, request.request_id)
           .then(response => {
@@ -807,11 +819,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'list_domain_credentials') {
     debugLog('[SentinelPass Background] Handling list_domain_credentials for base domain:', request.domain);
-    const validation = validateSenderDomainContext(sender, request.domain, 'list_domain_credentials');
-    if (!validation.ok) {
-      console.warn('[SentinelPass Background] Blocked list_domain_credentials:', validation.error);
-      sendResponse({ success: false, error: validation.error, data: [] });
-      return true;
+    if (!isPopupSender(sender)) {
+      const validation = validateSenderDomainContext(sender, request.domain, 'list_domain_credentials');
+      if (!validation.ok) {
+        console.warn('[SentinelPass Background] Blocked list_domain_credentials:', validation.error);
+        sendResponse({ success: false, error: validation.error, data: [] });
+        return true;
+      }
     }
     handleListDomainCredentials(request.domain, request.request_id)
           .then(response => {
@@ -857,15 +871,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     debugLog('[SentinelPass Background] Domain:', request.data?.domain);
     debugLog('[SentinelPass Background] URL:', request.data?.url);
     debugLog('[SentinelPass Background] Save trigger:', request.data?.save_trigger || 'unknown');
-    const validation = validateSenderDomainContext(
-      sender,
-      request.data?.domain || request.data?.url || '',
-      'save_credential'
-    );
-    if (!validation.ok) {
-      console.warn('[SentinelPass Background] Blocked save_credential:', validation.error);
-      sendResponse({ success: false, error: validation.error, code: 'sender_domain_mismatch' });
-      return true;
+    if (!isPopupSender(sender)) {
+      const validation = validateSenderDomainContext(
+        sender,
+        request.data?.domain || request.data?.url || '',
+        'save_credential'
+      );
+      if (!validation.ok) {
+        console.warn('[SentinelPass Background] Blocked save_credential:', validation.error);
+        sendResponse({ success: false, error: validation.error, code: 'sender_domain_mismatch' });
+        return true;
+      }
     }
     handleSaveCredential(request.data)
           .then(response => {
@@ -884,11 +900,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'check_credential_exists') {
     debugLog('[SentinelPass Background] Handling check_credential_exists for domain:', request.domain);
-    const validation = validateSenderDomainContext(sender, request.domain, 'check_credential_exists');
-    if (!validation.ok) {
-      console.warn('[SentinelPass Background] Blocked check_credential_exists:', validation.error);
-      sendResponse({ success: false, exists: false, error: validation.error });
-      return true;
+    if (!isPopupSender(sender)) {
+      const validation = validateSenderDomainContext(sender, request.domain, 'check_credential_exists');
+      if (!validation.ok) {
+        console.warn('[SentinelPass Background] Blocked check_credential_exists:', validation.error);
+        sendResponse({ success: false, exists: false, error: validation.error });
+        return true;
+      }
     }
     handleCheckCredentialExists(request.domain)
           .then(exists => {
