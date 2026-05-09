@@ -18,6 +18,84 @@ use crate::{DatabaseError, PasswordManagerError, Result};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+/// Decrypt a sync blob's payload and deserialize it into `T`.
+fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
+    dek: &DataEncryptionKey,
+    blob: &SyncEntryBlob,
+) -> Result<T> {
+    let json = decrypt_from_sync(dek, &blob.encrypted_payload).map_err(PasswordManagerError::Crypto)?;
+    serde_json::from_slice(&json).map_err(|e| DatabaseError::Serialization(e.to_string()).into())
+}
+
+/// Conflict + tombstone preamble for the "existing local row" path.
+///
+/// Returns `true` when the caller should return `Ok(())` immediately (row kept locally
+/// or tombstone has been applied). Returns `false` when the caller should proceed with
+/// the update. `tombstone_sql` must be a parameterized UPDATE with bindings
+/// `(?1 = now_timestamp, ?2 = sync_version, ?3 = local_id)`.
+fn apply_existing_preamble(
+    conn: &rusqlite::Connection,
+    local_id: i64,
+    local_version: i64,
+    local_modified: i64,
+    blob: &SyncEntryBlob,
+    tombstone_sql: &str,
+) -> Result<bool> {
+    if ConflictResolver::resolve(local_version as u64, local_modified, blob) == Resolution::KeepLocal {
+        return Ok(true);
+    }
+    if blob.is_tombstone {
+        conn.execute(
+            tombstone_sql,
+            rusqlite::params![chrono::Utc::now().timestamp(), blob.sync_version as i64, local_id],
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Returns `true` when a new-entry insert should be skipped (tombstone or stale blob).
+#[inline]
+fn skip_new_entry(blob: &SyncEntryBlob) -> bool {
+    blob.is_tombstone || !ConflictResolver::accept_new(blob)
+}
+
+/// Serialize a value with bincode, mapping errors to `DatabaseError::Serialization`.
+fn bincode_ser<T: serde::Serialize>(v: &T) -> Result<Vec<u8>> {
+    bincode::serialize(v).map_err(|e| DatabaseError::Serialization(e.to_string()).into())
+}
+
+struct CredentialBlobs {
+    title: Vec<u8>,
+    username: Vec<u8>,
+    password: Vec<u8>,
+    url: Option<Vec<u8>>,
+    notes: Option<Vec<u8>>,
+    nonce: Vec<u8>,
+    auth_tag: Vec<u8>,
+}
+
+fn prepare_credential_blobs(
+    dek: &DataEncryptionKey,
+    payload: &CredentialPayload,
+) -> Result<CredentialBlobs> {
+    let title_enc = crate::encrypt_string(dek, &payload.title)?;
+    let username_enc = crate::encrypt_string(dek, &payload.username)?;
+    let password_enc = crate::encrypt_string(dek, &payload.password)?;
+    let url_enc = payload.url.as_ref().map(|u| crate::encrypt_string(dek, u)).transpose()?;
+    let notes_enc = payload.notes.as_ref().map(|n| crate::encrypt_string(dek, n)).transpose()?;
+    Ok(CredentialBlobs {
+        nonce: bincode_ser(&title_enc.nonce)?,
+        auth_tag: bincode_ser(&title_enc.auth_tag)?,
+        title: bincode_ser(&title_enc)?,
+        username: bincode_ser(&username_enc)?,
+        password: bincode_ser(&password_enc)?,
+        url: url_enc.as_ref().map(bincode_ser).transpose()?,
+        notes: notes_enc.as_ref().map(bincode_ser).transpose()?,
+    })
+}
+
 /// Orchestrates the full sync lifecycle: push local changes, pull remote changes, resolve conflicts.
 pub struct SyncEngine {
     client: SyncClient,
@@ -207,73 +285,17 @@ impl SyncEngine {
             .ok();
 
         if let Some((entry_id, local_version, local_modified)) = local {
-            // Existing entry: resolve conflict
-            let resolution = ConflictResolver::resolve(local_version as u64, local_modified, blob);
-
-            if resolution == Resolution::KeepLocal {
+            if apply_existing_preamble(
+                conn, entry_id, local_version, local_modified, blob,
+                "UPDATE entries SET is_deleted = 1, deleted_at = ?1,
+                 sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
+                 WHERE entry_id = ?3",
+            )? {
                 return Ok(());
             }
 
-            if blob.is_tombstone {
-                // Soft-delete locally
-                conn.execute(
-                    "UPDATE entries SET is_deleted = 1, deleted_at = ?1,
-                     sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
-                     WHERE entry_id = ?3",
-                    rusqlite::params![
-                        chrono::Utc::now().timestamp(),
-                        blob.sync_version as i64,
-                        entry_id,
-                    ],
-                )
-                .map_err(DatabaseError::Sqlite)?;
-                return Ok(());
-            }
-
-            // Decrypt and apply the remote payload
-            let payload_json = decrypt_from_sync(dek, &blob.encrypted_payload)
-                .map_err(PasswordManagerError::Crypto)?;
-            let payload: CredentialPayload = serde_json::from_slice(&payload_json)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
-            // Re-encrypt fields for local storage
-            let title_enc = crate::encrypt_string(dek, &payload.title)?;
-            let username_enc = crate::encrypt_string(dek, &payload.username)?;
-            let password_enc = crate::encrypt_string(dek, &payload.password)?;
-            let url_enc = payload
-                .url
-                .as_ref()
-                .map(|u| crate::encrypt_string(dek, u))
-                .transpose()?;
-            let notes_enc = payload
-                .notes
-                .as_ref()
-                .map(|n| crate::encrypt_string(dek, n))
-                .transpose()?;
-
-            let title_blob = bincode::serialize(&title_enc)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let username_blob = bincode::serialize(&username_enc)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let password_blob = bincode::serialize(&password_enc)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let url_blob = url_enc
-                .as_ref()
-                .map(|e| {
-                    bincode::serialize(e).map_err(|e| DatabaseError::Serialization(e.to_string()))
-                })
-                .transpose()?;
-            let notes_blob = notes_enc
-                .as_ref()
-                .map(|e| {
-                    bincode::serialize(e).map_err(|e| DatabaseError::Serialization(e.to_string()))
-                })
-                .transpose()?;
-            let nonce_blob = bincode::serialize(&title_enc.nonce)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let auth_tag_blob = bincode::serialize(&title_enc.auth_tag)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
+            let payload: CredentialPayload = decrypt_sync_payload(dek, blob)?;
+            let blobs = prepare_credential_blobs(dek, &payload)?;
             let now = chrono::Utc::now().timestamp();
 
             conn.execute(
@@ -284,14 +306,14 @@ impl SyncEngine {
                     sync_state = 'synced', last_synced_at = ?12
                  WHERE entry_id = ?13",
                 rusqlite::params![
-                    title_blob,
-                    username_blob,
-                    password_blob,
-                    url_blob.as_deref().unwrap_or(&[]),
-                    notes_blob.as_deref().unwrap_or(&[]),
+                    blobs.title,
+                    blobs.username,
+                    blobs.password,
+                    blobs.url.as_deref().unwrap_or(&[]),
+                    blobs.notes.as_deref().unwrap_or(&[]),
                     payload.credential_type.as_str(),
-                    nonce_blob,
-                    auth_tag_blob,
+                    blobs.nonce,
+                    blobs.auth_tag,
                     payload.modified_at,
                     payload.favorite as i32,
                     blob.sync_version as i64,
@@ -315,57 +337,11 @@ impl SyncEngine {
                 .map_err(DatabaseError::Sqlite)?;
             }
         } else {
-            // New entry
-            if blob.is_tombstone {
-                return Ok(()); // Nothing to delete
-            }
-
-            if !ConflictResolver::accept_new(blob) {
+            if skip_new_entry(blob) {
                 return Ok(());
             }
-
-            let payload_json = decrypt_from_sync(dek, &blob.encrypted_payload)
-                .map_err(PasswordManagerError::Crypto)?;
-            let payload: CredentialPayload = serde_json::from_slice(&payload_json)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
-            let title_enc = crate::encrypt_string(dek, &payload.title)?;
-            let username_enc = crate::encrypt_string(dek, &payload.username)?;
-            let password_enc = crate::encrypt_string(dek, &payload.password)?;
-            let url_enc = payload
-                .url
-                .as_ref()
-                .map(|u| crate::encrypt_string(dek, u))
-                .transpose()?;
-            let notes_enc = payload
-                .notes
-                .as_ref()
-                .map(|n| crate::encrypt_string(dek, n))
-                .transpose()?;
-
-            let title_blob = bincode::serialize(&title_enc)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let username_blob = bincode::serialize(&username_enc)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let password_blob = bincode::serialize(&password_enc)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let url_blob = url_enc
-                .as_ref()
-                .map(|e| {
-                    bincode::serialize(e).map_err(|e| DatabaseError::Serialization(e.to_string()))
-                })
-                .transpose()?;
-            let notes_blob = notes_enc
-                .as_ref()
-                .map(|e| {
-                    bincode::serialize(e).map_err(|e| DatabaseError::Serialization(e.to_string()))
-                })
-                .transpose()?;
-            let nonce_blob = bincode::serialize(&title_enc.nonce)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let auth_tag_blob = bincode::serialize(&title_enc.auth_tag)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
+            let payload: CredentialPayload = decrypt_sync_payload(dek, blob)?;
+            let blobs = prepare_credential_blobs(dek, &payload)?;
             let now = chrono::Utc::now().timestamp();
 
             conn.execute(
@@ -375,14 +351,14 @@ impl SyncEngine {
                     sync_id, sync_version, sync_state, last_synced_at, is_deleted
                 ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'synced', ?14, 0)",
                 rusqlite::params![
-                    title_blob,
-                    username_blob,
-                    password_blob,
-                    url_blob.as_deref().unwrap_or(&[]),
-                    notes_blob.as_deref().unwrap_or(&[]),
+                    blobs.title,
+                    blobs.username,
+                    blobs.password,
+                    blobs.url.as_deref().unwrap_or(&[]),
+                    blobs.notes.as_deref().unwrap_or(&[]),
                     payload.credential_type.as_str(),
-                    nonce_blob,
-                    auth_tag_blob,
+                    blobs.nonce,
+                    blobs.auth_tag,
                     payload.created_at,
                     payload.modified_at,
                     payload.favorite as i32,
@@ -423,30 +399,15 @@ impl SyncEngine {
             .ok();
 
         if let Some((key_id, local_version, local_modified)) = local {
-            let resolution = ConflictResolver::resolve(local_version as u64, local_modified, blob);
-            if resolution == Resolution::KeepLocal {
+            if apply_existing_preamble(
+                conn, key_id, local_version, local_modified, blob,
+                "UPDATE ssh_keys SET is_deleted = 1, deleted_at = ?1,
+                 sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
+                 WHERE key_id = ?3",
+            )? {
                 return Ok(());
             }
-
-            if blob.is_tombstone {
-                conn.execute(
-                    "UPDATE ssh_keys SET is_deleted = 1, deleted_at = ?1,
-                     sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
-                     WHERE key_id = ?3",
-                    rusqlite::params![
-                        chrono::Utc::now().timestamp(),
-                        blob.sync_version as i64,
-                        key_id
-                    ],
-                )
-                .map_err(DatabaseError::Sqlite)?;
-                return Ok(());
-            }
-
-            let payload_json = decrypt_from_sync(dek, &blob.encrypted_payload)
-                .map_err(PasswordManagerError::Crypto)?;
-            let payload: SshKeyPayload = serde_json::from_slice(&payload_json)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+            let payload: SshKeyPayload = decrypt_sync_payload(dek, blob)?;
 
             let now = chrono::Utc::now().timestamp();
             conn.execute(
@@ -474,18 +435,10 @@ impl SyncEngine {
             )
             .map_err(DatabaseError::Sqlite)?;
         } else {
-            if blob.is_tombstone {
+            if skip_new_entry(blob) {
                 return Ok(());
             }
-            if !ConflictResolver::accept_new(blob) {
-                return Ok(());
-            }
-
-            let payload_json = decrypt_from_sync(dek, &blob.encrypted_payload)
-                .map_err(PasswordManagerError::Crypto)?;
-            let payload: SshKeyPayload = serde_json::from_slice(&payload_json)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
+            let payload: SshKeyPayload = decrypt_sync_payload(dek, blob)?;
             let now = chrono::Utc::now().timestamp();
             conn.execute(
                 "INSERT INTO ssh_keys (
@@ -534,30 +487,15 @@ impl SyncEngine {
             .ok();
 
         if let Some((totp_id, local_version, local_created)) = local {
-            let resolution = ConflictResolver::resolve(local_version as u64, local_created, blob);
-            if resolution == Resolution::KeepLocal {
+            if apply_existing_preamble(
+                conn, totp_id, local_version, local_created, blob,
+                "UPDATE totp_secrets SET is_deleted = 1, deleted_at = ?1,
+                 sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
+                 WHERE totp_id = ?3",
+            )? {
                 return Ok(());
             }
-
-            if blob.is_tombstone {
-                conn.execute(
-                    "UPDATE totp_secrets SET is_deleted = 1, deleted_at = ?1,
-                     sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
-                     WHERE totp_id = ?3",
-                    rusqlite::params![
-                        chrono::Utc::now().timestamp(),
-                        blob.sync_version as i64,
-                        totp_id
-                    ],
-                )
-                .map_err(DatabaseError::Sqlite)?;
-                return Ok(());
-            }
-
-            let payload_json = decrypt_from_sync(dek, &blob.encrypted_payload)
-                .map_err(PasswordManagerError::Crypto)?;
-            let payload: TotpPayload = serde_json::from_slice(&payload_json)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+            let payload: TotpPayload = decrypt_sync_payload(dek, blob)?;
 
             // Re-link entry_id from parent_credential_sync_id
             let entry_id = payload.parent_credential_sync_id.and_then(|pid| {
@@ -595,18 +533,10 @@ impl SyncEngine {
                 .map_err(DatabaseError::Sqlite)?;
             }
         } else {
-            if blob.is_tombstone {
+            if skip_new_entry(blob) {
                 return Ok(());
             }
-            if !ConflictResolver::accept_new(blob) {
-                return Ok(());
-            }
-
-            let payload_json = decrypt_from_sync(dek, &blob.encrypted_payload)
-                .map_err(PasswordManagerError::Crypto)?;
-            let payload: TotpPayload = serde_json::from_slice(&payload_json)
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
+            let payload: TotpPayload = decrypt_sync_payload(dek, blob)?;
             let entry_id = payload.parent_credential_sync_id.and_then(|pid| {
                 conn.query_row(
                     "SELECT entry_id FROM entries WHERE sync_id = ?1",
