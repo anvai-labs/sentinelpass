@@ -4962,7 +4962,6 @@ name = "sentinelpass-core"
 version = "0.6.3"
 dependencies = [
  "aes-gcm",
- "anyhow",
  "argon2",
  "base64 0.22.1",
  "bincode",

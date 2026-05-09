@@ -90,7 +90,23 @@
       "Bash(./build-ios.sh:*)",
       "Bash(xcrun simctl install:*)",
       "Bash(xcrun simctl launch:*)",
-      "Bash(xcrun simctl:*)"
+      "Bash(xcrun simctl:*)",
+      "Bash(sed -n '185,220p' /Users/vijaysingh/code/sentinelpass/sentinelpass-core/src/daemon/vault_state.rs)",
+      "Bash(sed -n '395,430p' /Users/vijaysingh/code/sentinelpass/sentinelpass-core/src/daemon/vault_state.rs)",
+      "Bash(sed -n '200,215p' /Users/vijaysingh/code/sentinelpass/sentinelpass-core/src/keepass/mod.rs)",
+      "Bash(sed -n '248,272p' /Users/vijaysingh/code/sentinelpass/sentinelpass-core/src/keepass/mod.rs)",
+      "Bash(git -C /Users/vijaysingh/code/sentinelpass status)",
+      "Bash(git -C /Users/vijaysingh/code/codingagent status)",
+      "Bash(git -C /Users/vijaysingh/code/sentinelpass log --oneline -3)",
+      "Bash(git -C /Users/vijaysingh/code/codingagent log --oneline -3)",
+      "Bash(git -C /Users/vijaysingh/code/codingagent diff HEAD -- victor/tools/git_tool.py victor/ui/slash/registry.py)",
+      "Bash(git *)",
+      "Bash(pip show *)",
+      "Bash(pip3 show *)",
+      "Read(//Users/vijaysingh/code/**)",
+      "Read(//Users/vijaysingh/**)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(npm run *)"
     ]
   }
 }
