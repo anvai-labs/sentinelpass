@@ -37,6 +37,10 @@ impl Database {
     ///   of failing immediately under concurrent daemon access.
     /// synchronous = NORMAL — safe with WAL (the WAL itself is always fsynced);
     ///   faster than FULL without sacrificing durability for typical workloads.
+    /// cache_size = -16000 — 16 MB page cache; avoids repeated disk reads for
+    ///   large vaults and outperforms SQLite's 2 MB default.
+    /// temp_store = MEMORY — temp tables and indexes stay in memory instead of
+    ///   being written to a temp file; matters for sort-heavy list/search queries.
     ///
     /// Uses `pragma_update` (not `execute`) for pragmas that return a result row
     /// such as `journal_mode`, which would cause an error with plain `execute`.
@@ -49,6 +53,23 @@ impl Database {
         conn.pragma_update(None, "busy_timeout", 5000i64)
             .map_err(DatabaseError::Sqlite)?;
         conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(DatabaseError::Sqlite)?;
+        // Negative value = kibibytes; -16000 ≈ 16 MB.
+        conn.pragma_update(None, "cache_size", -16000i64)
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Trigger a passive WAL checkpoint to reclaim space after bulk writes.
+    ///
+    /// A passive checkpoint writes dirty WAL pages back to the main database
+    /// file without blocking readers or the writer. Call this after large sync
+    /// operations so the WAL file doesn't grow unboundedly.
+    pub fn wal_checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute("PRAGMA wal_checkpoint(PASSIVE)", [])
             .map_err(DatabaseError::Sqlite)?;
         Ok(())
     }

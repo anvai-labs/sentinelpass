@@ -121,7 +121,7 @@ impl SyncEngine {
         // 2. Pull and apply remote changes
         let _pull_count = self.pull_changes(dek).await?;
 
-        // 3. Update sync metadata
+        // 3. Update sync metadata and checkpoint the WAL.
         let db = self
             .db
             .lock()
@@ -131,6 +131,10 @@ impl SyncEngine {
         config.save(db.conn())?;
 
         let pending = count_pending_changes(db.conn())?;
+
+        // Passive checkpoint: flush WAL pages written during push/pull back to the
+        // main database file without blocking readers.
+        let _ = db.wal_checkpoint();
 
         Ok(SyncStatus {
             enabled: config.sync_enabled,
