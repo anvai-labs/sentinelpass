@@ -56,9 +56,10 @@ function generateRequestId() {
 // already authenticated (same extension ID) and have no meaningful "sender domain"
 // to validate against, so domain-context checks must be skipped for them.
 function isPopupSender(sender) {
-    return !sender.tab &&
-        typeof sender.url === 'string' &&
-        sender.url.startsWith(`chrome-extension://${chrome.runtime.id}`);
+    // Content scripts always have sender.tab; extension pages (popup, options) do not.
+    // sender.id === chrome.runtime.id is already enforced above, so !sender.tab is
+    // sufficient to identify our own popup/options pages on both Chrome and Firefox.
+    return !sender.tab;
 }
 function normalizeHostForSenderValidation(value) {
     if (!value || typeof value !== 'string') {

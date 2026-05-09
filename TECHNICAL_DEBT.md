@@ -135,7 +135,7 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | Issue | File(s) | Status | Target |
 |-------|---------|--------|--------|
 | vault.rs at 1,763 lines (facade doing too much) | `vault/mod.rs` | Done (v0.3.0) | v0.3.0 |
-| UI app.ts uses module-level global state | `sentinelpass-ui/app.ts` | Open | v0.4.0 |
+| UI app.ts uses module-level global state | `sentinelpass-ui/app.ts` | Done (v0.3.0) | v0.4.0 |
 | `PasswordManagerError::Database(String)` loses type info | `lib.rs` | Done (v0.3.0) | v0.3.0 |
 
 ---
@@ -156,7 +156,7 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 
 - [x] Extract TOTP, SSH, biometric from vault.rs into dedicated modules
 - [x] Proper error typing for database operations (`DatabaseError` enum)
-- [ ] UI state management refactor (if UI grows)
+- [x] UI state management refactor (state.ts owns all cross-module state; 3 local `let` vars in app.ts are intentionally module-local)
 - [x] Pagination for `list_entries()` and `list_ssh_keys()`
 - [x] Browser extension: enable search, add credential, settings
 
