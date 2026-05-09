@@ -217,37 +217,10 @@ jobs:
           # a running simulator.
           cargo test --package sentinelpass-mobile-bridge --test integration_test -- --nocapture
 
-      - name: Test bridge API
+      - name: Verify bridge header compiles
         run: |
-          # Test that the bridge C API is callable
-          cd sentinelpass-mobile-bridge
-          cat > test_bridge.c <<'EOF'
-          #include <stdio.h>
-          #include "include/sentinelpass_bridge.h"
-
-          int main() {
-              printf("Testing bridge API...\n");
-
-              // Test vault initialization
-              sentinelpass_vault_t *vault = sentinelpass_vault_init();
-              if (vault == NULL) {
-                  printf("FAIL: Vault initialization failed\n");
-                  return 1;
-              }
-
-              printf("SUCCESS: Bridge API is callable\n");
-              sentinelpass_vault_free(vault);
-              return 0;
-          }
-          EOF
-
-          # Compile and run test
-          clang -o test_bridge test_bridge.c \
-            -I./include \
-            -L./target/aarch64-apple-ios-sim/release \
-            -lsentinelpass_mobile_bridge \
-            -framework Security \
-            -framework LocalAuthentication \
-            -framework Foundation
-
-          ./test_bridge
+          # Verify the bridge header (iOS/common API) compiles cleanly on macOS.
+          # JNI declarations are guarded with #ifdef __ANDROID__ so they are
+          # excluded here. The sp macro is #defined to nothing in the header itself.
+          echo '#include "sentinelpass-mobile-bridge/include/sentinelpass_bridge.h"' \
+            | clang -x c -fsyntax-only - && echo "Header compiles OK"

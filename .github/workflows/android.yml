@@ -143,7 +143,9 @@ jobs:
   # Android Emulator Tests
   emulator-tests:
     name: Android Emulator Tests
-    runs-on: macos-latest
+    # ubuntu-latest is x86_64 and supports KVM hardware acceleration for Android
+    # emulators. macos-latest is now arm64 and cannot run x86_64 AVD images.
+    runs-on: ubuntu-latest
     needs: mobile-bridge
 
     strategy:
@@ -186,6 +188,13 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/*.gradle.kts', '**/libs/*.toml') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
       - name: Run instrumented tests
         uses: reactivecircus/android-emulator-runner@v2

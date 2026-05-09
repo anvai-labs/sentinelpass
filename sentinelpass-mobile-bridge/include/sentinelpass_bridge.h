@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/* cbindgen [fn] prefix — expands to nothing on all platforms */
+#define sp
+
 /**
  * Error codes that can be returned to mobile platforms
  */
@@ -100,6 +103,7 @@ typedef struct SPTotpCode {
 extern "C" {
 #endif // __cplusplus
 
+#ifdef __ANDROID__
 /**
  * Initialize Drive sync (JNI)
  *
@@ -151,6 +155,7 @@ jint Java_com_sentinelpass_DriveSync_nativeUpdateState(JNIEnv Env,
                                                        jlong Handle,
                                                        jlong LastSync,
                                                        jstring PageToken);
+#endif /* __ANDROID__ */
 
 sp enum SPErrorCode sp_biometric_has_key(SPVaultHandle Handle, bool *OutHasKey);
 
