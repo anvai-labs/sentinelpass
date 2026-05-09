@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rpassword::prompt_password;
 use sentinelpass_core::{CredentialType, ExternalSecretField, VaultManager};
 use std::path::PathBuf;
-use tracing::{Level};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 mod commands;
@@ -632,7 +632,10 @@ pub(crate) fn prompt_master_password(confirm: bool) -> Result<String> {
     Ok(password)
 }
 
-pub(crate) fn open_vault_with_password(vault_path: &PathBuf, master_password: &[u8]) -> Result<VaultManager> {
+pub(crate) fn open_vault_with_password(
+    vault_path: &PathBuf,
+    master_password: &[u8],
+) -> Result<VaultManager> {
     match VaultManager::open(vault_path, master_password) {
         Ok(vault) => Ok(vault),
         Err(sentinelpass_core::PasswordManagerError::LockedOut(remaining_seconds)) => {

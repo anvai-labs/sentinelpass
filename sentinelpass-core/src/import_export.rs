@@ -9,8 +9,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-const PLAINTEXT_EXPORT_WARNING: &str =
-    "WARNING: This file contains UNENCRYPTED passwords. \
+const PLAINTEXT_EXPORT_WARNING: &str = "WARNING: This file contains UNENCRYPTED passwords. \
      Treat it like a master password. Delete it immediately after use.";
 
 /// Restrict an export file to owner-read/write only (mode 0600 on Unix).

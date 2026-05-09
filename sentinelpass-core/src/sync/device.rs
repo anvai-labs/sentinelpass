@@ -76,8 +76,9 @@ impl DeviceIdentity {
 
         match result {
             Ok((Some(device_id_str), Some(device_name), Some(encrypted))) => {
-                let device_id = Uuid::parse_str(&device_id_str)
-                    .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid device_id: {}", e)))?;
+                let device_id = Uuid::parse_str(&device_id_str).map_err(|e| {
+                    PasswordManagerError::InvalidInput(format!("Invalid device_id: {}", e))
+                })?;
 
                 let signing_key_bytes =
                     decrypt_from_sync(dek, &encrypted).map_err(PasswordManagerError::Crypto)?;

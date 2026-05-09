@@ -1,18 +1,18 @@
 //! IPC client — sends messages to the daemon.
 
-use super::{IpcEnvelope, IpcMessage, load_ipc_token};
 #[cfg(windows)]
-use super::{encrypt_windows_ipc_frame, decrypt_windows_ipc_frame, windows_named_pipe_path};
-use crate::{DatabaseError, PasswordManagerError, Result};
+use super::{decrypt_windows_ipc_frame, encrypt_windows_ipc_frame, windows_named_pipe_path};
+use super::{load_ipc_token, IpcEnvelope, IpcMessage};
 #[cfg(unix)]
 use crate::daemon::transport::unix::UnixSocketConnection;
 #[cfg(windows)]
-use crate::daemon::transport::{TransportConfig, windows::WindowsNamedPipeConnection};
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::ClientOptions;
+use crate::daemon::transport::{windows::WindowsNamedPipeConnection, TransportConfig};
+use crate::{DatabaseError, PasswordManagerError, Result};
 use std::path::PathBuf;
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ClientOptions;
 #[cfg(windows)]
 use tracing::debug;
 

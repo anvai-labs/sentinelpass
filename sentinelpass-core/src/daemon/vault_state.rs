@@ -46,8 +46,15 @@ fn normalize_host(value: &str) -> Option<String> {
     // url::Url includes in host_str() (e.g. "[::1]" → "::1").
     let extract = |url: Url| -> Option<String> {
         let h = url.host_str()?.trim_matches('.');
-        let h = h.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(h);
-        if h.is_empty() { None } else { Some(h.to_string()) }
+        let h = h
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(h);
+        if h.is_empty() {
+            None
+        } else {
+            Some(h.to_string())
+        }
     };
 
     // Try parsing as a full URL first; only use the result if a host was found.
@@ -71,7 +78,11 @@ fn normalize_host(value: &str) -> Option<String> {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim_matches('.');
-    if host.is_empty() { None } else { Some(host.to_string()) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 fn domains_match(request_domain: &str, entry_url_or_domain: &str) -> bool {

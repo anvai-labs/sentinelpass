@@ -85,7 +85,9 @@ fn test_vault_add_and_get_passkey_reference_entry_type() {
         entry_id: None,
         title: "Example Passkey".to_string(),
         username: "user@example.com".to_string(),
-        password: "passkey-ref:example.com:user@example.com".to_string().into(),
+        password: "passkey-ref:example.com:user@example.com"
+            .to_string()
+            .into(),
         url: Some("https://example.com".to_string()),
         notes: Some("Reference only; no WebAuthn private key material".to_string()),
         credential_type: CredentialType::PasskeyReference,

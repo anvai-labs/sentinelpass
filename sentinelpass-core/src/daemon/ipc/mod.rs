@@ -20,7 +20,11 @@ use std::path::PathBuf;
 use tracing::warn;
 use zeroize::Zeroize;
 
-pub(super) fn log_daemon_audit(logger: Option<&AuditLogger>, event_type: AuditEventType, context: &str) {
+pub(super) fn log_daemon_audit(
+    logger: Option<&AuditLogger>,
+    event_type: AuditEventType,
+    context: &str,
+) {
     if let Some(lg) = logger {
         if let Err(e) = lg.log(event_type, context) {
             warn!("Failed to write daemon audit event: {}", e);
@@ -459,10 +463,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn daemon_ipc_external_secret_lookup_requires_victor_allowlist() {
+        use crate::daemon::DaemonVault;
         use crate::{
             CredentialType, Entry, ExternalSecretAllowlist, ExternalSecretField, VaultManager,
         };
-        use crate::daemon::DaemonVault;
         use chrono::Utc;
         use std::sync::Arc;
         use tokio::time::{sleep, Duration};
@@ -496,7 +500,9 @@ mod tests {
                 entry_id: None,
                 title: "Example Passkey".to_string(),
                 username: "user@example.com".to_string(),
-                password: "passkey-ref:example.com:user@example.com".to_string().into(),
+                password: "passkey-ref:example.com:user@example.com"
+                    .to_string()
+                    .into(),
                 url: Some("https://example.com".to_string()),
                 notes: Some("Reference only; no WebAuthn private key material".to_string()),
                 credential_type: CredentialType::PasskeyReference,

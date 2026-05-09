@@ -15,7 +15,10 @@ pub struct SecretLookupResult {
     pub value: String,
 }
 
-pub fn render_secret_lookup(result: &SecretLookupResult, output: SecretOutputFormat) -> Result<String> {
+pub fn render_secret_lookup(
+    result: &SecretLookupResult,
+    output: SecretOutputFormat,
+) -> Result<String> {
     match output {
         SecretOutputFormat::Plain => Ok(result.value.clone()),
         SecretOutputFormat::Json => serde_json::to_string(&serde_json::json!({
@@ -227,7 +230,9 @@ pub fn parse_external_secret_grant_duration(value: &str) -> Result<chrono::Durat
     }
 }
 
-pub fn load_external_secret_audit_events(limit: usize) -> Result<Vec<sentinelpass_core::AuditEntry>> {
+pub fn load_external_secret_audit_events(
+    limit: usize,
+) -> Result<Vec<sentinelpass_core::AuditEntry>> {
     let logger = sentinelpass_core::AuditLogger::new(sentinelpass_core::get_audit_log_dir())
         .map_err(|e| anyhow::anyhow!("Failed to open audit log: {}", e))?;
     logger
@@ -343,9 +348,7 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
             )?;
             let expiry = grant
                 .expires_at
-                .map(|expires_at| {
-                    format!(" until {}", expires_at.format("%Y-%m-%d %H:%M:%S UTC"))
-                })
+                .map(|expires_at| format!(" until {}", expires_at.format("%Y-%m-%d %H:%M:%S UTC")))
                 .unwrap_or_default();
             println!(
                 "Allowed client '{}' to retrieve {} for {}{}",
@@ -380,11 +383,7 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
             let entries = load_external_secret_audit_events(*limit)?;
             println!(
                 "{}",
-                render_external_secret_audit_report(
-                    &entries,
-                    client_id.as_deref(),
-                    *failures_only
-                )
+                render_external_secret_audit_report(&entries, client_id.as_deref(), *failures_only)
             );
         }
         crate::SecretCommands::Get {

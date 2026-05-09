@@ -299,8 +299,7 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             let device_name = hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "unknown".to_string());
-            let identity =
-                sentinelpass_core::sync::device::DeviceIdentity::generate(&device_name);
+            let identity = sentinelpass_core::sync::device::DeviceIdentity::generate(&device_name);
             let public_key = identity.public_key_bytes();
             let register_client = sentinelpass_core::sync::client::SyncClient::new(
                 &bootstrap.relay_url,

@@ -1,24 +1,26 @@
 //! IPC server — handles daemon-side message dispatch.
 
-use super::{IpcEnvelope, IpcMessage, CredentialSummary, log_daemon_audit, log_external_secret_audit};
 #[cfg(windows)]
-use super::{encrypt_windows_ipc_frame, decrypt_windows_ipc_frame, windows_named_pipe_path};
+use super::{decrypt_windows_ipc_frame, encrypt_windows_ipc_frame, windows_named_pipe_path};
+use super::{
+    log_daemon_audit, log_external_secret_audit, CredentialSummary, IpcEnvelope, IpcMessage,
+};
+#[cfg(unix)]
+use crate::daemon::transport::unix::UnixSocketTransport;
+#[cfg(windows)]
+use crate::daemon::transport::windows::{WindowsNamedPipeConnection, WindowsNamedPipeTransport};
 use crate::daemon::transport::{TransportConfig, TransportError};
 use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
 use crate::{AuditEventType, AuditLogger};
 use crate::{DatabaseError, PasswordManagerError, Result};
-#[cfg(unix)]
-use crate::daemon::transport::unix::UnixSocketTransport;
-#[cfg(windows)]
-use crate::daemon::transport::windows::{WindowsNamedPipeConnection, WindowsNamedPipeTransport};
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
 
@@ -54,7 +56,10 @@ impl IpcServer {
         let audit_logger = match AuditLogger::new(crate::get_audit_log_dir()) {
             Ok(lg) => Some(Arc::new(lg)),
             Err(e) => {
-                warn!("IpcServer: audit logger unavailable — audit events will be dropped: {}", e);
+                warn!(
+                    "IpcServer: audit logger unavailable — audit events will be dropped: {}",
+                    e
+                );
                 None
             }
         };

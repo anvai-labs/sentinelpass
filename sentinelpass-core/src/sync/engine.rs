@@ -23,7 +23,8 @@ fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
     dek: &DataEncryptionKey,
     blob: &SyncEntryBlob,
 ) -> Result<T> {
-    let json = decrypt_from_sync(dek, &blob.encrypted_payload).map_err(PasswordManagerError::Crypto)?;
+    let json =
+        decrypt_from_sync(dek, &blob.encrypted_payload).map_err(PasswordManagerError::Crypto)?;
     serde_json::from_slice(&json).map_err(|e| DatabaseError::Serialization(e.to_string()).into())
 }
 
@@ -41,13 +42,19 @@ fn apply_existing_preamble(
     blob: &SyncEntryBlob,
     tombstone_sql: &str,
 ) -> Result<bool> {
-    if ConflictResolver::resolve(local_version as u64, local_modified, blob) == Resolution::KeepLocal {
+    if ConflictResolver::resolve(local_version as u64, local_modified, blob)
+        == Resolution::KeepLocal
+    {
         return Ok(true);
     }
     if blob.is_tombstone {
         conn.execute(
             tombstone_sql,
-            rusqlite::params![chrono::Utc::now().timestamp(), blob.sync_version as i64, local_id],
+            rusqlite::params![
+                chrono::Utc::now().timestamp(),
+                blob.sync_version as i64,
+                local_id
+            ],
         )
         .map_err(DatabaseError::Sqlite)?;
         return Ok(true);
@@ -83,8 +90,16 @@ fn prepare_credential_blobs(
     let title_enc = crate::encrypt_string(dek, &payload.title)?;
     let username_enc = crate::encrypt_string(dek, &payload.username)?;
     let password_enc = crate::encrypt_string(dek, &payload.password)?;
-    let url_enc = payload.url.as_ref().map(|u| crate::encrypt_string(dek, u)).transpose()?;
-    let notes_enc = payload.notes.as_ref().map(|n| crate::encrypt_string(dek, n)).transpose()?;
+    let url_enc = payload
+        .url
+        .as_ref()
+        .map(|u| crate::encrypt_string(dek, u))
+        .transpose()?;
+    let notes_enc = payload
+        .notes
+        .as_ref()
+        .map(|n| crate::encrypt_string(dek, n))
+        .transpose()?;
     Ok(CredentialBlobs {
         nonce: bincode_ser(&title_enc.nonce)?,
         auth_tag: bincode_ser(&title_enc.auth_tag)?,
@@ -290,7 +305,11 @@ impl SyncEngine {
 
         if let Some((entry_id, local_version, local_modified)) = local {
             if apply_existing_preamble(
-                conn, entry_id, local_version, local_modified, blob,
+                conn,
+                entry_id,
+                local_version,
+                local_modified,
+                blob,
                 "UPDATE entries SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
                  WHERE entry_id = ?3",
@@ -404,7 +423,11 @@ impl SyncEngine {
 
         if let Some((key_id, local_version, local_modified)) = local {
             if apply_existing_preamble(
-                conn, key_id, local_version, local_modified, blob,
+                conn,
+                key_id,
+                local_version,
+                local_modified,
+                blob,
                 "UPDATE ssh_keys SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
                  WHERE key_id = ?3",
@@ -492,7 +515,11 @@ impl SyncEngine {
 
         if let Some((totp_id, local_version, local_created)) = local {
             if apply_existing_preamble(
-                conn, totp_id, local_version, local_created, blob,
+                conn,
+                totp_id,
+                local_version,
+                local_created,
+                blob,
                 "UPDATE totp_secrets SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
                  WHERE totp_id = ?3",

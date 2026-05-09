@@ -53,9 +53,7 @@ pub fn handle_ssh_agent_status() -> Result<()> {
         if available { "yes" } else { "no" }
     );
     if !available {
-        println!(
-            "Hint: ensure `ssh-add` is installed and your SSH agent service is running."
-        );
+        println!("Hint: ensure `ssh-add` is installed and your SSH agent service is running.");
     }
     Ok(())
 }
@@ -124,8 +122,8 @@ pub fn handle_ssh_key_add(
             e
         )
     })?;
-    let (public_key, key_type) = SshKeyImporter::import_public_key(&public_key_path)
-        .map_err(|e| {
+    let (public_key, key_type) =
+        SshKeyImporter::import_public_key(&public_key_path).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to read public key file {}: {}",
                 public_key_path.display(),

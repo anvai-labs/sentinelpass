@@ -123,9 +123,7 @@ pub fn handle_list(vault_path: PathBuf, show_passwords: bool) -> Result<()> {
 
                 if show_passwords {
                     println!();
-                    println!(
-                        "WARNING: Showing passwords (be careful of shoulder surfing!)"
-                    );
+                    println!("WARNING: Showing passwords (be careful of shoulder surfing!)");
                     println!();
                     for summary in &entries {
                         if let Ok(entry) = vault.get_entry(summary.entry_id) {
