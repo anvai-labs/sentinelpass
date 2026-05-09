@@ -4994,6 +4994,7 @@ dependencies = [
  "sha2",
  "ssh-key",
  "subtle",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
