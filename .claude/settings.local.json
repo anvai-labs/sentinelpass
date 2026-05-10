@@ -106,7 +106,21 @@
       "Read(//Users/vijaysingh/code/**)",
       "Read(//Users/vijaysingh/**)",
       "Bash(echo \"exit: $?\")",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(npm audit *)",
+      "Bash(wait)",
+      "Bash(bash /Users/vijaysingh/code/sentinelpass/scripts/coverage-rust.sh)",
+      "Bash(npm ci *)",
+      "Bash(echo \"fmt:$?\")",
+      "Bash(awk '{print $1, $2, $3}')",
+      "Bash(sort -k2)",
+      "Bash(python:*)",
+      "Bash(wc:*)",
+      "Bash(sqlite3:*)",
+      "Bash(__NEW_LINE_b7cb42e9b09bceec__ echo \"\")",
+      "Bash(cd /Users/vijaysingh/code/proximaDB __NEW_LINE_e0097c7e1f4acb50__ echo \"\" echo \"Backup mod.rs \\(416 lines\\) - what''''s different?\" echo \"   Lines 1-20:\" head -20 .victor/backups/mod.rs.20260510_105658.backup __NEW_LINE_e0097c7e1f4acb50__ echo \"\" echo \"   Lines 400-416 \\(end\\):\" tail -17 .victor/backups/mod.rs.20260510_105658.backup __NEW_LINE_e0097c7e1f4acb50__ echo \"\" echo \"Backup traits.rs \\(2912 lines\\) - what''''s different?\" echo \"   Lines 1-20:\" head -20 .victor/backups/traits.rs.20260510_073900.backup __NEW_LINE_e0097c7e1f4acb50__ echo \"\" echo \"   Lines 2890-2912 \\(end\\):\" tail -23 .victor/backups/traits.rs.20260510_073900.backup)"
     ]
   }
 }
