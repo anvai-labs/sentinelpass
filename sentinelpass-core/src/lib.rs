@@ -9,6 +9,7 @@ pub mod biometric;
 pub mod crypto;
 pub mod daemon;
 pub mod database;
+pub mod external_secret_access;
 pub mod import_export;
 pub mod keepass;
 pub mod lockout;
@@ -26,6 +27,9 @@ pub use crypto::{
     CryptoResult, DataEncryptionKey, EncryptedEntry, KdfParams, KeyHierarchy, MasterKey,
     WrappedKey,
 };
+pub use external_secret_access::{
+    ExternalSecretAllowlist, ExternalSecretField, ExternalSecretGrant,
+};
 pub use import_export::{
     export_to_csv, export_to_json, import_from_csv, import_from_json, ExportEntry,
 };
@@ -37,7 +41,9 @@ pub use platform::{
 };
 pub use ssh::{SshAgentClient, SshKey, SshKeyGenerator, SshKeyImporter, SshKeySummary, SshKeyType};
 pub use totp::{parse_otpauth_uri, ParsedTotpUri, TotpAlgorithm, TotpCode, TotpSecretMetadata};
-pub use vault::{Entry, EntrySummary, VaultManager};
+pub use vault::{
+    CredentialType, Entry, EntrySummary, PaginatedResult, PaginationParams, VaultManager,
+};
 
 // Re-export common types
 use thiserror::Error;
@@ -47,6 +53,7 @@ pub type Result<T> = std::result::Result<T, PasswordManagerError>;
 
 /// Structured error type for database and I/O operations
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum DatabaseError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -75,6 +82,7 @@ pub enum DatabaseError {
 
 /// General error type for password manager operations
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum PasswordManagerError {
     #[error("Crypto error: {0}")]
     Crypto(#[from] crypto::CryptoError),
@@ -99,4 +107,64 @@ pub enum PasswordManagerError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod documentation_status_tests {
+    use std::path::Path;
+
+    #[test]
+    fn security_status_matrix_exists_with_required_controls() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let matrix_path = manifest_dir.join("../docs/SECURITY_STATUS_MATRIX.md");
+        let contents = std::fs::read_to_string(&matrix_path)
+            .expect("docs/SECURITY_STATUS_MATRIX.md must exist");
+
+        for required in [
+            "| Control | Status | Code Location | Test Location | Residual Risk | Next Action |",
+            "Biometric Storage Model",
+            "Memory Locking / Zeroization",
+            "Windows IPC Named Pipes and ACLs",
+            "Extension Sender Validation",
+            "Relay Abuse Controls",
+            "Passkey Support State",
+        ] {
+            assert!(
+                contents.contains(required),
+                "security status matrix is missing required content: {}",
+                required
+            );
+        }
+    }
+
+    #[test]
+    fn passkey_product_design_exists_with_required_boundaries() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let design_path = manifest_dir.join("../docs/PASSKEY_PRODUCT_DESIGN.md");
+        let contents = std::fs::read_to_string(&design_path)
+            .expect("docs/PASSKEY_PRODUCT_DESIGN.md must exist before passkey implementation");
+
+        for required in [
+            "# Passkey Product Design",
+            "## Product Decision",
+            "## Non-Goals",
+            "## Data Model",
+            "## User Flows",
+            "## Platform Strategy",
+            "## Security Constraints",
+            "## Implementation Phases",
+            "## Acceptance Gates",
+            "passkey_reference",
+            "SentinelPass does not store passkey private keys",
+            "WebAuthn",
+            "AuthenticationServices",
+            "FIDO Credential Exchange",
+        ] {
+            assert!(
+                contents.contains(required),
+                "passkey product design is missing required content: {}",
+                required
+            );
+        }
+    }
 }

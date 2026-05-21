@@ -1,9 +1,34 @@
 //! Import/export functionality for password vault
 
-use crate::{DatabaseError, Entry, PasswordManagerError, Result, VaultManager};
+use crate::{CredentialType, DatabaseError, Entry, PasswordManagerError, Result, VaultManager};
 use serde::{Deserialize, Serialize};
+use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+const PLAINTEXT_EXPORT_WARNING: &str = "WARNING: This file contains UNENCRYPTED passwords. \
+     Treat it like a master password. Delete it immediately after use.";
+
+/// Restrict an export file to owner-read/write only (mode 0600 on Unix).
+/// On non-Unix platforms this is a no-op; the caller's OS-level protections apply.
+fn set_export_permissions(file: &std::fs::File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        file.set_permissions(Permissions::from_mode(0o600))
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::FileIo(format!(
+                    "Failed to restrict export file permissions: {}",
+                    e
+                )))
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
 
 /// Export format for vault data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +48,7 @@ impl From<Entry> for ExportEntry {
         Self {
             title: entry.title,
             username: entry.username,
-            password: entry.password,
+            password: entry.password.as_str().to_string(),
             url: entry.url,
             notes: entry.notes,
             created_at: entry.created_at.to_rfc3339(),
@@ -43,6 +68,9 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     let mut export_entries = Vec::new();
 
     for summary in entries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
         match vault.get_entry(summary.entry_id) {
             Ok(entry) => {
                 export_entries.push(ExportEntry::from(entry));
@@ -62,6 +90,16 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     let mut file = std::fs::File::create(output).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to create export file: {}",
+            e
+        )))
+    })?;
+
+    set_export_permissions(&file)?;
+
+    // Prepend a plaintext warning so the file is obviously sensitive.
+    writeln!(file, "// {}", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
+        PasswordManagerError::from(DatabaseError::FileIo(format!(
+            "Failed to write export warning: {}",
             e
         )))
     })?;
@@ -90,7 +128,15 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
         )))
     })?;
 
-    // Write CSV header
+    set_export_permissions(&file)?;
+
+    // Write CSV header with plaintext warning prepended.
+    writeln!(file, "# {}", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
+        PasswordManagerError::from(DatabaseError::FileIo(format!(
+            "Failed to write export warning: {}",
+            e
+        )))
+    })?;
     writeln!(
         file,
         "Title,Username,Password,URL,Notes,Created At,Modified At,Favorite"
@@ -100,6 +146,9 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
     })?;
 
     for summary in entries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
         let entry = vault.get_entry(summary.entry_id)?;
 
         // Escape CSV fields
@@ -168,9 +217,10 @@ pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize>
             entry_id: None,
             title: export_entry.title,
             username: export_entry.username,
-            password: export_entry.password,
+            password: export_entry.password.into(),
             url: export_entry.url,
             notes: export_entry.notes,
+            credential_type: CredentialType::Password,
             created_at: export_entry.created_at.parse().map_err(|e| {
                 PasswordManagerError::from(DatabaseError::Serialization(format!(
                     "Invalid created_at date: {}",
@@ -250,7 +300,7 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
             entry_id: None,
             title: record.first().unwrap_or(empty).to_string(),
             username: record.get(1).unwrap_or(empty).to_string(),
-            password: record.get(2).unwrap_or(empty).to_string(),
+            password: record.get(2).unwrap_or(empty).to_string().into(),
             url: {
                 let url_str = record.get(3).unwrap_or(empty);
                 if url_str.is_empty() {
@@ -267,6 +317,7 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
                     Some(notes_str.to_string())
                 }
             },
+            credential_type: CredentialType::Password,
             created_at: chrono::Utc::now(),
             modified_at: chrono::Utc::now(),
             favorite: record.get(7).map(|s| s == "true").unwrap_or(false),
@@ -325,6 +376,23 @@ fn parse_csv_line(line: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
+    use tempfile::TempDir;
+
+    fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
+        Entry {
+            entry_id: None,
+            title: title.to_string(),
+            username: "user@example.com".to_string(),
+            password: password.to_string().into(),
+            url: Some("https://example.com".to_string()),
+            notes: None,
+            credential_type,
+            created_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            modified_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            favorite: false,
+        }
+    }
 
     #[test]
     fn test_parse_csv_simple() {
@@ -356,15 +424,14 @@ mod tests {
 
     #[test]
     fn test_export_entry_from_entry() {
-        use chrono::TimeZone;
-
         let entry = Entry {
             entry_id: Some(1),
             title: "Test".to_string(),
             username: "user@example.com".to_string(),
-            password: "password123".to_string(),
+            password: "password123".to_string().into(),
             url: Some("https://example.com".to_string()),
             notes: Some("Test notes".to_string()),
+            credential_type: CredentialType::Password,
             created_at: chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             modified_at: chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
             favorite: true,
@@ -374,5 +441,63 @@ mod tests {
         assert_eq!(export.title, "Test");
         assert_eq!(export.username, "user@example.com");
         assert!(export.favorite);
+    }
+
+    #[test]
+    fn export_json_excludes_passkey_references_from_password_backup() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let output_path = tmp.path().join("export.json");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        export_to_json(&vault, &output_path).unwrap();
+
+        let exported = std::fs::read_to_string(&output_path).unwrap();
+        assert!(exported.contains("Example Password"));
+        assert!(!exported.contains("Example Passkey"));
+        assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
+    }
+
+    #[test]
+    fn export_csv_excludes_passkey_references_from_password_backup() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let output_path = tmp.path().join("export.csv");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        export_to_csv(&vault, &output_path).unwrap();
+
+        let exported = std::fs::read_to_string(&output_path).unwrap();
+        assert!(exported.contains("Example Password"));
+        assert!(!exported.contains("Example Passkey"));
+        assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
     }
 }

@@ -12,7 +12,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// A data encryption key (DEK) used to encrypt individual entries
 ///
@@ -32,9 +32,15 @@ impl DataEncryptionKey {
         Ok(Self { key: key_array })
     }
 
-    /// Create a DEK from raw bytes (use with caution)
-    pub fn from_bytes(key: [u8; 32]) -> Self {
-        Self { key }
+    /// Create a DEK from raw bytes and zeroize the source immediately.
+    ///
+    /// Takes a mutable reference so the caller's buffer is zeroed after the
+    /// key material is copied in, preventing it from persisting on the stack
+    /// or in a wrapping `Zeroizing` guard that the caller may forget to drop.
+    pub fn from_bytes(key: &mut [u8; 32]) -> Self {
+        let dek = Self { key: *key };
+        key.zeroize();
+        dek
     }
 
     /// Get the raw key bytes (use sparingly)
@@ -42,9 +48,10 @@ impl DataEncryptionKey {
         &self.key
     }
 
-    /// Convert to raw bytes
-    pub fn into_bytes(self) -> [u8; 32] {
-        self.key
+    /// Convert to raw bytes, wrapped in a zeroizing guard so the caller
+    /// can't accidentally leak key material on the stack.
+    pub fn into_bytes(self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.key)
     }
 }
 

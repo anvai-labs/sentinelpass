@@ -182,7 +182,17 @@ All sync commands live under `sentinelpass sync`:
 | `GET` | `/api/v1/sync/status` | Ed25519 | Vault entry count + sequence |
 | `POST` | `/api/v1/pairing/bootstrap` | — | Upload encrypted bootstrap |
 | `GET` | `/api/v1/pairing/bootstrap/{token}` | — | Fetch + consume bootstrap |
-| `GET` | `/health` | — | Health check |
+| `GET` | `/health` | — | JSON health check with `status`, `service`, and `version` |
+
+Health response example:
+
+```json
+{
+  "status": "ok",
+  "service": "sentinelpass-relay",
+  "version": "0.6.3"
+}
+```
 
 ### Run
 

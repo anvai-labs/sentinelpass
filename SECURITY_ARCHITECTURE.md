@@ -59,7 +59,7 @@
 
 | Threat | Attack Vector | Mitigation Strategy | Status |
 |--------|---------------|---------------------|--------|
-| **Stolen Laptop** | Physical access to encrypted database | • Argon2id with high memory cost (256MB)<br>• Master password required<br>• No plaintext keys stored<br>• Biometric unlock only stores wrapped key | ✅ |
+| **Stolen Laptop** | Physical access to encrypted database | • Argon2id with high memory cost (256MB)<br>• Master password required<br>• No plaintext keys stored<br>• Biometric unlock stores OS-protected DEK material, not the master password | ✅ |
 | **Malware** | Process memory reading | • Zeroization on unlock timeout<br>• mlock() to prevent swap<br>• Memory encryption for sensitive buffers<br>• ASLR and PIE enabled | ✅ |
 | **Memory Scraping** | Heap inspection for keys | • SecureString wrappers with zeroize<br>• Secrets in locked memory pages<br>• No string copies of secrets<br>• Minimize time in memory | ✅ |
 | **Clipboard Snooping** | Other apps reading clipboard | • Auto-clear clipboard after 30s<br>• Protected API on macOS<br>• User notification on copy | ⚠️ (auto-clear partial) |
@@ -179,11 +179,11 @@
 **Biometric Enrollment:**
 ```
 1. After successful password unlock
-2. Wrap DEK with OS keystore:
-   - macOS: Secure Enclave + Keychain
-   - Windows: DPAPI with current user scope
+2. Store DEK material behind the OS biometric/keyring reference:
+   - macOS: Keychain-backed biometric access
+   - Windows: Windows Hello / current-user protected storage
 3. Store reference ID in database
-4. Future biometric unlock retrieves wrapped DEK
+4. Future biometric unlock retrieves the DEK and unlocks the in-memory key hierarchy
 ```
 
 **Entry Encryption:**
@@ -528,7 +528,7 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 | **Phase 2: Desktop Client** | ⚠️ Partial | Tauri UI functional, needs feature parity |
 | **Phase 3: Browser Extension** | ✅ Complete | Chrome MV3 + Firefox MV2 with sender validation |
 | **Phase 4: SSH Support** | ✅ Complete | Storage, CLI, agent integration implemented |
-| **Phase 5: Biometrics** | ⚠️ Partial | macOS Touch ID + Windows Hello implemented |
+| **Phase 5: Biometrics** | ⚠️ Partial | macOS Touch ID + Windows Hello implemented; master password is not stored for biometric unlock |
 | **Phase 6: Advanced Features** | ⚠️ Partial | TOTP ✅, KeePass import 📋, audit log ✅ |
 | **Phase 7: Multi-Device Sync** | ✅ Complete | E2E sync, relay, pairing, Ed25519 all implemented |
 | **Phase 8: Hardening & Testing** | ⚠️ In Progress | Security hardening (Phase 1) complete, audit pending |
@@ -564,7 +564,9 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 #### Phase 5: Biometrics ⚠️
 1. ✅ macOS Touch ID (LocalAuthentication framework)
 2. ✅ Windows Hello (Windows Credentials API)
-3. 📋 Linux support (planned)
+3. ✅ Biometric unlock stores DEK material instead of master password
+4. 📋 Platform-native non-exportable DEK wrapping / enrollment invalidation
+5. 📋 Linux support (planned)
 
 #### Phase 6: Advanced Features ⚠️
 1. ✅ TOTP authenticator (SHA1, SHA256, SHA512)

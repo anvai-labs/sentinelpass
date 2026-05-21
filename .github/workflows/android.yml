@@ -143,7 +143,9 @@ jobs:
   # Android Emulator Tests
   emulator-tests:
     name: Android Emulator Tests
-    runs-on: macos-latest
+    # ubuntu-latest is x86_64 and supports KVM hardware acceleration for Android
+    # emulators. macos-latest is now arm64 and cannot run x86_64 AVD images.
+    runs-on: ubuntu-latest
     needs: mobile-bridge
 
     strategy:
@@ -177,11 +179,6 @@ jobs:
         working-directory: android/SentinelPass
         run: chmod +x gradlew
 
-      - name: Enable KMP group
-        uses: android-actions/setup-kotlin@main
-        with:
-          version: '1.9.0'
-
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
@@ -192,21 +189,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Create AVD and generate snapshot for caching
-        uses: actions/setup-android/emulator@main
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
           target: ${{ matrix.target }}
           arch: ${{ matrix.arch }}
-          force-snapshot: true
-
-      - name: Run instrumented tests
-        working-directory: android/SentinelPass
-        run: |
-          ./gradlew connectedDebugAndroidTest \
-            -Pandroid.testoptions.emulator=true \
-            --continue \
-            --stacktrace
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            cd android/SentinelPass && ./gradlew connectedDebugAndroidTest \
+              --continue \
+              --stacktrace
 
       - name: Upload test results
         uses: actions/upload-artifact@v4

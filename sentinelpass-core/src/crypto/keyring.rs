@@ -106,6 +106,16 @@ impl KeyHierarchy {
         Ok(())
     }
 
+    /// Unlock using an already unwrapped DEK.
+    ///
+    /// This is used for OS-protected biometric unlock flows where the platform
+    /// credential store releases vault key material after local authentication,
+    /// so the master password is not persisted or re-derived.
+    pub fn unlock_vault_with_dek(&mut self, dek: DataEncryptionKey) {
+        self.master_key.take();
+        self.dek = Some(dek);
+    }
+
     /// Lock the vault by clearing all keys from memory
     pub fn lock_vault(&mut self) {
         self.master_key.take();
@@ -114,7 +124,7 @@ impl KeyHierarchy {
 
     /// Check if the vault is currently unlocked
     pub fn is_unlocked(&self) -> bool {
-        self.master_key.is_some() && self.dek.is_some()
+        self.dek.is_some()
     }
 
     /// Get the DEK (only available when unlocked)
@@ -203,7 +213,7 @@ impl KeyHierarchy {
             .try_into()
             .map_err(|_| CryptoError::DecryptionFailed("Invalid DEK format".to_string()))?;
 
-        Ok(DataEncryptionKey::from_bytes(dek_array))
+        Ok(DataEncryptionKey::from_bytes(&mut { dek_array }))
     }
 }
 
@@ -235,6 +245,17 @@ mod tests {
             .unlock_vault(password, &kdf_params, &wrapped_dek)
             .unwrap();
         assert!(hierarchy.is_unlocked());
+    }
+
+    #[test]
+    fn test_unlock_with_dek_does_not_require_master_key() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let mut hierarchy = KeyHierarchy::new();
+
+        hierarchy.unlock_vault_with_dek(dek);
+
+        assert!(hierarchy.is_unlocked());
+        assert!(hierarchy.dek().is_ok());
     }
 
     #[test]

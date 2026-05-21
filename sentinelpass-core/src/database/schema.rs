@@ -6,7 +6,7 @@ use std::path::Path;
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -17,22 +17,61 @@ impl Database {
     /// Open a database at the specified path
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
-
-        // Enable foreign key constraints
-        conn.execute("PRAGMA foreign_keys = ON", [])
-            .map_err(DatabaseError::Sqlite)?;
-
+        Self::apply_pragmas(&conn)?;
         Ok(Self { conn })
     }
 
     /// Create a new in-memory database for testing
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(DatabaseError::Sqlite)?;
-
+        // WAL and busy_timeout are no-ops for in-memory; foreign_keys still matters.
         conn.execute("PRAGMA foreign_keys = ON", [])
             .map_err(DatabaseError::Sqlite)?;
-
         Ok(Self { conn })
+    }
+
+    /// Apply connection-level PRAGMAs that improve reliability and performance.
+    ///
+    /// WAL mode — allows concurrent readers while a writer is active.
+    /// busy_timeout — retries for up to 5 s before returning SQLITE_BUSY instead
+    ///   of failing immediately under concurrent daemon access.
+    /// synchronous = NORMAL — safe with WAL (the WAL itself is always fsynced);
+    ///   faster than FULL without sacrificing durability for typical workloads.
+    /// cache_size = -16000 — 16 MB page cache; avoids repeated disk reads for
+    ///   large vaults and outperforms SQLite's 2 MB default.
+    /// temp_store = MEMORY — temp tables and indexes stay in memory instead of
+    ///   being written to a temp file; matters for sort-heavy list/search queries.
+    ///
+    /// Uses `pragma_update` (not `execute`) for pragmas that return a result row
+    /// such as `journal_mode`, which would cause an error with plain `execute`.
+    fn apply_pragmas(conn: &Connection) -> Result<()> {
+        use rusqlite::DatabaseName;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(Some(DatabaseName::Main), "journal_mode", "WAL")
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(None, "busy_timeout", 5000i64)
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(DatabaseError::Sqlite)?;
+        // Negative value = kibibytes; -16000 ≈ 16 MB.
+        conn.pragma_update(None, "cache_size", -16000i64)
+            .map_err(DatabaseError::Sqlite)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Trigger a passive WAL checkpoint to reclaim space after bulk writes.
+    ///
+    /// A passive checkpoint writes dirty WAL pages back to the main database
+    /// file without blocking readers or the writer. Call this after large sync
+    /// operations so the WAL file doesn't grow unboundedly.
+    pub fn wal_checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute("PRAGMA wal_checkpoint(PASSIVE)", [])
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
     }
 
     /// Initialize the database schema (creates v2 tables for new vaults)
@@ -79,6 +118,8 @@ impl Database {
                 password BLOB NOT NULL,
                 url BLOB,
                 notes BLOB,
+                credential_type TEXT NOT NULL DEFAULT 'password'
+                    CHECK (credential_type IN ('password', 'api_key', 'passkey_reference')),
                 entry_nonce BLOB NOT NULL,
                 auth_tag BLOB NOT NULL,
                 created_at INTEGER NOT NULL,
@@ -247,6 +288,8 @@ impl Database {
             // v3 indexes for pagination performance
             "CREATE INDEX IF NOT EXISTS idx_entries_modified_at ON entries(modified_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at DESC)",
+            // v4 index for credential category filtering
+            "CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type)",
         ];
         for sql in &indexes {
             self.conn.execute(sql, []).map_err(DatabaseError::Sqlite)?;
@@ -381,6 +424,8 @@ mod tests {
         // v3 indexes must be present for new vaults too
         assert!(index_names.contains(&"idx_entries_modified_at".to_string()));
         assert!(index_names.contains(&"idx_entries_created_at".to_string()));
+        // v4 index must be present for new vaults too
+        assert!(index_names.contains(&"idx_entries_credential_type".to_string()));
 
         // Verify triggers exist
         let trigger_names: Vec<String> = db

@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS entries (
     password BLOB NOT NULL,
     url BLOB,
     notes BLOB,
+    credential_type TEXT NOT NULL DEFAULT 'password'
+        CHECK (credential_type IN ('password', 'api_key', 'passkey_reference')),
     entry_nonce BLOB NOT NULL,
     auth_tag BLOB NOT NULL,
     created_at INTEGER NOT NULL,
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS totp_secrets (
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_entries_vault_id ON entries(vault_id);
 CREATE INDEX IF NOT EXISTS idx_entries_favorite ON entries(favorite);
+CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type);
 CREATE INDEX IF NOT EXISTS idx_domain_mappings_entry_id ON domain_mappings(entry_id);
 CREATE INDEX IF NOT EXISTS idx_domain_mappings_domain ON domain_mappings(domain);
 CREATE INDEX IF NOT EXISTS idx_totp_secrets_entry_id ON totp_secrets(entry_id);

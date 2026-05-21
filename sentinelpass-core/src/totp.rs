@@ -142,38 +142,28 @@ pub fn parse_otpauth_uri(uri: &str) -> Result<ParsedTotpUri> {
             let value = percent_decode(value_raw)?;
 
             match key.as_str() {
-                "secret" => {
-                    if !value.trim().is_empty() {
-                        secret_base32 = Some(value);
-                    }
+                "secret" if !value.trim().is_empty() => {
+                    secret_base32 = Some(value);
                 }
-                "issuer" => {
-                    if !value.trim().is_empty() {
-                        issuer_from_query = Some(value);
-                    }
+                "issuer" if !value.trim().is_empty() => {
+                    issuer_from_query = Some(value);
                 }
-                "algorithm" => {
-                    if !value.trim().is_empty() {
-                        algorithm = value.parse::<TotpAlgorithm>()?;
-                    }
+                "algorithm" if !value.trim().is_empty() => {
+                    algorithm = value.parse::<TotpAlgorithm>()?;
                 }
-                "digits" => {
-                    if !value.trim().is_empty() {
-                        digits = value.parse::<u8>().map_err(|_| {
-                            PasswordManagerError::InvalidInput(
-                                "TOTP digits must be numeric".to_string(),
-                            )
-                        })?;
-                    }
+                "digits" if !value.trim().is_empty() => {
+                    digits = value.parse::<u8>().map_err(|_| {
+                        PasswordManagerError::InvalidInput(
+                            "TOTP digits must be numeric".to_string(),
+                        )
+                    })?;
                 }
-                "period" => {
-                    if !value.trim().is_empty() {
-                        period = value.parse::<u32>().map_err(|_| {
-                            PasswordManagerError::InvalidInput(
-                                "TOTP period must be numeric".to_string(),
-                            )
-                        })?;
-                    }
+                "period" if !value.trim().is_empty() => {
+                    period = value.parse::<u32>().map_err(|_| {
+                        PasswordManagerError::InvalidInput(
+                            "TOTP period must be numeric".to_string(),
+                        )
+                    })?;
                 }
                 _ => {}
             }

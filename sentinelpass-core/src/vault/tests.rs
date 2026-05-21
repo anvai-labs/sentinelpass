@@ -1,5 +1,6 @@
 use super::*;
 use crate::database::Database;
+use tempfile::TempDir;
 
 #[test]
 fn test_vault_create_and_open() {
@@ -26,9 +27,10 @@ fn test_vault_add_and_get_entry() {
         entry_id: None,
         title: "Test Entry".to_string(),
         username: "user@example.com".to_string(),
-        password: "secret123".to_string(),
+        password: "secret123".to_string().into(),
         url: Some("https://example.com".to_string()),
         notes: Some("Test notes".to_string()),
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -40,9 +42,68 @@ fn test_vault_add_and_get_entry() {
     let retrieved = vault.get_entry(entry_id).unwrap();
     assert_eq!(retrieved.title, "Test Entry");
     assert_eq!(retrieved.username, "user@example.com");
-    assert_eq!(retrieved.password, "secret123");
+    assert_eq!(retrieved.password.as_str(), "secret123");
     assert_eq!(retrieved.url, Some("https://example.com".to_string()));
     assert_eq!(retrieved.notes, Some("Test notes".to_string()));
+}
+
+#[test]
+fn test_vault_add_and_get_api_key_entry_type() {
+    let temp_path = ":memory:";
+    let password = b"test_password";
+
+    let vault = VaultManager::create(temp_path, password).unwrap();
+
+    let entry = Entry {
+        entry_id: None,
+        title: "Anthropic API".to_string(),
+        username: "anthropic".to_string(),
+        password: "sk-ant-test".to_string().into(),
+        url: Some("https://console.anthropic.com".to_string()),
+        notes: None,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+        credential_type: CredentialType::ApiKey,
+    };
+
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let retrieved = vault.get_entry(entry_id).unwrap();
+
+    assert_eq!(retrieved.credential_type, CredentialType::ApiKey);
+    assert_eq!(retrieved.password.as_str(), "sk-ant-test");
+}
+
+#[test]
+fn test_vault_add_and_get_passkey_reference_entry_type() {
+    let temp_path = ":memory:";
+    let password = b"test_password";
+
+    let vault = VaultManager::create(temp_path, password).unwrap();
+
+    let entry = Entry {
+        entry_id: None,
+        title: "Example Passkey".to_string(),
+        username: "user@example.com".to_string(),
+        password: "passkey-ref:example.com:user@example.com"
+            .to_string()
+            .into(),
+        url: Some("https://example.com".to_string()),
+        notes: Some("Reference only; no WebAuthn private key material".to_string()),
+        credential_type: CredentialType::PasskeyReference,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let retrieved = vault.get_entry(entry_id).unwrap();
+
+    assert_eq!(retrieved.credential_type, CredentialType::PasskeyReference);
+    assert_eq!(
+        retrieved.password.as_str(),
+        "passkey-ref:example.com:user@example.com"
+    );
 }
 
 #[test]
@@ -56,9 +117,10 @@ fn test_vault_list_entries() {
         entry_id: None,
         title: "Alpha Entry".to_string(),
         username: "user1@example.com".to_string(),
-        password: "pass1".to_string(),
+        password: "pass1".to_string().into(),
         url: None,
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -68,9 +130,10 @@ fn test_vault_list_entries() {
         entry_id: None,
         title: "Zeta Entry".to_string(),
         username: "user2@example.com".to_string(),
-        password: "pass2".to_string(),
+        password: "pass2".to_string().into(),
         url: None,
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: true,
@@ -110,9 +173,10 @@ fn test_vault_locked_operations_fail() {
             entry_id: None,
             title: "Test".to_string(),
             username: "test".to_string(),
-            password: "test".to_string(),
+            password: "test".to_string().into(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -125,8 +189,8 @@ fn test_vault_locked_operations_fail() {
 
 #[test]
 fn test_vault_lockout_after_repeated_failed_unlocks() {
-    let temp_path =
-        std::env::temp_dir().join(format!("sentinelpass_lockout_{}.db", uuid::Uuid::new_v4()));
+    let tmp = TempDir::new().unwrap();
+    let temp_path = tmp.path().join("vault.db");
     let password = b"test_password";
 
     let vault = VaultManager::create(&temp_path, password).unwrap();
@@ -148,8 +212,6 @@ fn test_vault_lockout_after_repeated_failed_unlocks() {
         still_locked_with_correct_password,
         Err(PasswordManagerError::LockedOut(_))
     ));
-
-    let _ = std::fs::remove_file(&temp_path);
 }
 
 #[test]
@@ -163,9 +225,10 @@ fn test_totp_add_generate_remove() {
         entry_id: None,
         title: "TOTP Entry".to_string(),
         username: "user@example.com".to_string(),
-        password: "secret123".to_string(),
+        password: "secret123".to_string().into(),
         url: Some("https://example.com".to_string()),
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -332,9 +395,10 @@ fn test_import_pairing_bootstrap_rejects_non_empty_vault() {
         entry_id: None,
         title: "Local data".to_string(),
         username: "user".to_string(),
-        password: "pass".to_string(),
+        password: "pass".to_string().into(),
         url: None,
         notes: None,
+        credential_type: CredentialType::Password,
         created_at: Utc::now(),
         modified_at: Utc::now(),
         favorite: false,
@@ -479,9 +543,10 @@ fn test_pagination_first_page() {
             entry_id: None,
             title: format!("Entry {:03}", i),
             username: format!("user{}@example.com", i),
-            password: format!("pass{}", i),
+            password: format!("pass{}", i).into(),
             url: Some(format!("https://example{}.com", i)),
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: i % 2 == 0,
@@ -511,9 +576,10 @@ fn test_pagination_second_page() {
             entry_id: None,
             title: format!("Site {:03}", i),
             username: "user@example.com".to_string(),
-            password: "secret".to_string(),
+            password: "secret".to_string().into(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -543,9 +609,10 @@ fn test_pagination_last_page() {
             entry_id: None,
             title: format!("Item {:03}", i),
             username: "user@example.com".to_string(),
-            password: "pass".to_string(),
+            password: "pass".to_string().into(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -575,9 +642,10 @@ fn test_pagination_large_page_size_capped() {
             entry_id: None,
             title: format!("Test {}", i),
             username: "user@example.com".to_string(),
-            password: "pass".to_string(),
+            password: "pass".to_string().into(),
             url: None,
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: Utc::now(),
             modified_at: Utc::now(),
             favorite: false,
@@ -616,4 +684,97 @@ fn test_pagination_default_params() {
     assert_eq!(params.page_size, 50);
     assert_eq!(params.offset(), 0);
     assert_eq!(params.limit(), 50);
+}
+
+fn add_test_ssh_key(vault: &VaultManager, name: &str) -> i64 {
+    vault
+        .add_ssh_key_plaintext(
+            name.to_string(),
+            None,
+            crate::ssh::SshKeyType::Ed25519,
+            None,
+            "ssh-ed25519 AAAA test".to_string(),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nfakekey\n-----END OPENSSH PRIVATE KEY-----"
+                .to_string(),
+            format!("SHA256:{}", name),
+        )
+        .unwrap()
+}
+
+#[test]
+fn test_ssh_pagination_first_page() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    for i in 0..30 {
+        add_test_ssh_key(&vault, &format!("key_{:03}", i));
+    }
+
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::new(0, 10))
+        .unwrap();
+
+    assert_eq!(result.items.len(), 10);
+    assert_eq!(result.total_count, 30);
+    assert!(result.has_more);
+}
+
+#[test]
+fn test_ssh_pagination_last_page() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    for i in 0..25 {
+        add_test_ssh_key(&vault, &format!("key_{:03}", i));
+    }
+
+    // Page 2 of page_size=10 → items 20-24 (5 items)
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::new(2, 10))
+        .unwrap();
+
+    assert_eq!(result.items.len(), 5);
+    assert_eq!(result.total_count, 25);
+    assert!(!result.has_more);
+}
+
+#[test]
+fn test_ssh_pagination_empty() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::default())
+        .unwrap();
+
+    assert_eq!(result.items.len(), 0);
+    assert_eq!(result.total_count, 0);
+    assert!(!result.has_more);
+}
+
+#[test]
+fn test_ssh_pagination_sorted_by_name() {
+    let vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    // Insert in reverse order
+    for i in (0..5).rev() {
+        add_test_ssh_key(&vault, &format!("key_{:03}", i));
+    }
+
+    let result = vault
+        .list_ssh_keys_paginated(PaginationParams::new(0, 10))
+        .unwrap();
+
+    let names: Vec<&str> = result.items.iter().map(|k| k.name.as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "results should be sorted by name");
+}
+
+#[test]
+fn test_ssh_pagination_locked_vault_fails() {
+    let mut vault = VaultManager::create(":memory:", b"test_password").unwrap();
+    vault.lock();
+
+    let err = vault
+        .list_ssh_keys_paginated(PaginationParams::default())
+        .unwrap_err();
+    assert!(
+        matches!(err, PasswordManagerError::VaultLocked),
+        "expected VaultLocked"
+    );
 }

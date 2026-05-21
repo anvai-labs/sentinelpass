@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.3"
+version = "0.7.0"
 edition = "2021"
 authors = ["VJ Singh <singhvjd@gmail.com>"]
 license = "Apache-2.0"
@@ -26,7 +26,7 @@ categories = ["command-line-utilities", "authentication"]
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
-zeroize = { version = "1.7", features = ["zeroize_derive"] }
+zeroize = { version = "1.7", features = ["zeroize_derive", "serde"] }
 memsec = "0.6"
 subtle = "2.5"
 hex = "0.4"
@@ -73,6 +73,7 @@ home = "0.5"
 
 # Testing
 proptest = "1.4"
+tempfile = "3.10"
 
 # SSH keys
 ssh-key = { version = "0.6", features = ["crypto", "encryption"] }
@@ -88,6 +89,7 @@ base64 = "0.22"
 
 # HTTP / Sync
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+url = "2.5"
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }

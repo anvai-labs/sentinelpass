@@ -210,6 +210,25 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migrate schema from v3 to v4: add credential type discriminator.
+pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+
+        ALTER TABLE entries ADD COLUMN credential_type TEXT NOT NULL DEFAULT 'password'
+            CHECK (credential_type IN ('password', 'api_key', 'passkey_reference'));
+
+        CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type);
+
+        UPDATE db_metadata SET version = 4 WHERE id = 1;
+
+        COMMIT;",
+    )
+    .map_err(DatabaseError::Sqlite)?;
+
+    Ok(())
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -224,6 +243,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 3 {
         migrate_v2_to_v3(conn)?;
+    }
+
+    if version < 4 {
+        migrate_v3_to_v4(conn)?;
     }
 
     Ok(())
@@ -440,12 +463,53 @@ mod tests {
     }
 
     #[test]
+    fn migrate_v3_to_v4_adds_credential_type() {
+        let conn = create_v1_db();
+
+        migrate_v1_to_v2(&conn).unwrap();
+        migrate_v2_to_v3(&conn).unwrap();
+        migrate_v3_to_v4(&conn).unwrap();
+
+        let version: i32 = conn
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 4);
+
+        let has_credential_type: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('entries') WHERE name='credential_type')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_credential_type);
+
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, entry_nonce, auth_tag, created_at, modified_at)
+             VALUES (1, X'01', X'02', X'03', X'04', X'05', 0, 0)",
+            [],
+        )
+        .unwrap();
+
+        let credential_type: String = conn
+            .query_row(
+                "SELECT credential_type FROM entries WHERE entry_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(credential_type, "password");
+    }
+
+    #[test]
     fn run_migrations_idempotent() {
         let conn = create_v1_db();
 
         run_migrations(&conn).unwrap();
 
-        // Running again should be a no-op (version is already 3)
+        // Running again should be a no-op (version is already current)
         run_migrations(&conn).unwrap();
 
         let version: i32 = conn
@@ -453,6 +517,6 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, crate::database::schema::CURRENT_SCHEMA_VERSION);
     }
 }

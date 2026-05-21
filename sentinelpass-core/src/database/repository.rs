@@ -27,6 +27,7 @@ pub struct RawEntryRow {
     pub password: Vec<u8>,
     pub url: Option<Vec<u8>>,
     pub notes: Option<Vec<u8>>,
+    pub credential_type: String,
     pub entry_nonce: Vec<u8>,
     pub auth_tag: Vec<u8>,
     pub created_at: i64,
@@ -43,6 +44,7 @@ pub struct NewEntryParams {
     pub password: Vec<u8>,
     pub url: Option<Vec<u8>>,
     pub notes: Option<Vec<u8>>,
+    pub credential_type: String,
     pub entry_nonce: Vec<u8>,
     pub auth_tag: Vec<u8>,
     pub created_at: i64,
@@ -58,6 +60,7 @@ pub struct UpdateEntryParams {
     pub password: Option<Vec<u8>>,
     pub url: Option<Vec<u8>>,
     pub notes: Option<Vec<u8>>,
+    pub credential_type: Option<String>,
     pub entry_nonce: Option<Vec<u8>>,
     pub auth_tag: Option<Vec<u8>>,
     pub modified_at: i64,
@@ -110,13 +113,14 @@ impl<'a> SqliteEntryRepository<'a> {
             password: row.get(3)?,
             url: row.get(4)?,
             notes: row.get(5)?,
-            entry_nonce: row.get(6)?,
-            auth_tag: row.get(7)?,
-            created_at: row.get(8)?,
-            modified_at: row.get(9)?,
-            favorite: row.get::<_, i32>(10)? == 1,
-            sync_id: row.get(11)?,
-            sync_version: row.get(12)?,
+            credential_type: row.get(6)?,
+            entry_nonce: row.get(7)?,
+            auth_tag: row.get(8)?,
+            created_at: row.get(9)?,
+            modified_at: row.get(10)?,
+            favorite: row.get::<_, i32>(11)? == 1,
+            sync_id: row.get(12)?,
+            sync_version: row.get(13)?,
         })
     }
 }
@@ -127,16 +131,17 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
 
         conn.execute(
             "INSERT INTO entries (
-                vault_id, title, username, password, url, notes,
+                vault_id, title, username, password, url, notes, credential_type,
                 entry_nonce, auth_tag, created_at, modified_at, favorite,
                 sync_id, sync_version, sync_state
-            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, 'pending')",
+            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, 'pending')",
             rusqlite::params![
                 entry.title,
                 entry.username,
                 entry.password,
                 entry.url,
                 entry.notes,
+                entry.credential_type,
                 entry.entry_nonce,
                 entry.auth_tag,
                 entry.created_at,
@@ -155,7 +160,7 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
 
         let mut stmt = conn
             .prepare(
-                "SELECT entry_id, title, username, password, url, notes,
+                "SELECT entry_id, title, username, password, url, notes, credential_type,
                  entry_nonce, auth_tag, created_at, modified_at, favorite,
                  sync_id, sync_version
                  FROM entries WHERE entry_id = ?1 AND is_deleted = 0",
@@ -174,7 +179,7 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
         let conn = self.db.conn();
 
         let mut query = String::from(
-            "SELECT entry_id, title, username, password, url, notes,
+            "SELECT entry_id, title, username, password, url, notes, credential_type,
              entry_nonce, auth_tag, created_at, modified_at, favorite,
              sync_id, sync_version
              FROM entries WHERE is_deleted = 0",
@@ -239,6 +244,10 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
             set_clauses.push(format!("notes = ?{}", param_index));
             param_index += 1;
         }
+        if entry.credential_type.is_some() {
+            set_clauses.push(format!("credential_type = ?{}", param_index));
+            param_index += 1;
+        }
         if entry.entry_nonce.is_some() {
             set_clauses.push(format!("entry_nonce = ?{}", param_index));
             param_index += 1;
@@ -279,6 +288,9 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
             params.push(Box::new(v));
         }
         if let Some(v) = entry.notes {
+            params.push(Box::new(v));
+        }
+        if let Some(v) = entry.credential_type {
             params.push(Box::new(v));
         }
         if let Some(v) = entry.entry_nonce {
@@ -344,7 +356,7 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
 
         let mut stmt = conn
             .prepare(
-                "SELECT e.entry_id, e.title, e.username, e.password, e.url, e.notes,
+                "SELECT e.entry_id, e.title, e.username, e.password, e.url, e.notes, e.credential_type,
                  e.entry_nonce, e.auth_tag, e.created_at, e.modified_at, e.favorite,
                  e.sync_id, e.sync_version
                  FROM entries e
@@ -385,6 +397,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: Some(b"https://example.com".to_vec()),
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -408,6 +421,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: Some(b"https://example.com".to_vec()),
             notes: None,
+            credential_type: "api_key".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -424,6 +438,7 @@ mod tests {
         assert_eq!(row.entry_id, entry_id);
         assert_eq!(row.title, b"Test Entry");
         assert_eq!(row.username, b"user@example.com");
+        assert_eq!(row.credential_type, "api_key");
     }
 
     #[test]
@@ -439,6 +454,7 @@ mod tests {
                 password: b"password123".to_vec(),
                 url: None,
                 notes: None,
+                credential_type: "password".to_string(),
                 entry_nonce: vec![0u8; 12],
                 auth_tag: vec![0u8; 16],
                 created_at: Utc::now().timestamp(),
@@ -467,6 +483,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: None,
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -490,6 +507,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: None,
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -518,6 +536,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: None,
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -543,6 +562,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: Some(b"https://example.com".to_vec()),
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -582,6 +602,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: None,
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -598,6 +619,7 @@ mod tests {
             password: b"password123".to_vec(),
             url: None,
             notes: None,
+            credential_type: "password".to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
@@ -629,6 +651,7 @@ mod tests {
                 password: b"password123".to_vec(),
                 url: None,
                 notes: None,
+                credential_type: "password".to_string(),
                 entry_nonce: vec![0u8; 12],
                 auth_tag: vec![0u8; 16],
                 created_at: Utc::now().timestamp(),

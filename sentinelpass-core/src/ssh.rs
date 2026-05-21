@@ -503,6 +503,7 @@ impl Default for SshAgentClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_ssh_key_type_display() {
@@ -550,19 +551,14 @@ mod tests {
 
     #[test]
     fn test_import_public_key_valid_format() {
-        // Test with a valid ssh-ed25519 public key format
         let valid_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINCertainlyNotARealKeyButValidFormat test@example.com";
-        let temp_dir = std::env::temp_dir();
-        let key_path = temp_dir.join("test_key.pub");
+        let tmp = TempDir::new().unwrap();
+        let key_path = tmp.path().join("test_key.pub");
 
-        // Write the test key
         std::fs::write(&key_path, valid_key).expect("Failed to write test key");
 
         let result = SshKeyImporter::import_public_key(&key_path);
         assert!(result.is_ok());
-
-        // Clean up
-        let _ = std::fs::remove_file(&key_path);
     }
 
     #[test]

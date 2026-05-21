@@ -6,8 +6,10 @@ use crate::handlers::{devices, pairing, sync};
 use axum::extract::ConnectInfo;
 use axum::middleware;
 use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
+use serde::Serialize;
 use std::net::SocketAddr;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -51,8 +53,19 @@ pub fn build_router(app_state: RelayAppState) -> Router {
         .with_state(app_state)
 }
 
-async fn health() -> &'static str {
-    "ok"
+#[derive(Debug, Clone, Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    service: &'static str,
+    version: &'static str,
+}
+
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok",
+        service: "sentinelpass-relay",
+        version: env!("CARGO_PKG_VERSION"),
+    })
 }
 
 async fn public_rate_limit_middleware(
@@ -87,4 +100,18 @@ async fn public_rate_limit_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn health_returns_structured_relay_status() {
+        let Json(response) = health().await;
+
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.service, "sentinelpass-relay");
+        assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+    }
 }

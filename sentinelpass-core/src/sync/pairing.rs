@@ -52,7 +52,7 @@ pub fn encrypt_bootstrap(
     use crate::crypto::cipher::DataEncryptionKey;
     use crate::sync::crypto::encrypt_for_sync;
 
-    let dek = DataEncryptionKey::from_bytes(*pairing_key);
+    let dek = DataEncryptionKey::from_bytes(&mut { *pairing_key });
     let json = serde_json::to_vec(bootstrap).map_err(|e| {
         crate::crypto::CryptoError::EncryptionFailed(format!("Serialize bootstrap: {}", e))
     })?;
@@ -68,7 +68,7 @@ pub fn decrypt_bootstrap(
     use crate::crypto::cipher::DataEncryptionKey;
     use crate::sync::crypto::decrypt_from_sync;
 
-    let dek = DataEncryptionKey::from_bytes(*pairing_key);
+    let dek = DataEncryptionKey::from_bytes(&mut { *pairing_key });
     let json = decrypt_from_sync(&dek, encrypted)?;
     serde_json::from_slice(&json).map_err(|e| {
         crate::crypto::CryptoError::DecryptionFailed(format!("Deserialize bootstrap: {}", e))

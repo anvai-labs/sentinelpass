@@ -1,16 +1,46 @@
 //! Biometric authentication support (Windows Hello, Touch ID)
 
-#[cfg(any(windows, target_os = "macos"))]
+use crate::crypto::DataEncryptionKey;
 use crate::DatabaseError;
 use crate::{PasswordManagerError, Result};
 use std::path::Path;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(windows)]
 use zeroize::Zeroize;
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(windows, target_os = "macos"))]
 const BIOMETRIC_SERVICE_NAME: &str = "sentinelpass.biometric";
+
+/// Platform storage policy used for biometric vault DEK protection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BiometricProtectionPolicy {
+    /// macOS Keychain item protected with `biometryCurrentSet`.
+    MacosBiometryCurrentSet,
+    /// Windows Hello-gated OS key storage.
+    WindowsHelloUserPresence,
+}
+
+impl BiometricProtectionPolicy {
+    /// Return the strongest policy supported by the current platform.
+    pub fn current_platform() -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        return Ok(Self::MacosBiometryCurrentSet);
+
+        #[cfg(windows)]
+        return Ok(Self::WindowsHelloUserPresence);
+
+        #[cfg(not(any(windows, target_os = "macos")))]
+        return Err(PasswordManagerError::NotFound(
+            "Biometric key storage is not supported on this platform".to_string(),
+        ));
+    }
+
+    /// Whether the stored secret becomes unusable after biometric enrollment changes.
+    pub fn invalidates_on_biometric_enrollment_change(self) -> bool {
+        matches!(self, Self::MacosBiometryCurrentSet)
+    }
+}
 
 /// Result of a biometric operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,18 +119,56 @@ impl BiometricManager {
         format!("vault-{}", hex::encode(hasher.finalize()))
     }
 
-    /// Store the master password in an OS-protected key store for biometric unlock.
-    pub fn store_master_password(vault_path: &Path, master_password: &[u8]) -> Result<String> {
-        if master_password.is_empty() {
+    #[cfg(any(windows, test))]
+    fn encode_vault_dek(dek: &DataEncryptionKey) -> String {
+        use base64::Engine;
+
+        base64::engine::general_purpose::STANDARD.encode(dek.as_bytes())
+    }
+
+    #[cfg(any(windows, test))]
+    fn decode_vault_dek(encoded: &str) -> Result<DataEncryptionKey> {
+        use base64::Engine;
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Keyring(format!(
+                    "Stored biometric keyring secret is invalid: {}",
+                    e
+                )))
+            })?;
+
+        Self::decode_vault_dek_bytes(decoded)
+    }
+
+    #[cfg(any(windows, target_os = "macos", test))]
+    fn decode_vault_dek_bytes(decoded: Vec<u8>) -> Result<DataEncryptionKey> {
+        let key_bytes: [u8; 32] = decoded.try_into().map_err(|bytes: Vec<u8>| {
+            PasswordManagerError::from(DatabaseError::Keyring(format!(
+                "Stored biometric keyring secret has invalid length: expected 32 bytes, got {}",
+                bytes.len()
+            )))
+        })?;
+
+        Ok(DataEncryptionKey::from_bytes(&mut { key_bytes }))
+    }
+
+    /// Store the vault DEK in an OS-protected key store for biometric unlock.
+    pub fn store_vault_dek(vault_path: &Path, dek: &DataEncryptionKey) -> Result<String> {
+        if dek.as_bytes().is_empty() {
             return Err(PasswordManagerError::InvalidInput(
-                "Master password cannot be empty".to_string(),
+                "Vault DEK cannot be empty".to_string(),
             ));
         }
 
-        #[cfg(any(windows, target_os = "macos"))]
+        #[cfg(target_os = "macos")]
         {
-            use base64::Engine;
+            self::macos::store_vault_dek(vault_path, dek)
+        }
 
+        #[cfg(windows)]
+        {
             let biometric_ref = Self::biometric_ref_for_vault(vault_path);
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, &biometric_ref).map_err(|e| {
@@ -111,7 +179,7 @@ impl BiometricManager {
                 })?;
 
             // Store base64 to keep storage UTF-8 safe across keychain backends.
-            let mut encoded = base64::engine::general_purpose::STANDARD.encode(master_password);
+            let mut encoded = Self::encode_vault_dek(dek);
             let set_result = entry.set_password(&encoded).map_err(|e| {
                 PasswordManagerError::from(DatabaseError::Keyring(format!(
                     "Failed to store biometric keyring secret: {}",
@@ -126,19 +194,22 @@ impl BiometricManager {
 
         #[cfg(not(any(windows, target_os = "macos")))]
         {
-            let _ = (vault_path, master_password);
+            let _ = (vault_path, dek);
             Err(PasswordManagerError::NotFound(
                 "Biometric key storage is not supported on this platform".to_string(),
             ))
         }
     }
 
-    /// Load a previously stored master password from the OS key store.
-    pub fn load_master_password(biometric_ref: &str) -> Result<Vec<u8>> {
-        #[cfg(any(windows, target_os = "macos"))]
+    /// Load a previously stored vault DEK from the OS key store.
+    pub fn load_vault_dek(biometric_ref: &str) -> Result<DataEncryptionKey> {
+        #[cfg(target_os = "macos")]
         {
-            use base64::Engine;
+            self::macos::load_vault_dek(biometric_ref, "Unlock SentinelPass vault with Touch ID")
+        }
 
+        #[cfg(windows)]
+        {
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, biometric_ref).map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Keyring(format!(
@@ -154,17 +225,10 @@ impl BiometricManager {
                 ))
             })?;
 
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(encoded.as_bytes())
-                .map_err(|e| {
-                    PasswordManagerError::from(DatabaseError::Keyring(format!(
-                        "Stored biometric keyring secret is invalid: {}",
-                        e
-                    )))
-                })?;
+            let dek = Self::decode_vault_dek(&encoded)?;
             encoded.zeroize();
 
-            Ok(decoded)
+            Ok(dek)
         }
 
         #[cfg(not(any(windows, target_os = "macos")))]
@@ -176,9 +240,52 @@ impl BiometricManager {
         }
     }
 
-    /// Remove a stored biometric master password secret.
-    pub fn clear_master_password(biometric_ref: &str) -> Result<()> {
-        #[cfg(any(windows, target_os = "macos"))]
+    /// Authenticate and load a previously stored vault DEK from the OS key store.
+    pub fn authenticate_and_load_vault_dek(
+        biometric_ref: &str,
+        reason: &str,
+    ) -> Result<DataEncryptionKey> {
+        #[cfg(target_os = "macos")]
+        {
+            self::macos::load_vault_dek(biometric_ref, reason)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::require_authentication(reason)?;
+            Self::load_vault_dek(biometric_ref)
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn require_authentication(reason: &str) -> Result<()> {
+        match Self::authenticate(reason) {
+            BiometricResult::Success => Ok(()),
+            BiometricResult::Cancelled => Err(PasswordManagerError::InvalidInput(
+                "Biometric authentication was cancelled".to_string(),
+            )),
+            BiometricResult::NotAvailable => Err(PasswordManagerError::NotFound(format!(
+                "{} is not available on this system",
+                Self::get_method_name()
+            ))),
+            BiometricResult::NotEnrolled => Err(PasswordManagerError::NotFound(format!(
+                "{} is not enrolled on this system",
+                Self::get_method_name()
+            ))),
+            BiometricResult::Failed(err) => Err(PasswordManagerError::from(DatabaseError::Other(
+                format!("Biometric authentication failed: {}", err),
+            ))),
+        }
+    }
+
+    /// Remove a stored biometric vault DEK secret.
+    pub fn clear_vault_dek(biometric_ref: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self::macos::clear_vault_dek(biometric_ref)
+        }
+
+        #[cfg(windows)]
         {
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, biometric_ref).map_err(|e| {
@@ -335,13 +442,37 @@ mod windows {
 #[cfg(target_os = "macos")]
 #[allow(unexpected_cfgs)]
 mod macos {
-    use super::BiometricResult;
+    use super::{BiometricManager, BiometricResult, BIOMETRIC_SERVICE_NAME};
+    use crate::{DatabaseError, PasswordManagerError, Result};
     use block::ConcreteBlock;
     use cocoa::base::{id, nil, BOOL, YES};
     use cocoa::foundation::NSString;
+    use core_foundation::base::{
+        kCFAllocatorDefault, CFGetTypeID, CFRelease, CFType, CFTypeRef, TCFType,
+    };
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::data::{CFData, CFDataRef};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::{CFString, CFStringRef};
     use objc::{msg_send, runtime::Class, sel, sel_impl};
+    use security_framework_sys::access_control::{
+        kSecAccessControlBiometryCurrentSet, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+        SecAccessControlCreateWithFlags,
+    };
+    use security_framework_sys::base::{errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::item::{
+        kSecAttrAccessControl, kSecAttrAccount, kSecAttrService, kSecClass,
+        kSecClassGenericPassword, kSecReturnData, kSecValueData,
+    };
+    use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching, SecItemDelete};
+    use std::path::Path;
+    use std::ptr;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    extern "C" {
+        static kSecUseOperationPrompt: CFStringRef;
+    }
 
     const LAPOLICY_DEVICE_OWNER_AUTHENTICATION_WITH_BIOMETRICS: i64 = 1;
 
@@ -352,6 +483,175 @@ mod macos {
     const LA_ERROR_BIOMETRY_NOT_AVAILABLE: i64 = -6;
     const LA_ERROR_BIOMETRY_NOT_ENROLLED: i64 = -7;
     const LA_ERROR_BIOMETRY_LOCKOUT: i64 = -8;
+
+    fn keychain_error(action: &str, status: i32) -> PasswordManagerError {
+        PasswordManagerError::from(DatabaseError::Keyring(format!(
+            "Failed to {} biometric keychain secret (status {})",
+            action, status
+        )))
+    }
+
+    fn sec_status(action: &str, status: i32) -> Result<()> {
+        if status == errSecSuccess {
+            Ok(())
+        } else {
+            Err(keychain_error(action, status))
+        }
+    }
+
+    fn sec_class() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecClass) }
+    }
+
+    fn sec_class_generic_password() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword) }
+    }
+
+    fn sec_attr_service() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecAttrService) }
+    }
+
+    fn sec_attr_account() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) }
+    }
+
+    fn sec_attr_access_control() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecAttrAccessControl) }
+    }
+
+    fn sec_value_data() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecValueData) }
+    }
+
+    fn sec_return_data() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecReturnData) }
+    }
+
+    fn sec_operation_prompt() -> CFString {
+        // SAFETY: Security.framework returns immortal CFString constants.
+        unsafe { CFString::wrap_under_get_rule(kSecUseOperationPrompt) }
+    }
+
+    fn base_query(biometric_ref: &str) -> Vec<(CFString, CFType)> {
+        vec![
+            (sec_class(), sec_class_generic_password().into_CFType()),
+            (
+                sec_attr_service(),
+                CFString::from(BIOMETRIC_SERVICE_NAME).into_CFType(),
+            ),
+            (
+                sec_attr_account(),
+                CFString::from(biometric_ref).into_CFType(),
+            ),
+        ]
+    }
+
+    fn biometry_current_set_access_control() -> Result<CFType> {
+        // SAFETY: The protection constant and flags are defined by Security.framework.
+        let access_control = unsafe {
+            SecAccessControlCreateWithFlags(
+                kCFAllocatorDefault,
+                kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly as CFTypeRef,
+                kSecAccessControlBiometryCurrentSet,
+                ptr::null_mut(),
+            )
+        };
+        if access_control.is_null() {
+            return Err(PasswordManagerError::from(DatabaseError::Keyring(
+                "Failed to create biometric keychain access control".to_string(),
+            )));
+        }
+
+        // SAFETY: `SecAccessControlCreateWithFlags` follows Create Rule ownership.
+        Ok(unsafe { CFType::wrap_under_create_rule(access_control as CFTypeRef) })
+    }
+
+    fn add_query(biometric_ref: &str, dek: &[u8]) -> Result<CFDictionary<CFString, CFType>> {
+        let mut query = base_query(biometric_ref);
+        query.push((
+            sec_attr_access_control(),
+            biometry_current_set_access_control()?,
+        ));
+        query.push((sec_value_data(), CFData::from_buffer(dek).into_CFType()));
+        Ok(CFDictionary::from_CFType_pairs(&query))
+    }
+
+    fn load_query(biometric_ref: &str, reason: &str) -> CFDictionary<CFString, CFType> {
+        let mut query = base_query(biometric_ref);
+        query.push((sec_return_data(), CFBoolean::from(true).into_CFType()));
+        query.push((sec_operation_prompt(), CFString::from(reason).into_CFType()));
+        CFDictionary::from_CFType_pairs(&query)
+    }
+
+    fn delete_query(biometric_ref: &str) -> CFDictionary<CFString, CFType> {
+        CFDictionary::from_CFType_pairs(&base_query(biometric_ref))
+    }
+
+    pub fn store_vault_dek(
+        vault_path: &Path,
+        dek: &crate::crypto::DataEncryptionKey,
+    ) -> Result<String> {
+        let biometric_ref = BiometricManager::biometric_ref_for_vault(vault_path);
+        clear_vault_dek(&biometric_ref)?;
+
+        let query = add_query(&biometric_ref, dek.as_bytes())?;
+        // SAFETY: `query` is a well-formed SecItemAdd dictionary.
+        sec_status("store", unsafe {
+            SecItemAdd(query.as_concrete_TypeRef(), ptr::null_mut())
+        })?;
+
+        Ok(biometric_ref)
+    }
+
+    pub fn load_vault_dek(
+        biometric_ref: &str,
+        reason: &str,
+    ) -> Result<crate::crypto::DataEncryptionKey> {
+        let query = load_query(biometric_ref, reason);
+        let mut item: CFTypeRef = ptr::null();
+        // SAFETY: `query` is a well-formed SecItemCopyMatching dictionary and `item` is an out pointer.
+        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut item) };
+        if status == errSecItemNotFound {
+            return Err(PasswordManagerError::NotFound(
+                "Biometric keychain secret is unavailable".to_string(),
+            ));
+        }
+        sec_status("load", status)?;
+
+        if item.is_null() {
+            return Err(keychain_error("load", status));
+        }
+
+        // SAFETY: `item` is returned by a Copy operation and must be released on all paths.
+        let data = unsafe {
+            if CFGetTypeID(item) != CFData::type_id() {
+                CFRelease(item);
+                return Err(PasswordManagerError::from(DatabaseError::Keyring(
+                    "Stored biometric keychain secret has unexpected type".to_string(),
+                )));
+            }
+            CFData::wrap_under_create_rule(item as CFDataRef)
+        };
+
+        BiometricManager::decode_vault_dek_bytes(data.bytes().to_vec())
+    }
+
+    pub fn clear_vault_dek(biometric_ref: &str) -> Result<()> {
+        let query = delete_query(biometric_ref);
+        // SAFETY: `query` is a well-formed SecItemDelete dictionary.
+        let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
+        if status == errSecItemNotFound {
+            return Ok(());
+        }
+        sec_status("clear", status)
+    }
 
     fn la_error_code(error: id) -> Option<i64> {
         if error == nil {
@@ -510,5 +810,57 @@ mod tests {
     fn test_is_enrolled() {
         // This test will pass on supported platforms
         let _ = BiometricManager::is_enrolled();
+    }
+
+    #[test]
+    fn test_current_biometric_policy_is_platform_native() {
+        let policy = BiometricProtectionPolicy::current_platform();
+
+        #[cfg(target_os = "macos")]
+        {
+            let policy = policy.unwrap();
+            assert_eq!(policy, BiometricProtectionPolicy::MacosBiometryCurrentSet);
+            assert!(policy.invalidates_on_biometric_enrollment_change());
+        }
+
+        #[cfg(windows)]
+        {
+            let policy = policy.unwrap();
+            assert_eq!(policy, BiometricProtectionPolicy::WindowsHelloUserPresence);
+            assert!(!policy.invalidates_on_biometric_enrollment_change());
+        }
+
+        #[cfg(not(any(windows, target_os = "macos")))]
+        assert!(policy.is_err());
+    }
+
+    #[test]
+    fn test_vault_dek_encoding_roundtrip() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let encoded = BiometricManager::encode_vault_dek(&dek);
+        let decoded = BiometricManager::decode_vault_dek(&encoded).unwrap();
+
+        assert_eq!(decoded.as_bytes(), dek.as_bytes());
+    }
+
+    #[test]
+    fn test_vault_dek_raw_bytes_roundtrip() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let decoded = BiometricManager::decode_vault_dek_bytes(dek.as_bytes().to_vec()).unwrap();
+
+        assert_eq!(decoded.as_bytes(), dek.as_bytes());
+    }
+
+    #[test]
+    fn test_vault_dek_decode_rejects_legacy_master_password_length() {
+        use base64::Engine;
+
+        let legacy_encoded = base64::engine::general_purpose::STANDARD.encode(b"master-password");
+        let err = match BiometricManager::decode_vault_dek(&legacy_encoded) {
+            Ok(_) => panic!("legacy master-password-sized secret should not decode as a DEK"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("invalid length"));
     }
 }

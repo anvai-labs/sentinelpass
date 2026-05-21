@@ -18,6 +18,7 @@ Quick reference to all project documentation. Most docs live at the repository r
 |----------|-------------|----------|
 | [SECURITY.md](../SECURITY.md) | Vulnerability reporting policy | CVE, vulnerability, disclosure, reporting |
 | [SECURITY_ARCHITECTURE.md](../SECURITY_ARCHITECTURE.md) | Cryptographic design, threat model, hardening | Argon2id, AES-256-GCM, key hierarchy, KDF, nonce, zeroize, IPC token, biometric, threat model |
+| [docs/SECURITY_STATUS_MATRIX.md](./SECURITY_STATUS_MATRIX.md) | Code-linked status for implemented, partial, and planned security controls | security status, evidence, residual risk, biometric, IPC, relay, passkeys |
 
 ## Development
 
@@ -32,7 +33,9 @@ Quick reference to all project documentation. Most docs live at the repository r
 
 | Document | Description | Keywords |
 |----------|-------------|----------|
+| [docs/GAP_REVIEW_2026-05-08.md](./GAP_REVIEW_2026-05-08.md) | Current gap review and integration plan for developer secrets, passkeys, and biometrics | audit, victor, api keys, passkeys, biometric, typed credentials |
 | [docs/GAP_REVIEW_2026-02-26.md](./GAP_REVIEW_2026-02-26.md) | Evidence-based gap audit across security, features, design, and implementation | audit, review, gaps, security posture |
+| [docs/PASSKEY_PRODUCT_DESIGN.md](./PASSKEY_PRODUCT_DESIGN.md) | Product and security boundary for passkey references before implementation | passkeys, WebAuthn, AuthenticationServices, FIDO, credential provider |
 | [docs/PRD.md](./PRD.md) | Product requirements document (vision, users, scope, metrics, tiers) | prd, vision, users, scope, metrics |
 | [docs/REQUIREMENTS.md](./REQUIREMENTS.md) | Traceable functional/security/ops/commercial requirements | requirements, acceptance criteria, security requirements |
 | [docs/SOLUTION_DESIGN.md](./SOLUTION_DESIGN.md) | Gap-closing architecture and trust-boundary design | design, trust boundary, ipc, relay, extension |
@@ -63,9 +66,11 @@ Looking for something specific? Use these pointers:
 |-------|---------------|
 | **Vault CRUD** | [CLAUDE.md](../CLAUDE.md) § Architecture Overview, `sentinelpass-core/src/vault/` |
 | **Crypto (KDF, cipher)** | [SECURITY_ARCHITECTURE.md](../SECURITY_ARCHITECTURE.md), `sentinelpass-core/src/crypto/` |
+| **Security status evidence** | [docs/SECURITY_STATUS_MATRIX.md](./SECURITY_STATUS_MATRIX.md) |
 | **IPC protocol** | [CLAUDE.md](../CLAUDE.md) § IPC, `sentinelpass-core/src/daemon/ipc.rs` |
 | **Native messaging** | [CLAUDE.md](../CLAUDE.md) § Native Messaging Protocol, `sentinelpass-core/src/daemon/native_messaging.rs` |
 | **Browser extension** | [DEBUGGING.md](../browser-extension/chrome/DEBUGGING.md), `browser-extension/chrome/` |
+| **Passkey product boundary** | [docs/PASSKEY_PRODUCT_DESIGN.md](./PASSKEY_PRODUCT_DESIGN.md) |
 | **TOTP** | [CLAUDE.md](../CLAUDE.md) § Adding a New Native Message Type, `sentinelpass-core/src/totp.rs` |
 | **SSH keys** | `sentinelpass-core/src/ssh.rs` (comprehensive Rust doc comments) |
 | **Biometrics** | `sentinelpass-core/src/biometric.rs` (comprehensive Rust doc comments) |

@@ -5,7 +5,7 @@ use crate::sync::crypto::encrypt_for_sync;
 use crate::sync::models::{
     CredentialPayload, DomainPayload, SshKeyPayload, SyncEntryBlob, SyncEntryType, TotpPayload,
 };
-use crate::{DatabaseError, Result};
+use crate::{CredentialType, DatabaseError, PasswordManagerError, Result};
 use rusqlite::Connection;
 use uuid::Uuid;
 
@@ -18,7 +18,7 @@ pub fn collect_pending_credential_blobs(
     let mut stmt = conn
         .prepare(
             "SELECT entry_id, sync_id, sync_version, modified_at, is_deleted,
-                    title, username, password, url, notes, favorite, created_at
+                    title, username, password, url, notes, credential_type, favorite, created_at
              FROM entries
              WHERE sync_state = 'pending'",
         )
@@ -37,8 +37,9 @@ pub fn collect_pending_credential_blobs(
                 row.get::<_, Vec<u8>>(7)?,         // password
                 row.get::<_, Option<Vec<u8>>>(8)?, // url
                 row.get::<_, Option<Vec<u8>>>(9)?, // notes
-                row.get::<_, bool>(10)?,           // favorite
-                row.get::<_, i64>(11)?,            // created_at
+                row.get::<_, String>(10)?,         // credential_type
+                row.get::<_, bool>(11)?,           // favorite
+                row.get::<_, i64>(12)?,            // created_at
             ))
         })
         .map_err(DatabaseError::Sqlite)?;
@@ -57,12 +58,13 @@ pub fn collect_pending_credential_blobs(
             password_blob,
             url_blob,
             notes_blob,
+            credential_type,
             favorite,
             created_at,
         ) = row.map_err(DatabaseError::Sqlite)?;
 
         let sync_id = Uuid::parse_str(&sync_id_str)
-            .map_err(|e| DatabaseError::Other(format!("Invalid sync_id: {}", e)))?;
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
             // Tombstone: empty encrypted payload
@@ -107,6 +109,7 @@ pub fn collect_pending_credential_blobs(
             title,
             username,
             password,
+            credential_type: CredentialType::parse(&credential_type)?,
             url,
             notes,
             favorite,
@@ -193,7 +196,7 @@ pub fn collect_pending_ssh_key_blobs(
         ) = row.map_err(DatabaseError::Sqlite)?;
 
         let sync_id = Uuid::parse_str(&sync_id_str)
-            .map_err(|e| DatabaseError::Other(format!("Invalid sync_id: {}", e)))?;
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
             let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
@@ -305,7 +308,7 @@ pub fn collect_pending_totp_blobs(
         ) = row.map_err(DatabaseError::Sqlite)?;
 
         let sync_id = Uuid::parse_str(&sync_id_str)
-            .map_err(|e| DatabaseError::Other(format!("Invalid sync_id: {}", e)))?;
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
             let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
@@ -479,10 +482,10 @@ mod tests {
 
         conn.execute(
             "INSERT INTO entries (
-                vault_id, title, username, password, url, notes,
+                vault_id, title, username, password, url, notes, credential_type,
                 entry_nonce, auth_tag, created_at, modified_at, favorite,
                 sync_id, sync_version, sync_state, is_deleted
-            ) VALUES (1, ?1, ?2, ?3, X'', X'', ?4, ?5, ?6, ?7, 0, ?8, 1, 'pending', ?9)",
+            ) VALUES (1, ?1, ?2, ?3, X'', X'', 'password', ?4, ?5, ?6, ?7, 0, ?8, 1, 'pending', ?9)",
             rusqlite::params![
                 title_blob,
                 username_blob,

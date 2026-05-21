@@ -1,6 +1,6 @@
 # Technical Debt & Roadmap
 
-Last updated: 2026-02-16 (v0.3.0)
+Last updated: 2026-05-09 (v0.7.0)
 
 ---
 
@@ -116,7 +116,7 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | Issue | File(s) | Status | Target |
 |-------|---------|--------|--------|
 | IPC token uses `!=` instead of constant-time compare | `daemon/ipc.rs:122` | Done (v0.2.0) | v0.2.0 |
-| IPC master password sent in plaintext (Windows TCP risk) | `daemon/ipc.rs` | Open | v0.3.0 |
+| IPC master password sent in plaintext (Windows TCP risk) | `daemon/ipc/client.rs` | Done (v0.3.0) | v0.3.0 |
 | Browser extension popup lacks clipboard auto-clear | `browser-extension/chrome/popup.ts` | Done (v0.2.0) | v0.2.0 |
 | `schema.rs` uses `CryptoError` for database errors | `database/schema.rs` | Done (v0.2.0) | v0.2.0 |
 
@@ -135,7 +135,7 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | Issue | File(s) | Status | Target |
 |-------|---------|--------|--------|
 | vault.rs at 1,763 lines (facade doing too much) | `vault/mod.rs` | Done (v0.3.0) | v0.3.0 |
-| UI app.ts uses module-level global state | `sentinelpass-ui/app.ts` | Open | v0.4.0 |
+| UI app.ts uses module-level global state | `sentinelpass-ui/app.ts` | Done (v0.3.0) | v0.4.0 |
 | `PasswordManagerError::Database(String)` loses type info | `lib.rs` | Done (v0.3.0) | v0.3.0 |
 
 ---
@@ -156,11 +156,22 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 
 - [x] Extract TOTP, SSH, biometric from vault.rs into dedicated modules
 - [x] Proper error typing for database operations (`DatabaseError` enum)
-- [ ] UI state management refactor (if UI grows)
-- [ ] Pagination for `list_entries()` and `list_ssh_keys()`
-- [ ] Browser extension: enable search, add credential, settings
+- [x] UI state management refactor (state.ts owns all cross-module state; 3 local `let` vars in app.ts are intentionally module-local)
+- [x] Pagination for `list_entries()` and `list_ssh_keys()`
+- [x] Browser extension: enable search, add credential, settings
 
-### v0.4.0 -- Features (from blog roadmap)
+### v0.7.0 -- Security, Features & CI Health
+
+- [x] P0/P1 security fixes: Entry.password zeroization, biometric hardening, IPC token constant-time compare
+- [x] rustls-webpki CVEs patched (RUSTSEC-2026-0098/0099/0104 → 0.103.13)
+- [x] Passkey reference type: credential discriminator, export filtering, secret lookup blocking
+- [x] External secret allowlist with expiring grants and audit events
+- [x] Browser extension: search, add credential, settings, Firefox parity, sender validation fix
+- [x] Architecture: IPC split, CLI module extraction, vault sync/health ops, DB PRAGMAs + WAL
+- [x] Pagination for list_ssh_keys; crate-root re-exports for pagination types
+- [x] CI stabilisation: clippy collapsible_match, platform cfg gates, Windows import fix
+
+### v0.8.0 -- Features (from blog roadmap)
 
 - [ ] Mobile apps (iOS/Android) with shared Rust core
 - [ ] Opt-in encrypted cloud sync (E2E encrypted, self-hostable relay)
@@ -178,3 +189,5 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | 2026-02-16 | v0.1.3 | DeepSeek analysis verification, TECHNICAL_DEBT.md created | -- |
 | 2026-02-16 | v0.2.0 | Hardening: constant-time IPC token, schema error types, indexes/triggers, version validation, remove refinery, proptest, clipboard auto-clear | #16 |
 | 2026-02-16 | v0.3.0 | Architecture: extract vault.rs into vault/ directory module (mod.rs + biometric_ops.rs + totp_ops.rs + ssh_ops.rs + tests.rs), add structured DatabaseError enum with 8 variants replacing catch-all String, migrate ~152 call sites across 10 files. CI fix: gate DatabaseError import for biometric platforms, exclude binary entry points from coverage. | #16 |
+| 2026-05-09 | v0.3.0 | Code quality: IPC split (ipc/mod.rs + server.rs + client.rs), CLI command extraction (9 modules), vault sync/health ops, error refinement (anyhow removed, DatabaseError::Other→InvalidInput), DB PRAGMAs + WAL checkpoint, list_ssh_keys_paginated + crate-root re-exports, popup search/add/settings + sender validation fix, Windows TCP IPC encryption verified Done | -- |
+| 2026-05-09 | v0.7.0 | Version bump to 0.7.0; security: rustls-webpki CVE patches; CI: fix 6 clippy errors (collapsible_match, platform cfg, Windows import); align Cargo.toml + tauri.conf.json versions | -- |

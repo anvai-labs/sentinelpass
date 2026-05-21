@@ -9,6 +9,11 @@ use std::str::FromStr;
 /// Default maximum failed attempts before lockout
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 
+/// Sliding window used when counting recent failures for lockout decisions.
+/// Failures older than this are ignored so historical events can't cause
+/// permanent lockout.
+pub const LOCKOUT_WINDOW_SECONDS: i64 = 3600; // 1 hour
+
 /// Lockout configuration
 #[derive(Debug, Clone)]
 pub struct LockoutConfig {
@@ -125,8 +130,8 @@ impl LockoutManager {
             return Ok(false);
         }
 
-        let total_attempts = self.get_total_failed_attempts()?;
-        let lockout_duration = match self.config.calculate_lockout_duration(total_attempts) {
+        let recent_attempts = self.get_recent_failed_attempts(LOCKOUT_WINDOW_SECONDS)?;
+        let lockout_duration = match self.config.calculate_lockout_duration(recent_attempts) {
             Some(d) => d,
             None => return Ok(false),
         };
@@ -145,8 +150,8 @@ impl LockoutManager {
             return Ok(None);
         }
 
-        let total_attempts = self.get_total_failed_attempts()?;
-        let lockout_duration = match self.config.calculate_lockout_duration(total_attempts) {
+        let recent_attempts = self.get_recent_failed_attempts(LOCKOUT_WINDOW_SECONDS)?;
+        let lockout_duration = match self.config.calculate_lockout_duration(recent_attempts) {
             Some(d) => d,
             None => return Ok(None),
         };

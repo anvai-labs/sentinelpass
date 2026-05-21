@@ -2,6 +2,8 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::CredentialType;
+
 /// A password entry stored in the database
 #[derive(Debug, Clone)]
 pub struct Entry {
@@ -12,6 +14,7 @@ pub struct Entry {
     pub password: String,
     pub url: Option<String>,
     pub notes: Option<String>,
+    pub credential_type: CredentialType,
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub favorite: bool,

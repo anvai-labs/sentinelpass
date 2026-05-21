@@ -35,6 +35,13 @@ pub enum AuditEventType {
     CredentialsListed {
         count: usize,
     },
+    ExternalSecretAccess {
+        client_id: Option<String>,
+        domain: String,
+        field: Option<String>,
+        purpose: Option<String>,
+        success: bool,
+    },
 
     /// Authentication events
     AuthenticationAttempt {
@@ -65,6 +72,9 @@ pub enum AuditEventType {
     DaemonStopped,
     IpcServerStarted,
     IpcClientConnected,
+    BiometricUnlockRequested {
+        success: bool,
+    },
 }
 
 /// Audit log entry
@@ -132,7 +142,7 @@ impl AuditLogger {
             event_type,
             severity,
             context: context.to_string(),
-            pid: std::env::var("PID").ok().and_then(|p| p.parse().ok()),
+            pid: Some(std::process::id()),
             tid: None, // ThreadId cannot be converted to u64, using None
         };
 
@@ -179,13 +189,17 @@ impl AuditLogger {
 
             // Medium-high severity (3)
             AuditEventType::VaultUnlocked { success: true }
-            | AuditEventType::CredentialModified { .. } => 3,
+            | AuditEventType::CredentialModified { .. }
+            | AuditEventType::ExternalSecretAccess { success: true, .. }
+            | AuditEventType::BiometricUnlockRequested { success: true } => 3,
 
             // Medium severity (2)
             AuditEventType::VaultLocked
             | AuditEventType::CredentialCreated { .. }
             | AuditEventType::CredentialViewed { .. }
-            | AuditEventType::VaultAutoLocked => 2,
+            | AuditEventType::VaultAutoLocked
+            | AuditEventType::ExternalSecretAccess { success: false, .. }
+            | AuditEventType::BiometricUnlockRequested { success: false } => 2,
 
             // Low severity (1)
             AuditEventType::CredentialsListed { .. } | AuditEventType::DataImported { .. } => 1,
@@ -390,6 +404,22 @@ mod tests {
             AuditLogger::severity_for_event(&AuditEventType::IpcServerStarted),
             0
         );
+        assert_eq!(
+            AuditLogger::severity_for_event(&AuditEventType::ExternalSecretAccess {
+                client_id: Some("victor".to_string()),
+                domain: "anthropic".to_string(),
+                field: Some("password".to_string()),
+                purpose: Some("victor-auth".to_string()),
+                success: true,
+            }),
+            3
+        );
+        assert_eq!(
+            AuditLogger::severity_for_event(&AuditEventType::BiometricUnlockRequested {
+                success: true
+            }),
+            3
+        );
     }
 
     #[test]
@@ -503,6 +533,45 @@ mod tests {
         let deserialized: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.severity, 2);
         assert_eq!(deserialized.context, "test context");
+    }
+
+    #[test]
+    fn test_external_secret_access_serialization_roundtrip() {
+        let entry = AuditEntry {
+            timestamp: Utc::now(),
+            event_type: AuditEventType::ExternalSecretAccess {
+                client_id: Some("victor".to_string()),
+                domain: "anthropic".to_string(),
+                field: Some("password".to_string()),
+                purpose: Some("victor-auth".to_string()),
+                success: true,
+            },
+            severity: 3,
+            context: "secret field retrieved through daemon".to_string(),
+            pid: Some(1234),
+            tid: None,
+        };
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: AuditEntry = serde_json::from_str(&json).unwrap();
+
+        match deserialized.event_type {
+            AuditEventType::ExternalSecretAccess {
+                client_id,
+                domain,
+                field,
+                purpose,
+                success,
+            } => {
+                assert_eq!(client_id, Some("victor".to_string()));
+                assert_eq!(domain, "anthropic");
+                assert_eq!(field, Some("password".to_string()));
+                assert_eq!(purpose, Some("victor-auth".to_string()));
+                assert!(success);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert_eq!(deserialized.severity, 3);
     }
 
     #[test]

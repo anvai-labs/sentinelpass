@@ -1,129 +1,242 @@
-// Popup script for Password Manager extension
+// Popup script for SentinelPass extension
+const CLIPBOARD_CLEAR_TIMEOUT_MS = 10_000;
 let currentDomain = '';
-const UNAVAILABLE_FEATURE_MESSAGE = 'This feature is not available in the current preview build.';
-const CLIPBOARD_CLEAR_TIMEOUT_MS = 10000;
-// Store credentials in memory only — never expose in DOM attributes
-const credentialStore = new Map();
-let credentialIdCounter = 0;
+let allCredentials = [];
 document.addEventListener('DOMContentLoaded', async () => {
-    // Get current tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    currentDomain = new URL(tab.url).hostname;
-    // Initialize popup
+    try {
+        currentDomain = tab.url ? new URL(tab.url).hostname : '';
+    }
+    catch {
+        currentDomain = '';
+    }
     setupEventListeners();
-    applyUnavailableFeatureState();
     checkVaultStatus();
 });
 function setupEventListeners() {
     document.getElementById('lockBtn').addEventListener('click', lockVault);
     document.getElementById('settingsBtn').addEventListener('click', openSettings);
+    const search = document.getElementById('searchInput');
+    search.addEventListener('input', () => handleSearch(search.value.trim()));
+    document.getElementById('addCredentialBtn').addEventListener('click', showAddView);
+    document.getElementById('addForm').addEventListener('submit', handleAddSubmit);
+    document.getElementById('addCancelBtn').addEventListener('click', () => {
+        document.getElementById('addForm').reset();
+        showUnlockedView();
+    });
+    document.getElementById('settingsBackBtn').addEventListener('click', showUnlockedView);
 }
-function applyUnavailableFeatureState() {
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput) {
-        searchInput.disabled = true;
-        searchInput.title = UNAVAILABLE_FEATURE_MESSAGE;
-        searchInput.classList.add('feature-disabled');
-    }
-    const addButton = document.getElementById('addCredentialBtn');
-    if (addButton) {
-        addButton.disabled = true;
-        addButton.title = UNAVAILABLE_FEATURE_MESSAGE;
-        addButton.classList.add('feature-disabled');
-    }
-}
+// ── Vault status ──────────────────────────────────────────────────────────────
 async function checkVaultStatus() {
     showLoading();
     try {
-        const response = await chrome.runtime.sendMessage({
-            type: 'check_vault_status'
-        });
+        const response = await chrome.runtime.sendMessage({ type: 'check_vault_status' });
         if (response.unlocked) {
             showUnlockedView();
-            loadCredentials();
+            await loadCredentials();
         }
         else {
             showLockedView();
         }
     }
-    catch (error) {
-        console.error('Failed to check vault status:', error);
+    catch {
         showLockedView();
     }
 }
+// ── Credential loading and search ─────────────────────────────────────────────
 async function loadCredentials() {
+    if (!currentDomain) {
+        renderCredentials([]);
+        return;
+    }
+    try {
+        const response = await chrome.runtime.sendMessage({
+            type: 'list_domain_credentials',
+            domain: currentDomain,
+            request_id: generateUUID(),
+        });
+        const raw = response?.credentials ?? [];
+        allCredentials = raw.map(c => ({
+            username: c.username ?? '',
+            title: c.title ?? currentDomain,
+            domain: c.url ?? currentDomain,
+        }));
+    }
+    catch {
+        allCredentials = [];
+    }
+    // Clear the search box on every fresh load
+    document.getElementById('searchInput').value = '';
+    renderCredentials(allCredentials);
+}
+function handleSearch(query) {
+    if (!query) {
+        renderCredentials(allCredentials);
+        return;
+    }
+    const q = query.toLowerCase();
+    renderCredentials(allCredentials.filter(c => c.username.toLowerCase().includes(q) || c.title.toLowerCase().includes(q)));
+}
+function renderCredentials(credentials) {
+    const list = document.getElementById('credentialsList');
+    list.textContent = '';
+    if (credentials.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        const p = document.createElement('p');
+        p.textContent = 'No credentials found for ';
+        const strong = document.createElement('strong');
+        strong.textContent = currentDomain || 'this site';
+        p.appendChild(strong);
+        empty.appendChild(p);
+        list.appendChild(empty);
+        return;
+    }
+    for (const cred of credentials) {
+        const item = document.createElement('div');
+        item.className = 'credential-item';
+        const info = document.createElement('div');
+        info.className = 'credential-info';
+        const usernameDiv = document.createElement('div');
+        usernameDiv.className = 'credential-username';
+        usernameDiv.textContent = cred.username;
+        const titleDiv = document.createElement('div');
+        titleDiv.className = 'credential-domain';
+        titleDiv.textContent = cred.title !== currentDomain ? cred.title : cred.domain;
+        info.appendChild(usernameDiv);
+        info.appendChild(titleDiv);
+        const actions = document.createElement('div');
+        actions.className = 'credential-actions';
+        const copyUserBtn = document.createElement('button');
+        copyUserBtn.className = 'btn-copy';
+        copyUserBtn.textContent = 'User';
+        copyUserBtn.title = 'Copy username';
+        copyUserBtn.addEventListener('click', () => copyText(cred.username, 'Username copied'));
+        const copyPassBtn = document.createElement('button');
+        copyPassBtn.className = 'btn-copy';
+        copyPassBtn.textContent = 'Pass';
+        copyPassBtn.title = 'Copy password';
+        copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain));
+        actions.appendChild(copyUserBtn);
+        actions.appendChild(copyPassBtn);
+        item.appendChild(info);
+        item.appendChild(actions);
+        list.appendChild(item);
+    }
+}
+// Fetch a credential's password at copy-time to avoid holding it in memory.
+async function fetchAndCopyPassword(domain) {
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'get_credential',
-            domain: currentDomain,
-            request_id: generateUUID()
+            domain,
+            request_id: generateUUID(),
         });
-        const credentialsList = document.getElementById('credentialsList');
-        credentialsList.textContent = '';
-        if (response.success && response.data) {
-            // Store credentials in memory — never expose in DOM
-            const credId = 'cred-' + (++credentialIdCounter);
-            credentialStore.set(credId, {
-                username: response.data.username,
-                password: response.data.password
-            });
-            const item = document.createElement('div');
-            item.className = 'credential-item';
-            const info = document.createElement('div');
-            info.className = 'credential-info';
-            const usernameDiv = document.createElement('div');
-            usernameDiv.className = 'credential-username';
-            usernameDiv.textContent = response.data.username;
-            const domainDiv = document.createElement('div');
-            domainDiv.className = 'credential-domain';
-            domainDiv.textContent = currentDomain;
-            info.appendChild(usernameDiv);
-            info.appendChild(domainDiv);
-            const copyBtn = document.createElement('button');
-            copyBtn.className = 'btn-copy';
-            copyBtn.textContent = 'Copy';
-            copyBtn.dataset.credId = credId;
-            copyBtn.addEventListener('click', () => {
-                const cred = credentialStore.get(credId);
-                if (cred) {
-                    copyToClipboard(cred.username, cred.password);
-                }
-            });
-            item.appendChild(info);
-            item.appendChild(copyBtn);
-            credentialsList.appendChild(item);
+        if (response?.success && response.data?.password) {
+            await copyText(response.data.password, 'Password copied');
         }
         else {
-            const emptyState = document.createElement('div');
-            emptyState.className = 'empty-state';
-            const p = document.createElement('p');
-            p.textContent = 'No credentials found for ';
-            const strong = document.createElement('strong');
-            strong.textContent = currentDomain;
-            p.appendChild(strong);
-            const addBtn = document.createElement('button');
-            addBtn.id = 'addCredentialBtn';
-            addBtn.className = 'btn btn-primary feature-disabled';
-            addBtn.disabled = true;
-            addBtn.title = UNAVAILABLE_FEATURE_MESSAGE;
-            addBtn.textContent = 'Add Credential (Coming Soon)';
-            emptyState.appendChild(p);
-            emptyState.appendChild(addBtn);
-            credentialsList.appendChild(emptyState);
+            showNotification('Could not retrieve password', 'error');
         }
     }
-    catch (error) {
-        console.error('Failed to load credentials:', error);
-        const credentialsList = document.getElementById('credentialsList');
-        credentialsList.textContent = '';
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'error-state';
-        const p = document.createElement('p');
-        p.textContent = 'Failed to load credentials';
-        errorDiv.appendChild(p);
-        credentialsList.appendChild(errorDiv);
+    catch {
+        showNotification('Failed to copy password', 'error');
     }
 }
+// ── Add credential form ───────────────────────────────────────────────────────
+function showAddView() {
+    hideAllViews();
+    document.getElementById('addView').classList.remove('hidden');
+    const urlInput = document.getElementById('addUrl');
+    if (currentDomain)
+        urlInput.value = `https://${currentDomain}`;
+    document.getElementById('addTitle').focus();
+}
+async function handleAddSubmit(e) {
+    e.preventDefault();
+    const title = document.getElementById('addTitle').value.trim();
+    const username = document.getElementById('addUsername').value.trim();
+    const password = document.getElementById('addPassword').value;
+    const url = document.getElementById('addUrl').value.trim();
+    if (!title || !username || !password) {
+        showNotification('Title, username, and password are required', 'error');
+        return;
+    }
+    const saveBtn = document.getElementById('addSaveBtn');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+        const response = await chrome.runtime.sendMessage({
+            type: 'save_credential',
+            data: {
+                domain: currentDomain,
+                username,
+                password,
+                title,
+                url: url || (currentDomain ? `https://${currentDomain}` : ''),
+            },
+        });
+        if (response?.success) {
+            showNotification('Credential saved');
+            document.getElementById('addForm').reset();
+            showUnlockedView();
+            await loadCredentials();
+        }
+        else {
+            showNotification(response?.error ?? 'Failed to save credential', 'error');
+        }
+    }
+    catch {
+        showNotification('Failed to save credential', 'error');
+    }
+    finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+    }
+}
+// ── Settings ──────────────────────────────────────────────────────────────────
+function openSettings() {
+    hideAllViews();
+    document.getElementById('settingsView').classList.remove('hidden');
+    // Populate dynamic fields
+    const manifest = chrome.runtime.getManifest();
+    const versionEl = document.getElementById('settingsVersion');
+    if (versionEl)
+        versionEl.textContent = `v${manifest.version}`;
+}
+// ── Lock vault ────────────────────────────────────────────────────────────────
+async function lockVault() {
+    try {
+        const response = await chrome.runtime.sendMessage({ type: 'lock_vault' });
+        if (response?.success && response.unlocked === false) {
+            showLockedView();
+            showNotification('Vault locked');
+        }
+        else {
+            showNotification(response?.error ?? 'Failed to lock vault', 'error');
+        }
+    }
+    catch {
+        showNotification('Failed to lock vault', 'error');
+    }
+}
+// ── Clipboard ─────────────────────────────────────────────────────────────────
+async function copyText(text, successMsg) {
+    try {
+        await navigator.clipboard.writeText(text);
+        showNotification(successMsg);
+        setTimeout(async () => {
+            try {
+                await navigator.clipboard.writeText('');
+            }
+            catch { /* ignore */ }
+        }, CLIPBOARD_CLEAR_TIMEOUT_MS);
+    }
+    catch {
+        showNotification('Failed to copy', 'error');
+    }
+}
+// ── View management ───────────────────────────────────────────────────────────
 function showLockedView() {
     hideAllViews();
     document.getElementById('lockedView').classList.remove('hidden');
@@ -139,14 +252,12 @@ function showLoading() {
     document.getElementById('loadingView').classList.remove('hidden');
 }
 function hideAllViews() {
-    document.querySelectorAll('.view').forEach(view => {
-        view.classList.add('hidden');
-    });
+    document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
 }
 function updateVaultStatus(unlocked) {
-    const statusIndicator = document.getElementById('vaultStatus');
-    const dot = statusIndicator.querySelector('.status-dot');
-    const text = statusIndicator.querySelector('.status-text');
+    const indicator = document.getElementById('vaultStatus');
+    const dot = indicator.querySelector('.status-dot');
+    const text = indicator.querySelector('.status-text');
     if (unlocked) {
         dot.classList.add('unlocked');
         dot.classList.remove('locked');
@@ -158,63 +269,22 @@ function updateVaultStatus(unlocked) {
         text.textContent = 'Locked';
     }
 }
-async function lockVault() {
-    try {
-        const response = await chrome.runtime.sendMessage({
-            type: 'lock_vault'
-        });
-        if (response && response.success && response.unlocked === false) {
-            showLockedView();
-            showNotification('Vault locked');
-        }
-        else {
-            showNotification(response?.error || 'Failed to lock vault', 'error');
-        }
-    }
-    catch (error) {
-        console.error('Failed to lock vault:', error);
-        showNotification('Failed to lock vault', 'error');
-    }
-}
-function openSettings() {
-    showNotification(UNAVAILABLE_FEATURE_MESSAGE, 'info');
-}
-async function copyToClipboard(username, password) {
-    try {
-        await navigator.clipboard.writeText(password);
-        showNotification('Password copied to clipboard');
-        // Auto-clear clipboard after timeout
-        setTimeout(async () => {
-            try {
-                await navigator.clipboard.writeText('');
-            }
-            catch {
-                // Clipboard write may fail if focus changed
-            }
-        }, CLIPBOARD_CLEAR_TIMEOUT_MS);
-    }
-    catch (error) {
-        console.error('Failed to copy:', error);
-        showNotification('Failed to copy password', 'error');
-    }
-}
+// ── Notifications ─────────────────────────────────────────────────────────────
 function showNotification(message, type = 'success') {
-    const notification = document.createElement('div');
-    notification.className = `notification notification-${type}`;
-    notification.textContent = message;
-    document.body.appendChild(notification);
+    const n = document.createElement('div');
+    n.className = `notification notification-${type}`;
+    n.textContent = message;
+    document.body.appendChild(n);
+    setTimeout(() => n.classList.add('show'), 10);
     setTimeout(() => {
-        notification.classList.add('show');
-    }, 10);
-    setTimeout(() => {
-        notification.classList.remove('show');
-        setTimeout(() => notification.remove(), 300);
+        n.classList.remove('show');
+        setTimeout(() => n.remove(), 300);
     }, 3000);
 }
+// ── Utilities ─────────────────────────────────────────────────────────────────
 function generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = (Math.random() * 16) | 0;
+        return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
     });
 }

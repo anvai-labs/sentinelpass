@@ -3,13 +3,17 @@
 //! The daemon maintains the vault in memory, handling lock/unlock
 //! and responding to credential requests.
 
-use crate::{get_default_vault_path, DatabaseError, PasswordManagerError, Result, VaultManager};
+use crate::{
+    get_default_vault_path, CredentialType, DatabaseError, PasswordManagerError, Result,
+    VaultManager,
+};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use tracing::{info, warn};
+use url::Url;
 
 /// Vault state for the daemon
 #[derive(Clone, Copy, Debug)]
@@ -21,51 +25,59 @@ pub enum VaultState {
 /// Daemon vault manager with auto-lock functionality
 pub struct DaemonVault {
     vault: Arc<Mutex<Option<VaultManager>>>,
-    state: Arc<RwLock<VaultState>>,
-    last_activity: Arc<RwLock<Instant>>,
+    state: Arc<SyncMutex<VaultState>>,
+    last_activity: Arc<SyncMutex<Instant>>,
     vault_path: PathBuf,
     inactivity_timeout: Duration,
 }
 
+/// Extract the bare hostname from a URL or hostname string.
+///
+/// Tries the `url` crate first (handles schemes, auth, ports, IPv6, encoding).
+/// Falls back to treating the input as a bare hostname so that plain domain
+/// strings like `"example.com"` still work without a scheme prefix.
 fn normalize_host(value: &str) -> Option<String> {
-    let normalized = value.trim().trim_matches('.').to_ascii_lowercase();
-    if normalized.is_empty() {
+    let trimmed = value.trim().trim_matches('.').to_ascii_lowercase();
+    if trimmed.is_empty() {
         return None;
     }
 
-    let mut host = normalized.as_str();
-
-    if let Some(scheme_pos) = host.find("://") {
-        host = &host[(scheme_pos + 3)..];
-    }
-
-    if let Some(at_pos) = host.rfind('@') {
-        host = &host[(at_pos + 1)..];
-    }
-
-    let host_end = host.find(['/', '?', '#']).unwrap_or(host.len());
-    host = &host[..host_end];
-    host = host.trim_end_matches('.');
-
-    // Bracketed IPv6 URL host: [::1]:443
-    if host.starts_with('[') {
-        if let Some(end) = host.find(']') {
-            let ipv6 = &host[1..end];
-            if !ipv6.is_empty() {
-                return Some(ipv6.to_string());
-            }
+    // Extract the host string from a parsed URL, stripping IPv6 brackets that
+    // url::Url includes in host_str() (e.g. "[::1]" → "::1").
+    let extract = |url: Url| -> Option<String> {
+        let h = url.host_str()?.trim_matches('.');
+        let h = h
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(h);
+        if h.is_empty() {
+            None
+        } else {
+            Some(h.to_string())
         }
-        return None;
-    }
+    };
 
-    // Strip port for host:port. Skip for non-bracketed IPv6.
-    if let Some(colon_pos) = host.rfind(':') {
-        if !host[..colon_pos].contains(':') {
-            host = &host[..colon_pos];
+    // Try parsing as a full URL first; only use the result if a host was found.
+    // "example.com:8443" parses as scheme="example.com" with no host — skip it.
+    if let Ok(url) = Url::parse(&trimmed) {
+        if let Some(host) = extract(url) {
+            return Some(host);
         }
     }
 
-    let host = host.trim().trim_matches('.');
+    // No scheme, or scheme-only parse produced no host — prepend a dummy scheme.
+    if let Ok(url) = Url::parse(&format!("dummy://{}", trimmed)) {
+        if let Some(host) = extract(url) {
+            return Some(host);
+        }
+    }
+
+    // Last resort: bare hostname. Strip stray brackets (e.g. "[]" → "") and dots.
+    let host = trimmed
+        .trim_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_matches('.');
     if host.is_empty() {
         None
     } else {
@@ -108,8 +120,8 @@ impl DaemonVault {
 
         Ok(Self {
             vault: Arc::new(Mutex::new(None)),
-            state: Arc::new(RwLock::new(VaultState::Locked)),
-            last_activity: Arc::new(RwLock::new(Instant::now())),
+            state: Arc::new(SyncMutex::new(VaultState::Locked)),
+            last_activity: Arc::new(SyncMutex::new(Instant::now())),
             vault_path,
             inactivity_timeout: Duration::from_secs(inactivity_timeout_sec),
         })
@@ -131,8 +143,8 @@ impl DaemonVault {
     /// Unlock the daemon with an already opened vault manager.
     pub async fn unlock_with_manager(&self, vault: VaultManager) {
         *self.vault.lock().await = Some(vault);
-        *self.state.write().await = VaultState::Unlocked;
-        *self.last_activity.write().await = Instant::now();
+        *self.state.lock().unwrap() = VaultState::Unlocked;
+        *self.last_activity.lock().unwrap() = Instant::now();
 
         info!("Vault unlocked successfully");
 
@@ -157,13 +169,13 @@ impl DaemonVault {
     /// Lock the vault
     pub async fn lock(&self) {
         *self.vault.lock().await = None;
-        *self.state.write().await = VaultState::Locked;
+        *self.state.lock().unwrap() = VaultState::Locked;
         info!("Vault locked");
     }
 
     /// Check if vault is unlocked
     pub async fn is_unlocked(&self) -> bool {
-        matches!(*self.state.read().await, VaultState::Unlocked)
+        matches!(*self.state.lock().unwrap(), VaultState::Unlocked)
     }
 
     /// Get credential by domain.
@@ -182,10 +194,13 @@ impl DaemonVault {
         // Fast path: indexed lookup via domain_mappings
         if let Some(host) = normalize_host(domain) {
             let indexed = vault.find_entries_by_domain(&host)?;
-            if let Some(entry) = indexed.into_iter().next() {
+            if let Some(entry) = indexed
+                .into_iter()
+                .find(|entry| entry.credential_type.is_retrievable_secret())
+            {
                 return Ok(Some(CredentialResponse {
                     username: entry.username,
-                    password: entry.password,
+                    password: entry.password.as_str().to_string(),
                     title: entry.title,
                 }));
             }
@@ -194,12 +209,15 @@ impl DaemonVault {
         // Slow path: full scan (entries without domain_mappings)
         let entries = vault.list_entries()?;
         for summary in entries {
+            if !summary.credential_type.is_retrievable_secret() {
+                continue;
+            }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
                 if let Some(ref url) = entry.url {
                     if domains_match(domain, url) {
                         return Ok(Some(CredentialResponse {
                             username: entry.username,
-                            password: entry.password,
+                            password: entry.password.as_str().to_string(),
                             title: entry.title,
                         }));
                     }
@@ -296,6 +314,9 @@ impl DaemonVault {
             let indexed = vault.find_entries_by_domain(&host)?;
             if !indexed.is_empty() {
                 for entry in indexed {
+                    if !entry.credential_type.is_retrievable_secret() {
+                        continue;
+                    }
                     let domain = entry
                         .url
                         .as_ref()
@@ -317,6 +338,9 @@ impl DaemonVault {
         // Slow path: full scan
         let entries = vault.list_entries()?;
         for summary in entries {
+            if !summary.credential_type.is_retrievable_secret() {
+                continue;
+            }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
                 let matches = if let Some(ref url) = entry.url {
                     domains_match(base_domain, url)
@@ -385,7 +409,7 @@ impl DaemonVault {
 
         if let Some(entry_id) = existing_entry_id {
             let mut existing_entry = vault.get_entry(entry_id)?;
-            existing_entry.password = password.to_string();
+            existing_entry.password = password.to_string().into();
             if let Some(incoming_url) = url {
                 existing_entry.url = Some(incoming_url.to_string());
             }
@@ -402,9 +426,10 @@ impl DaemonVault {
             entry_id: None, // Auto-assigned by database
             title: format!("Credential for {}", domain),
             username: username.to_string(),
-            password: password.to_string(),
+            password: password.to_string().into(),
             url: url.map(|u| u.to_string()),
             notes: None,
+            credential_type: CredentialType::Password,
             created_at: now,
             modified_at: now,
             favorite: false,
@@ -435,7 +460,7 @@ impl DaemonVault {
 
     /// Record activity (resets the auto-lock timer)
     pub async fn record_activity(&self) {
-        *self.last_activity.write().await = Instant::now();
+        *self.last_activity.lock().unwrap() = Instant::now();
     }
 
     /// Start the auto-lock background task
@@ -456,11 +481,11 @@ impl DaemonVault {
 
             loop {
                 timer.tick().await;
-                let unlocked = matches!(*state.read().await, VaultState::Unlocked);
-                if unlocked && last_activity.read().await.elapsed() >= timeout {
+                let unlocked = matches!(*state.lock().unwrap(), VaultState::Unlocked);
+                if unlocked && last_activity.lock().unwrap().elapsed() >= timeout {
                     warn!("Auto-locking vault due to inactivity");
                     *vault.lock().await = None;
-                    *state.write().await = VaultState::Locked;
+                    *state.lock().unwrap() = VaultState::Locked;
                 }
             }
         });
@@ -493,6 +518,110 @@ pub struct DomainCredentialResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Entry, VaultManager};
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    fn test_entry(title: &str, password: &str, credential_type: CredentialType) -> Entry {
+        Entry {
+            entry_id: None,
+            title: title.to_string(),
+            username: "user@example.com".to_string(),
+            password: password.to_string().into(),
+            url: Some("https://example.com/login".to_string()),
+            notes: None,
+            credential_type,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            favorite: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_credential_does_not_return_passkey_reference_secret() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        let credential = daemon_vault.get_credential("example.com").await.unwrap();
+
+        assert!(credential.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_credential_skips_passkey_reference_and_returns_password_entry() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        let credential = daemon_vault
+            .get_credential("example.com")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(credential.password, "password-secret");
+    }
+
+    #[tokio::test]
+    async fn list_domain_credentials_does_not_include_passkey_references() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Passkey",
+                "passkey-ref:example.com:user@example.com",
+                CredentialType::PasskeyReference,
+            ))
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        let credentials = daemon_vault
+            .list_domain_credentials("example.com")
+            .await
+            .unwrap();
+
+        assert!(credentials.is_empty());
+    }
 
     #[test]
     fn test_vault_state() {

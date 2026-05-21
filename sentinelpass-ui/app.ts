@@ -29,7 +29,8 @@ import {
 } from './totp.js';
 import {
     loadEntries, loadEntry, createNewEntry, saveEntry, deleteEntry,
-    refreshEntriesNow, backgroundRefreshEntries, applyEntryFilters
+    refreshEntriesNow, backgroundRefreshEntries, applyEntryFilters,
+    handleCredentialTypeChanged
 } from './entries.js';
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -136,6 +137,7 @@ function setupEventListeners() {
     }
     searchInput.addEventListener('input', handleSearch);
     document.getElementById('detail-url').addEventListener('input', updateUrlOpenButtonState);
+    document.getElementById('detail-credential-type')?.addEventListener('change', handleCredentialTypeChanged);
 
     // Filter buttons
     document.querySelectorAll('.filter-btn').forEach(btn => {
@@ -149,7 +151,7 @@ function setupEventListeners() {
     document.getElementById('toggle-detail-password').addEventListener('click', () => togglePasswordVisibility('detail-password'));
     document.getElementById('generate-password-btn').addEventListener('click', generatePasswordForEntry);
     document.getElementById('copy-username').addEventListener('click', () => copyToClipboard((document.getElementById('detail-username') as HTMLInputElement).value, 'Username'));
-    document.getElementById('copy-password').addEventListener('click', () => copyToClipboard((document.getElementById('detail-password') as HTMLInputElement).value, 'Password'));
+    document.getElementById('copy-password').addEventListener('click', () => copyToClipboard((document.getElementById('detail-password') as HTMLInputElement).value, getDetailSecretLabel()));
     document.getElementById('copy-totp').addEventListener('click', copyTotpForEntry);
     document.getElementById('configure-totp').addEventListener('click', openTotpModal);
     document.getElementById('remove-totp').addEventListener('click', removeTotpForEntry);
@@ -601,10 +603,15 @@ async function generatePasswordForEntry() {
             includeSymbols: true
         });
         (document.getElementById('detail-password') as HTMLInputElement).value = password;
-        showToast('Password generated!', 'success');
+        showToast(`${getDetailSecretLabel()} generated!`, 'success');
     } catch (error) {
         showToast(error, 'error');
     }
+}
+
+function getDetailSecretLabel() {
+    const typeSelect = document.getElementById('detail-credential-type') as HTMLSelectElement | null;
+    return typeSelect?.value === 'api_key' ? 'API key' : 'Password';
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
