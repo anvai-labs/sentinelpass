@@ -70,7 +70,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Link(destination: URL(string: "https://github.com/vjsingh1984/sentinelpass")!) {
+                    Link(destination: URL(string: "https://github.com/anvai-labs/sentinelpass")!) {
                         HStack {
                             Text("GitHub Repository")
                             Spacer()

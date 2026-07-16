@@ -4,7 +4,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vjsingh1984/sentinelpass.git"
+    "url": "https://github.com/anvai-labs/sentinelpass.git"
   },
   "scripts": {
     "web:build": "tsc -p tsconfig.web.json && node scripts/postprocess-web-build.mjs",
