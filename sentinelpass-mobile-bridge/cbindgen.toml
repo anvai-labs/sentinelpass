@@ -6,6 +6,7 @@ cpp_compat = true
 [defines]
 "target_os = ios" = "IOS_PLATFORM"
 "target_os = android" = "ANDROID_PLATFORM"
+"feature = jni" = "__ANDROID__"
 
 [export]
 # Explicitly list items to export
@@ -47,7 +48,6 @@ include = [
 
 [fn]
 # Function naming conventions
-prefix = "sp"
 rename_args = "PascalCase"
 
 # Sort by name

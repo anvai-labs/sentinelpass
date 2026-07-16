@@ -221,6 +221,6 @@ jobs:
         run: |
           # Verify the bridge header (iOS/common API) compiles cleanly on macOS.
           # JNI declarations are guarded with #ifdef __ANDROID__ so they are
-          # excluded here. The sp macro is #defined to nothing in the header itself.
+          # excluded here.
           echo '#include "sentinelpass-mobile-bridge/include/sentinelpass_bridge.h"' \
             | clang -x c -fsyntax-only - && echo "Header compiles OK"
