@@ -19,21 +19,21 @@ Choose your platform:
 
 **Windows:**
 ```bash
-# Download from https://github.com/vjsingh1984/sentinelpass/releases
+# Download from https://github.com/anvai-labs/sentinelpass/releases
 # Run sentinelpass-installer-VERSION-windows.zip
 # Extract and run install-user.cmd
 ```
 
 **macOS:**
 ```bash
-# Download from https://github.com/vjsingh1984/sentinelpass/releases
+# Download from https://github.com/anvai-labs/sentinelpass/releases
 # Extract sentinelpass-installer-VERSION-macos.tar.gz
 # Run: ./install-user.command
 ```
 
 **Linux:**
 ```bash
-# Download from https://github.com/vjsingh1984/sentinelpass/releases
+# Download from https://github.com/anvai-labs/sentinelpass/releases
 # Extract sentinelpass-installer-VERSION-linux.tar.gz
 # Run: ./install.sh
 ```
@@ -90,5 +90,5 @@ The browser extension will show:
 ### Support
 
 For issues or questions:
-- GitHub: https://github.com/vjsingh1984/sentinelpass/issues
-- Documentation: https://github.com/vjsingh1984/sentinelpass
+- GitHub: https://github.com/anvai-labs/sentinelpass/issues
+- Documentation: https://github.com/anvai-labs/sentinelpass

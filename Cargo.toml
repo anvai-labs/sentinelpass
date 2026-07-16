@@ -8,6 +8,7 @@ members = [
     "sentinelpass-relay",
     "sentinelpass-mobile-bridge",
 ]
+exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
@@ -15,8 +16,8 @@ version = "0.7.0"
 edition = "2021"
 authors = ["VJ Singh <singhvjd@gmail.com>"]
 license = "Apache-2.0"
-repository = "https://github.com/vjsingh1984/sentinelpass"
-homepage = "https://github.com/vjsingh1984/sentinelpass"
+repository = "https://github.com/anvai-labs/sentinelpass"
+homepage = "https://github.com/anvai-labs/sentinelpass"
 description = "A secure, local-first password manager with browser autofill"
 keywords = ["password", "security", "vault", "autofill"]
 categories = ["command-line-utilities", "authentication"]
@@ -97,6 +98,11 @@ toml_dep = { package = "toml", version = "0.8" }
 
 # System
 hostname = "0.4"
+
+[patch.crates-io]
+# Released 0.31.10 plus upstream's dependency-only security fix. Remove this
+# vendor after wayland-scanner publishes quick-xml 0.41 support.
+wayland-scanner = { path = "vendor/wayland-scanner" }
 
 [profile.release]
 opt-level = 3
