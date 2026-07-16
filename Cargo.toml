@@ -8,6 +8,7 @@ members = [
     "sentinelpass-relay",
     "sentinelpass-mobile-bridge",
 ]
+exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
@@ -99,9 +100,9 @@ toml_dep = { package = "toml", version = "0.8" }
 hostname = "0.4"
 
 [patch.crates-io]
-# Remove after wayland-scanner publishes the quick-xml 0.41 security update.
-# Upstream commit addresses RUSTSEC-2026-0194 and RUSTSEC-2026-0195.
-wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "d07c4f91f28b42e5a485823ffd9d8d5a210b1053" }
+# Released 0.31.10 plus upstream's dependency-only security fix. Remove this
+# vendor after wayland-scanner publishes quick-xml 0.41 support.
+wayland-scanner = { path = "vendor/wayland-scanner" }
 
 [profile.release]
 opt-level = 3
