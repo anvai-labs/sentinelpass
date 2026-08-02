@@ -14,7 +14,7 @@ resolver = "2"
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
-authors = ["VJ Singh <singhvjd@gmail.com>"]
+authors = ["VJ Singh <vijay@anvaiops.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/anvai-labs/sentinelpass"
 homepage = "https://github.com/anvai-labs/sentinelpass"

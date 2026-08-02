@@ -264,7 +264,7 @@ test.skip('submit flow does not auto-save before explicit click', async () => {
     }
 
     await page.goto(`${baseUrl}/login`);
-    await page.fill('#username', 'singhvjd@gmail.com');
+    await page.fill('#username', 'vijay@anvaiops.com');
     await page.fill('#password', 'test-password-123');
     await page.click('#submit');
     await expect(page).toHaveURL(/\/after/);
@@ -288,7 +288,7 @@ test.skip('inline prompt not-now emits NO_SAVE and does not call save', async ()
   try {
     const { page, baseUrl, hostname, logs, worker } = harness;
     await seedPendingLogin(worker, {
-      username: 'singhvjd@gmail.com',
+      username: 'vijay@anvaiops.com',
       password: 'test-password-123',
       domain: hostname,
       url: `${baseUrl}/login`,
@@ -313,7 +313,7 @@ test.skip('inline prompt save click emits save intent and triggers save call', a
   try {
     const { page, baseUrl, hostname, logs, worker } = harness;
     await seedPendingLogin(worker, {
-      username: 'singhvjd@gmail.com',
+      username: 'vijay@anvaiops.com',
       password: 'test-password-123',
       domain: hostname,
       url: `${baseUrl}/login`,

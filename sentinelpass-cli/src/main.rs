@@ -11,7 +11,7 @@ mod commands;
 /// SentinelPass CLI - A secure, local-first password manager
 #[derive(Parser)]
 #[command(name = "sentinelpass")]
-#[command(author = "VJ Singh <singhvjd@gmail.com>")]
+#[command(author = "VJ Singh <vijay@anvaiops.com>")]
 #[command(version = "0.1.0")]
 #[command(about = "Secure, local-first password manager with browser autofill", long_about = None)]
 struct Cli {
