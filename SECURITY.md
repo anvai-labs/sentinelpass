@@ -11,7 +11,7 @@
 
 Do not open public issues for exploitable vulnerabilities.
 
-1. Email maintainers at `singhvjd@gmail.com` with subject `SentinelPass Security Report`.
+1. Email maintainers at `vijay@anvaiops.com` with subject `SentinelPass Security Report`.
 2. Include: affected component, impact, reproduction steps, and suggested mitigation (if known).
 3. If needed, include encrypted attachments/logs only.
 
