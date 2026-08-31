@@ -458,6 +458,16 @@ impl DaemonVault {
         }
     }
 
+    /// Run a full sync cycle (push pending changes, pull remote changes).
+    #[cfg(feature = "sync")]
+    pub async fn sync_now(&self) -> Result<crate::sync::models::SyncStatus> {
+        let vault_guard = self.vault.lock().await;
+        let vault = vault_guard
+            .as_ref()
+            .ok_or(PasswordManagerError::VaultLocked)?;
+        vault.sync_now().await
+    }
+
     /// Record activity (resets the auto-lock timer)
     pub async fn record_activity(&self) {
         *self.last_activity.lock().unwrap() = Instant::now();

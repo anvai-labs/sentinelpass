@@ -15,6 +15,7 @@ use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField
 use crate::{AuditEventType, AuditLogger};
 use crate::{DatabaseError, PasswordManagerError, Result};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
@@ -33,6 +34,8 @@ pub struct IpcServer {
     /// Shared audit logger — initialised once at startup so every IPC request
     /// reuses the open file handle instead of reopening it per-call.
     audit_logger: Option<Arc<AuditLogger>>,
+    /// Set by the `Shutdown` IPC message; the accept loops observe it and exit.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl IpcServer {
@@ -69,7 +72,13 @@ impl IpcServer {
             auth_token,
             external_secret_allowlist_path,
             audit_logger,
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Handle to observe (or trigger) server shutdown from outside the accept loop.
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
     }
 
     /// Start the IPC server
@@ -153,8 +162,15 @@ impl IpcServer {
                         error!("Failed to accept connection: {}", e);
                     }
                 }
+
+                if self.shutdown.load(Ordering::Acquire) {
+                    info!("IPC: shutdown requested — stopping accept loop");
+                    break;
+                }
             }
         }
+
+        let _ = std::fs::remove_file(&self.socket_path);
 
         #[cfg(windows)]
         {
@@ -289,6 +305,11 @@ impl IpcServer {
                             error!("Failed to accept connection: {}", e);
                         }
                     }
+
+                    if self.shutdown.load(Ordering::Acquire) {
+                        info!("IPC: shutdown requested — stopping accept loop");
+                        break;
+                    }
                 }
             } else {
                 // Default: Use named pipes with per-user ACLs
@@ -397,10 +418,19 @@ impl IpcServer {
                         }
                     }
 
+                    if self.shutdown.load(Ordering::Acquire) {
+                        info!("IPC: shutdown requested — stopping accept loop");
+                        break;
+                    }
+
                     // Connection is closed when dropped
                 }
             }
+
+            let _ = std::fs::remove_file(&self.socket_path);
         }
+
+        Ok(())
     }
 
     /// Handle an IPC message
@@ -732,7 +762,49 @@ impl IpcServer {
             }
             IpcMessage::Shutdown => {
                 info!("IPC: Shutdown requested");
+                self.shutdown.store(true, Ordering::Release);
                 IpcMessage::VaultStatusResponse { unlocked: false }
+            }
+            IpcMessage::SyncNow => {
+                debug!("IPC: SyncNow");
+                #[cfg(feature = "sync")]
+                {
+                    let pending_before = self
+                        .vault
+                        .get_sync_status()
+                        .await
+                        .map(|s| s.pending_changes)
+                        .unwrap_or(0);
+                    match self.vault.sync_now().await {
+                        Ok(status_after) => {
+                            let pushed =
+                                pending_before.saturating_sub(status_after.pending_changes);
+                            info!("IPC: sync completed, ~{} changes pushed", pushed);
+                            IpcMessage::SyncNowResponse {
+                                success: true,
+                                pushed,
+                                pulled: 0,
+                                error: None,
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to run sync: {}", e);
+                            IpcMessage::SyncNowResponse {
+                                success: false,
+                                pushed: 0,
+                                pulled: 0,
+                                error: Some(e.to_string()),
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "sync"))]
+                IpcMessage::SyncNowResponse {
+                    success: false,
+                    pushed: 0,
+                    pulled: 0,
+                    error: Some("sync support is not compiled into this daemon".to_string()),
+                }
             }
             IpcMessage::SyncStatus => {
                 debug!("IPC: SyncStatus");

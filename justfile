@@ -41,15 +41,15 @@ clean:
 
 # Initialize development database
 init-db:
-    cargo run --bin pm-cli -- init --dev
+    cargo run --bin sentinelpass -- init --dev
 
 # Run daemon in development
 daemon:
-    cargo run --bin pm-daemon
+    cargo run --bin sentinelpass-daemon
 
 # Run CLI
 cli:
-    cargo run --bin pm-cli --
+    cargo run --bin sentinelpass --
 
 # Install native messaging host (Windows)
 install-host-windows:

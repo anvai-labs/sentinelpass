@@ -28,7 +28,6 @@ argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
 zeroize = { version = "1.7", features = ["zeroize_derive", "serde"] }
-memsec = "0.6"
 subtle = "2.5"
 hex = "0.4"
 
