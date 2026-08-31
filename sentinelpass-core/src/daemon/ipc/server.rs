@@ -228,9 +228,7 @@ impl IpcServer {
                                                                     continue;
                                                                 }
                                                                 let response = self
-                                                                    .handle_message(
-                                                                        envelope,
-                                                                    )
+                                                                    .handle_message(envelope)
                                                                     .await;
                                                                 match serde_json::to_vec(&response) {
                                                                     Ok(response_bytes) => {
