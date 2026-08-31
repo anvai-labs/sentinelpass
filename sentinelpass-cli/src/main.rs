@@ -71,9 +71,9 @@ enum Commands {
         #[arg(long)]
         biometric_unlock: bool,
 
-        /// Local tool client id to enforce external-secret allowlist authorization
+        /// Local tool client id used for allowlist authorization (required)
         #[arg(long)]
-        client_id: Option<String>,
+        client_id: String,
 
         /// Purpose label recorded in daemon audit context
         #[arg(long)]
@@ -92,6 +92,60 @@ enum Commands {
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
+    },
+
+    /// Run a command with secrets injected as environment variables
+    Exec {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Purpose label recorded in daemon audit context
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// NAME=domain[:field] mapping; repeatable
+        #[arg(long = "env")]
+        env_specs: Vec<String>,
+
+        /// Command and arguments to run (after `--`)
+        #[arg(last = true)]
+        command: Vec<std::ffi::OsString>,
+    },
+
+    /// Print resolved secrets as shell exports or JSON (no command runs)
+    Env {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Purpose label recorded in daemon audit context
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SecretOutputFormat::Exports)]
+        format: SecretOutputFormat,
+
+        /// NAME=domain[:field] mapping; repeatable
+        #[arg(long = "env")]
+        env_specs: Vec<String>,
     },
 
     /// Manage metadata-only passkey references
@@ -636,6 +690,8 @@ impl SecretField {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum SecretOutputFormat {
     Plain,
+    #[value(name = "exports")]
+    Exports,
     Json,
 }
 
@@ -660,6 +716,16 @@ impl From<SecretField> for ExternalSecretField {
             SecretField::Username => Self::Username,
             SecretField::Password => Self::Password,
             SecretField::Title => Self::Title,
+        }
+    }
+}
+
+impl From<ExternalSecretField> for SecretField {
+    fn from(field: ExternalSecretField) -> Self {
+        match field {
+            ExternalSecretField::Username => Self::Username,
+            ExternalSecretField::Password => Self::Password,
+            ExternalSecretField::Title => Self::Title,
         }
     }
 }
@@ -825,6 +891,48 @@ fn main() -> Result<()> {
 
         Commands::Secret { command } => {
             commands::secret::handle_secret_command(&command)?;
+        }
+
+        Commands::Exec {
+            client_id,
+            token,
+            biometric_unlock,
+            purpose,
+            env_specs,
+            command,
+        } => {
+            let code = commands::exec::handle_exec_command(
+                &env_specs,
+                commands::exec::ExecOptions {
+                    client_id,
+                    token,
+                    biometric_unlock,
+                    purpose,
+                },
+                command,
+            )?;
+            std::process::exit(code);
+        }
+
+        Commands::Env {
+            client_id,
+            token,
+            biometric_unlock,
+            purpose,
+            format,
+            env_specs,
+        } => {
+            let code = commands::exec::handle_env_command(
+                &env_specs,
+                commands::exec::ExecOptions {
+                    client_id,
+                    token,
+                    biometric_unlock,
+                    purpose,
+                },
+                format,
+            )?;
+            std::process::exit(code);
         }
 
         Commands::Passkey { ref command } => match command {
@@ -1440,7 +1548,7 @@ mod tests {
             } => {
                 assert_eq!(domain, "anthropic");
                 assert!(matches!(field, SecretField::Password));
-                assert_eq!(client_id, Some("victor".to_string()));
+                assert_eq!(client_id, "victor".to_string());
                 assert_eq!(purpose, Some("victor-auth".to_string()));
                 assert_eq!(output, SecretOutputFormat::Json);
             }

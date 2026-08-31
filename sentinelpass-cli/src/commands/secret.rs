@@ -20,7 +20,7 @@ pub fn render_secret_lookup(
     output: SecretOutputFormat,
 ) -> Result<String> {
     match output {
-        SecretOutputFormat::Plain => Ok(result.value.clone()),
+        SecretOutputFormat::Plain | SecretOutputFormat::Exports => Ok(result.value.clone()),
         SecretOutputFormat::Json => serde_json::to_string(&serde_json::json!({
             "domain": &result.domain,
             "field": result.field.as_str(),
@@ -73,79 +73,49 @@ pub async fn get_secret_from_daemon(
     field: SecretField,
     biometric_unlock: bool,
     prompt_reason: String,
-    client_id: Option<String>,
+    client_id: String,
     purpose: Option<String>,
     client_token: Option<String>,
 ) -> Result<SecretLookupResult> {
+    // Legacy unscoped GetCredential lookup was removed: every secret fetch is
+    // allowlist-scoped and token-enforced under a client id.
+    let lookup_purpose = purpose.clone();
     let client = IpcClient::new_for_cli(default_ipc_socket_path(), client_token)?;
     unlock_daemon_with_biometric_if_requested(&client, biometric_unlock, &prompt_reason).await?;
-    let lookup_domain = domain.clone();
-    let lookup_client_id = client_id.clone();
-    let lookup_purpose = purpose.clone();
 
-    if let Some(client_id) = client_id {
-        return match client
-            .send(IpcMessage::GetExternalSecret {
-                client_id,
-                domain,
-                field: field.into(),
-                purpose,
-            })
-            .await?
-        {
-            IpcMessage::GetExternalSecretResponse {
-                value,
-                authorized: true,
-                error: None,
-                ..
-            } => value
-                .map(|value| SecretLookupResult {
-                    domain: lookup_domain,
-                    field,
-                    client_id: lookup_client_id,
-                    purpose: lookup_purpose,
-                    value,
-                })
-                .ok_or_else(|| anyhow::anyhow!("Requested secret field is not available")),
-            IpcMessage::GetExternalSecretResponse {
-                authorized: false,
-                error,
-                ..
-            } => {
-                let detail = error.unwrap_or_else(|| "external secret access denied".to_string());
-                anyhow::bail!("{}", detail)
-            }
-            IpcMessage::GetExternalSecretResponse {
-                error: Some(error), ..
-            } => anyhow::bail!("{}", error),
-            _ => anyhow::bail!("Unexpected daemon response during external secret lookup"),
-        };
-    }
-
-    match client.send(IpcMessage::GetCredential { domain }).await? {
-        IpcMessage::GetCredentialResponse {
-            username,
-            password,
-            title,
+    match client
+        .send(IpcMessage::GetExternalSecret {
+            client_id: client_id.clone(),
+            domain: domain.clone(),
+            field: field.into(),
+            purpose,
+        })
+        .await?
+    {
+        IpcMessage::GetExternalSecretResponse {
+            value: Some(value),
+            authorized: true,
+            error: None,
+            locked: None,
+        } => Ok(SecretLookupResult {
+            domain,
+            field,
+            client_id: Some(client_id),
+            purpose: lookup_purpose,
+            value,
+        }),
+        IpcMessage::GetExternalSecretResponse {
+            authorized: false,
+            error,
             ..
         } => {
-            let value = match field {
-                SecretField::Username => username,
-                SecretField::Password => password,
-                SecretField::Title => title,
-            };
-
-            value
-                .map(|value| SecretLookupResult {
-                    domain: lookup_domain,
-                    field,
-                    client_id: lookup_client_id,
-                    purpose: lookup_purpose,
-                    value,
-                })
-                .ok_or_else(|| anyhow::anyhow!("Requested secret field is not available"))
+            let detail = error.unwrap_or_else(|| "external secret access denied".to_string());
+            anyhow::bail!("{}", detail)
         }
-        _ => anyhow::bail!("Unexpected daemon response during secret lookup"),
+        IpcMessage::GetExternalSecretResponse {
+            error: Some(error), ..
+        } => anyhow::bail!("{}", error),
+        _ => anyhow::bail!("Unexpected daemon response during external secret lookup"),
     }
 }
 
@@ -405,7 +375,7 @@ pub fn handle_secret_get(
     domain: String,
     field: SecretField,
     biometric_unlock: bool,
-    client_id: Option<String>,
+    client_id: String,
     purpose: Option<String>,
     output: SecretOutputFormat,
     prompt_reason: String,
@@ -538,7 +508,7 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
                 *field,
                 *biometric_unlock,
                 prompt_reason.clone(),
-                Some(client_id.clone()),
+                client_id.clone(),
                 purpose.clone(),
                 token.clone(),
             ))??;

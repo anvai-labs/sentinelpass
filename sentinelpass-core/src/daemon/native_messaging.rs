@@ -98,7 +98,7 @@ impl NativeMessagingHost {
 
         // Create IPC client to communicate with daemon
         let socket_path = default_ipc_socket_path();
-        let ipc_client = IpcClient::new(socket_path)
+        let ipc_client = IpcClient::new_for_native_host(socket_path)
             .map_err(|e| format!("Failed to initialize IPC client: {}", e))?;
 
         // Convert native message to IPC message

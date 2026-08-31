@@ -24,7 +24,7 @@ pub mod transport;
 pub mod windows_frame;
 
 pub use client::IpcClient;
-pub use envelope::IpcEnvelope;
+pub use envelope::{IpcEnvelope, Origin};
 pub use error::ProtocolError;
 pub use message::{CredentialSummary, ExternalSecretField, IpcMessage};
 pub use paths::{default_ipc_socket_path, default_ipc_token_path, get_config_dir};

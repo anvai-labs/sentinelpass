@@ -14,6 +14,7 @@ use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
 use crate::{AuditEventType, AuditLogger};
 use crate::{DatabaseError, PasswordManagerError, Result};
+use sentinelpass_protocol::Origin;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -433,13 +434,42 @@ impl IpcServer {
         Ok(())
     }
 
+    /// Gate for the browser-autofill surface (GetCredential, GetTotpCode,
+    /// ListDomainCredentials, SaveCredential). External tools must use
+    /// GetExternalSecret / SaveSecret instead.
+    ///
+    /// - `NativeHost` origin: allowed.
+    /// - `Cli` origin: denied — a CLI-tagged client has no business on the
+    ///   autofill surface.
+    /// - No origin: legacy <= 0.7 hosts. Allowed with a deprecation warning
+    ///   in 0.8; set SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1 to deny now
+    ///   (deny-by-default is planned for 0.9).
+    fn browser_surface_allowed(&self, origin: Option<Origin>) -> bool {
+        match origin {
+            Some(Origin::NativeHost) => true,
+            Some(Origin::Cli) => false,
+            None => std::env::var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL")
+                .map(|v| v != "1")
+                .unwrap_or(true),
+        }
+    }
+
+    fn warn_originless_browser_surface(&self) {
+        warn!(
+            "Deprecated: browser-surface request without origin marker from an \
+             untagged client; upgrade sentinelpass-host. This will be denied by \
+             default in v0.9 (SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1 denies now)."
+        );
+    }
+
     /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
     async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
         let client_token = envelope.client_token.clone();
-        // Origin is provenance labeling for deprecation gating (used by the
-        // browser-surface gate); not security-relevant by itself.
-        let _origin = envelope.origin;
+        // Origin is provenance labeling for the browser-surface gate below —
+        // NOT authentication. The security boundary for external tools is the
+        // grant + client token system.
+        let origin = envelope.origin;
         match envelope.message {
             IpcMessage::GetExternalSecret {
                 client_id,
@@ -690,6 +720,18 @@ impl IpcServer {
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::GetCredentialResponse {
+                        username: None,
+                        password: None,
+                        title: None,
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
+
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::GetCredentialResponse {
                         username: None,
@@ -761,6 +803,16 @@ impl IpcServer {
                     base_domain
                 );
 
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::ListDomainCredentialsResponse {
+                        credentials: Vec::new(),
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
+
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::ListDomainCredentialsResponse {
                         credentials: Vec::new(),
@@ -794,6 +846,17 @@ impl IpcServer {
             }
             IpcMessage::GetTotpCode { domain } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
+
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::GetTotpCodeResponse {
+                        code: None,
+                        seconds_remaining: None,
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
 
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::GetTotpCodeResponse {
@@ -837,6 +900,19 @@ impl IpcServer {
                     "IPC: SaveCredential for domain '{}', user '{}'",
                     domain, username
                 );
+
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::SaveCredentialResponse {
+                        success: false,
+                        error: Some(
+                            "browser-surface request rejected: non-native origin".to_string(),
+                        ),
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
 
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::SaveCredentialResponse {

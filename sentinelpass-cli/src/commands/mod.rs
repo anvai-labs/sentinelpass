@@ -1,4 +1,5 @@
 pub mod credentials;
+pub mod exec;
 pub mod generate;
 pub mod import_export;
 pub mod passkey;
