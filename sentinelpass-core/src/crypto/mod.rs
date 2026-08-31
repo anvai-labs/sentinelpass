@@ -15,7 +15,6 @@ pub mod kdf;
 pub mod keyring;
 pub mod password;
 pub mod strength;
-pub mod zero;
 
 pub use cipher::{decrypt_entry, encrypt_entry, DataEncryptionKey, EncryptedEntry};
 pub use health::{
@@ -31,7 +30,6 @@ pub use password::{
 pub use strength::{
     analyze_password, calculate_shannon_entropy, PasswordAnalysis, PasswordStrength,
 };
-pub use zero::{zeroize_bytes, SecureBuffer};
 
 use thiserror::Error;
 

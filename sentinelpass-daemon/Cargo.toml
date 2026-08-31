@@ -15,7 +15,7 @@ name = "sentinelpass-daemon"
 path = "src/main.rs"
 
 [dependencies]
-sentinelpass-core = { path = "../sentinelpass-core" }
+sentinelpass-core = { path = "../sentinelpass-core", features = ["sync"] }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

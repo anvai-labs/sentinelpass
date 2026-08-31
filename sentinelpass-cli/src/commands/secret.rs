@@ -20,7 +20,7 @@ pub fn render_secret_lookup(
     output: SecretOutputFormat,
 ) -> Result<String> {
     match output {
-        SecretOutputFormat::Plain => Ok(result.value.clone()),
+        SecretOutputFormat::Plain | SecretOutputFormat::Exports => Ok(result.value.clone()),
         SecretOutputFormat::Json => serde_json::to_string(&serde_json::json!({
             "domain": &result.domain,
             "field": result.field.as_str(),
@@ -73,76 +73,49 @@ pub async fn get_secret_from_daemon(
     field: SecretField,
     biometric_unlock: bool,
     prompt_reason: String,
-    client_id: Option<String>,
+    client_id: String,
     purpose: Option<String>,
+    client_token: Option<String>,
 ) -> Result<SecretLookupResult> {
-    let client = IpcClient::new(default_ipc_socket_path())?;
-    unlock_daemon_with_biometric_if_requested(&client, biometric_unlock, &prompt_reason).await?;
-    let lookup_domain = domain.clone();
-    let lookup_client_id = client_id.clone();
+    // Legacy unscoped GetCredential lookup was removed: every secret fetch is
+    // allowlist-scoped and token-enforced under a client id.
     let lookup_purpose = purpose.clone();
+    let client = IpcClient::new_for_cli(default_ipc_socket_path(), client_token)?;
+    unlock_daemon_with_biometric_if_requested(&client, biometric_unlock, &prompt_reason).await?;
 
-    if let Some(client_id) = client_id {
-        return match client
-            .send(IpcMessage::GetExternalSecret {
-                client_id,
-                domain,
-                field: field.into(),
-                purpose,
-            })
-            .await?
-        {
-            IpcMessage::GetExternalSecretResponse {
-                value,
-                authorized: true,
-                error: None,
-            } => value
-                .map(|value| SecretLookupResult {
-                    domain: lookup_domain,
-                    field,
-                    client_id: lookup_client_id,
-                    purpose: lookup_purpose,
-                    value,
-                })
-                .ok_or_else(|| anyhow::anyhow!("Requested secret field is not available")),
-            IpcMessage::GetExternalSecretResponse {
-                authorized: false,
-                error,
-                ..
-            } => {
-                let detail = error.unwrap_or_else(|| "external secret access denied".to_string());
-                anyhow::bail!("{}", detail)
-            }
-            IpcMessage::GetExternalSecretResponse {
-                error: Some(error), ..
-            } => anyhow::bail!("{}", error),
-            _ => anyhow::bail!("Unexpected daemon response during external secret lookup"),
-        };
-    }
-
-    match client.send(IpcMessage::GetCredential { domain }).await? {
-        IpcMessage::GetCredentialResponse {
-            username,
-            password,
-            title,
+    match client
+        .send(IpcMessage::GetExternalSecret {
+            client_id: client_id.clone(),
+            domain: domain.clone(),
+            field: field.into(),
+            purpose,
+        })
+        .await?
+    {
+        IpcMessage::GetExternalSecretResponse {
+            value: Some(value),
+            authorized: true,
+            error: None,
+            locked: None,
+        } => Ok(SecretLookupResult {
+            domain,
+            field,
+            client_id: Some(client_id),
+            purpose: lookup_purpose,
+            value,
+        }),
+        IpcMessage::GetExternalSecretResponse {
+            authorized: false,
+            error,
+            ..
         } => {
-            let value = match field {
-                SecretField::Username => username,
-                SecretField::Password => password,
-                SecretField::Title => title,
-            };
-
-            value
-                .map(|value| SecretLookupResult {
-                    domain: lookup_domain,
-                    field,
-                    client_id: lookup_client_id,
-                    purpose: lookup_purpose,
-                    value,
-                })
-                .ok_or_else(|| anyhow::anyhow!("Requested secret field is not available"))
+            let detail = error.unwrap_or_else(|| "external secret access denied".to_string());
+            anyhow::bail!("{}", detail)
         }
-        _ => anyhow::bail!("Unexpected daemon response during secret lookup"),
+        IpcMessage::GetExternalSecretResponse {
+            error: Some(error), ..
+        } => anyhow::bail!("{}", error),
+        _ => anyhow::bail!("Unexpected daemon response during external secret lookup"),
     }
 }
 
@@ -151,15 +124,40 @@ pub fn allow_external_secret(
     domain: String,
     field: SecretField,
     expires_in: Option<String>,
-) -> Result<sentinelpass_core::ExternalSecretGrant> {
+    allow_write: bool,
+    no_token: bool,
+) -> Result<(sentinelpass_core::ExternalSecretGrant, Option<String>)> {
     let expires_at = expires_in
         .as_deref()
         .map(parse_external_secret_grant_duration)
         .transpose()?
         .map(|duration| chrono::Utc::now() + duration);
 
-    ExternalSecretAllowlist::allow_until_default(&client_id, &domain, field.into(), expires_at)
-        .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))
+    let path = ExternalSecretAllowlist::default_path();
+    let mut allowlist = ExternalSecretAllowlist::load_from_path(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to load external secret allowlist: {}", e))?;
+
+    let grant = allowlist
+        .upsert_grant(&client_id, &domain, field.into(), expires_at, allow_write)
+        .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))?;
+
+    let minted = if !no_token
+        && allowlist.token_status(&grant.client_id) == sentinelpass_core::ClientTokenStatus::Legacy
+    {
+        Some(
+            allowlist
+                .mint_client_token(&grant.client_id)
+                .map_err(|e| anyhow::anyhow!("Failed to mint client token: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    allowlist
+        .save_to_path(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to save external secret allowlist: {}", e))?;
+
+    Ok((grant, minted))
 }
 
 pub fn revoke_external_secret(
@@ -169,6 +167,19 @@ pub fn revoke_external_secret(
 ) -> Result<Option<sentinelpass_core::ExternalSecretGrant>> {
     ExternalSecretAllowlist::revoke_default(&client_id, &domain, field.into())
         .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))
+}
+
+pub fn revoke_all_external_secrets(client_id: &str) -> Result<usize> {
+    let path = ExternalSecretAllowlist::default_path();
+    let mut allowlist = ExternalSecretAllowlist::load_from_path(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to load external secret allowlist: {}", e))?;
+    let removed = allowlist
+        .revoke_all_for_client(client_id)
+        .map_err(|e| anyhow::anyhow!("Failed to update external secret allowlist: {}", e))?;
+    allowlist
+        .save_to_path(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to save external secret allowlist: {}", e))?;
+    Ok(removed)
 }
 
 pub fn list_external_secret_grants(client_id: Option<&str>) -> Result<Vec<ExternalSecretGrant>> {
@@ -182,11 +193,13 @@ pub fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
         return "No external secret grants configured".to_string();
     }
 
+    let allowlist = ExternalSecretAllowlist::load_default().unwrap_or_default();
+
     let mut output = format!(
-        "{:<20} {:<30} {:<10} Expires\n",
-        "Client", "Domain", "Field"
+        "{:<20} {:<30} {:<10} {:<10} Write Expires\n",
+        "Client", "Domain", "Field", "Token"
     );
-    output.push_str(&"-".repeat(90));
+    output.push_str(&"-".repeat(100));
     output.push('\n');
 
     for grant in grants {
@@ -194,16 +207,63 @@ pub fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
             .expires_at
             .map(|expires_at| expires_at.format("%Y-%m-%d %H:%M:%S UTC").to_string())
             .unwrap_or_else(|| "never".to_string());
+        let token = match allowlist.token_status(&grant.client_id) {
+            sentinelpass_core::ClientTokenStatus::Enforced => "required",
+            sentinelpass_core::ClientTokenStatus::Legacy => "legacy",
+            sentinelpass_core::ClientTokenStatus::Revoked => "revoked",
+        };
+        let write = if grant.allow_write { "yes" } else { "no" };
         output.push_str(&format!(
-            "{:<20} {:<30} {:<10} {}\n",
+            "{:<20} {:<30} {:<10} {:<10} {:<5} {}\n",
             grant.client_id,
             grant.domain,
             grant.field.as_str(),
+            token,
+            write,
             expires
         ));
     }
 
     output.push_str(&format!("Total: {} grants", grants.len()));
+    output
+}
+
+pub fn render_client_tokens(client_id: Option<&str>) -> String {
+    let allowlist = match ExternalSecretAllowlist::load_default() {
+        Ok(allowlist) => allowlist,
+        Err(e) => return format!("Failed to load external secret allowlist: {}", e),
+    };
+
+    let mut clients: Vec<&String> = allowlist
+        .client_tokens
+        .keys()
+        .filter(|id| client_id.is_none_or(|filter| id == &filter))
+        .collect();
+    clients.sort();
+
+    if clients.is_empty() {
+        return "No client tokens configured (all clients are legacy / tokenless)".to_string();
+    }
+
+    let mut output = format!("{:<20} {:<10} {:<12} Created\n", "Client", "Token", "State");
+    output.push_str(&"-".repeat(64));
+    output.push('\n');
+
+    for id in &clients {
+        let record = &allowlist.client_tokens[id.as_str()];
+        let state = if record.revoked { "revoked" } else { "active" };
+        output.push_str(&format!(
+            "{:<20} {:<10} {:<12} {}\n",
+            id,
+            allowlist
+                .token_fingerprint(id)
+                .unwrap_or_else(|| "-".to_string()),
+            state,
+            record.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+    }
+
+    output.push_str(&format!("Total: {} client tokens", clients.len()));
     output
 }
 
@@ -315,7 +375,7 @@ pub fn handle_secret_get(
     domain: String,
     field: SecretField,
     biometric_unlock: bool,
-    client_id: Option<String>,
+    client_id: String,
     purpose: Option<String>,
     output: SecretOutputFormat,
     prompt_reason: String,
@@ -327,6 +387,7 @@ pub fn handle_secret_get(
         prompt_reason,
         client_id,
         purpose,
+        None,
     ))??;
     println!("{}", render_secret_lookup(&result, output)?);
     Ok(())
@@ -339,38 +400,84 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
             domain,
             field,
             expires_in,
+            write,
+            no_token,
         } => {
-            let grant = allow_external_secret(
+            let (grant, minted) = allow_external_secret(
                 client_id.clone(),
                 domain.clone(),
                 *field,
                 expires_in.clone(),
+                *write,
+                *no_token,
             )?;
             let expiry = grant
                 .expires_at
                 .map(|expires_at| format!(" until {}", expires_at.format("%Y-%m-%d %H:%M:%S UTC")))
                 .unwrap_or_default();
+            let write_note = if grant.allow_write {
+                " (read + write)"
+            } else {
+                ""
+            };
             println!(
-                "Allowed client '{}' to retrieve {} for {}{}",
+                "Allowed client '{}' to retrieve {} for {}{}{}",
                 grant.client_id,
                 grant.field.as_str(),
                 grant.domain,
+                write_note,
                 expiry
             );
+            if let Some(token) = minted {
+                println!();
+                println!(
+                    "Client token (shown once — store it now; it authorizes ALL grants for '{}'):",
+                    grant.client_id
+                );
+                println!("  export SENTINELPASS_CLIENT_TOKEN={}", token);
+            } else if *no_token {
+                println!("Created a legacy grant without a client token (not recommended).");
+            }
         }
         crate::SecretCommands::Revoke {
             client_id,
             domain,
             field,
-        } => match revoke_external_secret(client_id.clone(), domain.clone(), *field)? {
-            Some(grant) => println!(
-                "Revoked client '{}' access to {} for {}",
-                grant.client_id,
-                grant.field.as_str(),
-                grant.domain
-            ),
-            None => println!("No matching external secret grant found"),
-        },
+            all,
+        } => {
+            if *all {
+                let removed = revoke_all_external_secrets(client_id)?;
+                if removed == 0 {
+                    println!("No external secret grants found for client '{}'", client_id);
+                } else {
+                    println!(
+                        "Revoked {} grant(s) for client '{}' (its token, if any, still applies)",
+                        removed, client_id
+                    );
+                    println!(
+                        "To also block the tool entirely: sentinelpass secret token revoke --client-id {}",
+                        client_id
+                    );
+                }
+            } else {
+                let Some(domain) = domain else {
+                    anyhow::bail!("--domain is required unless --all is set");
+                };
+                let Some(field) = field else {
+                    anyhow::bail!("--field is required unless --all is set");
+                };
+                match revoke_external_secret(client_id.clone(), domain.clone(), *field)? {
+                    Some(grant) => println!(
+                        "Revoked client '{}' access to {} for {}",
+                        grant.client_id,
+                        grant.field.as_str(),
+                        grant.domain
+                    ),
+                    None => println!("No matching external secret grant found"),
+                }
+            }
+        }
+        crate::SecretCommands::Token { command } => handle_secret_token_command(command)?,
         crate::SecretCommands::List { ref client_id } => {
             let grants = list_external_secret_grants(client_id.as_deref())?;
             println!("{}", render_external_secret_grants(&grants));
@@ -391,6 +498,7 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
             domain,
             field,
             purpose,
+            token,
             output,
             biometric_unlock,
             prompt_reason,
@@ -400,11 +508,75 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
                 *field,
                 *biometric_unlock,
                 prompt_reason.clone(),
-                Some(client_id.clone()),
+                client_id.clone(),
                 purpose.clone(),
+                token.clone(),
             ))??;
             println!("{}", render_secret_lookup(&result, *output)?);
         }
     }
+    Ok(())
+}
+
+pub fn handle_secret_token_command(command: &crate::SecretTokenCommands) -> Result<()> {
+    let load = || -> Result<sentinelpass_core::ExternalSecretAllowlist> {
+        ExternalSecretAllowlist::load_default()
+            .map_err(|e| anyhow::anyhow!("Failed to load external secret allowlist: {}", e))
+    };
+    let save = |allowlist: &sentinelpass_core::ExternalSecretAllowlist| -> Result<()> {
+        allowlist
+            .save_to_path(&sentinelpass_core::ExternalSecretAllowlist::default_path())
+            .map_err(|e| anyhow::anyhow!("Failed to save external secret allowlist: {}", e))
+    };
+
+    match command {
+        crate::SecretTokenCommands::Mint { client_id } => {
+            let mut allowlist = load()?;
+            let token = allowlist
+                .mint_client_token(client_id)
+                .map_err(|e| anyhow::anyhow!("Failed to mint client token: {}", e))?;
+            save(&allowlist)?;
+            println!(
+                "Client token for '{}' (shown once — store it now; it authorizes ALL grants for this client):",
+                client_id
+            );
+            println!("  export SENTINELPASS_CLIENT_TOKEN={}", token);
+        }
+        crate::SecretTokenCommands::Rotate { client_id } => {
+            let mut allowlist = load()?;
+            let token = allowlist
+                .rotate_client_token(client_id)
+                .map_err(|e| anyhow::anyhow!("Failed to rotate client token: {}", e))?;
+            save(&allowlist)?;
+            println!(
+                "Rotated client token for '{}' (old token no longer works). New token, shown once:",
+                client_id
+            );
+            println!("  export SENTINELPASS_CLIENT_TOKEN={}", token);
+        }
+        crate::SecretTokenCommands::Revoke { client_id } => {
+            let mut allowlist = load()?;
+            let existed = allowlist
+                .revoke_client_token(client_id)
+                .map_err(|e| anyhow::anyhow!("Failed to revoke client token: {}", e))?;
+            if !existed {
+                println!("No client token exists for '{}'", client_id);
+                return Ok(());
+            }
+            save(&allowlist)?;
+            println!(
+                "Revoked client token for '{}'. Fail-closed: every grant for this client is now denied, even with the old token.",
+                client_id
+            );
+            println!(
+                "To also purge the grants: sentinelpass secret revoke --client-id {} --all",
+                client_id
+            );
+        }
+        crate::SecretTokenCommands::List { client_id } => {
+            println!("{}", render_client_tokens(client_id.as_deref()));
+        }
+    }
+
     Ok(())
 }

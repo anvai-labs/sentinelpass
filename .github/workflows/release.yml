@@ -455,6 +455,18 @@ jobs:
           ./install.sh
           \`\`\`
 
+          ### macOS (Homebrew)
+          \`\`\`bash
+          brew tap anvai-labs/tap https://github.com/anvai-labs/homebrew-tap
+          brew install anvai-labs/tap/sentinelpass
+          \`\`\`
+
+          ### Ubuntu/Debian (.deb, Tauri desktop app)
+          \`\`\`bash
+          wget https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass_${VERSION}_amd64.deb
+          sudo apt install ./sentinelpass_${VERSION}_amd64.deb
+          \`\`\`
+
           ## Browser Extensions
 
           ### Chrome
@@ -476,3 +488,23 @@ jobs:
           VERSION="${{ needs.setup.outputs.version }}"
           cd release-assets
           gh release upload "v${VERSION}" --clobber $(find . -type f)
+
+  homebrew:
+    name: Bump Homebrew formula
+    runs-on: ubuntu-latest
+    needs: [setup, release]
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump formula in anvai-labs/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "TAP_TOKEN secret not set — skipping Homebrew formula bump."
+            echo "Configure a fine-grained PAT with Contents:write on anvai-labs/homebrew-tap to enable."
+            exit 0
+          fi
+          bash scripts/bump-homebrew-formula.sh "$VERSION"

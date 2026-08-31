@@ -440,6 +440,67 @@ impl DaemonVault {
         Ok(())
     }
 
+    /// Upsert one secret value for one scope on behalf of an external tool.
+    /// Matches an existing entry by domain only (not username); new entries
+    /// are typed as API keys since tools store machine credentials here.
+    pub async fn save_secret_value(&self, domain: &str, value: &str) -> Result<()> {
+        let vault_guard = self.vault.lock().await;
+        let vault = match vault_guard.as_ref() {
+            Some(v) => v,
+            None => return Err(PasswordManagerError::VaultLocked),
+        };
+        self.record_activity().await;
+
+        use crate::vault::Entry;
+        use chrono::Utc;
+        let now = Utc::now();
+
+        let mut existing_entry_id: Option<i64> = None;
+        let entries = vault.list_entries()?;
+        for summary in entries {
+            if let Ok(existing_entry) = vault.get_entry(summary.entry_id) {
+                let url_matches = existing_entry
+                    .url
+                    .as_ref()
+                    .map(|entry_url| domains_match(domain, entry_url))
+                    .unwrap_or(false);
+                let title_matches = domains_match(domain, &existing_entry.title);
+                if url_matches || title_matches {
+                    existing_entry_id = Some(summary.entry_id);
+                    break;
+                }
+            }
+        }
+
+        if let Some(entry_id) = existing_entry_id {
+            let mut existing_entry = vault.get_entry(entry_id)?;
+            existing_entry.password = value.to_string().into();
+            existing_entry.modified_at = now;
+            vault.update_entry(entry_id, &existing_entry)?;
+            info!(
+                "External secret updated for domain: {} (entry_id={})",
+                domain, entry_id
+            );
+            return Ok(());
+        }
+
+        let entry = Entry {
+            entry_id: None,
+            title: domain.to_string(),
+            username: "api-key".to_string(),
+            password: value.to_string().into(),
+            url: Some(domain.to_string()),
+            notes: None,
+            credential_type: CredentialType::ApiKey,
+            created_at: now,
+            modified_at: now,
+            favorite: false,
+        };
+        vault.add_entry(&entry)?;
+        info!("External secret saved for domain: {}", domain);
+        Ok(())
+    }
+
     /// Get sync status from the vault database.
     pub async fn get_sync_status(&self) -> Result<crate::sync::models::SyncStatus> {
         let vault_guard = self.vault.lock().await;
@@ -456,6 +517,16 @@ impl DaemonVault {
                 pending_changes: 0,
             })
         }
+    }
+
+    /// Run a full sync cycle (push pending changes, pull remote changes).
+    #[cfg(feature = "sync")]
+    pub async fn sync_now(&self) -> Result<crate::sync::models::SyncStatus> {
+        let vault_guard = self.vault.lock().await;
+        let vault = vault_guard
+            .as_ref()
+            .ok_or(PasswordManagerError::VaultLocked)?;
+        vault.sync_now().await
     }
 
     /// Record activity (resets the auto-lock timer)

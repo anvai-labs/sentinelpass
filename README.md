@@ -40,7 +40,9 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 
 | Platform | Method |
 | --- | --- |
-| macOS | Download the DMG from [Releases](../../releases), open it, drag SentinelPass to Applications |
+| macOS | `brew tap anvai-labs/tap https://github.com/anvai-labs/homebrew-tap && brew install anvai-labs/tap/sentinelpass` — or download the DMG from [Releases](../../releases) |
+| Windows | Download the MSI installer from [Releases](../../releases) and run it |
+| Linux (Debian/Ubuntu) | `sudo apt install ./sentinelpass_<VERSION>_amd64.deb` — or `sudo dpkg -i sentinelpass-*.deb` |
 | Windows | Download the MSI installer from [Releases](../../releases) and run it |
 | Linux (Debian/Ubuntu) | `sudo dpkg -i sentinelpass-*.deb` |
 | Linux (Fedora/RHEL) | `sudo dnf install sentinelpass-*.rpm` |
@@ -53,6 +55,32 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 1. Open **SentinelPass** from your Applications folder / Start Menu / launcher.
 2. Create a new vault and set a master password.
 3. The app automatically starts the background daemon and registers the native messaging host for Chrome, Chromium, and Firefox.
+
+## Secrets Broker for Local Tools
+
+SentinelPass doubles as a least-privilege secrets broker for developer tools
+(AI agents, proxies, scripts). Tools authenticate with a per-client token and
+may only touch exactly the `client × domain × field` scopes you granted:
+
+```bash
+# Grant and receive a client token (shown once)
+sentinelpass secret allow --client-id victor --domain anthropic --field password
+export SENTINELPASS_CLIENT_TOKEN=spt_...   # from the grant output
+
+# Fetch one field (allowlist + token enforced, audited)
+sentinelpass secret get --client-id victor --domain anthropic --field password
+
+# Or serve secrets as env vars to a child process
+sentinelpass exec --client-id victor \
+  --env ANTHROPIC_API_KEY=anthropic --env OPENAI_API_KEY=openai -- victor chat
+
+# Inspect and revoke
+sentinelpass secret list
+sentinelpass secret audit --client-id victor
+sentinelpass secret token revoke --client-id victor   # fail-closed
+```
+
+See `SECURITY_ARCHITECTURE.md` (Secrets Broker section) for the threat model.
 
 ## Browser Extension
 

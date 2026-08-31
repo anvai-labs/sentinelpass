@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "sentinelpass-protocol",
     "sentinelpass-core",
     "sentinelpass-cli",
     "sentinelpass-daemon",
@@ -12,7 +13,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["VJ Singh <vijay@anvaiops.com>"]
 license = "Apache-2.0"
@@ -28,7 +29,6 @@ argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
 zeroize = { version = "1.7", features = ["zeroize_derive", "serde"] }
-memsec = "0.6"
 subtle = "2.5"
 hex = "0.4"
 
@@ -63,7 +63,7 @@ dirs = "5.0"
 bincode = "1.3"
 
 # CLI
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] }
 
 # Password prompting
 rpassword = "7.3"

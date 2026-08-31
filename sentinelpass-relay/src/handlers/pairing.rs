@@ -2,7 +2,10 @@
 
 use crate::app_state::RelayAppState;
 use crate::error::RelayError;
-use crate::pairing_security::{hash_pairing_token, hash_registration_proof_b64};
+use crate::pairing_security::{
+    hash_bytes_hex, hash_pairing_token, hash_registration_proof_b64, is_legacy_pairing_hash,
+    verify_pairing_token,
+};
 use axum::extract::{Path, State};
 use axum::http::Extensions;
 use axum::Json;
@@ -115,8 +118,10 @@ pub async fn fetch_bootstrap(
 ) -> Result<Json<BootstrapResponse>, RelayError> {
     let mut conn = state.storage.conn()?;
     let now = Utc::now().timestamp();
-    let token_hash = hash_pairing_token(&token)?;
-    let token_hash_for_attempts = token_hash.clone();
+    // Rate-limit bookkeeping is keyed by a fast SHA-256 lookup hash. The
+    // at-rest token hash is Argon2id (salted), so it cannot serve as an
+    // equality lookup key — see the candidate scan below.
+    let lookup_hash = hash_bytes_hex(token.as_bytes());
     let tx = conn
         .transaction()
         .map_err(|e| RelayError::Database(e.to_string()))?;
@@ -124,7 +129,7 @@ pub async fn fetch_bootstrap(
     let attempt_state: Option<(i64, i64)> = tx
         .query_row(
             "SELECT attempts, blocked_until FROM pairing_fetch_attempts WHERE token_hash = ?1",
-            [&token_hash],
+            [&lookup_hash],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -143,7 +148,7 @@ pub async fn fetch_bootstrap(
          ON CONFLICT(token_hash) DO UPDATE SET
             attempts = excluded.attempts,
             last_attempt_at = excluded.last_attempt_at",
-        rusqlite::params![&token_hash, attempts_after, now, now],
+        rusqlite::params![&lookup_hash, attempts_after, now, now],
     )
     .map_err(|e| RelayError::Database(e.to_string()))?;
 
@@ -157,13 +162,13 @@ pub async fn fetch_bootstrap(
         let blocked_until = now + backoff_secs as i64;
         tx.execute(
             "UPDATE pairing_fetch_attempts SET blocked_until = ?2 WHERE token_hash = ?1",
-            rusqlite::params![&token_hash, blocked_until],
+            rusqlite::params![&lookup_hash, blocked_until],
         )
         .map_err(|e| RelayError::Database(e.to_string()))?;
         tx.commit()
             .map_err(|e| RelayError::Database(e.to_string()))?;
         tracing::warn!(
-            token_hash = %token_hash,
+            lookup_hash = %lookup_hash,
             attempts = attempts_after,
             blocked_until,
             "Pairing bootstrap fetch temporarily blocked due to repeated attempts"
@@ -171,19 +176,35 @@ pub async fn fetch_bootstrap(
         return Err(RelayError::RateLimited);
     }
 
-    let hashed_hit: Option<(Vec<u8>, Vec<u8>)> = tx
-        .query_row(
-            "SELECT encrypted_bootstrap, pairing_salt FROM pairing_bootstraps
-             WHERE pairing_token = ?1 AND expires_at > ?2 AND consumed = 0",
-            rusqlite::params![&token_hash, now],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+    // Candidate scan: active bootstraps are bounded by max_active_pairings,
+    // and we only reach this query after rate limiting, so the per-candidate
+    // Argon2id verification stays cheap and non-amplifiable.
+    let mut stmt = tx
+        .prepare(
+            "SELECT rowid, pairing_token, encrypted_bootstrap, pairing_salt
+             FROM pairing_bootstraps
+             WHERE expires_at > ?1 AND consumed = 0",
         )
-        .optional()
         .map_err(|e| RelayError::Database(e.to_string()))?;
+    let candidates: Vec<(i64, String, Vec<u8>, Vec<u8>)> = stmt
+        .query_map([now], |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })
+        .map_err(|e| RelayError::Database(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| RelayError::Database(e.to_string()))?;
+    drop(stmt);
 
-    let (lookup_token, encrypted, salt) = if let Some((encrypted, salt)) = hashed_hit {
-        (token_hash, encrypted, salt)
-    } else {
+    let matched = candidates
+        .into_iter()
+        .find(|(_, stored, _, _)| verify_pairing_token(&token, stored).unwrap_or(false));
+
+    let Some((rowid, stored_hash, encrypted, salt)) = matched else {
         tx.commit()
             .map_err(|e| RelayError::Database(e.to_string()))?;
         return Err(RelayError::NotFound(
@@ -191,15 +212,26 @@ pub async fn fetch_bootstrap(
         ));
     };
 
+    // Transparently upgrade legacy (<= 0.7) bare SHA-256 rows to Argon2id.
+    if is_legacy_pairing_hash(&stored_hash) {
+        if let Ok(upgraded) = hash_pairing_token(&token) {
+            tx.execute(
+                "UPDATE pairing_bootstraps SET pairing_token = ?1 WHERE rowid = ?2",
+                rusqlite::params![&upgraded, rowid],
+            )
+            .map_err(|e| RelayError::Database(e.to_string()))?;
+        }
+    }
+
     // Mark as consumed
     tx.execute(
-        "UPDATE pairing_bootstraps SET consumed = 1 WHERE pairing_token = ?1",
-        [lookup_token.as_str()],
+        "UPDATE pairing_bootstraps SET consumed = 1 WHERE rowid = ?1",
+        [rowid],
     )
     .map_err(|e| RelayError::Database(e.to_string()))?;
     tx.execute(
         "DELETE FROM pairing_fetch_attempts WHERE token_hash = ?1",
-        [&token_hash_for_attempts],
+        [&lookup_hash],
     )
     .map_err(|e| RelayError::Database(e.to_string()))?;
     tx.commit()
@@ -217,7 +249,9 @@ mod tests {
     use super::*;
     use crate::app_state::RelayAppState;
     use crate::config::RelayConfig;
-    use crate::pairing_security::{hash_pairing_token, hash_registration_proof_b64};
+    use crate::pairing_security::{
+        hash_bytes_hex, hash_registration_proof_b64, is_legacy_pairing_hash, verify_pairing_token,
+    };
     use crate::storage::RelayStorage;
     use axum::extract::State;
     use axum::http::Extensions;
@@ -388,11 +422,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            stored_token,
-            hash_pairing_token(&req.pairing_token).unwrap()
-        );
         assert_ne!(stored_token, req.pairing_token);
+        assert!(verify_pairing_token(&req.pairing_token, &stored_token).unwrap());
+        assert!(!is_legacy_pairing_hash(&stored_token));
         assert_eq!(stored_vault, vault_id);
         assert!(proof_exists);
     }
@@ -419,7 +451,7 @@ mod tests {
         let (attempts, blocked_until): (i64, i64) = conn
             .query_row(
                 "SELECT attempts, blocked_until FROM pairing_fetch_attempts WHERE token_hash = ?1",
-                [hash_pairing_token("bad-token").unwrap()],
+                [hash_bytes_hex(b"bad-token")],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
@@ -435,17 +467,18 @@ mod tests {
         let conn = state.storage.conn().unwrap();
         let now = Utc::now().timestamp();
         let token = "valid-token";
-        let token_hash = hash_pairing_token(token).unwrap();
+        // Seed a legacy (<= 0.7) bare SHA-256 row to exercise the upgrade path.
+        let legacy_hash = hash_bytes_hex(token.as_bytes());
         conn.execute(
             "INSERT INTO pairing_bootstraps (pairing_token, vault_id, encrypted_bootstrap, pairing_salt, expires_at, consumed)
              VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            rusqlite::params![&token_hash, "v1", vec![1u8, 2, 3], vec![4u8; 16], now + 300],
+            rusqlite::params![&legacy_hash, "v1", vec![1u8, 2, 3], vec![4u8; 16], now + 300],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO pairing_fetch_attempts (token_hash, attempts, first_attempt_at, last_attempt_at, blocked_until)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![&token_hash, 2, now - 20, now - 10, 0],
+            rusqlite::params![&legacy_hash, 2, now - 20, now - 10, 0],
         )
         .unwrap();
         drop(conn);
@@ -458,10 +491,46 @@ mod tests {
         let has_attempt_row: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pairing_fetch_attempts WHERE token_hash = ?1)",
-                [&token_hash],
+                [&legacy_hash],
                 |row| row.get(0),
             )
             .unwrap();
         assert!(!has_attempt_row);
+
+        let (consumed, stored): (i64, String) = conn
+            .query_row(
+                "SELECT consumed, pairing_token FROM pairing_bootstraps",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(consumed, 1);
+        assert!(!is_legacy_pairing_hash(&stored));
+    }
+
+    #[tokio::test]
+    async fn fetch_bootstrap_verifies_salted_hash_rows() {
+        let state = state_with_fetch_policy(5, 5, 60);
+        let conn = state.storage.conn().unwrap();
+        let now = Utc::now().timestamp();
+        let token = "998877";
+        let salted = crate::pairing_security::hash_pairing_token(token).unwrap();
+        conn.execute(
+            "INSERT INTO pairing_bootstraps (pairing_token, vault_id, encrypted_bootstrap, pairing_salt, expires_at, consumed)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            rusqlite::params![&salted, "v1", vec![9u8, 9, 9], vec![1u8; 16], now + 300],
+        )
+        .unwrap();
+        drop(conn);
+
+        let wrong = fetch_bootstrap(State(state.clone()), Path("111111".to_string()))
+            .await
+            .expect_err("wrong token must not match salted row");
+        assert!(matches!(wrong, RelayError::NotFound(_)));
+
+        let resp = fetch_bootstrap(State(state), Path(token.to_string()))
+            .await
+            .expect("correct token fetches salted row");
+        assert_eq!(resp.encrypted_bootstrap, STANDARD.encode([9u8, 9, 9]));
     }
 }

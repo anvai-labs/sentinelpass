@@ -15,12 +15,12 @@ default = []
 sync = ["reqwest", "hkdf"]
 
 [dependencies]
+sentinelpass-protocol = { path = "../sentinelpass-protocol" }
 # Workspace dependencies
 argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
-memsec = { workspace = true }
 subtle = { workspace = true }
 hex = { workspace = true }
 rusqlite = { workspace = true }

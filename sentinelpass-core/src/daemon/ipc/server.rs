@@ -14,7 +14,9 @@ use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
 use crate::{AuditEventType, AuditLogger};
 use crate::{DatabaseError, PasswordManagerError, Result};
+use sentinelpass_protocol::Origin;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
@@ -33,6 +35,8 @@ pub struct IpcServer {
     /// Shared audit logger — initialised once at startup so every IPC request
     /// reuses the open file handle instead of reopening it per-call.
     audit_logger: Option<Arc<AuditLogger>>,
+    /// Set by the `Shutdown` IPC message; the accept loops observe it and exit.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl IpcServer {
@@ -69,7 +73,13 @@ impl IpcServer {
             auth_token,
             external_secret_allowlist_path,
             audit_logger,
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Handle to observe (or trigger) server shutdown from outside the accept loop.
+    pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
     }
 
     /// Start the IPC server
@@ -123,7 +133,7 @@ impl IpcServer {
                                         warn!("Rejected IPC request with invalid token");
                                         continue;
                                     }
-                                    let response = self.handle_message(envelope.message).await;
+                                    let response = self.handle_message(envelope).await;
                                     match serde_json::to_vec(&response) {
                                         Ok(response_bytes) => {
                                             if let Err(e) =
@@ -153,8 +163,15 @@ impl IpcServer {
                         error!("Failed to accept connection: {}", e);
                     }
                 }
+
+                if self.shutdown.load(Ordering::Acquire) {
+                    info!("IPC: shutdown requested — stopping accept loop");
+                    break;
+                }
             }
         }
+
+        let _ = std::fs::remove_file(&self.socket_path);
 
         #[cfg(windows)]
         {
@@ -211,9 +228,7 @@ impl IpcServer {
                                                                     continue;
                                                                 }
                                                                 let response = self
-                                                                    .handle_message(
-                                                                        envelope.message,
-                                                                    )
+                                                                    .handle_message(envelope)
                                                                     .await;
                                                                 match serde_json::to_vec(&response) {
                                                                     Ok(response_bytes) => {
@@ -289,6 +304,11 @@ impl IpcServer {
                             error!("Failed to accept connection: {}", e);
                         }
                     }
+
+                    if self.shutdown.load(Ordering::Acquire) {
+                        info!("IPC: shutdown requested — stopping accept loop");
+                        break;
+                    }
                 }
             } else {
                 // Default: Use named pipes with per-user ACLs
@@ -344,7 +364,7 @@ impl IpcServer {
                                                         continue;
                                                     }
                                                     let response =
-                                                        self.handle_message(envelope.message).await;
+                                                        self.handle_message(envelope).await;
                                                     match serde_json::to_vec(&response) {
                                                         Ok(response_bytes) => {
                                                             match encrypt_windows_ipc_frame(
@@ -397,22 +417,72 @@ impl IpcServer {
                         }
                     }
 
+                    if self.shutdown.load(Ordering::Acquire) {
+                        info!("IPC: shutdown requested — stopping accept loop");
+                        break;
+                    }
+
                     // Connection is closed when dropped
                 }
             }
+
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+
+        Ok(())
+    }
+
+    /// Gate for the browser-autofill surface (GetCredential, GetTotpCode,
+    /// ListDomainCredentials, SaveCredential). External tools must use
+    /// GetExternalSecret / SaveSecret instead.
+    ///
+    /// - `NativeHost` origin: allowed.
+    /// - `Cli` origin: denied — a CLI-tagged client has no business on the
+    ///   autofill surface.
+    /// - No origin: legacy <= 0.7 hosts. Allowed with a deprecation warning
+    ///   in 0.8; set SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1 to deny now
+    ///   (deny-by-default is planned for 0.9).
+    fn browser_surface_allowed(&self, origin: Option<Origin>) -> bool {
+        match origin {
+            Some(Origin::NativeHost) => true,
+            Some(Origin::Cli) => false,
+            None => std::env::var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL")
+                .map(|v| v != "1")
+                .unwrap_or(true),
         }
     }
 
-    /// Handle an IPC message
+    fn warn_originless_browser_surface(&self) {
+        warn!(
+            "Deprecated: browser-surface request without origin marker from an \
+             untagged client; upgrade sentinelpass-host. This will be denied by \
+             default in v0.9 (SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1 denies now)."
+        );
+    }
+
+    /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
-    async fn handle_message(&self, msg: IpcMessage) -> IpcMessage {
-        match msg {
+    async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+        let client_token = envelope.client_token.clone();
+        // Origin is provenance labeling for the browser-surface gate below —
+        // NOT authentication. The security boundary for external tools is the
+        // grant + client token system.
+        let origin = envelope.origin;
+        match envelope.message {
             IpcMessage::GetExternalSecret {
                 client_id,
                 domain,
                 field,
                 purpose,
             } => {
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::GetExternalSecretResponse {
+                        value: None,
+                        authorized: true,
+                        error: None,
+                        locked: Some(true),
+                    };
+                }
                 debug!(
                     "IPC: GetExternalSecret client='{}' domain='{}' field='{}'",
                     client_id,
@@ -421,9 +491,18 @@ impl IpcServer {
                 );
 
                 let purpose = purpose.unwrap_or_else(|| "external-secret-access".to_string());
-                match ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path)
-                {
-                    Ok(allowlist) if allowlist.is_allowed(&client_id, &domain, field) => {
+                let allowlist =
+                    ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path);
+                let token_ok = match &allowlist {
+                    Ok(allowlist) => {
+                        allowlist.verify_client_token(&client_id, client_token.as_deref())
+                    }
+                    Err(_) => false,
+                };
+                match allowlist {
+                    Ok(allowlist)
+                        if token_ok && allowlist.is_allowed(&client_id, &domain, field) =>
+                    {
                         match self.vault.get_credential(&domain).await {
                             Ok(Some(cred)) => {
                                 let value = match field {
@@ -447,6 +526,7 @@ impl IpcServer {
                                     value,
                                     authorized: true,
                                     error: None,
+                                    locked: None,
                                 }
                             }
                             Ok(None) => {
@@ -466,6 +546,7 @@ impl IpcServer {
                                     value: None,
                                     authorized: true,
                                     error: None,
+                                    locked: None,
                                 }
                             }
                             Err(e) => {
@@ -486,6 +567,7 @@ impl IpcServer {
                                     value: None,
                                     authorized: true,
                                     error: Some("Credential lookup failed".to_string()),
+                                    locked: None,
                                 }
                             }
                         }
@@ -507,11 +589,17 @@ impl IpcServer {
                             value: None,
                             authorized: false,
                             error: Some(format!(
-                                "Client '{}' is not authorized for {} {}",
+                                "Client '{}' is not authorized for {} {}: run \
+                                 'sentinelpass secret allow --client-id {} --domain {} --field {}' \
+                                 and set SENTINELPASS_CLIENT_TOKEN",
+                                client_id,
+                                domain,
+                                field.as_str(),
                                 client_id,
                                 domain,
                                 field.as_str()
                             )),
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -520,12 +608,136 @@ impl IpcServer {
                             value: None,
                             authorized: false,
                             error: Some("Failed to load external secret allowlist".to_string()),
+                            locked: None,
                         }
                     }
                 }
             }
+            IpcMessage::SaveSecret {
+                client_id,
+                domain,
+                value,
+                purpose,
+            } => {
+                let purpose_label = purpose.unwrap_or_else(|| "external-secret-write".to_string());
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::SaveSecretResponse {
+                        success: false,
+                        locked: Some(true),
+                        error: Some("vault is locked".to_string()),
+                    };
+                }
+
+                let allowlist =
+                    ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path);
+                let authorized = match &allowlist {
+                    Ok(allowlist) => {
+                        allowlist.verify_client_token(&client_id, client_token.as_deref())
+                            && allowlist
+                                .grants_for_client(Some(&client_id))
+                                .unwrap_or_default()
+                                .into_iter()
+                                .any(|grant| {
+                                    grant.allow_write
+                                        && !grant.is_expired_at(chrono::Utc::now())
+                                        && grant.domain == domain
+                                })
+                    }
+                    Err(_) => false,
+                };
+
+                if !authorized {
+                    log_daemon_audit(
+                        self.audit_logger.as_deref(),
+                        AuditEventType::ExternalSecretWrite {
+                            client_id: Some(client_id.clone()),
+                            domain: domain.clone(),
+                            purpose: Some(purpose_label),
+                            success: false,
+                        },
+                        "External secret write denied",
+                    );
+                    return IpcMessage::SaveSecretResponse {
+                        success: false,
+                        locked: None,
+                        error: Some(format!(
+                            "Client '{}' has no write grant for '{}': run \
+                             'sentinelpass secret allow --client-id {} --domain {} --field password --write' \
+                             and set SENTINELPASS_CLIENT_TOKEN",
+                            client_id, domain, client_id, domain
+                        )),
+                    };
+                }
+
+                match self.vault.save_secret_value(&domain, &value).await {
+                    Ok(()) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            AuditEventType::ExternalSecretWrite {
+                                client_id: Some(client_id.clone()),
+                                domain: domain.clone(),
+                                purpose: Some(purpose_label),
+                                success: true,
+                            },
+                            "External secret written via daemon IPC",
+                        );
+                        IpcMessage::SaveSecretResponse {
+                            success: true,
+                            locked: None,
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to save external secret: {}", e);
+                        IpcMessage::SaveSecretResponse {
+                            success: false,
+                            locked: None,
+                            error: Some("Failed to save secret".to_string()),
+                        }
+                    }
+                }
+            }
+            IpcMessage::DeleteSecret { client_id, domain } => {
+                // Deletion is rejected until entries carry ownership metadata
+                // (schema v5): a write-grant must never be able to delete a
+                // human-created login.
+                debug!(
+                    "IPC: DeleteSecret from client '{}' for '{}' rejected (unsupported)",
+                    client_id, domain
+                );
+                let _ = domain;
+                IpcMessage::DeleteSecretResponse {
+                    deleted: false,
+                    locked: None,
+                    error: Some(
+                        "deletion is not supported for external tools; revoke the grant instead"
+                            .to_string(),
+                    ),
+                }
+            }
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
+
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::GetCredentialResponse {
+                        username: None,
+                        password: None,
+                        title: None,
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
+
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::GetCredentialResponse {
+                        username: None,
+                        password: None,
+                        title: None,
+                        locked: Some(true),
+                    };
+                }
 
                 match self.vault.get_credential(&domain).await {
                     Ok(Some(cred)) => {
@@ -542,6 +754,7 @@ impl IpcServer {
                             username: Some(cred.username),
                             password: Some(cred.password),
                             title: Some(cred.title),
+                            locked: None,
                         }
                     }
                     Ok(None) => {
@@ -559,6 +772,7 @@ impl IpcServer {
                             username: None,
                             password: None,
                             title: None,
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -576,6 +790,7 @@ impl IpcServer {
                             username: None,
                             password: None,
                             title: None,
+                            locked: None,
                         }
                     }
                 }
@@ -585,6 +800,23 @@ impl IpcServer {
                     "IPC: ListDomainCredentials for base domain '{}'",
                     base_domain
                 );
+
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::ListDomainCredentialsResponse {
+                        credentials: Vec::new(),
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
+
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::ListDomainCredentialsResponse {
+                        credentials: Vec::new(),
+                        locked: Some(true),
+                    };
+                }
 
                 match self.vault.list_domain_credentials(&base_domain).await {
                     Ok(credentials) => {
@@ -598,12 +830,14 @@ impl IpcServer {
                             .collect();
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: summaries,
+                            locked: None,
                         }
                     }
                     Err(e) => {
                         error!("Failed to list domain credentials: {}", e);
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: Vec::new(),
+                            locked: None,
                         }
                     }
                 }
@@ -611,16 +845,37 @@ impl IpcServer {
             IpcMessage::GetTotpCode { domain } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::GetTotpCodeResponse {
+                        code: None,
+                        seconds_remaining: None,
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
+
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::GetTotpCodeResponse {
+                        code: None,
+                        seconds_remaining: None,
+                        locked: Some(true),
+                    };
+                }
+
                 match self.vault.get_totp_code(&domain).await {
                     Ok(Some(code)) => IpcMessage::GetTotpCodeResponse {
                         code: Some(code.code),
                         seconds_remaining: Some(code.seconds_remaining),
+                        locked: None,
                     },
                     Ok(None) => {
                         debug!("No TOTP code found for domain '{}'", domain);
                         IpcMessage::GetTotpCodeResponse {
                             code: None,
                             seconds_remaining: None,
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -628,6 +883,7 @@ impl IpcServer {
                         IpcMessage::GetTotpCodeResponse {
                             code: None,
                             seconds_remaining: None,
+                            locked: None,
                         }
                     }
                 }
@@ -643,6 +899,27 @@ impl IpcServer {
                     domain, username
                 );
 
+                if !self.browser_surface_allowed(origin) {
+                    return IpcMessage::SaveCredentialResponse {
+                        success: false,
+                        error: Some(
+                            "browser-surface request rejected: non-native origin".to_string(),
+                        ),
+                        locked: None,
+                    };
+                }
+                if origin.is_none() {
+                    self.warn_originless_browser_surface();
+                }
+
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::SaveCredentialResponse {
+                        success: false,
+                        error: Some("vault is locked".to_string()),
+                        locked: Some(true),
+                    };
+                }
+
                 match self
                     .vault
                     .save_credential(&domain, &username, &password, url.as_deref())
@@ -653,6 +930,7 @@ impl IpcServer {
                         IpcMessage::SaveCredentialResponse {
                             success: true,
                             error: None,
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -660,6 +938,7 @@ impl IpcServer {
                         IpcMessage::SaveCredentialResponse {
                             success: false,
                             error: Some(e.to_string()),
+                            locked: None,
                         }
                     }
                 }
@@ -732,7 +1011,49 @@ impl IpcServer {
             }
             IpcMessage::Shutdown => {
                 info!("IPC: Shutdown requested");
+                self.shutdown.store(true, Ordering::Release);
                 IpcMessage::VaultStatusResponse { unlocked: false }
+            }
+            IpcMessage::SyncNow => {
+                debug!("IPC: SyncNow");
+                #[cfg(feature = "sync")]
+                {
+                    let pending_before = self
+                        .vault
+                        .get_sync_status()
+                        .await
+                        .map(|s| s.pending_changes)
+                        .unwrap_or(0);
+                    match self.vault.sync_now().await {
+                        Ok(status_after) => {
+                            let pushed =
+                                pending_before.saturating_sub(status_after.pending_changes);
+                            info!("IPC: sync completed, ~{} changes pushed", pushed);
+                            IpcMessage::SyncNowResponse {
+                                success: true,
+                                pushed,
+                                pulled: 0,
+                                error: None,
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to run sync: {}", e);
+                            IpcMessage::SyncNowResponse {
+                                success: false,
+                                pushed: 0,
+                                pulled: 0,
+                                error: Some(e.to_string()),
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "sync"))]
+                IpcMessage::SyncNowResponse {
+                    success: false,
+                    pushed: 0,
+                    pulled: 0,
+                    error: Some("sync support is not compiled into this daemon".to_string()),
+                }
             }
             IpcMessage::SyncStatus => {
                 debug!("IPC: SyncStatus");

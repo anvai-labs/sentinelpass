@@ -12,7 +12,7 @@ mod commands;
 #[derive(Parser)]
 #[command(name = "sentinelpass")]
 #[command(author = "VJ Singh <vijay@anvaiops.com>")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(about = "Secure, local-first password manager with browser autofill", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -71,9 +71,9 @@ enum Commands {
         #[arg(long)]
         biometric_unlock: bool,
 
-        /// Local tool client id to enforce external-secret allowlist authorization
+        /// Local tool client id used for allowlist authorization (required)
         #[arg(long)]
-        client_id: Option<String>,
+        client_id: String,
 
         /// Purpose label recorded in daemon audit context
         #[arg(long)]
@@ -92,6 +92,60 @@ enum Commands {
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
+    },
+
+    /// Run a command with secrets injected as environment variables
+    Exec {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Purpose label recorded in daemon audit context
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// NAME=domain[:field] mapping; repeatable
+        #[arg(long = "env")]
+        env_specs: Vec<String>,
+
+        /// Command and arguments to run (after `--`)
+        #[arg(last = true)]
+        command: Vec<std::ffi::OsString>,
+    },
+
+    /// Print resolved secrets as shell exports or JSON (no command runs)
+    Env {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Purpose label recorded in daemon audit context
+        #[arg(long)]
+        purpose: Option<String>,
+
+        /// Output format
+        #[arg(long, value_enum, default_value_t = SecretOutputFormat::Exports)]
+        format: SecretOutputFormat,
+
+        /// NAME=domain[:field] mapping; repeatable
+        #[arg(long = "env")]
+        env_specs: Vec<String>,
     },
 
     /// Manage metadata-only passkey references
@@ -409,6 +463,14 @@ enum SecretCommands {
         /// Optional grant duration, for example 30m, 8h, or 7d
         #[arg(long)]
         expires_in: Option<String>,
+
+        /// Also allow the client to write (upsert) this secret
+        #[arg(long)]
+        write: bool,
+
+        /// Create a legacy grant that works without a client token
+        #[arg(long)]
+        no_token: bool,
     },
 
     /// Revoke a local tool's access to one field for one domain/service
@@ -418,11 +480,21 @@ enum SecretCommands {
 
         /// Domain or service key the client may no longer access
         #[arg(long)]
-        domain: String,
+        domain: Option<String>,
 
         /// Field to revoke
-        #[arg(long, value_enum, default_value_t = SecretField::Password)]
-        field: SecretField,
+        #[arg(long, value_enum)]
+        field: Option<SecretField>,
+
+        /// Revoke every grant for this client
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Manage per-client grant tokens
+    Token {
+        #[command(subcommand)]
+        command: SecretTokenCommands,
     },
 
     /// List local-tool secret access grants
@@ -465,6 +537,10 @@ enum SecretCommands {
         #[arg(long)]
         purpose: Option<String>,
 
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
         /// Output format
         #[arg(long, value_enum, default_value_t = SecretOutputFormat::Plain)]
         output: SecretOutputFormat,
@@ -476,6 +552,37 @@ enum SecretCommands {
         /// Prompt shown by the OS biometric dialog
         #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
         prompt_reason: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretTokenCommands {
+    /// Mint a client token (printed once; authorizes every grant for the client)
+    Mint {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Replace a client token; the old token stops working immediately
+    Rotate {
+        /// Local tool client id
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Revoke a client token (fail-closed: all grants for the client are denied)
+    Revoke {
+        /// Local tool client id
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Show client token status
+    List {
+        /// Optional client id filter
+        #[arg(long)]
+        client_id: Option<String>,
     },
 }
 
@@ -583,6 +690,8 @@ impl SecretField {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum SecretOutputFormat {
     Plain,
+    #[value(name = "exports")]
+    Exports,
     Json,
 }
 
@@ -607,6 +716,16 @@ impl From<SecretField> for ExternalSecretField {
             SecretField::Username => Self::Username,
             SecretField::Password => Self::Password,
             SecretField::Title => Self::Title,
+        }
+    }
+}
+
+impl From<ExternalSecretField> for SecretField {
+    fn from(field: ExternalSecretField) -> Self {
+        match field {
+            ExternalSecretField::Username => Self::Username,
+            ExternalSecretField::Password => Self::Password,
+            ExternalSecretField::Title => Self::Title,
         }
     }
 }
@@ -772,6 +891,48 @@ fn main() -> Result<()> {
 
         Commands::Secret { command } => {
             commands::secret::handle_secret_command(&command)?;
+        }
+
+        Commands::Exec {
+            client_id,
+            token,
+            biometric_unlock,
+            purpose,
+            env_specs,
+            command,
+        } => {
+            let code = commands::exec::handle_exec_command(
+                &env_specs,
+                commands::exec::ExecOptions {
+                    client_id,
+                    token,
+                    biometric_unlock,
+                    purpose,
+                },
+                command,
+            )?;
+            std::process::exit(code);
+        }
+
+        Commands::Env {
+            client_id,
+            token,
+            biometric_unlock,
+            purpose,
+            format,
+            env_specs,
+        } => {
+            let code = commands::exec::handle_env_command(
+                &env_specs,
+                commands::exec::ExecOptions {
+                    client_id,
+                    token,
+                    biometric_unlock,
+                    purpose,
+                },
+                format,
+            )?;
+            std::process::exit(code);
         }
 
         Commands::Passkey { ref command } => match command {
@@ -1037,6 +1198,7 @@ mod tests {
                         domain,
                         field,
                         expires_in,
+                        ..
                     },
             } => {
                 assert_eq!(client_id, "victor");
@@ -1072,6 +1234,7 @@ mod tests {
                         domain,
                         field,
                         expires_in,
+                        ..
                     },
             } => {
                 assert_eq!(client_id, "victor");
@@ -1124,11 +1287,12 @@ mod tests {
                         client_id,
                         domain,
                         field,
+                        ..
                     },
             } => {
                 assert_eq!(client_id, "victor");
-                assert_eq!(domain, "anthropic");
-                assert!(matches!(field, SecretField::Password));
+                assert_eq!(domain, Some("anthropic".to_string()));
+                assert!(matches!(field, Some(SecretField::Password)));
             }
             _ => panic!("expected secret revoke command"),
         }
@@ -1384,7 +1548,7 @@ mod tests {
             } => {
                 assert_eq!(domain, "anthropic");
                 assert!(matches!(field, SecretField::Password));
-                assert_eq!(client_id, Some("victor".to_string()));
+                assert_eq!(client_id, "victor".to_string());
                 assert_eq!(purpose, Some("victor-auth".to_string()));
                 assert_eq!(output, SecretOutputFormat::Json);
             }

@@ -42,6 +42,12 @@ pub enum AuditEventType {
         purpose: Option<String>,
         success: bool,
     },
+    ExternalSecretWrite {
+        client_id: Option<String>,
+        domain: String,
+        purpose: Option<String>,
+        success: bool,
+    },
 
     /// Authentication events
     AuthenticationAttempt {
@@ -191,6 +197,7 @@ impl AuditLogger {
             AuditEventType::VaultUnlocked { success: true }
             | AuditEventType::CredentialModified { .. }
             | AuditEventType::ExternalSecretAccess { success: true, .. }
+            | AuditEventType::ExternalSecretWrite { success: true, .. }
             | AuditEventType::BiometricUnlockRequested { success: true } => 3,
 
             // Medium severity (2)
@@ -199,6 +206,7 @@ impl AuditLogger {
             | AuditEventType::CredentialViewed { .. }
             | AuditEventType::VaultAutoLocked
             | AuditEventType::ExternalSecretAccess { success: false, .. }
+            | AuditEventType::ExternalSecretWrite { success: false, .. }
             | AuditEventType::BiometricUnlockRequested { success: false } => 2,
 
             // Low severity (1)
