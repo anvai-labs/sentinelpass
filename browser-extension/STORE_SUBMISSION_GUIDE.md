@@ -150,12 +150,12 @@ Permissions:
 Third-Party Services:
 - None
 
-For more information, visit: https://github.com/vjsingh1984/sentinelpass
+For more information, visit: https://github.com/anvai-labs/sentinelpass
 ```
 
 ### Step 5: Support
-- **Support URL**: https://github.com/vjsingh1984/sentinelpass/issues
-- **Homepage**: https://github.com/vjsingh1984/sentinelpass
+- **Support URL**: https://github.com/anvai-labs/sentinelpass/issues
+- **Homepage**: https://github.com/anvai-labs/sentinelpass
 
 ### Step 6: Review Notes (Important!)
 ```
@@ -222,8 +222,8 @@ Both packages contain exactly 11 files:
 
 ## Support & Resources
 
-- **GitHub**: https://github.com/vjsingh1984/sentinelpass
-- **Issues**: https://github.com/vjsingh1984/sentinelpass/issues
+- **GitHub**: https://github.com/anvai-labs/sentinelpass
+- **Issues**: https://github.com/anvai-labs/sentinelpass/issues
 - **Documentation**: See project README.md
 - **Security**: Report vulnerabilities via GitHub Security Advisories
 

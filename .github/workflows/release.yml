@@ -433,7 +433,7 @@ jobs:
           ### macOS DMG (Recommended)
           \`\`\`bash
           # Download DMG installer
-          curl -LO https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-macos.dmg
+          curl -LO https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-macos.dmg
           # Open DMG and drag to Applications
           open sentinelpass-${VERSION}-macos.dmg
           \`\`\`
@@ -441,7 +441,7 @@ jobs:
           ### Windows MSI (Recommended)
           \`\`\`powershell
           # Download MSI installer
-          Invoke-WebRequest -Uri https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-windows.msi -OutFile installer.msi
+          Invoke-WebRequest -Uri https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-windows.msi -OutFile installer.msi
           # Run installer
           msiexec /i installer.msi
           \`\`\`
@@ -449,7 +449,7 @@ jobs:
           ### Linux (Tarball)
           \`\`\`bash
           # Download tarball installer
-          wget https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-installer-${VERSION}-linux.tar.gz
+          wget https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-installer-${VERSION}-linux.tar.gz
           tar -xzf sentinelpass-installer-${VERSION}-linux.tar.gz
           cd installer-root
           ./install.sh
@@ -458,10 +458,10 @@ jobs:
           ## Browser Extensions
 
           ### Chrome
-          Download [sentinelpass-chrome-${VERSION}.zip](https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-chrome-${VERSION}.zip), unzip, and load as unpacked extension.
+          Download [sentinelpass-chrome-${VERSION}.zip](https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-chrome-${VERSION}.zip), unzip, and load as unpacked extension.
 
           ### Firefox
-          Download [sentinelpass-firefox-${VERSION}.zip](https://github.com/vjsingh1984/sentinelpass/releases/download/v${VERSION}/sentinelpass-firefox-${VERSION}.zip) and install temporarily.
+          Download [sentinelpass-firefox-${VERSION}.zip](https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-firefox-${VERSION}.zip) and install temporarily.
 
           ## Verify Download
 

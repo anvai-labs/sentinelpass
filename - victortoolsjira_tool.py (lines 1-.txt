@@ -10,7 +10,7 @@
     boilerplate.
 
 (base) vijay.singh@LJHPGHK99W tools % cat jira_tool.py slack_tool.py 
-# Copyright 2025 Vijaykumar Singh <singhvjd@gmail.com>
+# Copyright 2025 Vijaykumar Singh <vijay@anvaiops.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -184,7 +184,7 @@ async def jira(
     except Exception as e:
         logger.error(f"[jira] Unexpected error during operation '{operation}': {e}")
         return {"success": False, "error": str(e)}
-# Copyright 2025 Vijaykumar Singh <singhvjd@gmail.com>
+# Copyright 2025 Vijaykumar Singh <vijay@anvaiops.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -314,7 +314,7 @@ async def slack(
 (base) vijay.singh@LJHPGHK99W tools % 
 
 (base) vijay.singh@LJHPGHK99W telemetry % cat opentelemetry.py 
-# Copyright 2025 Vijaykumar Singh <singhvjd@gmail.com>
+# Copyright 2025 Vijaykumar Singh <vijay@anvaiops.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -364,7 +364,7 @@ def setup_opentelemetry(service_name: str, service_version: str):
 (base) vijay.singh@LJHPGHK99W telemetry % 
 
 (base) vijay.singh@LJHPGHK99W auth % cat rbac.py 
-# Copyright 2025 Vijaykumar Singh <singhvjd@gmail.com>
+# Copyright 2025 Vijaykumar Singh <vijay@anvaiops.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

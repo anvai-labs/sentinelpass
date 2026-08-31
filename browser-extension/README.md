@@ -237,8 +237,8 @@ errorLog('Error occurred', error);
 
 ## Resources
 
-- **Main Project**: https://github.com/vjsingh1984/sentinelpass
-- **Issue Tracker**: https://github.com/vjsingh1984/sentinelpass/issues
+- **Main Project**: https://github.com/anvai-labs/sentinelpass
+- **Issue Tracker**: https://github.com/anvai-labs/sentinelpass/issues
 - **Security**: Report via GitHub Security Advisories
 
 ## License
