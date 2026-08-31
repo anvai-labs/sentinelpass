@@ -13,9 +13,9 @@
     "test:ts:watch": "vitest"
   },
   "devDependencies": {
-    "@types/chrome": "^0.1.31",
+    "@types/chrome": "^0.2.7",
     "@vitest/coverage-v8": "^4.1.10",
-    "typescript": "^5.9.2",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }
