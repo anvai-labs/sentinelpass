@@ -7,24 +7,7 @@ use std::path::{Path, PathBuf};
 
 const ALLOWLIST_FILE: &str = "external-secret-access.json";
 
-/// Secret field that a local tool may request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalSecretField {
-    Username,
-    Password,
-    Title,
-}
-
-impl ExternalSecretField {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Username => "username",
-            Self::Password => "password",
-            Self::Title => "title",
-        }
-    }
-}
+pub use sentinelpass_protocol::ExternalSecretField;
 
 /// A single local-tool authorization grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -4975,6 +4975,7 @@ dependencies = [
  "rusqlite",
  "security-framework",
  "security-framework-sys",
+ "sentinelpass-protocol",
  "serde",
  "serde_json",
  "sha1",
@@ -5033,6 +5034,22 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "sentinelpass-protocol"
+version = "0.7.0"
+dependencies = [
+ "aes-gcm",
+ "dirs 5.0.1",
+ "hex",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]
