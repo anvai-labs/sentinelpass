@@ -603,3 +603,41 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 8. **Never trust domain from browser** - Validate daemon-side
 9. **Never return full vault to extension** - Only return requested credential
 10. **Never forget to zeroize** - Drop all secret buffers promptly
+
+## 10. SECRETS BROKER FOR LOCAL TOOLS (v0.8.0)
+
+SentinelPass's daemon exposes a least-privilege secrets broker so local
+developer tools (AI agents, proxies, scripts) can fetch exactly the secrets
+they were granted — no more.
+
+### Trust boundaries
+
+| Boundary | Mechanism | Notes |
+| --- | --- | --- |
+| Process → daemon | 32-byte IPC token file (`<config>/ipc.token`, 0600), constant-time compared | Same-OS-user trust root. Any process running as the user can read the token. |
+| Tool → secret scope | `ExternalSecretGrant` (client_id × domain × field [+ expires_at]) in `<config>/external-secret-access.json` (0600) | Exact scope match, no wildcards. |
+| Tool identity | Per-client token (`spt_…`, 32 random bytes, SHA-256 at rest, shown once at mint) | A client with a `client_tokens` entry is token-enforced on **all** its grants; revocation is fail-closed. Legacy (tokenless) clients keep working during the migration window but are warned about. |
+| Browser autofill | Native-messaging origin label on every envelope | **Provenance labeling, not authentication.** Originless requests are allowed with a deprecation warning in 0.8 and denied by default from 0.9 (`SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1` denies now). |
+
+### Rules enforced by the daemon
+
+1. `GetExternalSecret` requires an unexpired grant whose scope matches exactly,
+   and a valid client token whenever the client is token-enforced.
+2. `SaveSecret` additionally requires the grant to carry `allow_write`.
+   Writes upsert one value for one domain and are audited as
+   `ExternalSecretWrite`.
+3. `DeleteSecret` is always rejected for external tools: deletion needs entry
+   ownership metadata (schema v5). A write grant must never delete a
+   human-created login.
+4. The CLI cannot use the legacy unscoped `GetCredential` path at all
+   (`secret get` / `secret-get` require `--client-id`).
+5. Every external lookup and write is appended to the audit log
+   (`<config>/audit/audit.log`); `sentinelpass secret audit` renders it.
+
+### Non-goals
+
+- Multi-user isolation: everything below the OS-user boundary is one trust
+  domain. Per-tool tokens provide *scope* containment, not process identity
+  (no SO_PEERCRED/getpeyeid reliance; macOS cannot expose peer PIDs).
+- Environment-injected secrets cannot be zeroized once a child process owns
+  them. `sentinelpass exec` is for trusted children only.
