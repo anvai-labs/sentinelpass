@@ -191,3 +191,29 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | 2026-02-16 | v0.3.0 | Architecture: extract vault.rs into vault/ directory module (mod.rs + biometric_ops.rs + totp_ops.rs + ssh_ops.rs + tests.rs), add structured DatabaseError enum with 8 variants replacing catch-all String, migrate ~152 call sites across 10 files. CI fix: gate DatabaseError import for biometric platforms, exclude binary entry points from coverage. | #16 |
 | 2026-05-09 | v0.3.0 | Code quality: IPC split (ipc/mod.rs + server.rs + client.rs), CLI command extraction (9 modules), vault sync/health ops, error refinement (anyhow removed, DatabaseError::Other→InvalidInput), DB PRAGMAs + WAL checkpoint, list_ssh_keys_paginated + crate-root re-exports, popup search/add/settings + sender validation fix, Windows TCP IPC encryption verified Done | -- |
 | 2026-05-09 | v0.7.0 | Version bump to 0.7.0; security: rustls-webpki CVE patches; CI: fix 6 clippy errors (collapsible_match, platform cfg, Windows import); align Cargo.toml + tauri.conf.json versions | -- |
+
+## v0.8.0 Session Log (2026-08-31)
+
+### Shipped this cycle
+- `sentinelpass-protocol` crate extracted (stable IPC contract for embedders; sandhi consumes it)
+- Per-client grant tokens (grant file v2: `client_tokens` map, fail-closed revoke, `allow_write` flag)
+- `GetCredential` CLI bypass closed; staged browser-surface origin gate (deny-by-default lands v0.9)
+- `sentinelpass exec` / `env` secret serving; explicit `locked` semantics on all lookup responses
+- `SaveSecret` (write grants) + `ExternalSecretWrite` audit; `DeleteSecret` defined-but-rejected
+- Relay pairing tokens: salted Argon2id at rest (was unsalted SHA-256 of a 6-digit code)
+- SyncNow/Shutdown IPC handlers implemented; CLI `--version` fixed; justfile fixed; dependabot enabled
+- Removed dead `crypto/zero.rs` (`SecureBuffer`) and unused `memsec` dep
+- Homebrew tap bump automation (`scripts/bump-homebrew-formula.sh` + release.yml job, needs `TAP_TOKEN` secret)
+- Sibling PRs: sandhi#176 (native IPC vault backend), victor#985 (allowlisted lookup)
+
+### Deferred (tracked, do not re-derive)
+1. Schema v5 typed payloads: api-key provider/scopes/expiry metadata + entry ownership → real `DeleteSecret`
+2. Full `Zeroizing` sweep on IPC/export/sync/native-messaging secret fields (wire structs still `String`)
+3. Dependency majors: rusqlite 0.30→0.32, thiserror 1→2, rand 0.8→0.9, objc/cocoa replacements
+4. Origin gate deny-by-default (v0.9); remove `SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL` (v1.0)
+5. `sentinelpass-protocol` → crates.io (removes git-rev pin in sandhi)
+6. Repository pattern for sync_ops/delete_entry raw SQL; add_entry/update_entry encrypt-block dedup (vault/mod.rs)
+7. audit.toml ignore review; pairing-code lengthening (9 digits, coordinated client+relay)
+8. Headless `.deb` via cargo-deb for servers; systemd user unit; launchd plist for daemon supervision
+9. DaemonVault mutex `.lock().unwrap()` sites (vault_state.rs) — poison handling
+10. CLI CRUD still re-opens the vault + re-runs Argon2id per command; route CRUD through the daemon
