@@ -9,8 +9,6 @@ use std::path::PathBuf;
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
-use tokio::net::windows::named_pipe::ClientOptions;
-#[cfg(windows)]
 use tracing::debug;
 
 /// IPC client for daemon communication

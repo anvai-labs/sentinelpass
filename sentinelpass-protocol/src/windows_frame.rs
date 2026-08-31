@@ -3,7 +3,8 @@
 //! The frame format is fixed: `nonce (12 bytes) || ciphertext || tag`.
 //! Changing it would break mixed-version daemon/client fleets.
 
-use crate::error::{ProtocolError, Result};
+use crate::error::ProtocolError;
+use crate::Result;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::{rngs::OsRng, RngCore};
