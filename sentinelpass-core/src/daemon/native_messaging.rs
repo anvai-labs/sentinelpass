@@ -172,6 +172,7 @@ impl NativeMessagingHost {
                 username,
                 password,
                 title,
+                ..
             }) => {
                 if msg_type == MSG_CHECK_CREDENTIAL_EXISTS {
                     let exists = username.is_some() && password.is_some();
@@ -185,6 +186,7 @@ impl NativeMessagingHost {
             Ok(IpcMessage::GetTotpCodeResponse {
                 code,
                 seconds_remaining,
+                ..
             }) => {
                 if let Some(code) = code {
                     let seconds_remaining = seconds_remaining.unwrap_or(0);
@@ -193,7 +195,7 @@ impl NativeMessagingHost {
                     Self::send_error(request_id, "No TOTP code found for domain")?;
                 }
             }
-            Ok(IpcMessage::SaveCredentialResponse { success, error }) => {
+            Ok(IpcMessage::SaveCredentialResponse { success, error, .. }) => {
                 if msg_type == MSG_SAVE_CREDENTIAL {
                     Self::send_action_status(
                         request_id,
@@ -219,7 +221,7 @@ impl NativeMessagingHost {
                     Self::send_vault_status(request_id, unlocked)?;
                 }
             }
-            Ok(IpcMessage::ListDomainCredentialsResponse { credentials }) => {
+            Ok(IpcMessage::ListDomainCredentialsResponse { credentials, .. }) => {
                 if msg_type == MSG_LIST_DOMAIN_CREDENTIALS {
                     Self::send_credential_list(request_id, credentials)?;
                 } else {

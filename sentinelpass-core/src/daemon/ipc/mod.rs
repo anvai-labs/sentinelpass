@@ -165,6 +165,7 @@ mod tests {
                 value,
                 authorized: true,
                 error: None,
+                ..
             } => assert_eq!(value, Some("sk-ant-test".to_string())),
             other => panic!("unexpected authorized lookup response: {:?}", other),
         }
@@ -183,6 +184,7 @@ mod tests {
                 value: None,
                 authorized: false,
                 error: Some(error),
+                ..
             } => assert!(error.contains("not authorized")),
             other => panic!("unexpected denied lookup response: {:?}", other),
         }
@@ -201,6 +203,7 @@ mod tests {
                 value: None,
                 authorized: true,
                 error: None,
+                ..
             } => {}
             other => panic!("unexpected passkey lookup response: {:?}", other),
         }
@@ -301,6 +304,7 @@ mod tests {
                 value: None,
                 authorized: false,
                 error: Some(err),
+                ..
             } => assert!(err.contains("SENTINELPASS_CLIENT_TOKEN")),
             other => panic!("expected token denial, got {:?}", other),
         }
@@ -317,6 +321,7 @@ mod tests {
                 value: Some(value),
                 authorized: true,
                 error: None,
+                ..
             } => assert_eq!(value, "sk-ant-live"),
             other => panic!("expected token grant, got {:?}", other),
         }
@@ -359,5 +364,195 @@ mod tests {
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_file(allowlist_path);
         let _ = std::fs::remove_file(vault_path);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_ipc_locked_semantics_and_save_secret() {
+        use crate::daemon::DaemonVault;
+        use crate::{
+            ClientTokenStatus, ExternalSecretAllowlist, ExternalSecretField, VaultManager,
+        };
+        use std::sync::Arc;
+        use tokio::time::{sleep, Duration};
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let short_suffix = &suffix[..12];
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_lock_{short_suffix}.db"));
+        let socket_path = PathBuf::from(format!("/tmp/sp-lock-{short_suffix}.sock"));
+        let allowlist_path =
+            std::env::temp_dir().join(format!("sentinelpass_lock_allow_{short_suffix}.json"));
+        let password = b"test_password_123!";
+        let auth_token = format!("test-token-{short_suffix}");
+
+        // Create the vault so DaemonVault::new accepts the path, but leave it locked.
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        drop(vault);
+
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .upsert_grant(
+                "sandhi",
+                "sandhi:anthropic:key",
+                ExternalSecretField::Password,
+                None,
+                true,
+            )
+            .unwrap();
+        allowlist
+            .allow(
+                "readonly",
+                "sandhi:openai:key",
+                ExternalSecretField::Password,
+            )
+            .unwrap();
+        let token = allowlist.mint_client_token("sandhi").unwrap();
+        allowlist.save_to_path(&allowlist_path).unwrap();
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        let server = Arc::new(IpcServer::new_with_allowlist_path(
+            socket_path.clone(),
+            daemon_vault.clone(),
+            auth_token.clone(),
+            allowlist_path.clone(),
+        ));
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(!server_task.is_finished());
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        let client = IpcClient::new_with_token(socket_path.clone(), auth_token.clone());
+
+        // Locked lookup: explicit locked flag, not a silent empty result.
+        match client
+            .send(IpcMessage::GetExternalSecret {
+                client_id: "sandhi".to_string(),
+                domain: "sandhi:anthropic:key".to_string(),
+                field: ExternalSecretField::Password,
+                purpose: Some("lock-test".to_string()),
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::GetExternalSecretResponse {
+                value: None,
+                authorized: true,
+                error: None,
+                locked: Some(true),
+            } => {}
+            other => panic!("expected locked response, got {:?}", other),
+        }
+
+        // Locked SaveSecret: locked flag on the write path too.
+        match client
+            .send(IpcMessage::SaveSecret {
+                client_id: "sandhi".to_string(),
+                domain: "sandhi:anthropic:key".to_string(),
+                value: "sk-ant-new".to_string(),
+                purpose: Some("lock-test".to_string()),
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::SaveSecretResponse {
+                success: false,
+                locked: Some(true),
+                ..
+            } => {}
+            other => panic!("expected locked save response, got {:?}", other),
+        }
+
+        // Unlock; the write grant now applies.
+        daemon_vault.unlock(password).await.unwrap();
+        let client = client.with_context(Some(token.clone()), None);
+
+        // SaveSecret with a write grant creates then updates the entry.
+        for expected in ["sk-ant-new", "sk-ant-rotated"] {
+            match client
+                .send(IpcMessage::SaveSecret {
+                    client_id: "sandhi".to_string(),
+                    domain: "sandhi:anthropic:key".to_string(),
+                    value: expected.to_string(),
+                    purpose: None,
+                })
+                .await
+                .unwrap()
+            {
+                IpcMessage::SaveSecretResponse {
+                    success: true,
+                    error: None,
+                    ..
+                } => {}
+                other => panic!("expected save success for {expected}, got {:?}", other),
+            }
+            match client
+                .send(IpcMessage::GetExternalSecret {
+                    client_id: "sandhi".to_string(),
+                    domain: "sandhi:anthropic:key".to_string(),
+                    field: ExternalSecretField::Password,
+                    purpose: None,
+                })
+                .await
+                .unwrap()
+            {
+                IpcMessage::GetExternalSecretResponse {
+                    value: Some(value),
+                    authorized: true,
+                    error: None,
+                    ..
+                } => assert_eq!(value, expected),
+                other => panic!("expected readback of {expected}, got {:?}", other),
+            }
+        }
+
+        // A read-only client cannot write.
+        let readonly_client = IpcClient::new_with_token(socket_path.clone(), auth_token.clone())
+            .with_context(Some("readonly-token".to_string()), None);
+        match readonly_client
+            .send(IpcMessage::SaveSecret {
+                client_id: "readonly".to_string(),
+                domain: "sandhi:openai:key".to_string(),
+                value: "nope".to_string(),
+                purpose: None,
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::SaveSecretResponse {
+                success: false,
+                error: Some(err),
+                ..
+            } => assert!(err.contains("no write grant")),
+            other => panic!("expected write denial for readonly client, got {:?}", other),
+        }
+
+        // DeleteSecret is defined but rejected.
+        match client
+            .send(IpcMessage::DeleteSecret {
+                client_id: "sandhi".to_string(),
+                domain: "sandhi:anthropic:key".to_string(),
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::DeleteSecretResponse {
+                deleted: false,
+                error: Some(err),
+                ..
+            } => assert!(err.contains("not supported")),
+            other => panic!("expected delete rejection, got {:?}", other),
+        }
+
+        server_task.abort();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_file(allowlist_path);
+        let _ = std::fs::remove_file(vault_path);
+        let _ = ClientTokenStatus::Legacy;
     }
 }

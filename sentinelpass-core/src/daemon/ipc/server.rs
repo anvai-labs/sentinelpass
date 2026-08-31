@@ -447,6 +447,14 @@ impl IpcServer {
                 field,
                 purpose,
             } => {
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::GetExternalSecretResponse {
+                        value: None,
+                        authorized: true,
+                        error: None,
+                        locked: Some(true),
+                    };
+                }
                 debug!(
                     "IPC: GetExternalSecret client='{}' domain='{}' field='{}'",
                     client_id,
@@ -490,6 +498,7 @@ impl IpcServer {
                                     value,
                                     authorized: true,
                                     error: None,
+                                    locked: None,
                                 }
                             }
                             Ok(None) => {
@@ -509,6 +518,7 @@ impl IpcServer {
                                     value: None,
                                     authorized: true,
                                     error: None,
+                                    locked: None,
                                 }
                             }
                             Err(e) => {
@@ -529,6 +539,7 @@ impl IpcServer {
                                     value: None,
                                     authorized: true,
                                     error: Some("Credential lookup failed".to_string()),
+                                    locked: None,
                                 }
                             }
                         }
@@ -560,6 +571,7 @@ impl IpcServer {
                                 domain,
                                 field.as_str()
                             )),
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -568,12 +580,124 @@ impl IpcServer {
                             value: None,
                             authorized: false,
                             error: Some("Failed to load external secret allowlist".to_string()),
+                            locked: None,
                         }
                     }
                 }
             }
+            IpcMessage::SaveSecret {
+                client_id,
+                domain,
+                value,
+                purpose,
+            } => {
+                let purpose_label = purpose.unwrap_or_else(|| "external-secret-write".to_string());
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::SaveSecretResponse {
+                        success: false,
+                        locked: Some(true),
+                        error: Some("vault is locked".to_string()),
+                    };
+                }
+
+                let allowlist =
+                    ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path);
+                let authorized = match &allowlist {
+                    Ok(allowlist) => {
+                        allowlist.verify_client_token(&client_id, client_token.as_deref())
+                            && allowlist
+                                .grants_for_client(Some(&client_id))
+                                .unwrap_or_default()
+                                .into_iter()
+                                .any(|grant| {
+                                    grant.allow_write
+                                        && !grant.is_expired_at(chrono::Utc::now())
+                                        && grant.domain == domain
+                                })
+                    }
+                    Err(_) => false,
+                };
+
+                if !authorized {
+                    log_daemon_audit(
+                        self.audit_logger.as_deref(),
+                        AuditEventType::ExternalSecretWrite {
+                            client_id: Some(client_id.clone()),
+                            domain: domain.clone(),
+                            purpose: Some(purpose_label),
+                            success: false,
+                        },
+                        "External secret write denied",
+                    );
+                    return IpcMessage::SaveSecretResponse {
+                        success: false,
+                        locked: None,
+                        error: Some(format!(
+                            "Client '{}' has no write grant for '{}': run \
+                             'sentinelpass secret allow --client-id {} --domain {} --field password --write' \
+                             and set SENTINELPASS_CLIENT_TOKEN",
+                            client_id, domain, client_id, domain
+                        )),
+                    };
+                }
+
+                match self.vault.save_secret_value(&domain, &value).await {
+                    Ok(()) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            AuditEventType::ExternalSecretWrite {
+                                client_id: Some(client_id.clone()),
+                                domain: domain.clone(),
+                                purpose: Some(purpose_label),
+                                success: true,
+                            },
+                            "External secret written via daemon IPC",
+                        );
+                        IpcMessage::SaveSecretResponse {
+                            success: true,
+                            locked: None,
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to save external secret: {}", e);
+                        IpcMessage::SaveSecretResponse {
+                            success: false,
+                            locked: None,
+                            error: Some("Failed to save secret".to_string()),
+                        }
+                    }
+                }
+            }
+            IpcMessage::DeleteSecret { client_id, domain } => {
+                // Deletion is rejected until entries carry ownership metadata
+                // (schema v5): a write-grant must never be able to delete a
+                // human-created login.
+                debug!(
+                    "IPC: DeleteSecret from client '{}' for '{}' rejected (unsupported)",
+                    client_id, domain
+                );
+                let _ = domain;
+                IpcMessage::DeleteSecretResponse {
+                    deleted: false,
+                    locked: None,
+                    error: Some(
+                        "deletion is not supported for external tools; revoke the grant instead"
+                            .to_string(),
+                    ),
+                }
+            }
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
+
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::GetCredentialResponse {
+                        username: None,
+                        password: None,
+                        title: None,
+                        locked: Some(true),
+                    };
+                }
 
                 match self.vault.get_credential(&domain).await {
                     Ok(Some(cred)) => {
@@ -590,6 +714,7 @@ impl IpcServer {
                             username: Some(cred.username),
                             password: Some(cred.password),
                             title: Some(cred.title),
+                            locked: None,
                         }
                     }
                     Ok(None) => {
@@ -607,6 +732,7 @@ impl IpcServer {
                             username: None,
                             password: None,
                             title: None,
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -624,6 +750,7 @@ impl IpcServer {
                             username: None,
                             password: None,
                             title: None,
+                            locked: None,
                         }
                     }
                 }
@@ -633,6 +760,13 @@ impl IpcServer {
                     "IPC: ListDomainCredentials for base domain '{}'",
                     base_domain
                 );
+
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::ListDomainCredentialsResponse {
+                        credentials: Vec::new(),
+                        locked: Some(true),
+                    };
+                }
 
                 match self.vault.list_domain_credentials(&base_domain).await {
                     Ok(credentials) => {
@@ -646,12 +780,14 @@ impl IpcServer {
                             .collect();
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: summaries,
+                            locked: None,
                         }
                     }
                     Err(e) => {
                         error!("Failed to list domain credentials: {}", e);
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: Vec::new(),
+                            locked: None,
                         }
                     }
                 }
@@ -659,16 +795,26 @@ impl IpcServer {
             IpcMessage::GetTotpCode { domain } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::GetTotpCodeResponse {
+                        code: None,
+                        seconds_remaining: None,
+                        locked: Some(true),
+                    };
+                }
+
                 match self.vault.get_totp_code(&domain).await {
                     Ok(Some(code)) => IpcMessage::GetTotpCodeResponse {
                         code: Some(code.code),
                         seconds_remaining: Some(code.seconds_remaining),
+                        locked: None,
                     },
                     Ok(None) => {
                         debug!("No TOTP code found for domain '{}'", domain);
                         IpcMessage::GetTotpCodeResponse {
                             code: None,
                             seconds_remaining: None,
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -676,6 +822,7 @@ impl IpcServer {
                         IpcMessage::GetTotpCodeResponse {
                             code: None,
                             seconds_remaining: None,
+                            locked: None,
                         }
                     }
                 }
@@ -691,6 +838,14 @@ impl IpcServer {
                     domain, username
                 );
 
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::SaveCredentialResponse {
+                        success: false,
+                        error: Some("vault is locked".to_string()),
+                        locked: Some(true),
+                    };
+                }
+
                 match self
                     .vault
                     .save_credential(&domain, &username, &password, url.as_deref())
@@ -701,6 +856,7 @@ impl IpcServer {
                         IpcMessage::SaveCredentialResponse {
                             success: true,
                             error: None,
+                            locked: None,
                         }
                     }
                     Err(e) => {
@@ -708,6 +864,7 @@ impl IpcServer {
                         IpcMessage::SaveCredentialResponse {
                             success: false,
                             error: Some(e.to_string()),
+                            locked: None,
                         }
                     }
                 }

@@ -97,6 +97,7 @@ pub async fn get_secret_from_daemon(
                 value,
                 authorized: true,
                 error: None,
+                ..
             } => value
                 .map(|value| SecretLookupResult {
                     domain: lookup_domain,
@@ -126,6 +127,7 @@ pub async fn get_secret_from_daemon(
             username,
             password,
             title,
+            ..
         } => {
             let value = match field {
                 SecretField::Username => username,

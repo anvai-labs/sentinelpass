@@ -37,17 +37,24 @@ pub enum IpcMessage {
         value: Option<String>,
         authorized: bool,
         error: Option<String>,
+        /// Some(true) = vault locked (distinct from not-found).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
     },
     GetCredentialResponse {
         username: Option<String>,
         password: Option<String>,
         title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
     },
     ListDomainCredentials {
         base_domain: String,
     },
     ListDomainCredentialsResponse {
         credentials: Vec<CredentialSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
     },
     GetTotpCode {
         domain: String,
@@ -55,6 +62,8 @@ pub enum IpcMessage {
     GetTotpCodeResponse {
         code: Option<String>,
         seconds_remaining: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
     },
     SaveCredential {
         domain: String,
@@ -64,6 +73,35 @@ pub enum IpcMessage {
     },
     SaveCredentialResponse {
         success: bool,
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
+    },
+    /// External tool writes (upserts) one secret value for one scope.
+    /// Requires a token-enforced grant with allow_write.
+    SaveSecret {
+        client_id: String,
+        domain: String,
+        value: String,
+        purpose: Option<String>,
+    },
+    SaveSecretResponse {
+        success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
+        error: Option<String>,
+    },
+    /// Defined for protocol completeness; the daemon currently rejects
+    /// deletion because third-party-created entries have no ownership
+    /// tracking yet (planned for schema v5).
+    DeleteSecret {
+        client_id: String,
+        domain: String,
+    },
+    DeleteSecretResponse {
+        deleted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
         error: Option<String>,
     },
     UnlockVault {
@@ -226,6 +264,7 @@ mod tests {
             username: Some("user@example.com".to_string()),
             password: Some("password123".to_string()),
             title: Some("Example".to_string()),
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -236,6 +275,7 @@ mod tests {
                 username,
                 password,
                 title,
+                locked: None,
             } => {
                 assert_eq!(username, Some("user@example.com".to_string()));
                 assert_eq!(password, Some("password123".to_string()));
@@ -251,6 +291,7 @@ mod tests {
             value: Some("secret-value".to_string()),
             authorized: true,
             error: None,
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -261,6 +302,7 @@ mod tests {
                 value,
                 authorized,
                 error,
+                locked: None,
             } => {
                 assert_eq!(value, Some("secret-value".to_string()));
                 assert!(authorized);
@@ -287,6 +329,7 @@ mod tests {
 
         let response = IpcMessage::ListDomainCredentialsResponse {
             credentials: credentials.clone(),
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -295,6 +338,7 @@ mod tests {
         match deserialized {
             IpcMessage::ListDomainCredentialsResponse {
                 credentials: decoded,
+                locked: None,
             } => {
                 assert_eq!(decoded.len(), 2);
                 assert_eq!(decoded[0].username, "user1@example.com");
@@ -309,13 +353,18 @@ mod tests {
         let response = IpcMessage::SaveCredentialResponse {
             success: true,
             error: None,
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
         let deserialized: IpcMessage = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
-            IpcMessage::SaveCredentialResponse { success, error } => {
+            IpcMessage::SaveCredentialResponse {
+                success,
+                error,
+                locked: None,
+            } => {
                 assert!(success);
                 assert!(error.is_none());
             }
@@ -328,15 +377,21 @@ mod tests {
         let response = IpcMessage::SaveCredentialResponse {
             success: false,
             error: Some("Vault is locked".to_string()),
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
         let deserialized: IpcMessage = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
-            IpcMessage::SaveCredentialResponse { success, error } => {
+            IpcMessage::SaveCredentialResponse {
+                success,
+                error,
+                locked,
+            } => {
                 assert!(!success);
                 assert_eq!(error, Some("Vault is locked".to_string()));
+                assert_eq!(locked, None);
             }
             _ => panic!("Wrong response type"),
         }
@@ -381,6 +436,7 @@ mod tests {
         let response = IpcMessage::GetTotpCodeResponse {
             code: Some("123456".to_string()),
             seconds_remaining: Some(30),
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -390,6 +446,7 @@ mod tests {
             IpcMessage::GetTotpCodeResponse {
                 code,
                 seconds_remaining,
+                locked: None,
             } => {
                 assert_eq!(code, Some("123456".to_string()));
                 assert_eq!(seconds_remaining, Some(30));
@@ -464,13 +521,17 @@ mod tests {
     fn test_empty_credential_list_serialization() {
         let response = IpcMessage::ListDomainCredentialsResponse {
             credentials: vec![],
+            locked: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
         let deserialized: IpcMessage = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
-            IpcMessage::ListDomainCredentialsResponse { credentials } => {
+            IpcMessage::ListDomainCredentialsResponse {
+                credentials,
+                locked: None,
+            } => {
                 assert!(credentials.is_empty());
             }
             _ => panic!("Wrong response type"),
