@@ -132,7 +132,7 @@ impl IpcServer {
                                         warn!("Rejected IPC request with invalid token");
                                         continue;
                                     }
-                                    let response = self.handle_message(envelope.message).await;
+                                    let response = self.handle_message(envelope).await;
                                     match serde_json::to_vec(&response) {
                                         Ok(response_bytes) => {
                                             if let Err(e) =
@@ -365,7 +365,7 @@ impl IpcServer {
                                                         continue;
                                                     }
                                                     let response =
-                                                        self.handle_message(envelope.message).await;
+                                                        self.handle_message(envelope).await;
                                                     match serde_json::to_vec(&response) {
                                                         Ok(response_bytes) => {
                                                             match encrypt_windows_ipc_frame(
@@ -433,10 +433,14 @@ impl IpcServer {
         Ok(())
     }
 
-    /// Handle an IPC message
+    /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
-    async fn handle_message(&self, msg: IpcMessage) -> IpcMessage {
-        match msg {
+    async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+        let client_token = envelope.client_token.clone();
+        // Origin is provenance labeling for deprecation gating (used by the
+        // browser-surface gate); not security-relevant by itself.
+        let _origin = envelope.origin;
+        match envelope.message {
             IpcMessage::GetExternalSecret {
                 client_id,
                 domain,
@@ -451,9 +455,18 @@ impl IpcServer {
                 );
 
                 let purpose = purpose.unwrap_or_else(|| "external-secret-access".to_string());
-                match ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path)
-                {
-                    Ok(allowlist) if allowlist.is_allowed(&client_id, &domain, field) => {
+                let allowlist =
+                    ExternalSecretAllowlist::load_from_path(&self.external_secret_allowlist_path);
+                let token_ok = match &allowlist {
+                    Ok(allowlist) => {
+                        allowlist.verify_client_token(&client_id, client_token.as_deref())
+                    }
+                    Err(_) => false,
+                };
+                match allowlist {
+                    Ok(allowlist)
+                        if token_ok && allowlist.is_allowed(&client_id, &domain, field) =>
+                    {
                         match self.vault.get_credential(&domain).await {
                             Ok(Some(cred)) => {
                                 let value = match field {
@@ -537,7 +550,12 @@ impl IpcServer {
                             value: None,
                             authorized: false,
                             error: Some(format!(
-                                "Client '{}' is not authorized for {} {}",
+                                "Client '{}' is not authorized for {} {}: run \
+                                 'sentinelpass secret allow --client-id {} --domain {} --field {}' \
+                                 and set SENTINELPASS_CLIENT_TOKEN",
+                                client_id,
+                                domain,
+                                field.as_str(),
                                 client_id,
                                 domain,
                                 field.as_str()

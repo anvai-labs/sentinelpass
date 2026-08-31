@@ -60,7 +60,7 @@ pub use server::IpcServer;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[cfg(unix)]
     #[tokio::test]
@@ -203,6 +203,156 @@ mod tests {
                 error: None,
             } => {}
             other => panic!("unexpected passkey lookup response: {:?}", other),
+        }
+
+        server_task.abort();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_file(allowlist_path);
+        let _ = std::fs::remove_file(vault_path);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_ipc_client_tokens_enforce_grant_access() {
+        use crate::daemon::DaemonVault;
+        use crate::{
+            ClientTokenStatus, CredentialType, Entry, ExternalSecretAllowlist, ExternalSecretField,
+            VaultManager,
+        };
+        use chrono::Utc;
+        use std::sync::Arc;
+        use tokio::time::{sleep, Duration};
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let short_suffix = &suffix[..12];
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_tok_{short_suffix}.db"));
+        let socket_path = PathBuf::from(format!("/tmp/sp-tok-{short_suffix}.sock"));
+        let allowlist_path =
+            std::env::temp_dir().join(format!("sentinelpass_tok_allow_{short_suffix}.json"));
+        let password = b"test_password_123!";
+        let auth_token = format!("test-token-{short_suffix}");
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "Anthropic API".to_string(),
+                username: "anthropic".to_string(),
+                password: "sk-ant-live".to_string().into(),
+                url: Some("anthropic".to_string()),
+                notes: None,
+                credential_type: CredentialType::ApiKey,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        drop(vault);
+
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+        let token = allowlist.mint_client_token("victor").unwrap();
+        allowlist.save_to_path(&allowlist_path).unwrap();
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        daemon_vault.unlock(password).await.unwrap();
+
+        let server = Arc::new(IpcServer::new_with_allowlist_path(
+            socket_path.clone(),
+            daemon_vault,
+            auth_token.clone(),
+            allowlist_path.clone(),
+        ));
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(!server_task.is_finished());
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        async fn lookup(
+            socket_path: &Path,
+            auth_token: &str,
+            client_token: Option<String>,
+        ) -> IpcMessage {
+            let client =
+                IpcClient::new_with_token(socket_path.to_path_buf(), auth_token.to_string())
+                    .with_context(client_token, None);
+            client
+                .send(IpcMessage::GetExternalSecret {
+                    client_id: "victor".to_string(),
+                    domain: "anthropic".to_string(),
+                    field: ExternalSecretField::Password,
+                    purpose: Some("token-test".to_string()),
+                })
+                .await
+                .unwrap()
+        }
+
+        // Token-enforced client: denied without token...
+        match lookup(&socket_path, &auth_token, None).await {
+            IpcMessage::GetExternalSecretResponse {
+                value: None,
+                authorized: false,
+                error: Some(err),
+            } => assert!(err.contains("SENTINELPASS_CLIENT_TOKEN")),
+            other => panic!("expected token denial, got {:?}", other),
+        }
+        // ...denied with a wrong token...
+        match lookup(&socket_path, &auth_token, Some("spt_wrong".to_string())).await {
+            IpcMessage::GetExternalSecretResponse {
+                authorized: false, ..
+            } => {}
+            other => panic!("expected wrong-token denial, got {:?}", other),
+        }
+        // ...and allowed with the minted token.
+        match lookup(&socket_path, &auth_token, Some(token.clone())).await {
+            IpcMessage::GetExternalSecretResponse {
+                value: Some(value),
+                authorized: true,
+                error: None,
+            } => assert_eq!(value, "sk-ant-live"),
+            other => panic!("expected token grant, got {:?}", other),
+        }
+
+        // Rotation kills the old token.
+        let mut allowlist = ExternalSecretAllowlist::load_from_path(&allowlist_path).unwrap();
+        assert_eq!(
+            allowlist.token_status("victor"),
+            ClientTokenStatus::Enforced
+        );
+        let rotated = allowlist.rotate_client_token("victor").unwrap();
+        allowlist.save_to_path(&allowlist_path).unwrap();
+        match lookup(&socket_path, &auth_token, Some(token.clone())).await {
+            IpcMessage::GetExternalSecretResponse {
+                authorized: false, ..
+            } => {}
+            other => panic!("expected old-token denial after rotation, got {:?}", other),
+        }
+        match lookup(&socket_path, &auth_token, Some(rotated.clone())).await {
+            IpcMessage::GetExternalSecretResponse {
+                value: Some(_),
+                authorized: true,
+                ..
+            } => {}
+            other => panic!("expected rotated-token grant, got {:?}", other),
+        }
+
+        // Revocation is fail-closed, even with the newest token.
+        let mut allowlist = ExternalSecretAllowlist::load_from_path(&allowlist_path).unwrap();
+        allowlist.revoke_client_token("victor").unwrap();
+        allowlist.save_to_path(&allowlist_path).unwrap();
+        match lookup(&socket_path, &auth_token, Some(rotated)).await {
+            IpcMessage::GetExternalSecretResponse {
+                authorized: false, ..
+            } => {}
+            other => panic!("expected revoked denial, got {:?}", other),
         }
 
         server_task.abort();

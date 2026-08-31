@@ -28,7 +28,8 @@ pub use crypto::{
     WrappedKey,
 };
 pub use external_secret_access::{
-    ExternalSecretAllowlist, ExternalSecretField, ExternalSecretGrant,
+    ClientTokenRecord, ClientTokenStatus, ExternalSecretAllowlist, ExternalSecretField,
+    ExternalSecretGrant,
 };
 pub use import_export::{
     export_to_csv, export_to_json, import_from_csv, import_from_json, ExportEntry,

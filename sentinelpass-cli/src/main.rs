@@ -409,6 +409,14 @@ enum SecretCommands {
         /// Optional grant duration, for example 30m, 8h, or 7d
         #[arg(long)]
         expires_in: Option<String>,
+
+        /// Also allow the client to write (upsert) this secret
+        #[arg(long)]
+        write: bool,
+
+        /// Create a legacy grant that works without a client token
+        #[arg(long)]
+        no_token: bool,
     },
 
     /// Revoke a local tool's access to one field for one domain/service
@@ -418,11 +426,21 @@ enum SecretCommands {
 
         /// Domain or service key the client may no longer access
         #[arg(long)]
-        domain: String,
+        domain: Option<String>,
 
         /// Field to revoke
-        #[arg(long, value_enum, default_value_t = SecretField::Password)]
-        field: SecretField,
+        #[arg(long, value_enum)]
+        field: Option<SecretField>,
+
+        /// Revoke every grant for this client
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Manage per-client grant tokens
+    Token {
+        #[command(subcommand)]
+        command: SecretTokenCommands,
     },
 
     /// List local-tool secret access grants
@@ -465,6 +483,10 @@ enum SecretCommands {
         #[arg(long)]
         purpose: Option<String>,
 
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
         /// Output format
         #[arg(long, value_enum, default_value_t = SecretOutputFormat::Plain)]
         output: SecretOutputFormat,
@@ -476,6 +498,37 @@ enum SecretCommands {
         /// Prompt shown by the OS biometric dialog
         #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
         prompt_reason: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretTokenCommands {
+    /// Mint a client token (printed once; authorizes every grant for the client)
+    Mint {
+        /// Local tool client id, for example `victor`
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Replace a client token; the old token stops working immediately
+    Rotate {
+        /// Local tool client id
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Revoke a client token (fail-closed: all grants for the client are denied)
+    Revoke {
+        /// Local tool client id
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Show client token status
+    List {
+        /// Optional client id filter
+        #[arg(long)]
+        client_id: Option<String>,
     },
 }
 
@@ -1037,6 +1090,7 @@ mod tests {
                         domain,
                         field,
                         expires_in,
+                        ..
                     },
             } => {
                 assert_eq!(client_id, "victor");
@@ -1072,6 +1126,7 @@ mod tests {
                         domain,
                         field,
                         expires_in,
+                        ..
                     },
             } => {
                 assert_eq!(client_id, "victor");
@@ -1124,11 +1179,12 @@ mod tests {
                         client_id,
                         domain,
                         field,
+                        ..
                     },
             } => {
                 assert_eq!(client_id, "victor");
-                assert_eq!(domain, "anthropic");
-                assert!(matches!(field, SecretField::Password));
+                assert_eq!(domain, Some("anthropic".to_string()));
+                assert!(matches!(field, Some(SecretField::Password)));
             }
             _ => panic!("expected secret revoke command"),
         }

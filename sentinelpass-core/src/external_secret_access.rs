@@ -1,13 +1,25 @@
 //! Least-privilege authorization for local tools requesting vault secrets.
 
 use crate::{get_config_dir, DatabaseError, PasswordManagerError, Result};
+use base64::Engine;
 use chrono::{DateTime, Utc};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 const ALLOWLIST_FILE: &str = "external-secret-access.json";
+const CLIENT_TOKEN_PREFIX: &str = "spt_";
+const CLIENT_TOKEN_BYTES: usize = 32;
 
 pub use sentinelpass_protocol::ExternalSecretField;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// A single local-tool authorization grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +29,9 @@ pub struct ExternalSecretGrant {
     pub field: ExternalSecretField,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// When true the client may also write (upsert) the secret for this scope.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_write: bool,
 }
 
 impl ExternalSecretGrant {
@@ -29,10 +44,35 @@ impl ExternalSecretGrant {
     }
 }
 
+/// Stored state of a client's grant token. The plaintext token is shown once
+/// at mint time; only its SHA-256 hash lives on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientTokenRecord {
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub revoked: bool,
+}
+
+/// Whether requests from a client must present a per-client token.
+///
+/// Clients with a `client_tokens` entry are token-enforced on every grant;
+/// clients without one are "legacy" — their grants work without a token.
+/// Revocation is fail-closed: a revoked client is denied even with its old
+/// token, and never degrades back to legacy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientTokenStatus {
+    Enforced,
+    Legacy,
+    Revoked,
+}
+
 /// JSON-backed allowlist for external secret access.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalSecretAllowlist {
     pub grants: Vec<ExternalSecretGrant>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub client_tokens: HashMap<String, ClientTokenRecord>,
 }
 
 impl ExternalSecretAllowlist {
@@ -129,6 +169,18 @@ impl ExternalSecretAllowlist {
         field: ExternalSecretField,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<ExternalSecretGrant> {
+        self.upsert_grant(client_id, domain, field, expires_at, false)
+    }
+
+    /// Insert or replace a grant with explicit write permission.
+    pub fn upsert_grant(
+        &mut self,
+        client_id: &str,
+        domain: &str,
+        field: ExternalSecretField,
+        expires_at: Option<DateTime<Utc>>,
+        allow_write: bool,
+    ) -> Result<ExternalSecretGrant> {
         let client_id = normalize_client_id(client_id)?;
         let domain = normalize_domain(domain)?;
         let grant = ExternalSecretGrant {
@@ -136,6 +188,7 @@ impl ExternalSecretAllowlist {
             domain,
             field,
             expires_at,
+            allow_write,
         };
 
         if let Some(existing) = self
@@ -162,6 +215,7 @@ impl ExternalSecretAllowlist {
             domain: normalize_domain(domain)?,
             field,
             expires_at: None,
+            allow_write: false,
         };
 
         let Some(index) = self
@@ -173,6 +227,103 @@ impl ExternalSecretAllowlist {
         };
 
         Ok(Some(self.grants.remove(index)))
+    }
+
+    /// Remove every grant for a client. Returns the number removed.
+    pub fn revoke_all_for_client(&mut self, client_id: &str) -> Result<usize> {
+        let client_id = normalize_client_id(client_id)?;
+        let before = self.grants.len();
+        self.grants.retain(|grant| grant.client_id != client_id);
+        Ok(before - self.grants.len())
+    }
+
+    /// Mint a client token (shown once), storing only its SHA-256 hash.
+    /// Mints and rotates share logic: rotation replaces the hash, killing
+    /// the previous token immediately.
+    pub fn mint_client_token(&mut self, client_id: &str) -> Result<String> {
+        let client_id = normalize_client_id(client_id)?;
+
+        let mut bytes = [0u8; CLIENT_TOKEN_BYTES];
+        OsRng.fill_bytes(&mut bytes);
+        let token = format!(
+            "{CLIENT_TOKEN_PREFIX}{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        );
+        bytes.zeroize();
+
+        self.client_tokens.insert(
+            client_id,
+            ClientTokenRecord {
+                token_hash: hash_client_token(&token),
+                created_at: Utc::now(),
+                revoked: false,
+            },
+        );
+
+        Ok(token)
+    }
+
+    /// Replace a client's token; the old token stops working immediately.
+    pub fn rotate_client_token(&mut self, client_id: &str) -> Result<String> {
+        let normalized = normalize_client_id(client_id)?;
+        if !self.client_tokens.contains_key(&normalized) {
+            return Err(PasswordManagerError::NotFound(format!(
+                "No client token exists for '{}'; use secret allow or token mint",
+                normalized
+            )));
+        }
+        self.mint_client_token(client_id)
+    }
+
+    /// Revoke a client token. Fail-closed: every grant for this client is
+    /// denied afterwards, even when the old token is presented.
+    pub fn revoke_client_token(&mut self, client_id: &str) -> Result<bool> {
+        let client_id = normalize_client_id(client_id)?;
+        Ok(self
+            .client_tokens
+            .get_mut(&client_id)
+            .map(|record| record.revoked = true)
+            .is_some())
+    }
+
+    /// Whether requests from this client need a token (and are accepted).
+    pub fn token_status(&self, client_id: &str) -> ClientTokenStatus {
+        match normalize_client_id(client_id)
+            .ok()
+            .and_then(|id| self.client_tokens.get(&id))
+        {
+            None => ClientTokenStatus::Legacy,
+            Some(record) if record.revoked => ClientTokenStatus::Revoked,
+            Some(_) => ClientTokenStatus::Enforced,
+        }
+    }
+
+    /// Short non-secret identifier of the stored token hash, for display.
+    pub fn token_fingerprint(&self, client_id: &str) -> Option<String> {
+        let id = normalize_client_id(client_id).ok()?;
+        self.client_tokens
+            .get(&id)
+            .map(|record| record.token_hash.chars().take(8).collect())
+    }
+
+    /// Constant-time verification of a presented client token against the
+    /// stored hash. Legacy clients (no `client_tokens` entry) pass; revoked
+    /// clients always fail.
+    pub fn verify_client_token(&self, client_id: &str, presented: Option<&str>) -> bool {
+        let Ok(id) = normalize_client_id(client_id) else {
+            return false;
+        };
+        match self.client_tokens.get(&id) {
+            None => true,
+            Some(record) if record.revoked => false,
+            Some(record) => match presented {
+                None => false,
+                Some(token) => {
+                    let candidate = hash_client_token(token);
+                    bool::from(candidate.as_bytes().ct_eq(record.token_hash.as_bytes()))
+                }
+            },
+        }
     }
 
     pub fn grants_for_client(&self, client_id: Option<&str>) -> Result<Vec<ExternalSecretGrant>> {
@@ -244,6 +395,10 @@ fn normalize_domain(domain: &str) -> Result<String> {
         ));
     }
     Ok(value)
+}
+
+fn hash_client_token(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 #[cfg(test)]
@@ -327,6 +482,7 @@ mod tests {
                 domain: "anthropic".to_string(),
                 field: ExternalSecretField::Password,
                 expires_at: None,
+                allow_write: false,
             })
         );
         assert!(!allowlist.is_allowed("victor", "anthropic", ExternalSecretField::Password));
@@ -443,5 +599,124 @@ mod tests {
             ExternalSecretField::Password,
             now + chrono::Duration::minutes(6)
         ));
+    }
+    #[test]
+    fn minted_client_token_enforces_scopes_and_rotates() {
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+
+        // Legacy until a token is minted
+        assert_eq!(allowlist.token_status("victor"), ClientTokenStatus::Legacy);
+        assert!(allowlist.verify_client_token("victor", None));
+
+        let token = allowlist.mint_client_token("victor").unwrap();
+        assert!(token.starts_with("spt_"));
+        assert!(!token.contains("hash"));
+        assert_eq!(
+            allowlist.token_status("victor"),
+            ClientTokenStatus::Enforced
+        );
+
+        // Correct token passes, missing/wrong tokens fail
+        assert!(allowlist.verify_client_token("victor", Some(&token)));
+        assert!(!allowlist.verify_client_token("victor", None));
+        assert!(!allowlist.verify_client_token("victor", Some("spt_wrong")));
+
+        // Token is stored hashed, never in plaintext
+        assert!(!allowlist
+            .client_tokens
+            .values()
+            .any(|record| record.token_hash == token));
+
+        // Rotation kills the old token
+        let rotated = allowlist.rotate_client_token("victor").unwrap();
+        assert_ne!(token, rotated);
+        assert!(!allowlist.verify_client_token("victor", Some(&token)));
+        assert!(allowlist.verify_client_token("victor", Some(&rotated)));
+
+        // Unknown clients cannot be verified into existence
+        assert_eq!(allowlist.token_status("unknown"), ClientTokenStatus::Legacy);
+        assert!(allowlist.verify_client_token("unknown", None));
+    }
+
+    #[test]
+    fn revoked_client_token_is_fail_closed() {
+        let mut allowlist = ExternalSecretAllowlist::default();
+        let token = allowlist.mint_client_token("victor").unwrap();
+        assert!(allowlist.verify_client_token("victor", Some(&token)));
+
+        assert!(allowlist.revoke_client_token("victor").unwrap());
+        assert_eq!(allowlist.token_status("victor"), ClientTokenStatus::Revoked);
+        assert!(!allowlist.verify_client_token("victor", Some(&token)));
+        assert!(!allowlist.verify_client_token("victor", None));
+
+        // Revoking again is fine; rotating a missing token errors
+        assert!(allowlist.revoke_client_token("victor").unwrap());
+        assert!(allowlist.rotate_client_token("ghost").is_err());
+    }
+
+    #[test]
+    fn allow_write_grants_round_trip_through_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("allowlist.json");
+
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .upsert_grant(
+                "sandhi",
+                "sandhi:anthropic:key",
+                ExternalSecretField::Password,
+                None,
+                true,
+            )
+            .unwrap();
+        let token = allowlist.mint_client_token("sandhi").unwrap();
+        allowlist.save_to_path(&path).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("allow_write"));
+        assert!(raw.contains("client_tokens"));
+        assert!(
+            !raw.contains(&token),
+            "plaintext token must not be persisted"
+        );
+
+        let loaded = ExternalSecretAllowlist::load_from_path(&path).unwrap();
+        assert!(loaded.is_allowed(
+            "sandhi",
+            "sandhi:anthropic:key",
+            ExternalSecretField::Password
+        ));
+        assert!(loaded.verify_client_token("sandhi", Some(&token)));
+        assert_eq!(loaded.token_fingerprint("sandhi").unwrap().len(), 8);
+    }
+
+    #[test]
+    fn legacy_grant_file_without_token_section_parses() {
+        let legacy = r#"{"grants":[{"client_id":"victor","domain":"anthropic","field":"password","expires_at":null}]}"#;
+        let parsed: ExternalSecretAllowlist = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.is_allowed("victor", "anthropic", ExternalSecretField::Password));
+        assert_eq!(parsed.token_status("victor"), ClientTokenStatus::Legacy);
+        assert!(parsed.verify_client_token("victor", None));
+    }
+
+    #[test]
+    fn revoke_all_removes_only_matching_client() {
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "a", ExternalSecretField::Password)
+            .unwrap();
+        allowlist
+            .allow("victor", "b", ExternalSecretField::Password)
+            .unwrap();
+        allowlist
+            .allow("sandhi", "a", ExternalSecretField::Password)
+            .unwrap();
+
+        assert_eq!(allowlist.revoke_all_for_client("victor").unwrap(), 2);
+        assert!(!allowlist.is_allowed("victor", "a", ExternalSecretField::Password));
+        assert!(allowlist.is_allowed("sandhi", "a", ExternalSecretField::Password));
     }
 }

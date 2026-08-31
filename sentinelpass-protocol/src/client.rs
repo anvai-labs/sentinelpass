@@ -1,6 +1,6 @@
 //! IPC client — sends messages to the daemon.
 
-use crate::envelope::IpcEnvelope;
+use crate::envelope::{IpcEnvelope, Origin};
 use crate::error::ProtocolError;
 use crate::message::IpcMessage;
 use crate::token::load_ipc_token;
@@ -17,6 +17,11 @@ use tracing::debug;
 pub struct IpcClient {
     socket_path: PathBuf,
     auth_token: String,
+    /// Per-client grant token (SENTINELPASS_CLIENT_TOKEN); sent on every
+    /// request so the daemon can enforce token-scoped grants.
+    client_token: Option<String>,
+    /// Provenance label for this process (native host / CLI).
+    origin: Option<Origin>,
 }
 
 impl IpcClient {
@@ -31,7 +36,39 @@ impl IpcClient {
         Self {
             socket_path,
             auth_token,
+            client_token: None,
+            origin: None,
         }
+    }
+
+    /// CLI client carrying a per-client grant token for external secret access.
+    pub fn new_for_cli(socket_path: PathBuf, client_token: Option<String>) -> Result<Self> {
+        let auth_token = load_ipc_token()?;
+        Ok(Self {
+            socket_path,
+            auth_token,
+            client_token,
+            origin: Some(Origin::Cli),
+        })
+    }
+
+    /// Override the per-client grant token and origin label. Intended for
+    /// embedders that construct the daemon token explicitly (tests, hosts).
+    pub fn with_context(mut self, client_token: Option<String>, origin: Option<Origin>) -> Self {
+        self.client_token = client_token;
+        self.origin = origin;
+        self
+    }
+
+    /// Browser native-messaging host client.
+    pub fn new_for_native_host(socket_path: PathBuf) -> Result<Self> {
+        let auth_token = load_ipc_token()?;
+        Ok(Self {
+            socket_path,
+            auth_token,
+            client_token: None,
+            origin: Some(Origin::NativeHost),
+        })
     }
 
     /// Send a message and wait for response
@@ -49,6 +86,8 @@ impl IpcClient {
 
             let envelope = IpcEnvelope {
                 token: self.auth_token.clone(),
+                client_token: self.client_token.clone(),
+                origin: self.origin,
                 message: msg,
             };
             let msg_bytes = serde_json::to_vec(&envelope)
@@ -107,6 +146,8 @@ impl IpcClient {
 
                 let envelope = IpcEnvelope {
                     token: self.auth_token.clone(),
+                    client_token: self.client_token.clone(),
+                    origin: self.origin,
                     message: msg,
                 };
                 let msg_bytes = serde_json::to_vec(&envelope).map_err(|e| {
@@ -169,6 +210,8 @@ impl IpcClient {
 
                 let envelope = IpcEnvelope {
                     token: self.auth_token.clone(),
+                    client_token: self.client_token.clone(),
+                    origin: self.origin,
                     message: msg,
                 };
                 let msg_bytes = serde_json::to_vec(&envelope).map_err(|e| {
