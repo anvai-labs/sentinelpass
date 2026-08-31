@@ -45,7 +45,7 @@ sha1 = { workspace = true }
 hmac = { workspace = true }
 hkdf = { workspace = true, optional = true }
 data-encoding = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 
 # HTTP client (sync feature)
 reqwest = { workspace = true, optional = true }
