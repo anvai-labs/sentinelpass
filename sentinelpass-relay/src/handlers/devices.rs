@@ -2,7 +2,7 @@
 
 use crate::app_state::RelayAppState;
 use crate::error::RelayError;
-use crate::pairing_security::{hash_pairing_token, hash_registration_proof_b64};
+use crate::pairing_security::{hash_registration_proof_b64, verify_pairing_token};
 use axum::extract::State;
 use axum::http::Extensions;
 use axum::Json;
@@ -77,21 +77,49 @@ pub async fn register_device(
             .as_deref()
             .ok_or_else(|| RelayError::Auth("Registration proof required".to_string()))?;
 
-        let pairing_token_hash = hash_pairing_token(pairing_token)?;
+        // Proof hashes are equality-matched (32 random bytes, SHA-256 is
+        // appropriate); the bound pairing token is then verified per candidate
+        // because its at-rest hash is salted Argon2id and cannot be looked up
+        // by equality.
         let proof_hash = hash_registration_proof_b64(registration_proof)?;
 
-        let consumed = tx
-            .execute(
-                "UPDATE pairing_registration_proofs
-                 SET consumed = 1
+        let mut stmt = tx
+            .prepare(
+                "SELECT pairing_token_hash
+                 FROM pairing_registration_proofs
                  WHERE proof_hash = ?1
-                   AND pairing_token_hash = ?2
-                   AND vault_id = ?3
-                   AND expires_at > ?4
+                   AND vault_id = ?2
+                   AND expires_at > ?3
                    AND consumed = 0",
-                rusqlite::params![proof_hash, pairing_token_hash, &vault_id_str, now],
             )
             .map_err(|e| RelayError::Database(e.to_string()))?;
+        let stored_hashes: Vec<String> = stmt
+            .query_map(rusqlite::params![&proof_hash, &vault_id_str, now], |row| {
+                row.get(0)
+            })
+            .map_err(|e| RelayError::Database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RelayError::Database(e.to_string()))?;
+        drop(stmt);
+
+        let matched = stored_hashes
+            .iter()
+            .find(|stored| verify_pairing_token(pairing_token, stored).unwrap_or(false));
+
+        let consumed = match matched {
+            Some(stored_hash) => tx
+                .execute(
+                    "UPDATE pairing_registration_proofs
+                     SET consumed = 1
+                     WHERE proof_hash = ?1
+                       AND pairing_token_hash = ?2
+                       AND vault_id = ?3
+                       AND consumed = 0",
+                    rusqlite::params![&proof_hash, stored_hash, &vault_id_str],
+                )
+                .map_err(|e| RelayError::Database(e.to_string()))?,
+            None => 0,
+        };
 
         if consumed == 0 {
             return Err(RelayError::Auth(

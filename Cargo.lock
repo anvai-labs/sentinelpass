@@ -5040,6 +5040,7 @@ name = "sentinelpass-relay"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -5052,6 +5053,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tokio",
  "toml 0.8.2",
  "tower 0.4.13",
