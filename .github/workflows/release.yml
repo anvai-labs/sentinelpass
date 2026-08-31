@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,7 +23,7 @@ jobs:
       is-release: ${{ steps.check.outputs.is_release }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: check
         name: Check if release
         run: |
@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
@@ -73,7 +73,7 @@ jobs:
 
       # Try to download cached build artifacts from rust.yml
       - name: Download cached Rust artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: rust-build-${{ matrix.platform }}
@@ -81,7 +81,7 @@ jobs:
 
       # Download web artifacts if available
       - name: Download cached web artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: web-artifacts-${{ matrix.platform }}
@@ -189,7 +189,7 @@ jobs:
           Compress-Archive -Path dist/installer/root/* -DestinationPath "dist/$installerName" -Force
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: packages-${{ matrix.platform }}
           path: |
@@ -201,7 +201,7 @@ jobs:
   bundle-smoke:
     name: Bundle Smoke Test (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    needs: package
+    needs: [setup, package]
     strategy:
       fail-fast: false
       matrix:
@@ -214,10 +214,10 @@ jobs:
             platform: windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: packages-${{ matrix.platform }}
           path: dist
@@ -244,7 +244,7 @@ jobs:
   native-installer-smoke:
     name: Native Installer Smoke (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    needs: package
+    needs: [setup, package]
     if: needs.setup.outputs.is-release == 'true'
     strategy:
       fail-fast: false
@@ -258,10 +258,10 @@ jobs:
             platform: windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: packages-${{ matrix.platform }}
           path: dist
@@ -299,7 +299,7 @@ jobs:
           done
 
       - name: Upload Tauri bundle artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tauri-bundles-${{ matrix.platform }}
           path: |
@@ -328,17 +328,17 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download all package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: packages-*
           path: release-assets
           merge-multiple: true
 
       - name: Download Tauri bundle artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: tauri-bundles-*
           path: tauri-assets
@@ -386,8 +386,8 @@ jobs:
           # Copy macOS DMG
           find_and_copy_bundles "*.dmg" ""
           # Try to rename to expected filename
-          if ls release-assets/*.dmg 1> /dev/null 2>&1; then
-            FIRST_DMG=$(ls release-assets/*.dmg | head -1)
+          if compgen -G 'release-assets/*.dmg' > /dev/null; then
+            FIRST_DMG=$(find release-assets -maxdepth 1 -type f -name '*.dmg' -print -quit)
             if [ ! -f "release-assets/sentinelpass-${VERSION}-macos.dmg" ]; then
               cp "$FIRST_DMG" "release-assets/sentinelpass-${VERSION}-macos.dmg"
             fi
@@ -396,8 +396,8 @@ jobs:
           # Copy Windows MSI
           find_and_copy_bundles "*.msi" ""
           # Try to rename to expected filename
-          if ls release-assets/*.msi 1> /dev/null 2>&1; then
-            FIRST_MSI=$(ls release-assets/*.msi | head -1)
+          if compgen -G 'release-assets/*.msi' > /dev/null; then
+            FIRST_MSI=$(find release-assets -maxdepth 1 -type f -name '*.msi' -print -quit)
             if [ ! -f "release-assets/sentinelpass-${VERSION}-windows.msi" ]; then
               cp "$FIRST_MSI" "release-assets/sentinelpass-${VERSION}-windows.msi"
             fi
@@ -410,7 +410,9 @@ jobs:
           find_and_copy_bundles "*.exe" ""
 
           echo "Tauri bundles copied:"
-          ls -la release-assets/ | grep -E '\.(dmg|msi|deb|AppImage|exe)$' || echo "No bundle files found"
+          find release-assets -maxdepth 1 -type f \
+            \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.exe' \) \
+            -print || echo "No bundle files found"
 
       - name: Regenerate SHA256 checksums with Tauri bundles
         shell: bash
@@ -475,4 +477,6 @@ jobs:
         run: |
           VERSION="${{ needs.setup.outputs.version }}"
           cd release-assets
-          gh release upload "v${VERSION}" --clobber $(find . -type f)
+          while IFS= read -r -d '' asset; do
+            gh release upload "v${VERSION}" "$asset" --clobber
+          done < <(find . -type f -print0)
