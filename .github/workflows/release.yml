@@ -23,7 +23,7 @@ jobs:
       is-release: ${{ steps.check.outputs.is_release }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - id: check
         name: Check if release
         run: |
@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
@@ -73,7 +73,7 @@ jobs:
 
       # Try to download cached build artifacts from rust.yml
       - name: Download cached Rust artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         continue-on-error: true
         with:
           name: rust-build-${{ matrix.platform }}
@@ -81,7 +81,7 @@ jobs:
 
       # Download web artifacts if available
       - name: Download cached web artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         continue-on-error: true
         with:
           name: web-artifacts-${{ matrix.platform }}
@@ -189,7 +189,7 @@ jobs:
           Compress-Archive -Path dist/installer/root/* -DestinationPath "dist/$installerName" -Force
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: packages-${{ matrix.platform }}
           path: |
@@ -214,10 +214,10 @@ jobs:
             platform: windows
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: packages-${{ matrix.platform }}
           path: dist
@@ -258,10 +258,10 @@ jobs:
             platform: windows
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: packages-${{ matrix.platform }}
           path: dist
@@ -299,7 +299,7 @@ jobs:
           done
 
       - name: Upload Tauri bundle artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tauri-bundles-${{ matrix.platform }}
           path: |
@@ -319,6 +319,64 @@ jobs:
           retention-days: 7
 
   # Create GitHub release and upload assets
+  # Crates.io publish for the reusable protocol contract crate: sandhi's
+  # sandhi-store pins sentinelpass-protocol, so an unpublished protocol crate
+  # breaks a DIFFERENT repository's release. Review-hardened:
+  # - runs only on real v* TAG pushes (a branch named v* must not reach the
+  #   registry via workflow_dispatch);
+  # - the gate checks the MANIFEST version at the tag, not the tag name — this
+  #   repo's history has 13 of 17 tags where the two disagreed, and the tag
+  #   name is exactly what an earlier draft wrongly trusted (re-review
+  #   finding 1); a mismatch fails the job loudly instead of publishing a
+  #   wrong version irreversibly;
+  # - the publish step requires the gate to SUCCEED (not merely be skipped):
+  #   a network-broken gate must not be followed by a publish attempt.
+  # A yanked version still answers 200, so a yank is permanent — standard
+  # crates.io semantics, noted rather than worked around.
+  crates-publish:
+    name: Publish sentinelpass-protocol to crates.io
+    needs: setup
+    if: >-
+      ${{ needs.setup.outputs.is-release == 'true' &&
+          github.event_name == 'push' &&
+          startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check tag/manifest agreement and crates.io presence
+        id: gate
+        env:
+          TAG_VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          manifest_version=$(awk -F'"' '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version/{print $2;exit}' Cargo.toml)
+          if [ "$TAG_VERSION" != "$manifest_version" ]; then
+            echo "::error::tag is v${TAG_VERSION} but the workspace manifest says ${manifest_version} — bump the manifest inside the release commit (this repo's history: 13 of 17 tags were out of sync)"
+            exit 1
+          fi
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "sentinelpass-release" \
+            "https://crates.io/api/v1/crates/sentinelpass-protocol/${manifest_version}" || echo 000)
+          if [ "$status" = "200" ]; then
+            echo "sentinelpass-protocol ${manifest_version} already published — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$status" = "404" ]; then
+            echo "not yet published — proceeding"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::crates.io returned ${status} — refusing to publish on an unclear answer"
+            exit 1
+          fi
+      - name: Publish sentinelpass-protocol
+        if: ${{ success() && steps.gate.outputs.skip == 'false' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p sentinelpass-protocol --locked
+
+  # Create GitHub release and upload assets
   release:
     name: Create Release
     runs-on: ubuntu-latest
@@ -328,17 +386,17 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download all package artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: packages-*
           path: release-assets
           merge-multiple: true
 
       - name: Download Tauri bundle artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: tauri-bundles-*
           path: tauri-assets
@@ -495,16 +553,30 @@ jobs:
     needs: [setup, release]
     if: needs.setup.outputs.is-release == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Mint scoped tap token
+        id: tap_token
+        if: env.TAP_APP_CONFIGURED == 'true'
+        env:
+          TAP_APP_CONFIGURED: ${{ secrets.TAP_APP_ID != '' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: anvai-labs
+          repositories: homebrew-tap
 
       - name: Bump formula in anvai-labs/homebrew-tap
+        if: env.TAP_APP_CONFIGURED == 'true'
         env:
-          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAP_APP_CONFIGURED: ${{ secrets.TAP_APP_ID != '' }}
+          GH_TOKEN: ${{ steps.tap_token.outputs.token }}
           VERSION: ${{ needs.setup.outputs.version }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "TAP_TOKEN secret not set — skipping Homebrew formula bump."
-            echo "Configure a fine-grained PAT with Contents:write on anvai-labs/homebrew-tap to enable."
+            echo "TAP_APP_ID / TAP_APP_PRIVATE_KEY secrets not set — skipping Homebrew formula bump."
+            echo "Configure the sentinelpass-release-bot GitHub App credentials to enable."
             exit 0
           fi
           bash scripts/bump-homebrew-formula.sh "$VERSION"
