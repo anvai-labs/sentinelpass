@@ -23,7 +23,7 @@ jobs:
       is-release: ${{ steps.check.outputs.is_release }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: check
         name: Check if release
         run: |
@@ -64,7 +64,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
@@ -73,7 +73,7 @@ jobs:
 
       # Try to download cached build artifacts from rust.yml
       - name: Download cached Rust artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: rust-build-${{ matrix.platform }}
@@ -81,7 +81,7 @@ jobs:
 
       # Download web artifacts if available
       - name: Download cached web artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: web-artifacts-${{ matrix.platform }}
@@ -189,7 +189,7 @@ jobs:
           Compress-Archive -Path dist/installer/root/* -DestinationPath "dist/$installerName" -Force
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: packages-${{ matrix.platform }}
           path: |
@@ -214,10 +214,10 @@ jobs:
             platform: windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: packages-${{ matrix.platform }}
           path: dist
@@ -258,10 +258,10 @@ jobs:
             platform: windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: packages-${{ matrix.platform }}
           path: dist
@@ -299,7 +299,7 @@ jobs:
           done
 
       - name: Upload Tauri bundle artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tauri-bundles-${{ matrix.platform }}
           path: |
@@ -328,17 +328,17 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: packages-*
           path: release-assets
           merge-multiple: true
 
       - name: Download Tauri bundle artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: tauri-bundles-*
           path: tauri-assets
@@ -495,7 +495,7 @@ jobs:
     needs: [setup, release]
     if: needs.setup.outputs.is-release == 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Bump formula in anvai-labs/homebrew-tap
         env:
