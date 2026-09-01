@@ -319,6 +319,40 @@ jobs:
           retention-days: 7
 
   # Create GitHub release and upload assets
+  # Crates.io publish for the reusable protocol contract crate (TD-0014-era
+  # follow-up: sandhi's sentinelpass-protocol ^0.8 pin made this publish a
+  # release-blocking dependency of a DIFFERENT repository, so it can no longer
+  # be a manual step). Skips when the version is already published, so re-runs
+  # and pre-published tags are clean no-ops.
+  crates-publish:
+    name: Publish sentinelpass-protocol to crates.io
+    needs: setup
+    if: ${{ needs.setup.outputs.is-release == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Skip if this version is already on crates.io
+        id: gate
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "sentinelpass-release" \
+            "https://crates.io/api/v1/crates/sentinelpass-protocol/${VERSION}")
+          if [ "$status" = "200" ]; then
+            echo "sentinelpass-protocol ${VERSION} already published — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish sentinelpass-protocol
+        if: ${{ steps.gate.outputs.skip != 'true' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p sentinelpass-protocol
+
   release:
     name: Create Release
     runs-on: ubuntu-latest
