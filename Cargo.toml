@@ -86,12 +86,12 @@ sha1 = "0.10"
 hmac = "0.12"
 hkdf = "0.12"
 data-encoding = "2.6"
-base64 = "0.22"
+base64 = "0.23"
 
 # HTTP / Sync
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 url = "2.5"
-axum = "0.7"
+axum = "0.8"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
 toml_dep = { package = "toml", version = "0.8" }

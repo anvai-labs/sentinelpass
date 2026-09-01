@@ -21,7 +21,7 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
     temp_dir = tempfile.mkdtemp(prefix="victor_db_test_")
     db_path = Path(temp_dir) / "test.db"
 
-    print(f"🧪 Testing concurrent database writes...")
+    print("🧪 Testing concurrent database writes...")
     print(f"   Database: {db_path}")
     print(f"   Concurrent writes: {num_concurrent_writes}")
 
@@ -34,6 +34,7 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
         print(f"\n⚡ Launching {num_concurrent_writes} concurrent write operations...")
 
         import time
+
         start_time = time.time()
 
         tasks = [
@@ -52,15 +53,18 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
         duration = end_time - start_time
 
         # Count results
-        success_count = sum(1 for r in results if isinstance(r, tuple) or not isinstance(r, Exception))
+        success_count = sum(
+            1 for r in results if isinstance(r, tuple) or not isinstance(r, Exception)
+        )
         error_count = sum(1 for r in results if isinstance(r, Exception))
         lock_errors = [
-            r for r in results
+            r
+            for r in results
             if isinstance(r, Exception) and "locked" in str(r).lower()
         ]
 
         # Report results
-        print(f"\n📊 Results:")
+        print("\n📊 Results:")
         print(f"   ✅ Successful writes: {success_count}/{num_concurrent_writes}")
         print(f"   ❌ Errors: {error_count}")
         print(f"   🔒 Lock errors: {len(lock_errors)}")
@@ -68,35 +72,35 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
         print(f"   📈 Throughput: {success_count/duration:.1f} writes/sec")
 
         if lock_errors:
-            print(f"\n❌ FAILED: Database lock errors detected!")
+            print("\n❌ FAILED: Database lock errors detected!")
             for err in lock_errors[:5]:
                 print(f"   - {err}")
             return False
         else:
-            print(f"\n✅ SUCCESS: All concurrent writes completed without lock errors!")
+            print("\n✅ SUCCESS: All concurrent writes completed without lock errors!")
             return True
 
     finally:
         # Cleanup
         if db_path.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
-            print(f"\n🧹 Cleaned up test database")
+            print("\n🧹 Cleaned up test database")
 
 
 async def main():
     """Run all tests."""
-    print("="*70)
+    print("=" * 70)
     print("SQLite Database Lock Fix - Concurrent Write Test")
-    print("="*70)
+    print("=" * 70)
     print("\nThis test simulates the concurrent write condition that was")
     print("causing 'database is locked' errors in production.\n")
 
-    print("─"*70)
+    print("─" * 70)
     success = await test_concurrent_writes(num_concurrent_writes=100)
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("FINAL RESULT")
-    print("="*70)
+    print("=" * 70)
     if success:
         print("✅ TEST PASSED - Database lock fix is working!")
         return 0

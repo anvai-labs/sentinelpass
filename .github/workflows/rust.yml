@@ -15,7 +15,7 @@ jobs:
     name: Check Rust Formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -27,7 +27,7 @@ jobs:
     name: Clippy Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-env
         with:
           web-build: false
@@ -39,7 +39,7 @@ jobs:
     name: TypeScript TDD
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-env
         with:
           linux-deps: false
@@ -48,7 +48,7 @@ jobs:
       - name: Run TypeScript unit tests with coverage
         run: npm run test:ts
       - name: Upload TypeScript coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ts-coverage
           path: coverage/ts/lcov.info
@@ -75,7 +75,7 @@ jobs:
             artifact_name: windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
@@ -86,7 +86,7 @@ jobs:
         run: cargo build --release --locked --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-build-${{ matrix.platform }}
           path: |
@@ -96,7 +96,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload web artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: web-artifacts-${{ matrix.platform }}
           path: |
@@ -116,7 +116,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
@@ -138,7 +138,7 @@ jobs:
     env:
       RUST_COVERAGE_MIN: "50"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust-env
         with:
           web-build: false
@@ -150,7 +150,7 @@ jobs:
       - name: Run Rust coverage
         run: bash scripts/coverage-rust.sh
       - name: Upload Rust coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-llvm-coverage
           path: target/llvm-cov/lcov.info

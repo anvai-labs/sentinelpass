@@ -12,7 +12,6 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import sys
-import os
 
 # Add the victor package to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "codingagent"))
@@ -38,7 +37,7 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
     temp_dir = tempfile.mkdtemp(prefix="victor_db_test_")
     db_path = Path(temp_dir) / "test.db"
 
-    print(f"🧪 Testing concurrent database writes...")
+    print("🧪 Testing concurrent database writes...")
     print(f"   Database: {db_path}")
     print(f"   Concurrent writes: {num_concurrent_writes}")
 
@@ -49,6 +48,7 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
 
         # Track results using thread-safe counters
         from threading import Lock
+
         results_lock = Lock()
         success_count = [0]
         lock_error_count = [0]
@@ -58,7 +58,7 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
             """Write a single message to the database."""
             try:
                 # This is the critical path that was causing lock errors
-                result = await store.add_message_async(
+                await store.add_message_async(
                     session_id=session.session_id,
                     role=MessageRole.USER,
                     content=f"Test message {message_id} from concurrent task",
@@ -69,11 +69,17 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
             except Exception as e:
                 error_msg = str(e)
                 import traceback
+
                 traceback.print_exc()
                 with results_lock:
-                    if "database is locked" in error_msg.lower() or "locked" in error_msg.lower():
+                    if (
+                        "database is locked" in error_msg.lower()
+                        or "locked" in error_msg.lower()
+                    ):
                         lock_error_count[0] += 1
-                    other_errors.append(f"Message {message_id}: {type(e).__name__}: {error_msg}")
+                    other_errors.append(
+                        f"Message {message_id}: {type(e).__name__}: {error_msg}"
+                    )
 
         # Launch all concurrent writes simultaneously
         print(f"\n⚡ Launching {num_concurrent_writes} concurrent write operations...")
@@ -86,7 +92,7 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
         duration = (end_time - start_time).total_seconds()
 
         # Report results
-        print(f"\n📊 Results:")
+        print("\n📊 Results:")
         print(f"   ✅ Successful writes: {success_count[0]}/{num_concurrent_writes}")
         print(f"   ❌ Lock errors: {lock_error_count[0]}")
         print(f"   ⏱️  Duration: {duration:.2f}s")
@@ -94,29 +100,29 @@ async def test_concurrent_writes(num_concurrent_writes: int = 50):
             print(f"   📈 Throughput: {success_count[0]/duration:.1f} writes/sec")
 
         if lock_error_count[0] > 0:
-            print(f"\n❌ FAILED: Database lock errors detected!")
-            print(f"\nFirst few errors:")
+            print("\n❌ FAILED: Database lock errors detected!")
+            print("\nFirst few errors:")
             for error in other_errors[:5]:
                 print(f"   - {error}")
             return False
         else:
-            print(f"\n✅ SUCCESS: All concurrent writes completed without lock errors!")
+            print("\n✅ SUCCESS: All concurrent writes completed without lock errors!")
             return True
 
     finally:
         # Cleanup
         if db_path.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
-            print(f"\n🧹 Cleaned up test database")
+            print("\n🧹 Cleaned up test database")
 
 
 async def test_stress_concurrent_writes():
     """
     Stress test with varying levels of concurrency.
     """
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("🔥 STRESS TEST: Multiple concurrency levels")
-    print("="*70)
+    print("=" * 70)
 
     concurrency_levels = [10, 25, 50, 100]
     results = {}
@@ -130,32 +136,32 @@ async def test_stress_concurrent_writes():
         await asyncio.sleep(0.5)
 
     # Summary
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("📋 STRESS TEST SUMMARY")
-    print("="*70)
+    print("=" * 70)
     for concurrency, success in results.items():
         status = "✅ PASS" if success else "❌ FAIL"
         print(f"   {concurrency:3d} concurrent writes: {status}")
 
     all_passed = all(results.values())
     if all_passed:
-        print(f"\n🎉 All stress tests passed!")
+        print("\n🎉 All stress tests passed!")
     else:
-        print(f"\n⚠️  Some stress tests failed")
+        print("\n⚠️  Some stress tests failed")
 
     return all_passed
 
 
 async def main():
     """Run all tests."""
-    print("="*70)
+    print("=" * 70)
     print("SQLite Database Lock Fix - Concurrent Write Test")
-    print("="*70)
+    print("=" * 70)
     print("\nThis test simulates the concurrent write condition that was")
     print("causing 'database is locked' errors in production.\n")
 
     # Run basic concurrent write test
-    print("─"*70)
+    print("─" * 70)
     basic_test_passed = await test_concurrent_writes(num_concurrent_writes=50)
 
     # Run stress test
@@ -163,9 +169,9 @@ async def main():
     stress_test_passed = await test_stress_concurrent_writes()
 
     # Final result
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("FINAL RESULT")
-    print("="*70)
+    print("=" * 70)
     if basic_test_passed and stress_test_passed:
         print("✅ ALL TESTS PASSED - Database lock fix is working!")
         return 0

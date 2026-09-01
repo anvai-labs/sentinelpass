@@ -7,6 +7,6 @@
     "test:e2e:headed": "HEADLESS=0 playwright test --config=playwright.config.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.52.0"
+    "@playwright/test": "^1.62.1"
   }
 }
