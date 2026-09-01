@@ -555,14 +555,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Bump formula in anvai-labs/homebrew-tap
+      - name: Mint scoped tap token
+        id: tap_token
+        if: env.TAP_APP_CONFIGURED == 'true'
         env:
-          GH_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAP_APP_CONFIGURED: ${{ secrets.TAP_APP_ID != '' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: anvai-labs
+          repositories: homebrew-tap
+
+      - name: Bump formula in anvai-labs/homebrew-tap
+        if: env.TAP_APP_CONFIGURED == 'true'
+        env:
+          TAP_APP_CONFIGURED: ${{ secrets.TAP_APP_ID != '' }}
+          GH_TOKEN: ${{ steps.tap_token.outputs.token }}
           VERSION: ${{ needs.setup.outputs.version }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "TAP_TOKEN secret not set — skipping Homebrew formula bump."
-            echo "Configure a fine-grained PAT with Contents:write on anvai-labs/homebrew-tap to enable."
+            echo "TAP_APP_ID / TAP_APP_PRIVATE_KEY secrets not set — skipping Homebrew formula bump."
+            echo "Configure the sentinelpass-release-bot GitHub App credentials to enable."
             exit 0
           fi
           bash scripts/bump-homebrew-formula.sh "$VERSION"
