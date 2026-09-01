@@ -49,15 +49,25 @@ path, version, macos_sha, linux_sha = sys.argv[1], sys.argv[2], sys.argv[3], sys
 with open(path) as f:
     content = f.read()
 
-# Bump the pinned version line
+# The formula may pin the version via a `version "X"` line or via the version
+# embedded in the archive URLs. Handle both shapes.
 content, n_ver = re.subn(r'(  version ")[^"]+(")', rf"\g<1>{version}\g<2>", content)
+
+url_versions = set(re.findall(r"download/v(\d+(?:\.\d+)+)/", content))
+if url_versions:
+    if len(url_versions) != 1:
+        sys.exit(f"Formula URLs disagree on version: {sorted(url_versions)}")
+    old = url_versions.pop()
+    if old != version:
+        content = re.sub(rf'(url "[^"]*?v){old}(/)', rf"\g<1>{version}\g<2>", content)
+        content = re.sub(rf"(url \"[^\"]*?sentinelpass-){old}(-)", rf"\g<1>{version}\g<2>", content)
 
 # Replace the two archive sha256 values in order of appearance
 shas = iter([macos_sha, linux_sha])
 content, n_sha = re.subn(r'(  sha256 ")[0-9a-f]+(")', lambda m: m.group(1) + next(shas) + m.group(2), content)
 
-if n_ver != 1 or n_sha != 2:
-    sys.exit(f"Unexpected formula shape (version replacements: {n_ver}, sha replacements: {n_sha})")
+if n_sha != 2:
+    sys.exit(f"Unexpected formula shape (version-line replacements: {n_ver}, sha replacements: {n_sha})")
 
 with open(path, "w") as f:
     f.write(content)
