@@ -18,12 +18,12 @@ jobs:
     name: Check Python Formatting (black)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: Install black
-        run: pip install black
+        run: pip install 'black==26.1.0'
       - name: Check formatting
         run: black --check --diff .
 
@@ -32,12 +32,12 @@ jobs:
     name: Ruff Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: Install ruff
-        run: pip install ruff
+        run: pip install 'ruff==0.15.1'
       - name: Run ruff
         run: ruff check .
 
@@ -46,8 +46,8 @@ jobs:
     name: Type Check (mypy)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
       - name: Install mypy

@@ -26,6 +26,7 @@ async def test_concurrency_level(num_writes: int, concurrency: int):
         session = store.create_session(project_path="/test/project")
 
         import time
+
         start_time = time.time()
 
         # Create batches of concurrent writes
@@ -59,10 +60,10 @@ async def test_concurrency_level(num_writes: int, concurrency: int):
         duration = end_time - start_time
 
         return {
-            'success': all_success,
-            'lock_errors': len(lock_errors),
-            'duration': duration,
-            'throughput': total_writes / duration if duration > 0 else 0,
+            "success": all_success,
+            "lock_errors": len(lock_errors),
+            "duration": duration,
+            "throughput": total_writes / duration if duration > 0 else 0,
         }
 
     finally:
@@ -72,14 +73,14 @@ async def test_concurrency_level(num_writes: int, concurrency: int):
 
 async def main():
     """Run comprehensive stress tests."""
-    print("="*70)
+    print("=" * 70)
     print("SQLite Database Lock Fix - Comprehensive Stress Test")
-    print("="*70)
+    print("=" * 70)
 
     test_configs = [
-        ("Low concurrency", 100, 10),    # 100 writes, 10 concurrent
+        ("Low concurrency", 100, 10),  # 100 writes, 10 concurrent
         ("Medium concurrency", 200, 50),  # 200 writes, 50 concurrent
-        ("High concurrency", 300, 100),   # 300 writes, 100 concurrent
+        ("High concurrency", 300, 100),  # 300 writes, 100 concurrent
         ("Very high concurrency", 500, 200),  # 500 writes, 200 concurrent
     ]
 
@@ -94,28 +95,28 @@ async def main():
         result = await test_concurrency_level(total_writes, concurrency)
         results.append((name, result))
 
-        if result['success']:
-            print(f"   ✅ PASSED")
+        if result["success"]:
+            print("   ✅ PASSED")
             print(f"   ⏱️  Duration: {result['duration']:.2f}s")
             print(f"   📈 Throughput: {result['throughput']:.1f} writes/sec")
             print(f"   🔒 Lock errors: {result['lock_errors']}")
         else:
-            print(f"   ❌ FAILED")
+            print("   ❌ FAILED")
             print(f"   🔒 Lock errors: {result['lock_errors']}")
 
     # Summary
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("📋 SUMMARY")
-    print("="*70)
+    print("=" * 70)
 
-    all_passed = all(r[1]['success'] for r in results)
+    all_passed = all(r[1]["success"] for r in results)
 
     for name, result in results:
-        status = "✅ PASS" if result['success'] else "❌ FAIL"
-        throughput = result['throughput']
+        status = "✅ PASS" if result["success"] else "❌ FAIL"
+        throughput = result["throughput"]
         print(f"   {name:25s}: {status} ({throughput:6.1f} writes/sec)")
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     if all_passed:
         print("🎉 ALL TESTS PASSED!")
         print("   The database lock fix is working correctly across all")

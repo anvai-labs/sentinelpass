@@ -9,6 +9,11 @@ updates:
         update-types:
           - minor
           - patch
+    # hmac 0.13 requires the digest-0.11 trait stack (sha2 0.11); the crypto
+    # stack here is digest-0.10-based. Revisit when sha2 0.11 lands.
+    ignore:
+      - dependency-name: hmac
+        versions: [">=0.13"]
 
   - package-ecosystem: github-actions
     directory: /
