@@ -54,6 +54,9 @@ enum Commands {
     /// Unlock vault using biometric authentication
     UnlockBiometric,
 
+    /// Rotate the vault master password (re-wraps the data key; entries untouched)
+    Passwd,
+
     /// Check whether SSH agent integration is available
     SshAgentStatus,
 
@@ -938,6 +941,11 @@ fn main() -> Result<()> {
         Commands::SshKeyDelete { id, force } => {
             let vault_path = get_vault_path(&cli, false);
             commands::ssh::handle_ssh_key_delete(vault_path, id, force)?;
+        }
+
+        Commands::Passwd => {
+            let vault_path = get_vault_path(&cli, false);
+            commands::vault::handle_passwd(vault_path)?;
         }
 
         Commands::SecretGet {

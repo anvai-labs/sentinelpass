@@ -100,7 +100,8 @@ impl Database {
                 dek_nonce BLOB NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_modified INTEGER NOT NULL,
-                biometric_ref TEXT
+                biometric_ref TEXT,
+                key_epoch INTEGER NOT NULL DEFAULT 1
             )",
                 [],
             )

@@ -18,6 +18,11 @@ pub enum AuditEventType {
         success: bool,
     },
     VaultLocked,
+    MasterPasswordChanged {
+        success: bool,
+        from_epoch: i64,
+        to_epoch: i64,
+    },
 
     /// Credential operations
     CredentialCreated {
@@ -218,6 +223,7 @@ impl AuditLogger {
             | AuditEventType::SecretRotated { .. }
             | AuditEventType::ExternalSecretAccess { success: true, .. }
             | AuditEventType::ExternalSecretWrite { success: true, .. }
+            | AuditEventType::MasterPasswordChanged { success: true, .. }
             | AuditEventType::BiometricUnlockRequested { success: true } => 3,
 
             // Medium severity (2)
@@ -229,6 +235,7 @@ impl AuditLogger {
             | AuditEventType::RegistryEntityDeleted { .. }
             | AuditEventType::ExternalSecretAccess { success: false, .. }
             | AuditEventType::ExternalSecretWrite { success: false, .. }
+            | AuditEventType::MasterPasswordChanged { success: false, .. }
             | AuditEventType::BiometricUnlockRequested { success: false } => 2,
 
             // Low severity (1)

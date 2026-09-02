@@ -43,7 +43,7 @@ impl VaultManager {
             PasswordManagerError::InvalidInput("Sync vault ID not set".to_string())
         })?;
 
-        let (kdf_params, wrapped_dek) = Self::load_vault_metadata(&db)?;
+        let (kdf_params, wrapped_dek, _key_epoch) = Self::load_vault_metadata(&db)?;
         let kdf_params_blob = bincode::serialize(&kdf_params)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let wrapped_dek_blob = bincode::serialize(&wrapped_dek)

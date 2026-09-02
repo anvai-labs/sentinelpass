@@ -123,11 +123,16 @@ impl VaultManager {
         }
 
         // Load vault metadata
-        let (kdf_params, wrapped_dek) = Self::load_vault_metadata(&db)?;
+        let (kdf_params, wrapped_dek, key_epoch) = Self::load_vault_metadata(&db)?;
 
-        // Unlock vault
+        // Unlock vault (epoch-bound wraps verify the key_epoch as AEAD)
         let mut key_hierarchy = KeyHierarchy::new();
-        if let Err(e) = key_hierarchy.unlock_vault(master_password, &kdf_params, &wrapped_dek) {
+        if let Err(e) = key_hierarchy.unlock_vault_with_epoch(
+            master_password,
+            &kdf_params,
+            &wrapped_dek,
+            key_epoch,
+        ) {
             let _ = Self::record_failed_attempt(&db);
 
             if let Some(remaining) = Self::get_remaining_lockout_seconds(&db)? {
@@ -767,28 +772,130 @@ impl VaultManager {
         }
     }
 
+    /// Rotate the master password (ADR-002): re-wraps the DEK under a new
+    /// master key derived from `new_password` with a fresh salt. Entry
+    /// ciphertexts are untouched. The current password is proven by unwrapping
+    /// the stored key material; failures count toward the brute-force lockout.
+    ///
+    /// Returns the new key epoch.
+    pub fn change_master_password(
+        &mut self,
+        current_password: &[u8],
+        new_password: &[u8],
+    ) -> Result<i64> {
+        use subtle::ConstantTimeEq;
+
+        const MIN_LENGTH: usize = 12;
+        if new_password.len() < MIN_LENGTH {
+            return Err(PasswordManagerError::InvalidInput(format!(
+                "New master password must be at least {MIN_LENGTH} characters"
+            )));
+        }
+        if bool::from(new_password.ct_eq(current_password)) {
+            return Err(PasswordManagerError::InvalidInput(
+                "New master password must differ from the current password".to_string(),
+            ));
+        }
+
+        let (kdf_params, wrapped_dek, key_epoch) = {
+            let db = self.lock_db()?;
+            if let Some(remaining) = Self::get_remaining_lockout_seconds(&db)? {
+                return Err(PasswordManagerError::LockedOut(remaining));
+            }
+            Self::load_vault_metadata(&db)?
+        };
+        let new_epoch = key_epoch + 1;
+        let rotation = crate::crypto::keyring::rotate_master_password(
+            &mut self.key_hierarchy,
+            current_password,
+            &kdf_params,
+            &wrapped_dek,
+            key_epoch,
+            new_password,
+        );
+
+        match &rotation {
+            Ok((new_kdf_params, new_wrapped)) => {
+                let db = self.lock_db()?;
+                let kdf_params_blob = bincode::serialize(new_kdf_params)
+                    .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+                let wrapped_blob = bincode::serialize(new_wrapped)
+                    .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+                let nonce_blob = bincode::serialize(&new_wrapped.nonce)
+                    .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+                let now = chrono::Utc::now().timestamp();
+                db.conn()
+                    .execute(
+                        "UPDATE db_metadata SET kdf_params = ?1, wrapped_dek = ?2, \
+                         dek_nonce = ?3, key_epoch = ?4, last_modified = ?5 WHERE id = 1",
+                        rusqlite::params![
+                            &kdf_params_blob,
+                            &wrapped_blob,
+                            &nonce_blob,
+                            new_epoch,
+                            now
+                        ],
+                    )
+                    .map_err(DatabaseError::Sqlite)?;
+                if let Some(ref logger) = self.audit_logger {
+                    let _ = logger.log(
+                        AuditEventType::MasterPasswordChanged {
+                            success: true,
+                            from_epoch: key_epoch,
+                            to_epoch: new_epoch,
+                        },
+                        "Master password rotated",
+                    );
+                }
+            }
+            Err(_) => {
+                let db = self.lock_db()?;
+                Self::record_failed_attempt(&db)?;
+                if let Some(ref logger) = self.audit_logger {
+                    let _ = logger.log(
+                        AuditEventType::MasterPasswordChanged {
+                            success: false,
+                            from_epoch: key_epoch,
+                            to_epoch: key_epoch,
+                        },
+                        "Master password rotation failed verification",
+                    );
+                }
+                if let Some(remaining) = Self::get_remaining_lockout_seconds(&db)? {
+                    return Err(PasswordManagerError::LockedOut(remaining));
+                }
+                return Err(PasswordManagerError::Crypto(
+                    crate::crypto::CryptoError::AuthenticationFailed,
+                ));
+            }
+        }
+
+        Ok(key_epoch + 1)
+    }
+
     /// Load vault metadata from database
     pub(super) fn load_vault_metadata(
         db: &crate::database::Database,
-    ) -> Result<(KdfParams, WrappedKey)> {
+    ) -> Result<(KdfParams, WrappedKey, i64)> {
         let mut stmt = db
             .conn()
-            .prepare("SELECT kdf_params, wrapped_dek FROM db_metadata WHERE id = 1")
+            .prepare("SELECT kdf_params, wrapped_dek, COALESCE(key_epoch, 1) FROM db_metadata WHERE id = 1")
             .map_err(DatabaseError::Sqlite)?;
 
         let result = stmt.query_row([], |row| {
             let kdf_params_blob: Vec<u8> = row.get(0)?;
             let wrapped_dek_blob: Vec<u8> = row.get(1)?;
-            Ok((kdf_params_blob, wrapped_dek_blob))
+            let key_epoch: i64 = row.get(2)?;
+            Ok((kdf_params_blob, wrapped_dek_blob, key_epoch))
         });
 
         match result {
-            Ok((kdf_params_blob, wrapped_dek_blob)) => {
+            Ok((kdf_params_blob, wrapped_dek_blob, key_epoch)) => {
                 let kdf_params: KdfParams = bincode::deserialize(&kdf_params_blob)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-                let wrapped_dek: WrappedKey = bincode::deserialize(&wrapped_dek_blob)
+                let wrapped_dek = WrappedKey::from_bincode_bytes(&wrapped_dek_blob)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-                Ok((kdf_params, wrapped_dek))
+                Ok((kdf_params, wrapped_dek, key_epoch))
             }
             Err(_) => Err(PasswordManagerError::NotFound("Vault metadata".to_string())),
         }

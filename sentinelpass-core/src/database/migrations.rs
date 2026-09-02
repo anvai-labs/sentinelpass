@@ -211,34 +211,15 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
 }
 
 /// Migrate schema from v3 to v4: add credential type discriminator.
-pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "BEGIN;
-
-        ALTER TABLE entries ADD COLUMN credential_type TEXT NOT NULL DEFAULT 'password'
-            CHECK (credential_type IN ('password', 'api_key', 'passkey_reference'));
-
-        CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type);
-
-        UPDATE db_metadata SET version = 4 WHERE id = 1;
-
-        COMMIT;",
-    )
-    .map_err(DatabaseError::Sqlite)?;
-
-    Ok(())
-}
-
-/// Migrate schema from v4 to v5: credential registry tables (ADR-001).
-///
-/// Creates `entities`, `entity_memberships`, `secret_equality_index`,
-/// `entry_lifecycle`, and `registry_state` plus their indexes. No entry data
-/// is touched; the equality index is deliberately NOT backfilled here — the
-/// migration runs on the schema-open path where no key material exists, so
-/// tags are computed by the post-unlock sweep.
+/// Migrate schema from v4 to v5: add the monotonic `key_epoch` counter to
+/// `db_metadata` (ADR-002). Existing vaults start at epoch 1; master-password
+/// rotation increments it, and the epoch is AEAD-bound into the wrapped DEK.
 pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "BEGIN;
+
+        ALTER TABLE db_metadata ADD COLUMN key_epoch INTEGER NOT NULL DEFAULT 1;
+        UPDATE db_metadata SET version = 5 WHERE id = 1;
 
         CREATE TABLE IF NOT EXISTS entities (
             entity_id TEXT PRIMARY KEY,
@@ -292,6 +273,52 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
 
         -- Bump schema version
         UPDATE db_metadata SET version = 5 WHERE id = 1;
+
+        COMMIT;",
+    )
+    .map_err(crate::DatabaseError::Sqlite)?;
+
+    // Re-serialize the wrapped DEK into the current shape. The v0.8.0 blob is
+    // bincode without the `epoch_bound` field; bincode is positional, so old
+    // blobs must be read with the legacy shape and rewritten with the field
+    // present (else every later open hits a deserialization EOF).
+    let wrapped_blob: Vec<u8> = conn
+        .query_row(
+            "SELECT wrapped_dek FROM db_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(crate::DatabaseError::Sqlite)?;
+    // Tolerant read accepts both the legacy 3-field shape and the current
+    // 4-field shape; the rewrite normalizes legacy blobs so every later open
+    // deserializes cleanly.
+    // A blob that is not a recognizable wrap (e.g. a test fixture placeholder)
+    // is left as-is: forcing it here would turn a data quirk into a migration
+    // failure. Real wraps rewrite into the current shape.
+    if let Ok(key) = crate::crypto::keyring::WrappedKey::from_bincode_bytes(&wrapped_blob) {
+        let upgraded_blob = bincode::serialize(&key).map_err(|e| {
+            crate::DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
+        conn.execute(
+            "UPDATE db_metadata SET wrapped_dek = ?1 WHERE id = 1",
+            rusqlite::params![&upgraded_blob],
+        )
+        .map_err(crate::DatabaseError::Sqlite)?;
+    }
+
+    Ok(())
+}
+
+pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+
+        ALTER TABLE entries ADD COLUMN credential_type TEXT NOT NULL DEFAULT 'password'
+            CHECK (credential_type IN ('password', 'api_key', 'passkey_reference'));
+
+        CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type);
+
+        UPDATE db_metadata SET version = 4 WHERE id = 1;
 
         COMMIT;",
     )

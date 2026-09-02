@@ -102,7 +102,7 @@ impl VaultManager {
         let db = self.lock_db()?;
 
         // Validate that the provided master password can actually unlock this vault.
-        let (kdf_params, wrapped_dek) = Self::load_vault_metadata(&db)?;
+        let (kdf_params, wrapped_dek, _key_epoch) = Self::load_vault_metadata(&db)?;
         let mut verifier = KeyHierarchy::new();
         verifier
             .unlock_vault(master_password, &kdf_params, &wrapped_dek)
