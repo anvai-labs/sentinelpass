@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed |
+| **Status** | Proposed (rev 2, after adversarial review — see git history) |
 | **Date** | 2026-09-02 |
 | **Area** | `sentinelpass-core` (crypto/keyring, crypto/kdf, vault metadata, daemon), `sentinelpass-cli`, `sentinelpass-ui` |
 | **Related** | [ADR-001](ADR-001-credential-registry-by-logical-entity.md) (rotation-recommendation surfacing); [TECHNICAL_DEBT.md](../../../../TECHNICAL_DEBT.md) roadmap; `crypto/keyring.rs` (`KeyHierarchy`), `crypto/kdf.rs` (`KdfParams`), `database/schema.rs` (`db_metadata`), `daemon/vault_state.rs`, `sync/` (pairing bootstrap) |
@@ -85,11 +85,18 @@ entry fields ◀──AES-256-GCM (per-field nonce)── Data Encryption Key (r
 
 ## Decision
 
-**D1 — Rotation = re-wrap, never re-encryption.** With the vault unlocked, derive
-`new_master_key = Argon2id(new_password, new_salt)` with fresh `KdfParams`, unwrap the DEK
-under the current in-memory `KeyHierarchy`, wrap the *same* DEK under `new_master_key`, and
-persist `{kdf_params(new), wrapped_dek(new), key_epoch(n+1)}` to `db_metadata` in one
-transaction. Entry rows are not read or written by rotation.
+**D1 — Rotation = re-wrap, never re-encryption. Epoch-bound wrapping.** With the vault
+unlocked, derive `new_master_key = Argon2id(new_password, new_salt)` with fresh `KdfParams`,
+unwrap the DEK under the current in-memory `KeyHierarchy`, wrap the *same* DEK under
+`new_master_key`, and persist `{kdf_params(new), wrapped_dek(new), key_epoch(n+1)}` to
+`db_metadata` in one transaction. Entry rows are not read or written by rotation.
+
+**Rev 2 (F1):** the new `key_epoch` is bound as **AEAD associated data** in the DEK wrap.
+A `db_metadata` row whose epoch column disagrees with the epoch baked into the wrap fails
+GCM authentication at open time — a file-level rollback that swaps an older `wrapped_dek`
+in alongside a matching epoch column is therefore *cryptographically* rejected, not merely
+advisory. (F5: cross-vault `wrapped_dek` swaps fail the tag independently, since the DEKs
+differ.)
 
 **D2 — Explicit re-authentication under the existing lockout regime.** The operation begins
 by verifying the *current* password via the existing `verify_master_password` path, and
@@ -108,31 +115,48 @@ compare). Only then commit the transaction. A crash before commit leaves the old
 There is no intermediate state in which either password fails.
 
 **D4 — Monotonic `key_epoch` for stale-credential rejection.** `db_metadata` gains a
-`key_epoch INTEGER NOT NULL` column, incremented on every rotation. Every credential that
-outlives a rotation must be re-validated against the current epoch:
-- **Biometric wrapper:** rotation deletes the keychain biometric reference *before* commit
-  and requires explicit re-enrollment (fresh OS auth) afterwards. An old biometric unwrap can
-  therefore never yield a DEK for a superseded epoch.
-- **Sync peers:** the pairing bootstrap's `wrapped_dek` is stamped with the epoch that
-  produced it. Sync apply rejects bootstrap blobs and any signed payload referencing
-  `key_epoch < current` (re-pairing re-issues at the current epoch). This is the sync-side
-  analogue of the existing `sync_version` rollback rule.
-- **In-memory daemon state:** a running daemon's unlocked hierarchy belongs to the old epoch.
-  v1 refuses rotation while a daemon holds the vault (detect via `CheckVault` + lock) and
-  documents "lock/quit daemon → rotate → restart"; a `ChangeMasterPassword` IPC message that
-  rotates in-place is the v2 slice.
+`key_epoch INTEGER NOT NULL` column, incremented on every rotation and bound as AEAD
+associated data per D1. Rev 2 corrects and sharpens the invalidation scope:
+
+- **Biometric wrapper (F2 — corrected):** rotation does **not** invalidate the biometric
+  path, and that is deliberate. The wrapper stores the DEK itself under the OS keychain;
+  the DEK is byte-identical after a re-wrap, so biometric unlock keeps working across
+  rotation. Password rotation's threat model is *password* compromise — a thief holding the
+  old password never had the device-bound keychain path, so deleting the reference would
+  force re-enrollment for zero security gain. Device *compromise* is a different threat that
+  re-wrap rotation cannot address by construction; its escape hatch is full DEK rotation
+  (option A), available as a follow-up ADR if that threat model becomes primary.
+- **Sync peers (the hard enforcement point):** the pairing bootstrap's `wrapped_dek` is
+  stamped with the epoch that produced it. Peers reject bootstrap blobs and signed payloads
+  referencing `key_epoch < current`, forcing re-pairing at the current epoch. The relay plus
+  per-device Ed25519 signing provide the external trust anchor that makes this rejection
+  meaningful (F3).
+- **Local-file rollback (F3 — honest caveat):** without an external anchor, detection of a
+  rolled-back live vault file is best-effort; D1's AEAD binding makes epoch/column
+  inconsistency fail hard, but an attacker who rewrites *both* consistently is outside what
+  file-local state can detect. Documented as a boundary, not hidden.
+- **In-memory daemon state (F4 — corrected rationale):** a stale daemon's *entry crypto*
+  remains correct after rotation (the DEK is unchanged); v1 still refuses rotation while a
+  daemon holds the vault, but as key-material hygiene (no unepoched hierarchy copies),
+  not as a correctness requirement. `ChangeMasterPassword` IPC for in-place rotation is the
+  v2 slice.
 - **Exports/backups:** carry their own snapshot of `wrapped_dek`; they remain openable with
   the password *at time of export* (documented property, not an invalidation target).
 
 **D5 — Surfaces and policy.** v1 ships `sentinelpass passwd` (TTY; prompts current password,
 new password, confirmation; enforces the existing lockout; strength-checks the new password
-with the `crypto/health.rs` analyzer — advisory verdict plus a hard minimum-length gate).
-The UI gains a Settings surface in a later slice behind the same core call. Broker surfaces
-(`secret get`/`exec`/`env`) are unaffected: they consume daemon IPC and hold no key material.
+with the `crypto/health.rs` analyzer — advisory verdict plus a hard minimum-length gate of
+12 characters). **Rev 2 (F6):** rotation with `new == current` is rejected (zero-entropy
+rotation). The UI gains a Settings surface in a later slice behind the same core call.
+Broker surfaces (`secret get`/`exec`/`env`) are unaffected: they consume daemon IPC and hold
+no key material.
 
 **D6 — Rotation is never silent.** `--force`-style overrides, bypasses of the old-password
 check, or "admin reset" paths are explicitly out of scope: under zero-trust there is no
 recovery path that does not require the current password (or a restored backup).
+**Rev 2 (F7):** the audit event carries the epoch transition —
+`AuditEventType::MasterPasswordChanged { success, from_epoch, to_epoch }` — with no secret
+material.
 
 ## Options considered
 
@@ -159,11 +183,14 @@ recovery path that does not require the current password (or a restored backup).
 
 ## MVP vs. later
 
-**MVP (this ADR's implementation slice):** `KeyHierarchy::rotate_master_password`, `key_epoch`
-column + migration (v4 → v5, additive), `sentinelpass passwd` CLI, biometric invalidation +
-re-enrollment prompt, audit events, daemon-stale detection (refuse while daemon holds vault),
-integration tests (rotation round-trip, epoch rejection, crash-before-commit equivalence,
-lockout interaction).
+**MVP (this ADR's implementation slice):** `KeyHierarchy::rotate_master_password` with
+epoch-bound AEAD wrapping, `key_epoch` column + additive migration (v4 → v5; **F8:** the
+migration number is merge-order dependent — if ADR-001's registry migration lands first,
+this one renumbers to v6 and ADR-001's schema expectations are unaffected, since both are
+additive), `sentinelpass passwd` CLI, audit events with epoch transition, daemon-stale
+detection (refuse while daemon holds vault), integration tests (rotation round-trip with
+old-password rejection + new-password success, epoch-AAD tamper rejection, same-password
+rejection, crash-before-commit equivalence, lockout interaction).
 
 **Later slices:** `ChangeMasterPassword` daemon IPC for in-place rotation; UI Settings surface;
 sync peer epoch propagation with automatic re-bootstrap on re-pair; key-versioned double-wrap
@@ -182,10 +209,27 @@ if zero-downtime re-key is ever required.
 
 - Password rotation becomes a cheap, safe, frequent operation — no re-encryption, no backup
   recursion, O(1) crypto.
-- Every stale copy of unwrap capability is explicitly invalidated; zero-trust is enforced by
-  an epoch check at each unwrap path rather than by trusting component identity.
-- A new schema migration (v4 → v5) is required; the schema-compat forward-compat warning
-  applies to older binaries opening rotated vaults (documented).
+- Stale unwrap credentials are rejected cryptographically where possible (AEAD-bound epoch
+  locally; relay-anchored epoch on the sync path) and by documented boundary elsewhere
+  (file-local rollback without an external anchor).
+- Biometric unlock deliberately survives rotation (same user, same device, same DEK);
+  device-compromise containment is out of scope for re-wrap rotation and requires the
+  option-A follow-up if ever needed.
+- A new schema migration (v4 → v5, or next available per merge order with ADR-001) is
+  required; the schema-compat forward-compat warning applies to older binaries opening
+  rotated vaults (documented).
 - Paired devices must re-pair after rotation (accepted friction; deliberate under D4).
 - The daemon must not hold an unlocked vault during v1 rotation (restart friction until the
   v2 IPC slice).
+
+## Adversarial review (rev 2)
+
+Findings incorporated from a dedicated adversarial pass; each is labeled in place above:
+- **F1** epoch not authenticated → AEAD associated-data binding (D1)
+- **F2** biometric invalidation was wrong (no gain, user-hostile) → corrected: biometric survives rotation deliberately (D4)
+- **F3** overclaimed local rollback detection → honest boundary split: relay-anchored enforcement hard, file-local best-effort (D4)
+- **F4** daemon refusal rationale corrected: hygiene, not correctness (D4)
+- **F5** cross-vault swap → covered by GCM tag; stated (D1)
+- **F6** same-password rotation → rejected (D5)
+- **F7** audit event lacked epoch transition → added (D6)
+- **F8** migration numbering collision with ADR-001 → coordination rule (MVP)
