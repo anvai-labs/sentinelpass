@@ -2,6 +2,7 @@
 
 mod biometric_ops;
 mod health_ops;
+mod registry_ops;
 mod ssh_ops;
 mod sync_ops;
 #[cfg(test)]
@@ -154,6 +155,20 @@ impl VaultManager {
                 AuditEventType::VaultUnlocked { success: true },
                 "Vault unlocked successfully",
             );
+        }
+
+        // Registry index backfill (ADR-001): repair the equality index when
+        // it is incomplete (post-migration, post-restore). Bounded full
+        // decrypt — runs only when the sweep bookkeeping says so, never on
+        // every unlock. Best-effort: a failed backfill retries on the next
+        // open or registry read.
+        if vault_manager.registry_backfill_needed().unwrap_or(false) {
+            if let Err(e) = vault_manager.sweep_registry_index() {
+                tracing::warn!(
+                    error = %e,
+                    "registry index backfill failed; will retry on next open"
+                );
+            }
         }
 
         Ok(vault_manager)
@@ -344,6 +359,12 @@ impl VaultManager {
                 AuditEventType::CredentialCreated { entry_id },
                 &format!("Created credential: {}", entry.title),
             );
+        }
+
+        // Registry equality index (ADR-001). Best-effort: a failed index
+        // write is repaired by the next sweep; the entry write stands.
+        if let Err(e) = self.registry_on_add(entry_id, entry) {
+            tracing::warn!(entry_id, error = %e, "registry index update failed");
         }
 
         Ok(entry_id)
@@ -547,6 +568,11 @@ impl VaultManager {
         )
         .map_err(DatabaseError::Sqlite)?;
 
+        // Purge registry rows (ADR-001): soft delete never fires FK CASCADE,
+        // so the equality index, lifecycle, and membership rows are removed
+        // here, mirroring the domain_mappings cleanup above.
+        Self::registry_purge_in_tx(&tx, entry_id)?;
+
         tx.commit().map_err(DatabaseError::Sqlite)?;
 
         // Log credential deletion
@@ -634,6 +660,14 @@ impl VaultManager {
                 AuditEventType::CredentialModified { entry_id },
                 &format!("Modified credential: {}", entry.title),
             );
+        }
+
+        // Registry equality index (ADR-001): a changed tag against a prior
+        // row is a password rotation — stamped in entry_lifecycle and
+        // audited. Title-only edits leave the tag unchanged and stamp
+        // nothing. Best-effort on failure; the sweep repairs.
+        if let Err(e) = self.registry_on_update(entry_id, entry) {
+            tracing::warn!(entry_id, error = %e, "registry index update failed");
         }
 
         Ok(())

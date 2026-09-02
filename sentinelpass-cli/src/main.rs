@@ -408,6 +408,12 @@ enum Commands {
         only_issues: bool,
     },
 
+    /// Manage the credential registry (entities, reuse clusters, rotation posture)
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommands,
+    },
+
     /// Export vault to file
     Export {
         /// Output file path
@@ -443,6 +449,71 @@ enum Commands {
     /// Sync subcommands for encrypted cloud sync
     #[command(subcommand)]
     Sync(SyncCommands),
+}
+
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Register a logical entity (broker, database, API, webhook, ...)
+    EntityAdd {
+        /// Unique entity name, for example `trading-postgres`
+        name: String,
+
+        /// Entity kind: broker, market_data, regulatory_data, notification,
+        /// database, infrastructure, application, or other
+        #[arg(long)]
+        kind: String,
+
+        /// Entity criticality: low, medium, or high
+        #[arg(long, default_value = "medium")]
+        criticality: String,
+
+        /// Free-form notes (stored encrypted)
+        #[arg(long)]
+        notes: Option<String>,
+
+        /// Override the rotation interval (days) for this entity
+        #[arg(long)]
+        rotation_interval_days: Option<i64>,
+    },
+
+    /// List registered entities
+    EntityList,
+
+    /// Delete an entity (its credential assignments go with it)
+    EntityDelete {
+        /// Entity name
+        name: String,
+    },
+
+    /// Assign a vault entry to an entity
+    Assign {
+        /// Vault entry id
+        entry_id: i64,
+
+        /// Entity name
+        #[arg(long)]
+        entity: String,
+
+        /// Optional label, for example `prod` or `paper`
+        #[arg(long)]
+        label: Option<String>,
+    },
+
+    /// Mark an entry's secret as rotated (for provider-issued keys)
+    MarkRotated {
+        /// Vault entry id
+        entry_id: i64,
+    },
+
+    /// Show registry posture summary (entities, reuse clusters, rotation)
+    Status,
+
+    /// Full posture report including strength analysis (decrypts all secrets)
+    Report {
+        /// Only show entries with findings
+        #[arg(long)]
+        only_issues: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1090,6 +1161,11 @@ fn main() -> Result<()> {
         } => {
             let vault_path = get_vault_path(&cli, false);
             commands::generate::handle_health(vault_path, detailed, only_issues)?;
+        }
+
+        Commands::Registry { ref command } => {
+            let vault_path = get_vault_path(&cli, false);
+            commands::registry::handle_registry_command(vault_path, command)?;
         }
 
         Commands::Export {

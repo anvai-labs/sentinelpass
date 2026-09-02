@@ -73,6 +73,25 @@ pub enum AuditEventType {
         count: usize,
     },
 
+    /// Registry operations (ADR-001). Context strings carry IDs, not names:
+    /// the audit log is plaintext and outside vault.db.
+    RegistryEntityCreated {
+        entity_id: String,
+    },
+    RegistryEntityDeleted {
+        entity_id: String,
+    },
+    EntryAssignedToEntity {
+        entry_id: i64,
+        entity_id: String,
+    },
+    SecretRotated {
+        entry_id: i64,
+    },
+    RegistryIndexRebuilt {
+        entries: usize,
+    },
+
     /// System events
     DaemonStarted,
     DaemonStopped,
@@ -196,6 +215,7 @@ impl AuditLogger {
             // Medium-high severity (3)
             AuditEventType::VaultUnlocked { success: true }
             | AuditEventType::CredentialModified { .. }
+            | AuditEventType::SecretRotated { .. }
             | AuditEventType::ExternalSecretAccess { success: true, .. }
             | AuditEventType::ExternalSecretWrite { success: true, .. }
             | AuditEventType::BiometricUnlockRequested { success: true } => 3,
@@ -205,12 +225,17 @@ impl AuditLogger {
             | AuditEventType::CredentialCreated { .. }
             | AuditEventType::CredentialViewed { .. }
             | AuditEventType::VaultAutoLocked
+            | AuditEventType::RegistryEntityCreated { .. }
+            | AuditEventType::RegistryEntityDeleted { .. }
             | AuditEventType::ExternalSecretAccess { success: false, .. }
             | AuditEventType::ExternalSecretWrite { success: false, .. }
             | AuditEventType::BiometricUnlockRequested { success: false } => 2,
 
             // Low severity (1)
-            AuditEventType::CredentialsListed { .. } | AuditEventType::DataImported { .. } => 1,
+            AuditEventType::CredentialsListed { .. }
+            | AuditEventType::DataImported { .. }
+            | AuditEventType::EntryAssignedToEntity { .. }
+            | AuditEventType::RegistryIndexRebuilt { .. } => 1,
 
             // Info (0)
             AuditEventType::AuthenticationAttempt { .. }

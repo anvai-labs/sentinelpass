@@ -22,7 +22,7 @@ pub use health::{
     StrengthDistribution, VaultHealthSummary, WeakPasswordEntry,
 };
 pub use kdf::{derive_master_key, verify_master_password, KdfParams};
-pub use keyring::{KeyHierarchy, MasterKey, WrappedKey};
+pub use keyring::{derive_equality_key, KeyHierarchy, MasterKey, WrappedKey};
 pub use password::{
     generate_passphrase, generate_password, generate_simple_password, CharacterSets,
     PasswordGeneratorConfig,

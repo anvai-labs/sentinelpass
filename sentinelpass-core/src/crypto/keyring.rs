@@ -4,8 +4,38 @@
 //! Master Password → Argon2id → Master Key → wraps → DEK
 
 use crate::crypto::{cipher::DataEncryptionKey, kdf::KdfParams, CryptoError, Result};
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
+use sha2::Sha256;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
+
+/// HKDF `info` label binding the credential-registry equality key to its
+/// purpose (ADR-001).
+///
+/// This value is part of the tag semantics: changing it changes every
+/// equality tag. Any change must ship together with a bump of
+/// `registry::EQUALITY_KEY_ID` so existing tags are rewritten under the new
+/// key (suppressed rotation) instead of being misread as mass rotation.
+pub const EQUALITY_KEY_INFO: &[u8] = b"sentinelpass-registry-equality-v1";
+
+/// Derive the credential-registry equality key from a DEK.
+///
+/// HKDF-SHA256 with an empty salt over the DEK, 32-byte output, fixed
+/// parameters so independent implementations cannot diverge. The derivation
+/// is deterministic for a given DEK — which is what makes equality tags
+/// comparable across entries and (paired) devices sharing that DEK.
+///
+/// The returned buffer is zeroized on drop, is never persisted, and must
+/// not be cached across lock.
+pub fn derive_equality_key(dek: &DataEncryptionKey) -> Result<Zeroizing<Vec<u8>>> {
+    let hk = Hkdf::<Sha256>::new(None, dek.as_bytes());
+    let mut okm = Zeroizing::new(vec![0u8; 32]);
+    hk.expand(EQUALITY_KEY_INFO, okm.as_mut_slice())
+        .map_err(|e| {
+            CryptoError::KdfFailed(format!("registry equality key derivation failed: {}", e))
+        })?;
+    Ok(okm)
+}
 
 /// The master key derived from the master password
 ///
@@ -132,6 +162,16 @@ impl KeyHierarchy {
         self.dek
             .as_ref()
             .ok_or_else(|| CryptoError::EncryptionFailed("Vault is locked".to_string()))
+    }
+
+    /// Derive the purpose-bound equality key for the credential registry
+    /// (see [`derive_equality_key`]).
+    ///
+    /// Available on every unlock path — biometric unlock reaches the same
+    /// DEK, so registry tags are computable regardless of how the vault was
+    /// unlocked.
+    pub fn equality_key(&self) -> Result<Zeroizing<Vec<u8>>> {
+        derive_equality_key(self.dek()?)
     }
 
     /// Wrap the DEK with the master key
@@ -306,5 +346,35 @@ mod tests {
                 .unwrap();
             assert!(hierarchy.is_unlocked());
         }
+    }
+
+    #[test]
+    fn test_equality_key_deterministic_dek_bound_and_lock_gated() {
+        // Deterministic for the same DEK, distinct across DEKs
+        let mut first = KeyHierarchy::new();
+        first.initialize_vault(b"first_password").unwrap();
+        let first_a = first.equality_key().unwrap();
+        let first_b = first.equality_key().unwrap();
+        assert_eq!(first_a.as_slice(), first_b.as_slice());
+
+        let mut second = KeyHierarchy::new();
+        second.initialize_vault(b"other_password").unwrap();
+        let second_key = second.equality_key().unwrap();
+        assert_ne!(first_a.as_slice(), second_key.as_slice());
+
+        // Biometric-style unlock (DEK handed in directly) derives the same key
+        let mut dek_bytes = [7u8; 32];
+        let dek = DataEncryptionKey::from_bytes(&mut dek_bytes);
+        let direct = derive_equality_key(&dek).unwrap();
+        let mut hierarchy = KeyHierarchy::new();
+        hierarchy.unlock_vault_with_dek(dek);
+        assert_eq!(
+            hierarchy.equality_key().unwrap().as_slice(),
+            direct.as_slice()
+        );
+
+        // Locked vaults derive nothing
+        hierarchy.lock_vault();
+        assert!(hierarchy.equality_key().is_err());
     }
 }

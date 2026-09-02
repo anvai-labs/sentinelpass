@@ -314,6 +314,22 @@ impl SyncEngine {
                  sync_version = ?2, sync_state = 'synced', last_synced_at = ?1
                  WHERE entry_id = ?3",
             )? {
+                // Tombstoned remotely: purge registry rows (soft delete never
+                // fires FK CASCADE). The preamble also returns early on
+                // conflict resolution (local row kept), so gate the purge on
+                // the row actually being soft-deleted.
+                let is_deleted: i64 = conn
+                    .query_row(
+                        "SELECT is_deleted FROM entries WHERE entry_id = ?1",
+                        [entry_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if is_deleted == 1 {
+                    if let Err(e) = crate::registry::purge_registry_rows(conn, entry_id) {
+                        tracing::warn!(entry_id, error = %e, "registry purge failed");
+                    }
+                }
                 return Ok(());
             }
 
@@ -359,6 +375,21 @@ impl SyncEngine {
                 )
                 .map_err(DatabaseError::Sqlite)?;
             }
+
+            // Registry equality index (ADR-001): sync apply is a first-class
+            // write site — this entry never passes through VaultManager, so
+            // without this hook remote-origin rotations would never stamp.
+            // Best-effort; the next sweep repairs.
+            if let Err(e) = crate::registry::upsert_equality_tag(
+                conn,
+                dek,
+                entry_id,
+                payload.credential_type,
+                &payload.password,
+                now,
+            ) {
+                tracing::warn!(entry_id, error = %e, "registry index update failed");
+            }
         } else {
             if skip_new_entry(blob) {
                 return Ok(());
@@ -399,6 +430,19 @@ impl SyncEngine {
                     rusqlite::params![entry_id, dm.domain, dm.is_primary],
                 )
                 .map_err(DatabaseError::Sqlite)?;
+            }
+
+            // Registry equality index for pulled-in entries (same rationale
+            // as the update branch above).
+            if let Err(e) = crate::registry::upsert_equality_tag(
+                conn,
+                dek,
+                entry_id,
+                payload.credential_type,
+                &payload.password,
+                now,
+            ) {
+                tracing::warn!(entry_id, error = %e, "registry index update failed");
             }
         }
 
