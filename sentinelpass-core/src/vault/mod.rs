@@ -353,6 +353,11 @@ impl VaultManager {
 
         let entry_id = repo.create(params)?;
 
+        // Release the db lock before the registry hook: registry_on_add
+        // re-acquires it, and Mutex is not reentrant (a nested lock_db()
+        // here deadlocks the vault).
+        drop(db);
+
         // Log credential creation
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
@@ -653,6 +658,10 @@ impl VaultManager {
 
         repo.update(entry_id, params)
             .map_err(PasswordManagerError::from)?;
+
+        // Release the db lock before the registry hook (non-reentrant Mutex
+        // — see add_entry).
+        drop(db);
 
         // Log credential modification
         if let Some(ref logger) = self.audit_logger {

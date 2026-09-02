@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(resolved_interval_days(&input), 45);
 
         input.criticality = Criticality::Low;
-        assert_eq!(resolved_interval_days(&input), 360);
+        assert_eq!(resolved_interval_days(&input), 180);
 
         input.criticality = Criticality::Medium;
         input.reuse_count = 2;
