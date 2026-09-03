@@ -208,6 +208,35 @@ impl VaultManager {
         Ok(())
     }
 
+    /// Remove an entry's entity assignment (the escape hatch for a wrong
+    /// `assign_entry` call — otherwise membership can only be replaced,
+    /// never cleared). A no-op (not an error) when the entry has no
+    /// assignment.
+    pub fn unassign_entry(&self, entry_id: i64) -> Result<()> {
+        let db = self.lock_db()?;
+        let rows = db
+            .conn()
+            .execute(
+                "DELETE FROM entity_memberships WHERE entry_id = ?1",
+                [entry_id],
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        drop(db);
+
+        if rows > 0 {
+            if let Some(ref logger) = self.audit_logger {
+                let _ = logger.log(
+                    AuditEventType::EntryAssignedToEntity {
+                        entry_id,
+                        entity_id: String::new(),
+                    },
+                    &format!("Entry {} unassigned from its entity", entry_id),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Stamp the lifecycle source for an entry (e.g. the daemon's
     /// external-secret write path stamps [`LifecycleSource::ToolManaged`]).
     pub fn set_lifecycle_source(&self, entry_id: i64, source: LifecycleSource) -> Result<()> {

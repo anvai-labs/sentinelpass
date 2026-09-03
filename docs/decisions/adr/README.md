@@ -22,3 +22,4 @@ large features — no implementation lands before the governing ADR is accepted.
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-001](ADR-001-credential-registry-by-logical-entity.md) | Credential registry by logical entity | Proposed |
+| [ADR-002](ADR-002-master-password-rotation.md) | Master password rotation via DEK re-wrap | Proposed |

@@ -38,7 +38,10 @@ pub async fn unlock_daemon_with_biometric_if_requested(
     prompt_reason: &str,
 ) -> Result<()> {
     let status = client.send(IpcMessage::CheckVault).await?;
-    let unlocked = matches!(status, IpcMessage::VaultStatusResponse { unlocked: true });
+    let unlocked = matches!(
+        status,
+        IpcMessage::VaultStatusResponse { unlocked: true, .. }
+    );
 
     if unlocked {
         return Ok(());

@@ -283,10 +283,10 @@ async fn unlock_daemon_with_password(master_password: &str) -> std::result::Resu
             success: false,
             error,
         } => Err(error.unwrap_or_else(|| "Daemon unlock failed".to_string())),
-        IpcMessage::VaultStatusResponse { unlocked } if unlocked => Ok(()),
-        IpcMessage::VaultStatusResponse { unlocked: false } => {
-            Err("Daemon remains locked".to_string())
-        }
+        IpcMessage::VaultStatusResponse { unlocked, .. } if unlocked => Ok(()),
+        IpcMessage::VaultStatusResponse {
+            unlocked: false, ..
+        } => Err("Daemon remains locked".to_string()),
         _ => Err("Unexpected daemon response while unlocking".to_string()),
     }
 }
@@ -304,10 +304,10 @@ async fn unlock_daemon_with_biometric(prompt_reason: &str) -> std::result::Resul
             success: false,
             error,
         } => Err(error.unwrap_or_else(|| "Daemon biometric unlock failed".to_string())),
-        IpcMessage::VaultStatusResponse { unlocked } if unlocked => Ok(()),
-        IpcMessage::VaultStatusResponse { unlocked: false } => {
-            Err("Daemon remains locked".to_string())
-        }
+        IpcMessage::VaultStatusResponse { unlocked, .. } if unlocked => Ok(()),
+        IpcMessage::VaultStatusResponse {
+            unlocked: false, ..
+        } => Err("Daemon remains locked".to_string()),
         _ => Err("Unexpected daemon response while unlocking with biometric".to_string()),
     }
 }
@@ -315,7 +315,7 @@ async fn unlock_daemon_with_biometric(prompt_reason: &str) -> std::result::Resul
 async fn fetch_daemon_status() -> DaemonStatus {
     unlock_debug_log("fetch_daemon_status: querying daemon lock state");
     match send_daemon_message(IpcMessage::CheckVault).await {
-        Ok(IpcMessage::VaultStatusResponse { unlocked }) => DaemonStatus {
+        Ok(IpcMessage::VaultStatusResponse { unlocked, .. }) => DaemonStatus {
             available: true,
             unlocked,
             message: None,

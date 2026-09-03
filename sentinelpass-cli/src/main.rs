@@ -57,6 +57,10 @@ enum Commands {
     /// Rotate the vault master password (re-wraps the data key; entries untouched)
     Passwd,
 
+    /// Show vault schema version, key epoch, and daemon reachability
+    /// (no master password required)
+    Status,
+
     /// Check whether SSH agent integration is available
     SshAgentStatus,
 
@@ -508,6 +512,22 @@ enum RegistryCommands {
         entry_id: i64,
     },
 
+    /// Remove an entry's entity assignment
+    Unassign {
+        /// Vault entry id
+        entry_id: i64,
+    },
+
+    /// Set (or clear) a provider-managed expiry for an entry
+    ExpiresAt {
+        /// Vault entry id
+        entry_id: i64,
+
+        /// Unix timestamp of the provider-issued expiry; omit to clear
+        #[arg(long)]
+        timestamp: Option<i64>,
+    },
+
     /// Show registry posture summary (entities, reuse clusters, rotation)
     Status,
 
@@ -946,6 +966,11 @@ fn main() -> Result<()> {
         Commands::Passwd => {
             let vault_path = get_vault_path(&cli, false);
             commands::vault::handle_passwd(vault_path)?;
+        }
+
+        Commands::Status => {
+            let vault_path = get_vault_path(&cli, false);
+            commands::vault::handle_status(vault_path)?;
         }
 
         Commands::SecretGet {

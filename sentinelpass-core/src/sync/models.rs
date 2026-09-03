@@ -134,6 +134,18 @@ pub struct VaultBootstrap {
     pub relay_url: String,
     /// Vault identifier on the relay.
     pub vault_id: Uuid,
+    /// Master-password key epoch (ADR-002) of the exporting vault at the
+    /// time of export. Required to unwrap an epoch-bound `wrapped_dek_blob`
+    /// (produced after a rotation) — the wrap binds `key_epoch` as AEAD
+    /// associated data, so importing without it fails GCM authentication.
+    /// Defaults to 1 (the un-rotated epoch) so bootstraps produced by
+    /// binaries that predate this field still deserialize.
+    #[serde(default = "default_key_epoch")]
+    pub key_epoch: i64,
+}
+
+fn default_key_epoch() -> i64 {
+    1
 }
 
 /// Current sync status summary for the local device.

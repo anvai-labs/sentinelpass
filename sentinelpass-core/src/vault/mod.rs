@@ -194,6 +194,42 @@ impl VaultManager {
         &self.vault_path
     }
 
+    /// Current master-password key epoch (ADR-002). Vault metadata, not key
+    /// material — readable while the vault is locked.
+    pub fn key_epoch(&self) -> Result<i64> {
+        let db = self.lock_db()?;
+        let (_, _, key_epoch) = Self::load_vault_metadata(&db)?;
+        Ok(key_epoch)
+    }
+
+    /// Read-only vault metadata inspection that requires **no master
+    /// password**: `db_metadata.version`/`key_epoch` are plaintext columns,
+    /// never the DEK or master key. Backs `sentinelpass status` and any
+    /// embedder that needs to know a vault's rotation generation without
+    /// first authenticating.
+    pub fn inspect_metadata<P: AsRef<Path>>(path: P) -> Result<VaultMetadataInfo> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(PasswordManagerError::NotFound(format!(
+                "Vault at {}",
+                path.display()
+            )));
+        }
+        let db = Database::open(path)?;
+        let (schema_version, key_epoch): (i32, i64) = db
+            .conn()
+            .query_row(
+                "SELECT version, COALESCE(key_epoch, 1) FROM db_metadata WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(VaultMetadataInfo {
+            schema_version,
+            key_epoch,
+        })
+    }
+
     /// Lock the vault (clear keys from memory)
     pub fn lock(&mut self) {
         self.key_hierarchy.lock_vault();
@@ -814,12 +850,12 @@ impl VaultManager {
             new_password,
         );
 
-        match &rotation {
+        match rotation {
             Ok((new_kdf_params, new_wrapped)) => {
                 let db = self.lock_db()?;
-                let kdf_params_blob = bincode::serialize(new_kdf_params)
+                let kdf_params_blob = bincode::serialize(&new_kdf_params)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-                let wrapped_blob = bincode::serialize(new_wrapped)
+                let wrapped_blob = bincode::serialize(&new_wrapped)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
                 let nonce_blob = bincode::serialize(&new_wrapped.nonce)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -848,25 +884,46 @@ impl VaultManager {
                     );
                 }
             }
-            Err(_) => {
-                let db = self.lock_db()?;
-                Self::record_failed_attempt(&db)?;
-                if let Some(ref logger) = self.audit_logger {
-                    let _ = logger.log(
-                        AuditEventType::MasterPasswordChanged {
-                            success: false,
-                            from_epoch: key_epoch,
-                            to_epoch: key_epoch,
-                        },
-                        "Master password rotation failed verification",
-                    );
+            Err(rotation_err) => {
+                // Only genuine authentication failures (wrong current
+                // password) feed the brute-force lockout; transient crypto
+                // or DB errors must neither burn lockout budget nor
+                // masquerade as a wrong password.
+                let auth_failure = matches!(
+                    rotation_err,
+                    crate::crypto::CryptoError::AuthenticationFailed
+                );
+                {
+                    let db = self.lock_db()?;
+                    if auth_failure {
+                        Self::record_failed_attempt(&db)?;
+                    }
+                    if let Some(ref logger) = self.audit_logger {
+                        let _ = logger.log(
+                            AuditEventType::MasterPasswordChanged {
+                                success: false,
+                                from_epoch: key_epoch,
+                                to_epoch: key_epoch,
+                            },
+                            if auth_failure {
+                                "Master password rotation failed verification"
+                            } else {
+                                "Master password rotation failed"
+                            },
+                        );
+                    }
+                    if auth_failure {
+                        if let Some(remaining) = Self::get_remaining_lockout_seconds(&db)? {
+                            return Err(PasswordManagerError::LockedOut(remaining));
+                        }
+                    }
                 }
-                if let Some(remaining) = Self::get_remaining_lockout_seconds(&db)? {
-                    return Err(PasswordManagerError::LockedOut(remaining));
+                if auth_failure {
+                    return Err(PasswordManagerError::Crypto(
+                        crate::crypto::CryptoError::AuthenticationFailed,
+                    ));
                 }
-                return Err(PasswordManagerError::Crypto(
-                    crate::crypto::CryptoError::AuthenticationFailed,
-                ));
+                return Err(PasswordManagerError::Crypto(rotation_err));
             }
         }
 
@@ -942,6 +999,14 @@ pub struct Entry {
     pub created_at: DateTime<Utc>,
     pub modified_at: DateTime<Utc>,
     pub favorite: bool,
+}
+
+/// Read-only vault metadata (schema version, key epoch) obtainable
+/// without a master password — see [`VaultManager::inspect_metadata`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct VaultMetadataInfo {
+    pub schema_version: i32,
+    pub key_epoch: i64,
 }
 
 /// Summary of an entry (without password)

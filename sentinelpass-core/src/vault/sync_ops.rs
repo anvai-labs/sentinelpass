@@ -43,7 +43,7 @@ impl VaultManager {
             PasswordManagerError::InvalidInput("Sync vault ID not set".to_string())
         })?;
 
-        let (kdf_params, wrapped_dek, _key_epoch) = Self::load_vault_metadata(&db)?;
+        let (kdf_params, wrapped_dek, key_epoch) = Self::load_vault_metadata(&db)?;
         let kdf_params_blob = bincode::serialize(&kdf_params)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let wrapped_dek_blob = bincode::serialize(&wrapped_dek)
@@ -54,13 +54,24 @@ impl VaultManager {
             wrapped_dek_blob,
             relay_url,
             vault_id,
+            key_epoch,
         })
     }
 
     /// Import a pairing bootstrap into an empty local vault and switch this instance to the
     /// remote vault's KDF parameters and wrapped DEK.
     ///
-    /// The local vault must be unlocked and contain no entries/SSH keys/TOTP secrets.
+    /// The local vault must be unlocked and contain no entries/SSH keys/TOTP
+    /// secrets/registry entities.
+    ///
+    /// The bootstrap's wrap may be epoch-bound (ADR-002: the origin vault
+    /// was rotated at least once) — `unlock_vault_with_epoch` verifies the
+    /// bound epoch as AEAD associated data, and the imported `key_epoch` is
+    /// persisted so a subsequent `open()` on this device verifies against
+    /// the same epoch the wrap was created under. Using the legacy
+    /// (non-epoch) unlock here would make pair-join from any rotated
+    /// origin vault fail outright, and skipping the epoch persist would
+    /// brick this vault on next open even if the unlock itself succeeded.
     pub fn import_pairing_bootstrap(
         &mut self,
         master_password: &[u8],
@@ -72,11 +83,19 @@ impl VaultManager {
 
         let imported_kdf: KdfParams = bincode::deserialize(&bootstrap.kdf_params_blob)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        let imported_wrapped: WrappedKey = bincode::deserialize(&bootstrap.wrapped_dek_blob)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        // Accept both the current 4-field wrap shape and the legacy
+        // (<= v0.8.0) 3-field shape a pre-ADR-002 origin device may still
+        // export.
+        let imported_wrapped = WrappedKey::from_bincode_bytes(&bootstrap.wrapped_dek_blob)
+            .map_err(PasswordManagerError::Crypto)?;
 
         let mut imported_hierarchy = KeyHierarchy::new();
-        imported_hierarchy.unlock_vault(master_password, &imported_kdf, &imported_wrapped)?;
+        imported_hierarchy.unlock_vault_with_epoch(
+            master_password,
+            &imported_kdf,
+            &imported_wrapped,
+            bootstrap.key_epoch,
+        )?;
 
         let db = self.lock_db()?;
         let conn = db.conn();
@@ -90,8 +109,16 @@ impl VaultManager {
         let totp_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM totp_secrets", [], |row| row.get(0))
             .map_err(DatabaseError::Sqlite)?;
+        // Registry entities (ADR-001): their name/notes columns are
+        // DEK-encrypted. Allowing entities to survive a DEK replacement
+        // would leave them permanently undecryptable under the new DEK, so
+        // they must be included in the "must be empty" guard alongside
+        // entries/ssh_keys/totp_secrets.
+        let entity_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+            .map_err(DatabaseError::Sqlite)?;
 
-        if entry_count > 0 || ssh_key_count > 0 || totp_count > 0 {
+        if entry_count > 0 || ssh_key_count > 0 || totp_count > 0 || entity_count > 0 {
             return Err(PasswordManagerError::InvalidInput(
                 "Pair-join target vault must be empty".to_string(),
             ));
@@ -99,15 +126,18 @@ impl VaultManager {
 
         let nonce_blob = bincode::serialize(&imported_wrapped.nonce)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let wrapped_dek_blob = bincode::serialize(&imported_wrapped)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let rows = conn
             .execute(
                 "UPDATE db_metadata
-                 SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3
+                 SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3, key_epoch = ?4
                  WHERE id = 1",
                 rusqlite::params![
                     &bootstrap.kdf_params_blob,
-                    &bootstrap.wrapped_dek_blob,
-                    &nonce_blob
+                    &wrapped_dek_blob,
+                    &nonce_blob,
+                    bootstrap.key_epoch,
                 ],
             )
             .map_err(DatabaseError::Sqlite)?;

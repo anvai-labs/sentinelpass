@@ -1002,17 +1002,30 @@ impl IpcServer {
             IpcMessage::CheckVault => {
                 debug!("IPC: CheckVault");
                 let unlocked = self.vault.is_unlocked().await;
-                IpcMessage::VaultStatusResponse { unlocked }
+                // key_epoch is vault metadata, not key material, but
+                // DaemonVault drops its VaultManager on lock — 0 means
+                // "unknown" (vault not currently loaded), not epoch zero.
+                let key_epoch = self.vault.key_epoch().await.unwrap_or(0);
+                IpcMessage::VaultStatusResponse {
+                    unlocked,
+                    key_epoch,
+                }
             }
             IpcMessage::LockVault => {
                 debug!("IPC: LockVault");
                 self.vault.lock().await;
-                IpcMessage::VaultStatusResponse { unlocked: false }
+                IpcMessage::VaultStatusResponse {
+                    unlocked: false,
+                    key_epoch: 0,
+                }
             }
             IpcMessage::Shutdown => {
                 info!("IPC: Shutdown requested");
                 self.shutdown.store(true, Ordering::Release);
-                IpcMessage::VaultStatusResponse { unlocked: false }
+                IpcMessage::VaultStatusResponse {
+                    unlocked: false,
+                    key_epoch: 0,
+                }
             }
             IpcMessage::SyncNow => {
                 debug!("IPC: SyncNow");
@@ -1079,7 +1092,10 @@ impl IpcServer {
                     }
                 }
             }
-            _ => IpcMessage::VaultStatusResponse { unlocked: false },
+            _ => IpcMessage::VaultStatusResponse {
+                unlocked: false,
+                key_epoch: 0,
+            },
         }
     }
 }

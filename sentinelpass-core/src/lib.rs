@@ -49,6 +49,7 @@ pub use ssh::{SshAgentClient, SshKey, SshKeyGenerator, SshKeyImporter, SshKeySum
 pub use totp::{parse_otpauth_uri, ParsedTotpUri, TotpAlgorithm, TotpCode, TotpSecretMetadata};
 pub use vault::{
     CredentialType, Entry, EntrySummary, PaginatedResult, PaginationParams, VaultManager,
+    VaultMetadataInfo,
 };
 
 // Re-export common types
