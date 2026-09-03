@@ -486,3 +486,9 @@ Changes touching these paths need extra care and explicit reasoning (see `CONTRI
 
 Read `SECURITY.md` and `SECURITY_ARCHITECTURE.md` before submitting security-critical changes.
 Check `TECHNICAL_DEBT.md` for known issues and verified technical debt before duplicating effort.
+
+# Branching & Releases
+
+- **`develop`** is the integration branch: feature branches open PRs into `develop` (CI-gated).
+- **Promotion is explicit**: `develop` -> `main` via a release PR (CI-gated); releases are tagged on `main`.
+- `main` always reflects the last promoted, releasable state.
