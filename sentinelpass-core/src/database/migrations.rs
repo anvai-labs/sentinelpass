@@ -210,7 +210,109 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migrate schema from v3 to v4: add credential type discriminator.
+/// Migrate schema from v4 to v5: two features land in this single
+/// migration — (1) the monotonic `key_epoch` counter on `db_metadata`
+/// (ADR-002): existing vaults start at epoch 1, master-password rotation
+/// increments it, and the epoch is AEAD-bound into the wrapped DEK; and
+/// (2) the credential registry tables (ADR-001): `entities`,
+/// `entity_memberships`, `secret_equality_index`, `entry_lifecycle`,
+/// `registry_state`.
+pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "BEGIN;
+
+        ALTER TABLE db_metadata ADD COLUMN key_epoch INTEGER NOT NULL DEFAULT 1;
+
+        CREATE TABLE IF NOT EXISTS entities (
+            entity_id TEXT PRIMARY KEY,
+            name BLOB NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('broker', 'market_data', 'regulatory_data',
+                'notification', 'database', 'infrastructure', 'application', 'other')),
+            criticality TEXT NOT NULL DEFAULT 'medium'
+                CHECK (criticality IN ('low', 'medium', 'high')),
+            notes BLOB,
+            rotation_interval_days_override INTEGER,
+            created_at INTEGER NOT NULL,
+            modified_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS entity_memberships (
+            membership_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL UNIQUE,
+            entity_id TEXT NOT NULL,
+            label BLOB,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE,
+            FOREIGN KEY (entity_id) REFERENCES entities(entity_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS secret_equality_index (
+            entry_id INTEGER PRIMARY KEY REFERENCES entries(entry_id) ON DELETE CASCADE,
+            tag_cipher BLOB NOT NULL,
+            algorithm_version INTEGER NOT NULL DEFAULT 1,
+            equality_key_id INTEGER NOT NULL DEFAULT 1,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS entry_lifecycle (
+            entry_id INTEGER PRIMARY KEY REFERENCES entries(entry_id) ON DELETE CASCADE,
+            password_rotated_at INTEGER,
+            expires_at INTEGER,
+            rotation_interval_days_override INTEGER,
+            source TEXT NOT NULL DEFAULT 'manual'
+                CHECK (source IN ('manual', 'imported', 'generated', 'tool_managed'))
+        );
+
+        CREATE TABLE IF NOT EXISTS registry_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_entity_memberships_entity_id
+            ON entity_memberships(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_secret_equality_index_updated
+            ON secret_equality_index(updated_at);
+
+        -- Bump schema version
+        UPDATE db_metadata SET version = 5 WHERE id = 1;
+
+        COMMIT;",
+    )
+    .map_err(crate::DatabaseError::Sqlite)?;
+
+    // Re-serialize the wrapped DEK into the current shape. The v0.8.0 blob is
+    // bincode without the `epoch_bound` field; bincode is positional, so old
+    // blobs must be read with the legacy shape and rewritten with the field
+    // present (else every later open hits a deserialization EOF).
+    let wrapped_blob: Vec<u8> = conn
+        .query_row(
+            "SELECT wrapped_dek FROM db_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(crate::DatabaseError::Sqlite)?;
+    // Tolerant read accepts both the legacy 3-field shape and the current
+    // 4-field shape; the rewrite normalizes legacy blobs so every later open
+    // deserializes cleanly.
+    // A blob that is not a recognizable wrap (e.g. a test fixture placeholder)
+    // is left as-is: forcing it here would turn a data quirk into a migration
+    // failure. Real wraps rewrite into the current shape.
+    if let Ok(key) = crate::crypto::keyring::WrappedKey::from_bincode_bytes(&wrapped_blob) {
+        let upgraded_blob = bincode::serialize(&key).map_err(|e| {
+            crate::DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+        })?;
+        conn.execute(
+            "UPDATE db_metadata SET wrapped_dek = ?1 WHERE id = 1",
+            rusqlite::params![&upgraded_blob],
+        )
+        .map_err(crate::DatabaseError::Sqlite)?;
+    }
+
+    Ok(())
+}
+
+/// Migrate schema from v3 to v4: add the credential type discriminator
+/// (`password` | `api_key` | `passkey_reference`) to `entries`.
 pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "BEGIN;
@@ -247,6 +349,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 4 {
         migrate_v3_to_v4(conn)?;
+    }
+
+    if version < 5 {
+        migrate_v4_to_v5(conn)?;
     }
 
     Ok(())
@@ -501,6 +607,104 @@ mod tests {
             )
             .unwrap();
         assert_eq!(credential_type, "password");
+    }
+
+    /// Create a database at v4 (v1 fixture advanced through v4), holding one
+    /// live and one soft-deleted entry.
+    fn create_v4_db() -> rusqlite::Connection {
+        let conn = create_v1_db();
+        migrate_v1_to_v2(&conn).unwrap();
+        migrate_v2_to_v3(&conn).unwrap();
+        migrate_v3_to_v4(&conn).unwrap();
+
+        // One live entry, one soft-deleted entry (soft delete is the only
+        // delete that exists — the registry must cope with both).
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, entry_nonce, auth_tag,
+                created_at, modified_at, credential_type)
+             VALUES (1, X'01', X'02', X'03', X'04', X'05', 0, 0, 'password')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, entry_nonce, auth_tag,
+                created_at, modified_at, credential_type, is_deleted, deleted_at)
+             VALUES (1, X'11', X'12', X'13', X'14', X'15', 0, 0, 'api_key', 1, 123)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrate_v4_to_v5_creates_registry_tables() {
+        let conn = create_v4_db();
+
+        migrate_v4_to_v5(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 5);
+
+        for table in [
+            "entities",
+            "entity_memberships",
+            "secret_equality_index",
+            "entry_lifecycle",
+            "registry_state",
+        ] {
+            let table_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                table_exists,
+                "table {} should exist after v5 migration",
+                table
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_v4_to_v5_preserves_live_and_soft_deleted_entries() {
+        let conn = create_v4_db();
+
+        migrate_v4_to_v5(&conn).unwrap();
+
+        // No entry data is touched by the registry migration; the equality
+        // index is backfilled post-unlock, not here (no key material at
+        // migration time).
+        let live_title: Vec<u8> = conn
+            .query_row(
+                "SELECT title FROM entries WHERE is_deleted = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live_title, vec![0x01]);
+
+        let deleted_row: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT is_deleted, deleted_at FROM entries WHERE credential_type = 'api_key'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(deleted_row, (1, Some(123)));
+
+        // The index starts empty; the post-unlock sweep fills it
+        let index_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM secret_equality_index", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(index_count, 0);
     }
 
     #[test]

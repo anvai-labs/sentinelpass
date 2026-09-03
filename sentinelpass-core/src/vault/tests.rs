@@ -359,7 +359,8 @@ fn test_import_pairing_bootstrap_into_empty_vault() {
         .expect("pairing bootstrap import should succeed for empty vault");
 
     let target_db = target.db.lock().unwrap();
-    let (target_kdf, target_wrapped) = VaultManager::load_vault_metadata(&target_db).unwrap();
+    let (target_kdf, target_wrapped, _target_epoch) =
+        VaultManager::load_vault_metadata(&target_db).unwrap();
     let target_kdf_blob = bincode::serialize(&target_kdf).unwrap();
     let target_wrapped_blob = bincode::serialize(&target_wrapped).unwrap();
     let sync_device_count: i64 = target_db
@@ -777,4 +778,197 @@ fn test_ssh_pagination_locked_vault_fails() {
         matches!(err, PasswordManagerError::VaultLocked),
         "expected VaultLocked"
     );
+}
+
+#[test]
+fn master_password_rotation_rewraps_without_touching_entries() {
+    use crate::CredentialType;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault_path = dir.path().join("rotate.db");
+    let old_pw = b"old-master-password-1";
+    let new_pw = b"new-master-password-2";
+
+    let mut vault = VaultManager::create(&vault_path, old_pw).unwrap();
+    vault
+        .add_entry(&crate::vault::Entry {
+            entry_id: None,
+            title: "Anthropic".to_string(),
+            username: "ops".to_string(),
+            password: "sk-ant-before-rotation".to_string().into(),
+            url: Some("anthropic".to_string()),
+            notes: None,
+            credential_type: CredentialType::ApiKey,
+            created_at: chrono::Utc::now(),
+            modified_at: chrono::Utc::now(),
+            favorite: false,
+        })
+        .unwrap();
+
+    // Same-password rotation is rejected.
+    assert!(vault.change_master_password(old_pw, old_pw).is_err());
+    // Short new password is rejected.
+    assert!(vault.change_master_password(old_pw, b"short").is_err());
+
+    vault.change_master_password(old_pw, new_pw).unwrap();
+
+    // Old password must no longer open the vault...
+    drop(vault);
+    assert!(VaultManager::open(&vault_path, old_pw).is_err());
+
+    // ...and the new password opens it with the pre-rotation entry intact
+    // (same DEK — ciphertexts untouched).
+    let mut reopened = VaultManager::open(&vault_path, new_pw).unwrap();
+    let summaries = reopened.list_entries().unwrap();
+    assert_eq!(summaries.len(), 1);
+    let entry = reopened.get_entry(summaries[0].entry_id).unwrap();
+    assert_eq!(entry.password.as_str(), "sk-ant-before-rotation");
+
+    // Rotation again from the reopened vault keeps working (epoch increments).
+    reopened
+        .change_master_password(new_pw, b"third-master-password")
+        .unwrap();
+}
+
+#[test]
+fn pair_join_from_a_rotated_source_vault_succeeds_and_persists_epoch() {
+    // Regression test for the exact flow `sentinelpass passwd` tells users
+    // to run after rotation ("paired sync devices must re-pair"): the
+    // source vault rotates its master password (epoch 1 -> 2, wrap becomes
+    // epoch-bound), exports a pairing bootstrap under the NEW password, and
+    // a fresh device imports it. Import must (a) succeed — an epoch-bound
+    // wrap requires the epoch-aware unlock, not the legacy one — and (b)
+    // persist the imported epoch, or the joined vault would be unopenable
+    // on its very next `open()`.
+    let dir = tempfile::TempDir::new().unwrap();
+    let source_path = dir.path().join("source.db");
+    let target_path = dir.path().join("target.db");
+    let old_pw = b"source-old-password-1";
+    let new_pw = b"source-new-password-2";
+
+    let mut source = VaultManager::create(&source_path, old_pw).unwrap();
+    source.change_master_password(old_pw, new_pw).unwrap();
+
+    let source_identity = crate::sync::device::DeviceIdentity::generate("Source Device");
+    source
+        .init_sync(
+            "https://relay.example.com",
+            "Source Device",
+            uuid::Uuid::new_v4(),
+            &source_identity,
+        )
+        .unwrap();
+
+    let bootstrap = source.export_pairing_bootstrap().unwrap();
+    assert_eq!(
+        bootstrap.key_epoch, 2,
+        "bootstrap must carry the post-rotation epoch"
+    );
+
+    // The target vault's own pre-import password is irrelevant — import
+    // replaces its KDF params, wrap, and epoch outright — but the caller
+    // must supply the ORIGIN's current password to unwrap the bootstrap.
+    let mut target = VaultManager::create(&target_path, b"target-throwaway-password").unwrap();
+    target
+        .import_pairing_bootstrap(new_pw, &bootstrap)
+        .expect("pair-join from a rotated source vault must succeed");
+    assert_eq!(target.key_epoch().unwrap(), 2);
+    drop(target);
+
+    // The real regression: without persisting the imported epoch, this
+    // reopen would fail (joiner recorded epoch 1 against a wrap bound to 2).
+    let reopened = VaultManager::open(&target_path, new_pw)
+        .expect("joined vault must reopen with the origin's rotated password");
+    assert_eq!(reopened.key_epoch().unwrap(), 2);
+
+    // The DEK carried over from the source vault, so a value encrypted
+    // under it there is decryptable here too (sanity: no source data was
+    // asserted, so instead confirm the vault is genuinely unlocked and
+    // functional post pair-join).
+    let summaries = reopened.list_entries().unwrap();
+    assert!(summaries.is_empty());
+    reopened
+        .add_entry(&Entry {
+            entry_id: None,
+            title: "post-pairjoin".to_string(),
+            username: "user".to_string(),
+            password: "secret".to_string().into(),
+            url: None,
+            notes: None,
+            credential_type: CredentialType::Password,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            favorite: false,
+        })
+        .unwrap();
+}
+
+#[test]
+fn pair_join_rejects_when_local_entities_are_not_empty() {
+    // A local entity's name/notes are encrypted under this vault's DEK;
+    // import_pairing_bootstrap replaces that DEK outright, which would
+    // leave any existing entity permanently undecryptable. The "must be
+    // empty" guard has to cover entities, not just entries/ssh_keys/totp.
+    let password = b"pairing-password";
+
+    let source = VaultManager::create(":memory:", password).unwrap();
+    let source_identity = crate::sync::device::DeviceIdentity::generate("Source Device");
+    source
+        .init_sync(
+            "https://relay.example.com",
+            "Source Device",
+            uuid::Uuid::new_v4(),
+            &source_identity,
+        )
+        .unwrap();
+    let bootstrap = source.export_pairing_bootstrap().unwrap();
+
+    let mut target = VaultManager::create(":memory:", password).unwrap();
+    target
+        .create_entity(
+            "pre-existing-entity",
+            crate::registry::EntityKind::Other,
+            crate::registry::Criticality::Medium,
+            None,
+            None,
+        )
+        .unwrap();
+
+    let err = target
+        .import_pairing_bootstrap(password, &bootstrap)
+        .expect_err("non-empty (entity) vault should be rejected");
+    match err {
+        PasswordManagerError::InvalidInput(msg) => {
+            assert!(msg.contains("must be empty"));
+        }
+        other => panic!("unexpected error: {}", other),
+    }
+}
+
+#[test]
+fn pair_join_from_legacy_unrotated_bootstrap_still_works() {
+    // A bootstrap exported by a vault that has never been rotated has
+    // key_epoch's serde default (1) exercised implicitly here via a normal
+    // (non-rotated) export/import cycle, and the wrap is NOT epoch-bound —
+    // confirming the epoch-aware unlock path is fully backward compatible
+    // with un-rotated vaults (the common case).
+    let password = b"pairing-password";
+    let source = VaultManager::create(":memory:", password).unwrap();
+    let source_identity = crate::sync::device::DeviceIdentity::generate("Source Device");
+    source
+        .init_sync(
+            "https://relay.example.com",
+            "Source Device",
+            uuid::Uuid::new_v4(),
+            &source_identity,
+        )
+        .unwrap();
+    let bootstrap = source.export_pairing_bootstrap().unwrap();
+    assert_eq!(bootstrap.key_epoch, 1);
+
+    let mut target = VaultManager::create(":memory:", password).unwrap();
+    target
+        .import_pairing_bootstrap(password, &bootstrap)
+        .expect("pair-join from an unrotated source vault must succeed");
+    assert_eq!(target.key_epoch().unwrap(), 1);
 }

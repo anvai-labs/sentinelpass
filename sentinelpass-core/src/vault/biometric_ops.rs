@@ -101,11 +101,16 @@ impl VaultManager {
 
         let db = self.lock_db()?;
 
-        // Validate that the provided master password can actually unlock this vault.
-        let (kdf_params, wrapped_dek) = Self::load_vault_metadata(&db)?;
+        // Validate that the provided master password can actually unlock this
+        // vault. Wraps created after a master-password rotation (ADR-002) bind
+        // key_epoch as AEAD associated data, so verification must be
+        // epoch-aware — the legacy unlock_vault() always fails GCM auth on a
+        // rotated wrap and would make it impossible to newly enable biometric
+        // unlock after any rotation.
+        let (kdf_params, wrapped_dek, key_epoch) = Self::load_vault_metadata(&db)?;
         let mut verifier = KeyHierarchy::new();
         verifier
-            .unlock_vault(master_password, &kdf_params, &wrapped_dek)
+            .unlock_vault_with_epoch(master_password, &kdf_params, &wrapped_dek, key_epoch)
             .map_err(PasswordManagerError::Crypto)?;
 
         let dek = verifier.dek()?.clone();

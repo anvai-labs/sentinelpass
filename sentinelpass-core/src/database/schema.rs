@@ -6,7 +6,7 @@ use std::path::Path;
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
-pub const CURRENT_SCHEMA_VERSION: i32 = 4;
+pub const CURRENT_SCHEMA_VERSION: i32 = 5;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -74,7 +74,7 @@ impl Database {
         Ok(())
     }
 
-    /// Initialize the database schema (creates v2 tables for new vaults)
+    /// Initialize the database schema (creates current tables for new vaults)
     pub fn initialize_schema(&self) -> Result<()> {
         self.create_db_metadata_table()?;
         self.create_entries_table()?;
@@ -83,6 +83,7 @@ impl Database {
         self.create_ssh_keys_table()?;
         self.create_totp_secrets_table()?;
         self.create_sync_tables()?;
+        self.create_registry_tables()?;
         self.create_indexes()?;
         self.create_triggers()?;
         Ok(())
@@ -99,7 +100,8 @@ impl Database {
                 dek_nonce BLOB NOT NULL,
                 created_at INTEGER NOT NULL,
                 last_modified INTEGER NOT NULL,
-                biometric_ref TEXT
+                biometric_ref TEXT,
+                key_epoch INTEGER NOT NULL DEFAULT 1
             )",
                 [],
             )
@@ -271,6 +273,68 @@ impl Database {
         Ok(())
     }
 
+    /// Registry tables (ADR-001): entities, membership, the encrypted
+    /// secret-equality index, entry lifecycle, and sweep bookkeeping.
+    ///
+    /// `entities.name`/`notes` and `entity_memberships.label` are
+    /// DEK-encrypted blobs (same field-encryption pattern as entry fields);
+    /// kind/criticality/policy columns are declared policy and stay
+    /// plaintext. `entry_lifecycle` is deliberately a sibling table rather
+    /// than columns on `entries`: the `update_entry_modified_timestamp`
+    /// trigger bumps `sync_version` on entry-field UPDATEs, so rotation
+    /// stamps must not live there (they would fabricate sync churn).
+    fn create_registry_tables(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS entities (
+                entity_id TEXT PRIMARY KEY,
+                name BLOB NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('broker', 'market_data', 'regulatory_data',
+                    'notification', 'database', 'infrastructure', 'application', 'other')),
+                criticality TEXT NOT NULL DEFAULT 'medium'
+                    CHECK (criticality IN ('low', 'medium', 'high')),
+                notes BLOB,
+                rotation_interval_days_override INTEGER,
+                created_at INTEGER NOT NULL,
+                modified_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS entity_memberships (
+                membership_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL UNIQUE,
+                entity_id TEXT NOT NULL,
+                label BLOB,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE,
+                FOREIGN KEY (entity_id) REFERENCES entities(entity_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS secret_equality_index (
+                entry_id INTEGER PRIMARY KEY REFERENCES entries(entry_id) ON DELETE CASCADE,
+                tag_cipher BLOB NOT NULL,
+                algorithm_version INTEGER NOT NULL DEFAULT 1,
+                equality_key_id INTEGER NOT NULL DEFAULT 1,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS entry_lifecycle (
+                entry_id INTEGER PRIMARY KEY REFERENCES entries(entry_id) ON DELETE CASCADE,
+                password_rotated_at INTEGER,
+                expires_at INTEGER,
+                rotation_interval_days_override INTEGER,
+                source TEXT NOT NULL DEFAULT 'manual'
+                    CHECK (source IN ('manual', 'imported', 'generated', 'tool_managed'))
+            );
+
+            CREATE TABLE IF NOT EXISTS registry_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
     fn create_indexes(&self) -> Result<()> {
         let indexes = [
             "CREATE INDEX IF NOT EXISTS idx_entries_vault_id ON entries(vault_id)",
@@ -290,6 +354,9 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_entries_created_at ON entries(created_at DESC)",
             // v4 index for credential category filtering
             "CREATE INDEX IF NOT EXISTS idx_entries_credential_type ON entries(credential_type)",
+            // v5 registry indexes
+            "CREATE INDEX IF NOT EXISTS idx_entity_memberships_entity_id ON entity_memberships(entity_id)",
+            "CREATE INDEX IF NOT EXISTS idx_secret_equality_index_updated ON secret_equality_index(updated_at)",
         ];
         for sql in &indexes {
             self.conn.execute(sql, []).map_err(DatabaseError::Sqlite)?;
@@ -405,6 +472,12 @@ mod tests {
         assert!(table_names.contains(&"failed_attempts".to_string()));
         assert!(table_names.contains(&"ssh_keys".to_string()));
         assert!(table_names.contains(&"totp_secrets".to_string()));
+        // v5 registry tables
+        assert!(table_names.contains(&"entities".to_string()));
+        assert!(table_names.contains(&"entity_memberships".to_string()));
+        assert!(table_names.contains(&"secret_equality_index".to_string()));
+        assert!(table_names.contains(&"entry_lifecycle".to_string()));
+        assert!(table_names.contains(&"registry_state".to_string()));
 
         // Verify indexes exist
         let index_names: Vec<String> = db
@@ -426,6 +499,9 @@ mod tests {
         assert!(index_names.contains(&"idx_entries_created_at".to_string()));
         // v4 index must be present for new vaults too
         assert!(index_names.contains(&"idx_entries_credential_type".to_string()));
+        // v5 registry indexes must be present for new vaults too
+        assert!(index_names.contains(&"idx_entity_memberships_entity_id".to_string()));
+        assert!(index_names.contains(&"idx_secret_equality_index_updated".to_string()));
 
         // Verify triggers exist
         let trigger_names: Vec<String> = db

@@ -1,8 +1,29 @@
 use anyhow::Result;
 use rpassword::prompt_password;
+use sentinelpass_core::daemon::ipc::{default_ipc_socket_path, IpcClient, IpcMessage};
 use sentinelpass_core::VaultManager;
 use std::path::PathBuf;
 use tracing::error;
+
+/// Best-effort daemon reachability probe: attempts a real IPC round trip
+/// (`CheckVault`) rather than checking whether the socket path exists.
+///
+/// Socket-file existence is not a reliable signal cross-platform — on
+/// Windows the default transport is a named pipe, which `Path::exists()`
+/// does not detect — and even on Unix a stale socket file can outlive its
+/// daemon. `None` means "no reachable daemon" (covers: no IPC token yet,
+/// connection refused, any other transport error); `Some((unlocked,
+/// key_epoch))` means a daemon answered.
+async fn probe_daemon() -> Option<(bool, i64)> {
+    let client = IpcClient::new_for_cli(default_ipc_socket_path(), None).ok()?;
+    match client.send(IpcMessage::CheckVault).await.ok()? {
+        IpcMessage::VaultStatusResponse {
+            unlocked,
+            key_epoch,
+        } => Some((unlocked, key_epoch)),
+        _ => None,
+    }
+}
 
 pub fn handle_init(vault_path: PathBuf, dev: bool) -> Result<()> {
     println!("Initializing new SentinelPass vault...");
@@ -125,5 +146,79 @@ pub fn handle_unlock_biometric(vault_path: PathBuf) -> Result<()> {
             anyhow::bail!("Biometric unlock failed: {}", e);
         }
     }
+    Ok(())
+}
+
+/// Rotate the vault master password (ADR-002). Re-wraps the DEK under a new
+/// master key; entry ciphertexts are untouched. Refuses while a daemon may
+/// hold an unlocked copy of the vault.
+pub fn handle_passwd(vault_path: PathBuf) -> Result<()> {
+    if crate::run_async(probe_daemon()).ok().flatten().is_some() {
+        anyhow::bail!(
+            "A SentinelPass daemon appears to be running and reachable. Quit it first — \
+             rotation while a daemon holds the vault is rejected in this release."
+        );
+    }
+
+    let current = prompt_password("Current master password: ")?;
+    let new_password = prompt_password("New master password (min 12 characters): ")?;
+    let confirm = prompt_password("Confirm new master password: ")?;
+    if new_password != confirm {
+        anyhow::bail!("New passwords do not match");
+    }
+    if new_password.len() < 12 {
+        anyhow::bail!("New master password must be at least 12 characters");
+    }
+
+    let mut vault = VaultManager::open(&vault_path, current.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Current password incorrect or vault unavailable: {}", e))?;
+
+    let new_epoch = vault
+        .change_master_password(current.as_bytes(), new_password.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Rotation failed: {}", e))?;
+
+    println!(
+        "✓ Master password rotated (key epoch {}). Entry data was not re-encrypted — \
+         the data encryption key is unchanged; only its wrapper was re-keyed.",
+        new_epoch
+    );
+    println!("Note: biometric unlock keeps working; paired sync devices must re-pair.");
+    Ok(())
+}
+
+/// Show vault metadata without requiring a master password: schema
+/// version and master-password key epoch (ADR-002) are plaintext columns,
+/// never the DEK. Also reports daemon reachability/unlock state (and its
+/// own view of the epoch) on a best-effort basis, since an embedder or a
+/// second device otherwise has no way to learn a rotation happened.
+pub fn handle_status(vault_path: PathBuf) -> Result<()> {
+    println!("Vault: {}", vault_path.display());
+
+    if !vault_path.exists() {
+        println!("  status: no vault at this path");
+        return Ok(());
+    }
+
+    match VaultManager::inspect_metadata(&vault_path) {
+        Ok(info) => {
+            println!("  schema version: {}", info.schema_version);
+            println!("  key epoch:      {}", info.key_epoch);
+        }
+        Err(e) => {
+            println!("  metadata:       unavailable ({})", e);
+        }
+    }
+
+    match crate::run_async(probe_daemon()).ok().flatten() {
+        Some((unlocked, key_epoch)) => {
+            println!(
+                "  daemon:         reachable, {} (epoch {})",
+                if unlocked { "unlocked" } else { "locked" },
+                key_epoch
+            );
+        }
+        None => println!("  daemon:         not reachable"),
+    }
+
     Ok(())
 }

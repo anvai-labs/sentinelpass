@@ -130,6 +130,7 @@ mod tests {
             wrapped_dek_blob: vec![4, 5, 6],
             relay_url: "https://relay.example.com".to_string(),
             vault_id: uuid::Uuid::new_v4(),
+            key_epoch: 3,
         };
 
         let encrypted = encrypt_bootstrap(&pairing_key, &bootstrap).unwrap();
@@ -139,6 +140,7 @@ mod tests {
         assert_eq!(bootstrap.kdf_params_blob, decrypted.kdf_params_blob);
         assert_eq!(bootstrap.wrapped_dek_blob, decrypted.wrapped_dek_blob);
         assert_eq!(bootstrap.vault_id, decrypted.vault_id);
+        assert_eq!(bootstrap.key_epoch, decrypted.key_epoch);
     }
 
     #[cfg(feature = "sync")]
@@ -153,6 +155,7 @@ mod tests {
             wrapped_dek_blob: vec![4, 5, 6],
             relay_url: "https://relay.example.com".to_string(),
             vault_id: uuid::Uuid::new_v4(),
+            key_epoch: 1,
         };
 
         let encrypted = encrypt_bootstrap(&correct_key, &bootstrap).unwrap();

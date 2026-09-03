@@ -211,7 +211,7 @@ impl NativeMessagingHost {
                     )?;
                 }
             }
-            Ok(IpcMessage::VaultStatusResponse { unlocked }) => {
+            Ok(IpcMessage::VaultStatusResponse { unlocked, .. }) => {
                 if msg_type == MSG_SAVE_CREDENTIAL {
                     Self::send_error(
                         request_id,
