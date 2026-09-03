@@ -1,13 +1,6 @@
 name: iOS CI
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - 'sentinelpass-core/**'
-      - 'sentinelpass-mobile-bridge/**'
-      - 'ios/**'
-      - '.github/workflows/ios.yml'
   pull_request:
     branches: [main, develop]
     paths:
