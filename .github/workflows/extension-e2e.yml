@@ -1,12 +1,6 @@
 name: Extension Browser E2E
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - "browser-extension/chrome/**"
-      - "browser-extension/e2e/**"
-      - ".github/workflows/extension-e2e.yml"
   pull_request:
     branches: [main, develop]
     paths:
