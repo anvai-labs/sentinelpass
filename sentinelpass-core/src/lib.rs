@@ -14,6 +14,7 @@ pub mod import_export;
 pub mod keepass;
 pub mod lockout;
 pub mod platform;
+pub mod registry;
 pub mod ssh;
 pub mod sync;
 pub mod totp;
@@ -39,6 +40,10 @@ pub use lockout::{LockoutConfig, LockoutManager, DEFAULT_MAX_ATTEMPTS};
 pub use platform::{
     ensure_config_dir, ensure_data_dir, get_arch, get_binary_name, get_config_dir, get_data_dir,
     get_default_vault_path, get_platform,
+};
+pub use registry::{
+    compute_equality_tag, Criticality, Entity, EntityKind, EntitySummary, EntryPosture,
+    LifecycleSource, RegistryOverview, ReuseCluster, RotationStatus, SweepReport, TagUpsert,
 };
 pub use ssh::{SshAgentClient, SshKey, SshKeyGenerator, SshKeyImporter, SshKeySummary, SshKeyType};
 pub use totp::{parse_otpauth_uri, ParsedTotpUri, TotpAlgorithm, TotpCode, TotpSecretMetadata};

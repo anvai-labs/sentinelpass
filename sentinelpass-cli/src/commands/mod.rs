@@ -3,6 +3,7 @@ pub mod exec;
 pub mod generate;
 pub mod import_export;
 pub mod passkey;
+pub mod registry;
 pub mod secret;
 pub mod ssh;
 pub mod sync;

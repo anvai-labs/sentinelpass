@@ -127,3 +127,42 @@ pub fn handle_unlock_biometric(vault_path: PathBuf) -> Result<()> {
     }
     Ok(())
 }
+
+/// Rotate the vault master password (ADR-002). Re-wraps the DEK under a new
+/// master key; entry ciphertexts are untouched. Refuses while a daemon may
+/// hold an unlocked copy of the vault.
+pub fn handle_passwd(vault_path: PathBuf) -> Result<()> {
+    let socket = sentinelpass_core::daemon::ipc::default_ipc_socket_path();
+    if socket.exists() {
+        anyhow::bail!(
+            "A SentinelPass daemon appears to be running ({}). Quit it first — \
+             rotation while a daemon holds the vault is rejected in this release.",
+            socket.display()
+        );
+    }
+
+    let current = prompt_password("Current master password: ")?;
+    let new_password = prompt_password("New master password (min 12 characters): ")?;
+    let confirm = prompt_password("Confirm new master password: ")?;
+    if new_password != confirm {
+        anyhow::bail!("New passwords do not match");
+    }
+    if new_password.len() < 12 {
+        anyhow::bail!("New master password must be at least 12 characters");
+    }
+
+    let mut vault = VaultManager::open(&vault_path, current.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Current password incorrect or vault unavailable: {}", e))?;
+
+    let new_epoch = vault
+        .change_master_password(current.as_bytes(), new_password.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Rotation failed: {}", e))?;
+
+    println!(
+        "✓ Master password rotated (key epoch {}). Entry data was not re-encrypted — \
+         the data encryption key is unchanged; only its wrapper was re-keyed.",
+        new_epoch
+    );
+    println!("Note: biometric unlock keeps working; paired sync devices must re-pair.");
+    Ok(())
+}

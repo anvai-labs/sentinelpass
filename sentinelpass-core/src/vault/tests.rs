@@ -359,7 +359,8 @@ fn test_import_pairing_bootstrap_into_empty_vault() {
         .expect("pairing bootstrap import should succeed for empty vault");
 
     let target_db = target.db.lock().unwrap();
-    let (target_kdf, target_wrapped) = VaultManager::load_vault_metadata(&target_db).unwrap();
+    let (target_kdf, target_wrapped, _target_epoch) =
+        VaultManager::load_vault_metadata(&target_db).unwrap();
     let target_kdf_blob = bincode::serialize(&target_kdf).unwrap();
     let target_wrapped_blob = bincode::serialize(&target_wrapped).unwrap();
     let sync_device_count: i64 = target_db
@@ -777,4 +778,54 @@ fn test_ssh_pagination_locked_vault_fails() {
         matches!(err, PasswordManagerError::VaultLocked),
         "expected VaultLocked"
     );
+}
+
+#[test]
+fn master_password_rotation_rewraps_without_touching_entries() {
+    use crate::CredentialType;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let vault_path = dir.path().join("rotate.db");
+    let old_pw = b"old-master-password-1";
+    let new_pw = b"new-master-password-2";
+
+    let mut vault = VaultManager::create(&vault_path, old_pw).unwrap();
+    vault
+        .add_entry(&crate::vault::Entry {
+            entry_id: None,
+            title: "Anthropic".to_string(),
+            username: "ops".to_string(),
+            password: "sk-ant-before-rotation".to_string().into(),
+            url: Some("anthropic".to_string()),
+            notes: None,
+            credential_type: CredentialType::ApiKey,
+            created_at: chrono::Utc::now(),
+            modified_at: chrono::Utc::now(),
+            favorite: false,
+        })
+        .unwrap();
+
+    // Same-password rotation is rejected.
+    assert!(vault.change_master_password(old_pw, old_pw).is_err());
+    // Short new password is rejected.
+    assert!(vault.change_master_password(old_pw, b"short").is_err());
+
+    vault.change_master_password(old_pw, new_pw).unwrap();
+
+    // Old password must no longer open the vault...
+    drop(vault);
+    assert!(VaultManager::open(&vault_path, old_pw).is_err());
+
+    // ...and the new password opens it with the pre-rotation entry intact
+    // (same DEK — ciphertexts untouched).
+    let mut reopened = VaultManager::open(&vault_path, new_pw).unwrap();
+    let summaries = reopened.list_entries().unwrap();
+    assert_eq!(summaries.len(), 1);
+    let entry = reopened.get_entry(summaries[0].entry_id).unwrap();
+    assert_eq!(entry.password.as_str(), "sk-ant-before-rotation");
+
+    // Rotation again from the reopened vault keeps working (epoch increments).
+    reopened
+        .change_master_password(new_pw, b"third-master-password")
+        .unwrap();
 }

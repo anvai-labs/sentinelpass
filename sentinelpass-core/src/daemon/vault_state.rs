@@ -4,8 +4,8 @@
 //! and responding to credential requests.
 
 use crate::{
-    get_default_vault_path, CredentialType, DatabaseError, PasswordManagerError, Result,
-    VaultManager,
+    get_default_vault_path, CredentialType, DatabaseError, LifecycleSource, PasswordManagerError,
+    Result, VaultManager,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as SyncMutex};
@@ -477,6 +477,11 @@ impl DaemonVault {
             existing_entry.password = value.to_string().into();
             existing_entry.modified_at = now;
             vault.update_entry(entry_id, &existing_entry)?;
+            // Stamp tool-managed source (ADR-001): deploy-time re-injection
+            // of an unchanged value produces an unchanged tag (no rotation
+            // stamp), and age-based rotation statuses are suppressed for
+            // these entries.
+            let _ = vault.set_lifecycle_source(entry_id, LifecycleSource::ToolManaged);
             info!(
                 "External secret updated for domain: {} (entry_id={})",
                 domain, entry_id
@@ -496,7 +501,8 @@ impl DaemonVault {
             modified_at: now,
             favorite: false,
         };
-        vault.add_entry(&entry)?;
+        let new_entry_id = vault.add_entry(&entry)?;
+        let _ = vault.set_lifecycle_source(new_entry_id, LifecycleSource::ToolManaged);
         info!("External secret saved for domain: {}", domain);
         Ok(())
     }
