@@ -210,16 +210,18 @@ pub fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migrate schema from v3 to v4: add credential type discriminator.
-/// Migrate schema from v4 to v5: add the monotonic `key_epoch` counter to
-/// `db_metadata` (ADR-002). Existing vaults start at epoch 1; master-password
-/// rotation increments it, and the epoch is AEAD-bound into the wrapped DEK.
+/// Migrate schema from v4 to v5: two features land in this single
+/// migration — (1) the monotonic `key_epoch` counter on `db_metadata`
+/// (ADR-002): existing vaults start at epoch 1, master-password rotation
+/// increments it, and the epoch is AEAD-bound into the wrapped DEK; and
+/// (2) the credential registry tables (ADR-001): `entities`,
+/// `entity_memberships`, `secret_equality_index`, `entry_lifecycle`,
+/// `registry_state`.
 pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "BEGIN;
 
         ALTER TABLE db_metadata ADD COLUMN key_epoch INTEGER NOT NULL DEFAULT 1;
-        UPDATE db_metadata SET version = 5 WHERE id = 1;
 
         CREATE TABLE IF NOT EXISTS entities (
             entity_id TEXT PRIMARY KEY,
@@ -309,6 +311,8 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Migrate schema from v3 to v4: add the credential type discriminator
+/// (`password` | `api_key` | `passkey_reference`) to `entries`.
 pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "BEGIN;

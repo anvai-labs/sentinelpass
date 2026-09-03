@@ -93,7 +93,8 @@ pub enum IpcMessage {
     },
     /// Defined for protocol completeness; the daemon currently rejects
     /// deletion because third-party-created entries have no ownership
-    /// tracking yet (planned for schema v5).
+    /// tracking yet (schema v5 shipped registry ownership groundwork; the
+    /// delete decision itself stays deliberately rejected per ADR-001 D1).
     DeleteSecret {
         client_id: String,
         domain: String,
@@ -117,6 +118,11 @@ pub enum IpcMessage {
     CheckVault,
     VaultStatusResponse {
         unlocked: bool,
+        /// Master-password rotation generation of the vault (ADR-002).
+        /// serde default keeps pre-epoch clients deserializing; 0 means
+        /// the responder could not read metadata.
+        #[serde(default)]
+        key_epoch: i64,
     },
     LockVault,
     Shutdown,
@@ -418,14 +424,21 @@ mod tests {
 
     #[test]
     fn test_vault_status_response_serialization() {
-        let response = IpcMessage::VaultStatusResponse { unlocked: true };
+        let response = IpcMessage::VaultStatusResponse {
+            unlocked: true,
+            key_epoch: 1,
+        };
 
         let serialized = serde_json::to_string(&response).unwrap();
         let deserialized: IpcMessage = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
-            IpcMessage::VaultStatusResponse { unlocked } => {
+            IpcMessage::VaultStatusResponse {
+                unlocked,
+                key_epoch,
+            } => {
                 assert!(unlocked);
+                assert_eq!(key_epoch, 1);
             }
             _ => panic!("Wrong response type"),
         }

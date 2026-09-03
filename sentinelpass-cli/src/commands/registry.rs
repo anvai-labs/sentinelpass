@@ -32,6 +32,11 @@ pub fn handle_registry_command(vault_path: PathBuf, command: &RegistryCommands) 
             label,
         } => handle_assign(vault_path, *entry_id, entity, label.as_deref()),
         RegistryCommands::MarkRotated { entry_id } => handle_mark_rotated(vault_path, *entry_id),
+        RegistryCommands::Unassign { entry_id } => handle_unassign(vault_path, *entry_id),
+        RegistryCommands::ExpiresAt {
+            entry_id,
+            timestamp,
+        } => handle_expires_at(vault_path, *entry_id, *timestamp),
         RegistryCommands::Status => handle_status(vault_path),
         RegistryCommands::Report { only_issues } => handle_report(vault_path, *only_issues),
     }
@@ -145,6 +150,23 @@ fn handle_mark_rotated(vault_path: PathBuf, entry_id: i64) -> Result<()> {
         "Entry {} marked as rotated (password_rotated_at = now)",
         entry_id
     );
+    Ok(())
+}
+
+fn handle_unassign(vault_path: PathBuf, entry_id: i64) -> Result<()> {
+    let vault = open_vault(vault_path)?;
+    vault.unassign_entry(entry_id)?;
+    println!("Entry {} unassigned from its entity", entry_id);
+    Ok(())
+}
+
+fn handle_expires_at(vault_path: PathBuf, entry_id: i64, timestamp: Option<i64>) -> Result<()> {
+    let vault = open_vault(vault_path)?;
+    vault.set_expires_at(entry_id, timestamp)?;
+    match timestamp {
+        Some(ts) => println!("Entry {} expiry set to unix timestamp {}", entry_id, ts),
+        None => println!("Entry {} expiry cleared", entry_id),
+    }
     Ok(())
 }
 

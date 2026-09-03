@@ -507,6 +507,15 @@ impl DaemonVault {
         Ok(())
     }
 
+    /// Current key epoch (ADR-002); `None` when no vault is loaded. Vault
+    /// metadata, not key material — readable while locked.
+    pub async fn key_epoch(&self) -> Option<i64> {
+        let vault_guard = self.vault.lock().await;
+        vault_guard
+            .as_ref()
+            .and_then(|vault| vault.key_epoch().ok())
+    }
+
     /// Get sync status from the vault database.
     pub async fn get_sync_status(&self) -> Result<crate::sync::models::SyncStatus> {
         let vault_guard = self.vault.lock().await;
