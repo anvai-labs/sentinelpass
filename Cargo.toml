@@ -13,7 +13,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 authors = ["VJ Singh <vijay@anvaiops.com>"]
 license = "Apache-2.0"
