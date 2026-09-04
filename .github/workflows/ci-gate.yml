@@ -1,0 +1,80 @@
+name: CI Gate
+
+# Aggregate required-check gate. Branch protection on `main`/`develop` requires
+# ONLY the "Gate" check from this workflow. The heavy workflows (Rust CI, Build
+# All Platforms, Security CI, Android/iOS CI, Extension E2E) are path-filtered
+# and no longer individually required — GitHub would otherwise strand PRs whose
+# changes match no path filter ("Expected — waiting for status" forever).
+#
+# Semantics:
+# - Any check run on the PR's merge commit that concludes failure/cancelled/
+#   timed_out/startup_failure/action_required fails this gate (fast).
+# - The gate passes once every check run is completed AND a registration grace
+#   period has elapsed. The grace covers the window before other workflows
+#   register their check runs; workflows skipped by path filters never register
+#   at all, so docs-only PRs go green after ~GRACE_SECONDS with zero heavy CI.
+# - New PR-triggered workflows are enforced automatically — no list to maintain.
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+permissions: {}
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.pull_request.head.sha }} # check runs for PR workflows attach to the head SHA (verified: merge-ref sha has none)
+      GRACE_SECONDS: 300
+      POLL_SECONDS: 20
+      DEADLINE_SECONDS: 7200
+    steps:
+      - name: Aggregate check results for this merge commit
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          deadline=$(( start + DEADLINE_SECONDS ))
+
+          # Let our own check run register so we can exclude it below.
+          sleep 10
+
+          while :; do
+            now=$(date +%s)
+            if [ "$now" -gt "$deadline" ]; then
+              echo "::error::CI Gate deadline (${DEADLINE_SECONDS}s) exceeded without all checks completing"
+              exit 1
+            fi
+
+            gh api \
+              --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+              --jq '.check_runs[]
+                    | select(.name != "Gate")
+                    | [.name, .status, (.conclusion // "-")]
+                    | @tsv' > checks.tsv || true
+
+            bad=$(awk -F'\t' '$3 == "failure" || $3 == "cancelled" || $3 == "timed_out" || $3 == "startup_failure" || $3 == "action_required"' checks.tsv)
+            if [ -n "$bad" ]; then
+              echo "::error::Failing check runs on ${SHA}:"
+              printf '%s\n' "$bad"
+              exit 1
+            fi
+
+            pending=$(awk -F'\t' '$2 != "completed"' checks.tsv | wc -l)
+            total=$(wc -l < checks.tsv)
+            elapsed=$(( now - start ))
+
+            if [ "$pending" -eq 0 ] && [ "$elapsed" -ge "$GRACE_SECONDS" ]; then
+              echo "All ${total} check run(s) completed without failures (grace ${GRACE_SECONDS}s satisfied)."
+              echo "CI Gate: green"
+              exit 0
+            fi
+
+            echo "elapsed=${elapsed}s pending=${pending} total=${total} — waiting ${POLL_SECONDS}s"
+            sleep "$POLL_SECONDS"
+          done

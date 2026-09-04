@@ -16,6 +16,12 @@ on:
       - 'scripts/**'
       - '.github/actions/**'
       - '.github/workflows/build-all.yml'
+    paths-ignore:
+      # docs-only PRs must not re-run platform builds, even when a README
+      # inside a source directory (sentinelpass-*/, browser-extension/)
+      # matches the allowlist above
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       platform:
