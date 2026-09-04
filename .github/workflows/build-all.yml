@@ -16,12 +16,14 @@ on:
       - 'scripts/**'
       - '.github/actions/**'
       - '.github/workflows/build-all.yml'
-    paths-ignore:
-      # docs-only PRs must not re-run platform builds, even when a README
-      # inside a source directory (sentinelpass-*/, browser-extension/)
-      # matches the allowlist above
-      - '**/*.md'
-      - 'docs/**'
+      # Negations (must come last; later patterns take precedence): docs-only
+      # PRs must not re-run platform builds, even when a README inside a
+      # source directory (sentinelpass-*/, browser-extension/) matches the
+      # allowlist above. NOTE: `paths:` and `paths-ignore:` cannot be
+      # combined under one event — GitHub rejects the workflow entirely
+      # (verified: stub failure runs with zero jobs on develop after #94).
+      - '!**/*.md'
+      - '!docs/**'
   workflow_dispatch:
     inputs:
       platform:

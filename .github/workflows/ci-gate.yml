@@ -7,19 +7,34 @@ name: CI Gate
 # changes match no path filter ("Expected — waiting for status" forever).
 #
 # Semantics:
-# - Any check run on the PR's merge commit that concludes failure/cancelled/
-#   timed_out/startup_failure/action_required fails this gate (fast).
+# - Any check run on the PR's head SHA (other than Gate itself) that concludes
+#   failure/cancelled/timed_out/startup_failure/action_required fails this gate
+#   (fast).
 # - The gate passes once every check run is completed AND a registration grace
 #   period has elapsed. The grace covers the window before other workflows
 #   register their check runs; workflows skipped by path filters never register
 #   at all, so docs-only PRs go green after ~GRACE_SECONDS with zero heavy CI.
-# - New PR-triggered workflows are enforced automatically — no list to maintain.
+# - Fail-closed floor: if the PR changes anything besides markdown/docs, the
+#   core CI checks in EXPECTED_CHECKS MUST be present among the check runs
+#   before the gate goes green. A workflow that broke, was disabled, or
+#   mis-filters itself out of a non-docs PR can no longer hide behind
+#   "absent = fine" — the gate waits until deadline and then fails.
+# - API failures during polling are never interpreted as "no pending checks":
+#   each poll writes to a temp file and is only trusted on success.
+# - New PR-triggered workflows are enforced automatically — no list to maintain
+#   (any failure anywhere fails the gate; only the core floor is explicit).
 
 on:
   pull_request:
     branches: [main, develop]
 
-permissions: {}
+permissions:
+  checks: read
+  pull-requests: read
+
+concurrency:
+  group: ci-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   gate:
@@ -28,16 +43,37 @@ jobs:
     timeout-minutes: 130
     env:
       GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
       SHA: ${{ github.event.pull_request.head.sha }} # check runs for PR workflows attach to the head SHA (verified: merge-ref sha has none)
       GRACE_SECONDS: 300
+      MISSING_TOLERANCE_SECONDS: 900 # extra wait for core checks to register (Actions queue delay) before failing closed
       POLL_SECONDS: 20
       DEADLINE_SECONDS: 7200
+      # Checks that MUST register whenever the diff is not docs-only. Mirrors
+      # the first-tier jobs of rust.yml and security.yml (both use the same
+      # paths-ignore docs filter this gate's docs_only predicate reproduces).
+      EXPECTED_CHECKS: 'Check Rust Formatting|Clippy Lint|TypeScript TDD|Build (ubuntu-latest)|Run Tests (ubuntu-latest)|RustSec Audit'
     steps:
-      - name: Aggregate check results for this merge commit
+      - name: Aggregate check results for this PR
         run: |
           set -euo pipefail
           start=$(date +%s)
           deadline=$(( start + DEADLINE_SECONDS ))
+
+          # Docs-only PRs (every changed file *.md or under docs/) match the
+          # paths-ignore filters on rust.yml/security.yml, so no core checks
+          # are expected for them. Anything else must produce the full set.
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+            --jq '.[].filename' > pr_files.txt
+          non_docs=$(awk '!( $0 ~ /^docs\// || $0 ~ /\.md$/ )' pr_files.txt)
+          if [ -n "$non_docs" ]; then
+            docs_only=false
+          else
+            docs_only=true
+          fi
+          echo "PR #${PR_NUMBER}: docs_only=${docs_only} ($(wc -l < pr_files.txt | tr -d ' ') changed files)"
 
           # Let our own check run register so we can exclude it below.
           sleep 10
@@ -49,14 +85,22 @@ jobs:
               exit 1
             fi
 
-            gh api \
-              --paginate \
-              -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
-              --jq '.check_runs[]
-                    | select(.name != "Gate")
-                    | [.name, .status, (.conclusion // "-")]
-                    | @tsv' > checks.tsv || true
+            # Poll; only trust successful API responses. A failed poll (rate
+            # limit, 5xx, network) must never look like "zero pending checks".
+            if gh api \
+                 --paginate \
+                 -H "Accept: application/vnd.github+json" \
+                 "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+                 --jq '.check_runs[]
+                       | select(.name != "Gate")
+                       | [.name, .status, (.conclusion // "-")]
+                       | @tsv' > checks.tsv.tmp 2>/dev/null; then
+              mv checks.tsv.tmp checks.tsv
+            else
+              echo "::warning::check-runs poll failed — retrying in ${POLL_SECONDS}s (not treating as green)"
+              sleep "$POLL_SECONDS"
+              continue
+            fi
 
             bad=$(awk -F'\t' '$3 == "failure" || $3 == "cancelled" || $3 == "timed_out" || $3 == "startup_failure" || $3 == "action_required"' checks.tsv)
             if [ -n "$bad" ]; then
@@ -65,16 +109,41 @@ jobs:
               exit 1
             fi
 
-            pending=$(awk -F'\t' '$2 != "completed"' checks.tsv | wc -l)
-            total=$(wc -l < checks.tsv)
+            pending=$(awk -F'\t' '$2 != "completed"' checks.tsv | wc -l | tr -d ' ')
+            total=$(wc -l < checks.tsv | tr -d ' ')
             elapsed=$(( now - start ))
 
+            # Fail-closed floor: core checks must have actually registered.
+            missing=""
+            missing_n=0
+            if [ "$docs_only" = false ]; then
+              IFS='|' read -r -a expected <<< "$EXPECTED_CHECKS"
+              for name in "${expected[@]}"; do
+                if ! awk -F'\t' -v n="$name" '$1 == n { found=1 } END { exit !found }' checks.tsv; then
+                  missing="${missing}${name}\n"
+                  missing_n=$(( missing_n + 1 ))
+                fi
+              done
+            fi
+
             if [ "$pending" -eq 0 ] && [ "$elapsed" -ge "$GRACE_SECONDS" ]; then
-              echo "All ${total} check run(s) completed without failures (grace ${GRACE_SECONDS}s satisfied)."
+              if [ -n "$missing" ]; then
+                if [ "$elapsed" -ge "$(( GRACE_SECONDS + MISSING_TOLERANCE_SECONDS ))" ]; then
+                  echo "::error::Core CI checks never registered for this non-docs PR:"
+                  printf '%b' "$missing"
+                  echo "::error::A required workflow is broken, disabled, or filtered itself out. The gate stays red."
+                  exit 1
+                fi
+                echo "all reported checks done but core checks still missing (queue delay?) — tolerating until $(( GRACE_SECONDS + MISSING_TOLERANCE_SECONDS ))s"
+                sleep "$POLL_SECONDS"
+                continue
+              fi
+              echo "All ${total} check run(s) completed without failures; all expected core checks present (grace ${GRACE_SECONDS}s satisfied)."
               echo "CI Gate: green"
               exit 0
             fi
 
-            echo "elapsed=${elapsed}s pending=${pending} total=${total} — waiting ${POLL_SECONDS}s"
+            missing_n=${missing_n:-0}
+            echo "elapsed=${elapsed}s pending=${pending} total=${total} missing_core=${missing_n} — waiting ${POLL_SECONDS}s"
             sleep "$POLL_SECONDS"
           done
