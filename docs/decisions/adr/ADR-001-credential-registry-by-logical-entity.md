@@ -5,7 +5,7 @@
 | **Status** | Accepted (rev 2, after adversarial review — see git history). Shipped: P1 (schema v5, core, CLI) in v0.8.1; P2 (desktop posture dashboard) on `develop` |
 | **Date** | 2026-09-02 |
 | **Area** | `sentinelpass-core` (schema v5, crypto, vault, sync apply), `sentinelpass-cli`, `sentinelpass-ui` |
-| **Related** | [TECHNICAL_DEBT.md](../../../../TECHNICAL_DEBT.md) deferred item 1 (schema v5 typed payloads + entry ownership; the "real `DeleteSecret`" rider is **not** absorbed — see D1); `crypto/health.rs` password-health analysis; v0.8.0 `sentinelpass exec`/`env` secret serving + per-client allowlist grants |
+| **Related** | [TECHNICAL_DEBT.md](../../../TECHNICAL_DEBT.md) deferred item 1 (schema v5 typed payloads + entry ownership; the "real `DeleteSecret`" rider is **not** absorbed — see D1); `crypto/health.rs` password-health analysis; v0.8.0 `sentinelpass exec`/`env` secret serving + per-client allowlist grants |
 
 ## Summary
 

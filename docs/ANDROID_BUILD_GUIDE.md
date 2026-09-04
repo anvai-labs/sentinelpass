@@ -360,6 +360,6 @@ After wiring up:
 ## Resources
 
 - [Jetpack Compose Documentation](https://developer.android.com/jetpack/compose)
-- [Kotlin JNI](https://developer.android.com/ndk/guides/cpp-apis)
+- [Kotlin JNI](https://developer.android.com/training/articles/perf-jni)
 - [BiometricPrompt](https://developer.android.com/training/sign-in/biometric-auth)
 - [Coroutines Guide](https://developer.android.com/kotlin/coroutines)

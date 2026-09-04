@@ -6,7 +6,7 @@ Secure, local-first password manager browser extensions for Chrome and Firefox.
 
 - **[Store Submission Guide](./STORE_SUBMISSION_GUIDE.md)** — Step-by-step submission instructions
 - **[Security Checklist](./SUBMISSION_CHECKLIST.md)** — Security hardening verification
-- **[Project README](../../README.md)** — Main project documentation
+- **[Project README](../README.md)** — Main project documentation
 
 ## Current Version
 
