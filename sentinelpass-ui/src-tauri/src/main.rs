@@ -888,7 +888,10 @@ async fn get_registry_overview(
 ) -> Result<RegistryOverview, String> {
     let vault_manager = state.vault_manager.lock().unwrap();
     let vault = vault_manager.as_ref().ok_or("Vault not unlocked")?;
-    if vault.registry_backfill_needed().map_err(|e| e.to_string())? {
+    if vault
+        .registry_backfill_needed()
+        .map_err(|e| e.to_string())?
+    {
         vault.sweep_registry_index().map_err(|e| e.to_string())?;
     }
     vault
