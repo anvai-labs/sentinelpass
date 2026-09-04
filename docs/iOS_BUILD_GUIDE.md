@@ -280,7 +280,7 @@ Records are stored in CloudKit's private database:
 ## Resources
 
 - [SwiftUI Documentation](https://developer.apple.com/documentation/swiftui)
-- [Swift-C Interop](https://developer.apple.com/documentation/swift/importing-c-headers-into-swift)
+- [Swift-C Interop](https://www.swift.org/documentation/cxx-interop/)
 - [Biometric Authentication](https://developer.apple.com/documentation/localauthentication)
 - [CloudKit Documentation](https://developer.apple.com/documentation/cloudkit)
 - [CloudKit Quick Start](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitQuickStart/)

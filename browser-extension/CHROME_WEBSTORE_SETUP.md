@@ -167,6 +167,6 @@ This will trigger the workflow with the version extracted from the tag.
 
 ## Additional Resources
 
-- [Chrome Web Store API Documentation](https://developer.chrome.com/docs/webstore/using-webstore-api/)
+- [Chrome Web Store API Documentation](https://developer.chrome.com/docs/webstore/api)
 - [Chrome Extension Publishing Best Practices](https://developer.chrome.com/docs/webstore/publish/)
 - [Google OAuth 2.0 Documentation](https://developers.google.com/identity/protocols/oauth2)

@@ -1672,7 +1672,7 @@ class RelaySyncEngine {
 
 ## References
 
-- [iOS Password AutoFill Guidelines](https://developer.apple.com/documentation/passwords)
+- [iOS Password AutoFill Guidelines](https://developer.apple.com/documentation/authenticationservices)
 - [Android Autofill Framework](https://developer.android.com/guide/topics/text/autofill)
 - [Windows Credential Provider API](https://docs.microsoft.com/en-us/windows/win32/api/credentialprovider/)
 - [macOS Accessibility API](https://developer.apple.com/documentation/appkit/accessibility)

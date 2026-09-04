@@ -94,6 +94,10 @@ Planning principles:
   - weak/reused password detection,
   - age indicators,
   - local security score.
+  - *Status:* delivered by the credential registry (ADR-001) — reuse clusters
+    and rotation posture in the CLI and desktop UI, shipped from v0.8.1 — plus
+    master password rotation (ADR-002, v0.8.1). Local security score remains
+    open.
 - Import/export improvements:
   - KeePass and Bitwarden first,
   - conflict and validation UX.
