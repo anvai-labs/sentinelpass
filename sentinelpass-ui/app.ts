@@ -23,6 +23,7 @@ import {
     vaultScreen, entryList, searchInput, noSelection, entryDetail
 } from './state.js';
 import { showToast, togglePasswordVisibility, copyToClipboard } from './utils.js';
+import { showRegistryDashboard, loadRegistryBadgeCount } from './registry.js';
 import {
     setTotpButtonState, closeTotpModal, copyTotpForEntry,
     openTotpModal, saveTotpForEntry, removeTotpForEntry
@@ -172,6 +173,12 @@ function setupEventListeners() {
     if (extensionsBtn) {
         extensionsBtn.addEventListener('click', openExtensionModal);
     }
+
+    // Registry posture dashboard
+    const registryBtn = document.getElementById('registry-btn');
+    if (registryBtn) {
+        registryBtn.addEventListener('click', showRegistryDashboard);
+    }
     document.getElementById('close-extension-modal')?.addEventListener('click', closeExtensionModal);
     document.getElementById('reregister-native-host')?.addEventListener('click', reregisterNativeHost);
     document.getElementById('open-chrome-extensions')?.addEventListener('click', () => openBrowserExtensionsPage('chrome'));
@@ -199,6 +206,7 @@ async function checkVaultUnlocked() {
         if (unlocked) {
             showVaultScreen();
             loadEntries();
+            void loadRegistryBadgeCount();
         }
     } catch (error) {
         console.error('Error checking vault status:', error);
@@ -406,6 +414,7 @@ async function handlePasswordSubmit(e) {
             await invoke('create_vault', { masterPassword: password });
             showToast('Vault created successfully!', 'success');
             showVaultScreen();
+            void loadRegistryBadgeCount();
             await refreshBiometricStatus();
             await refreshDaemonStatus();
         } catch (error) {
@@ -422,6 +431,7 @@ async function handlePasswordSubmit(e) {
             showToast(unlockMessage || 'Vault unlocked successfully!', unlockType);
             showVaultScreen();
             loadEntries();
+            void loadRegistryBadgeCount();
             await refreshBiometricStatus();
             const status = await refreshDaemonStatus();
             console.log('[SentinelPass UI] daemon_status after unlock:', status);
@@ -447,6 +457,7 @@ async function unlockVaultWithBiometric() {
         showToast(unlockMessage || 'Vault unlocked with biometric authentication!', unlockType);
         showVaultScreen();
         loadEntries();
+        void loadRegistryBadgeCount();
         await refreshBiometricStatus();
         const status = await refreshDaemonStatus();
         console.log('[SentinelPass UI] daemon_status after biometric unlock:', status);

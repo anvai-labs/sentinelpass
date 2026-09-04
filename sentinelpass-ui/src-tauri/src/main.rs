@@ -2,7 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use sentinelpass_core::daemon::{default_ipc_socket_path, IpcClient, IpcMessage};
-use sentinelpass_core::{parse_otpauth_uri, Entry, EntrySummary, TotpAlgorithm, VaultManager};
+use sentinelpass_core::{
+    parse_otpauth_uri, Entity, Entry, EntrySummary, RegistryOverview, TotpAlgorithm, VaultManager,
+};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
@@ -873,6 +875,35 @@ async fn delete_entry(entry_id: i64, state: State<'_, AppState>) -> Result<(), S
     vault.delete_entry(entry_id).map_err(|e| e.to_string())
 }
 
+// Command: Registry posture overview (ADR-001 P2). `include_strength=false`
+// is a cheap, no-decrypt pass (used for the header badge count);
+// `include_strength=true` decrypts every eligible secret for strength
+// scoring (used when the dashboard panel is actually opened). Backfill is
+// not automatic inside `registry_overview()` — mirrors the CLI's own
+// `ensure_index()` orchestration (commands/registry.rs) explicitly here.
+#[tauri::command]
+async fn get_registry_overview(
+    include_strength: bool,
+    state: State<'_, AppState>,
+) -> Result<RegistryOverview, String> {
+    let vault_manager = state.vault_manager.lock().unwrap();
+    let vault = vault_manager.as_ref().ok_or("Vault not unlocked")?;
+    if vault.registry_backfill_needed().map_err(|e| e.to_string())? {
+        vault.sweep_registry_index().map_err(|e| e.to_string())?;
+    }
+    vault
+        .registry_overview(include_strength)
+        .map_err(|e| e.to_string())
+}
+
+// Command: List registered entities
+#[tauri::command]
+async fn list_entities(state: State<'_, AppState>) -> Result<Vec<Entity>, String> {
+    let vault_manager = state.vault_manager.lock().unwrap();
+    let vault = vault_manager.as_ref().ok_or("Vault not unlocked")?;
+    vault.list_entities().map_err(|e| e.to_string())
+}
+
 // Command: Generate password
 #[tauri::command]
 async fn generate_password(length: usize, include_symbols: bool) -> String {
@@ -1285,6 +1316,8 @@ fn main() {
             add_entry,
             update_entry,
             delete_entry,
+            get_registry_overview,
+            list_entities,
             generate_password,
             check_password_strength,
             has_totp,

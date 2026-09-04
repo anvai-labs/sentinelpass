@@ -780,3 +780,117 @@ body {
 ::-webkit-scrollbar-thumb:hover {
     background: var(--color-surface-hover);
 }
+
+/* Registry posture dashboard (ADR-001 P2) */
+
+#registry-btn {
+    position: relative;
+}
+
+.registry-badge {
+    position: absolute;
+    top: 0.1rem;
+    right: 0.1rem;
+    padding: 0 0.35rem;
+    min-width: 1.1rem;
+    height: 1.1rem;
+    line-height: 1.1rem;
+    text-align: center;
+    font-size: 0.65rem;
+    background: var(--color-danger);
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid rgb(154 180 206 / 0.3);
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+.status-badge.status-ok {
+    border-color: rgb(16 185 129 / 0.5);
+    color: var(--color-success);
+}
+
+.status-badge.status-due-soon {
+    border-color: rgb(245 158 11 / 0.5);
+    color: var(--color-warning);
+}
+
+.status-badge.status-weak {
+    border-color: var(--color-warning);
+    background: rgb(245 158 11 / 0.18);
+    color: var(--color-warning);
+}
+
+.status-badge.status-reused {
+    border-color: rgb(217 119 6 / 0.6);
+    background: rgb(217 119 6 / 0.2);
+    color: #f59e0b;
+}
+
+.status-badge.status-overdue {
+    border-color: var(--color-danger);
+    background: rgb(239 68 68 / 0.18);
+    color: var(--color-danger);
+}
+
+.registry-finding-row,
+.registry-entity-row {
+    padding: 0.75rem 1rem;
+    background: var(--color-background);
+    border-radius: var(--radius);
+    margin-bottom: 0.5rem;
+}
+
+.registry-finding-row-header,
+.registry-entity-row-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    cursor: pointer;
+}
+
+.registry-finding-title {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.registry-finding-reasons {
+    margin-top: 0.4rem;
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+}
+
+.registry-disclosure-toggle {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0;
+    text-decoration: underline;
+}
+
+.registry-cluster-members {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--color-border);
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+}
+
+.registry-list-empty {
+    text-align: center;
+    padding: 2rem;
+    color: var(--color-text-muted);
+}
