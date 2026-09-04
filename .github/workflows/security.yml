@@ -3,6 +3,9 @@ name: Security CI
 on:
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:
@@ -34,7 +37,17 @@ jobs:
       - name: Install root dependencies
         run: npm ci
       - name: Run npm audit (high+)
-        run: npm audit --audit-level=high
+        # registry.npmjs.org audit endpoint 503s intermittently (seen 3x in
+        # one day); retry before concluding there is a real finding
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1
 
   npm_audit_e2e:
     name: npm Audit (Extension E2E)
@@ -51,7 +64,16 @@ jobs:
         run: npm ci
       - name: Run npm audit (high+)
         working-directory: browser-extension/e2e
-        run: npm audit --audit-level=high
+        # same registry-flake retry as the root audit job
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1
 
   trivy:
     name: Trivy Filesystem Scan

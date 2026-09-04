@@ -18,7 +18,8 @@ const emittedFiles = [
   'sentinelpass-ui/state.js',
   'sentinelpass-ui/utils.js',
   'sentinelpass-ui/totp.js',
-  'sentinelpass-ui/entries.js'
+  'sentinelpass-ui/entries.js',
+  'sentinelpass-ui/registry.js'
 ];
 
 for (const relativePath of emittedFiles) {
@@ -38,6 +39,7 @@ const uiFilesToSync = [
   ['sentinelpass-ui/utils.js', 'sentinelpass-ui/dist/utils.js'],
   ['sentinelpass-ui/totp.js', 'sentinelpass-ui/dist/totp.js'],
   ['sentinelpass-ui/entries.js', 'sentinelpass-ui/dist/entries.js'],
+  ['sentinelpass-ui/registry.js', 'sentinelpass-ui/dist/registry.js'],
   ['sentinelpass-ui/index.html', 'sentinelpass-ui/dist/index.html'],
   ['sentinelpass-ui/styles.css', 'sentinelpass-ui/dist/styles.css']
 ];

@@ -162,6 +162,7 @@ export async function loadEntriesWithOptions({
             setTotpButtonState(false, false);
             noSelection.classList.remove('hidden');
             entryDetail.classList.add('hidden');
+            document.getElementById('registry-dashboard')?.classList.add('hidden');
             if (selectionMissingToast) {
                 showToast('Selected entry is no longer available', 'warning');
             }
@@ -276,6 +277,7 @@ export async function loadEntry(entryId: number) {
         // Show entry detail
         noSelection.classList.add('hidden');
         entryDetail.classList.remove('hidden');
+        document.getElementById('registry-dashboard')?.classList.add('hidden');
 
         // Populate form
         (document.getElementById('detail-title') as HTMLInputElement).value = entry.title;
@@ -321,6 +323,7 @@ export function createNewEntry() {
     // Show entry detail
     noSelection.classList.add('hidden');
     entryDetail.classList.remove('hidden');
+    document.getElementById('registry-dashboard')?.classList.add('hidden');
 
     // Clear form
     (document.getElementById('detail-title') as HTMLInputElement).value = '';
@@ -420,6 +423,7 @@ export async function deleteEntry() {
         await loadEntries();
         noSelection.classList.remove('hidden');
         entryDetail.classList.add('hidden');
+        document.getElementById('registry-dashboard')?.classList.add('hidden');
     } catch (error) {
         showToast(error, 'error');
     }

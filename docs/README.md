@@ -12,6 +12,14 @@ Quick reference to all project documentation. Most docs live at the repository r
 | [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Community standards and expectations | conduct, community |
 | [SUPPORT.md](../SUPPORT.md) | How to get help | help, support, issues |
 
+## Architecture Decisions
+
+| Document | Description | Keywords |
+|----------|-------------|----------|
+| [docs/decisions/adr/README.md](./decisions/adr/README.md) | Index and conventions for architecture decision records (ADRs) | ADR, decisions, design gate |
+| [ADR-001](./decisions/adr/ADR-001-credential-registry-by-logical-entity.md) | Credential registry by logical entity — entities, reuse clusters, rotation posture | registry, entity, reuse, rotation |
+| [ADR-002](./decisions/adr/ADR-002-master-password-rotation.md) | Master password rotation via DEK re-wrap | rotation, re-wrap, key epoch, DEK |
+
 ## Security
 
 | Document | Description | Keywords |
