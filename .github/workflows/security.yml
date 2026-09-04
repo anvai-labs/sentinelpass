@@ -42,8 +42,10 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             if npm audit --audit-level=high; then exit 0; fi
-            echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
-            sleep 60
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
           done
           exit 1
 
@@ -66,8 +68,10 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             if npm audit --audit-level=high; then exit 0; fi
-            echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
-            sleep 60
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
           done
           exit 1
 

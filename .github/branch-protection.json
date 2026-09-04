@@ -1,33 +1,12 @@
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": [
-      "Build (macos-latest)",
-      "Build (ubuntu-latest)",
-      "Build (windows-latest)",
-      "Check Rust Formatting",
-      "Clippy Lint",
-      "Run Tests (macos-latest)",
-      "Run Tests (ubuntu-latest)",
-      "Run Tests (windows-latest)",
-      "Rust LLVM Coverage",
-      "RustSec Audit",
-      "Trivy Filesystem Scan",
-      "TypeScript TDD",
-      "Release Bundle Smoke (linux)",
-      "Release Bundle Smoke (macos)",
-      "Release Bundle Smoke (windows)",
-      "Release Native Installer Smoke (linux)",
-      "Release Native Installer Smoke (macos)",
-      "Release Native Installer Smoke (windows)",
-      "npm Audit (Extension E2E)",
-      "npm Audit (Root)"
-    ]
+    "contexts": ["Gate"]
   },
-  "enforce_admins": true,
+  "enforce_admins": false,
   "required_pull_request_reviews": {
     "dismiss_stale_reviews": true,
-    "require_code_owner_reviews": false,
+    "require_code_owner_reviews": true,
     "require_last_push_approval": false,
     "required_approving_review_count": 1
   },
@@ -38,5 +17,5 @@
   "block_creations": false,
   "required_conversation_resolution": true,
   "lock_branch": false,
-  "allow_fork_syncing": true
+  "allow_fork_syncing": false
 }

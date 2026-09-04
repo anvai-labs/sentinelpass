@@ -1,0 +1,6 @@
+# CI Gate (the sole required branch-protection check on main/develop) runs the
+# PR branch's own copy of .github/workflows/ci-gate.yml — GitHub evaluates PR
+# events against the PR's workflow YAML. A PR that edits workflow or branch
+# protection files therefore changes its own enforcement; require the
+# maintainer's review on those paths.
+/.github/ @vjsingh1984
