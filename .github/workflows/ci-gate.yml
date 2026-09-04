@@ -120,7 +120,10 @@ jobs:
           # Path-scoped workflow families (anchor check per workflow; regexes
           # mirror each workflow's own paths filter — keep in sync when
           # editing those triggers):
-          build_all_paths='($0 ~ /^sentinelpass-[^\/]+\// || $0 ~ /^(android|ios|browser-extension|scripts)\// || $0 ~ /^\.github\/actions\// || $0 == ".github/workflows/build-all.yml" || $0 ~ /(^|\/)(Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json)$/ || $0 ~ /(^|\/)tsconfig[^\/]*\.json$/) { found=1 } END { exit !found }'
+          # Bare-filename patterns (Cargo.toml, package.json, tsconfig*.json)
+          # are ROOT-anchored in GitHub path filters — slash-less patterns
+          # match only the root path (that's why the md filters say '**/*.md').
+          build_all_paths='($0 ~ /^sentinelpass-[^\/]+\// || $0 ~ /^(android|ios|browser-extension|scripts)\// || $0 ~ /^\.github\/actions\// || $0 == ".github/workflows/build-all.yml" || $0 ~ /^Cargo\.(toml|lock)$/ || $0 == "package.json" || $0 == "package-lock.json" || $0 ~ /^tsconfig[^\/]*\.json$/) { found=1 } END { exit !found }'
           android_paths='($0 ~ /^(sentinelpass-core|sentinelpass-mobile-bridge|android)\// || $0 == ".github/workflows/android.yml") { found=1 } END { exit !found }'
           ios_paths='($0 ~ /^(sentinelpass-core|sentinelpass-mobile-bridge|ios)\// || $0 == ".github/workflows/ios.yml") { found=1 } END { exit !found }'
           e2e_paths='($0 ~ /^browser-extension\/(chrome|e2e)\// || $0 == ".github/workflows/extension-e2e.yml") { found=1 } END { exit !found }'
@@ -158,13 +161,17 @@ jobs:
 
             # ---- 4. Poll; only trust successful API responses. A failed poll
             # (rate limit, 5xx, network) must never look like "zero pending".
+            # NOTE: `gh api` has no --arg; inject the run id via jq's env
+            # (verified live: env.GITHUB_RUN_ID resolves in gh's gojq). We
+            # exclude our own check run by its run URL only — excluding by
+            # job name would swallow any other workflow's job named "Gate"
+            # and break entirely if this job is renamed.
             if gh api \
                  --paginate \
                  -H "Accept: application/vnd.github+json" \
-                 --arg runid "$GITHUB_RUN_ID" \
                  "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
                  --jq '.check_runs[]
-                       | select((.name != "Gate") and (((.html_url // "") | contains("/runs/" + $runid + "/")) | not))
+                       | select((((.html_url // "") | contains("/runs/" + env.GITHUB_RUN_ID + "/")) | not))
                        | [.name, .status, (.conclusion // "-")]
                        | @tsv' > checks.tsv.tmp 2> poll_err.txt; then
               fail_streak=0
@@ -189,10 +196,14 @@ jobs:
             total=$(wc -l < checks.tsv | tr -d ' ')
             elapsed=$(( now - start ))
 
-            # Set-stability: a newly registered check run resets the clock.
-            set_hash=$(cut -f1 checks.tsv | sort | cksum)
-            if [ "$set_hash" != "$last_hash" ]; then
-              last_hash=$set_hash
+            # Row-stability: hash the full name+status+conclusion rows, so a
+            # newly registered check run OR any job completing (flipping its
+            # conclusion — e.g. a needs:-chained job starting after all
+            # anchors went green) resets the quiet clock. Green requires the
+            # whole board silent for STABLE_SECONDS, not just the name set.
+            row_hash=$(sort checks.tsv | cksum)
+            if [ "$row_hash" != "$last_hash" ]; then
+              last_hash=$row_hash
               last_change=$now
             fi
             stable=$(( now - last_change ))
