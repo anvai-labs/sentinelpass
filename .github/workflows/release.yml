@@ -6,6 +6,11 @@ on:
       - "v*"
   pull_request:
     branches: [main, develop]
+    paths-ignore:
+      # docs-only PRs skip release packaging (this workflow has no path
+      # filter by design for releases; PRs are preflight)
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:

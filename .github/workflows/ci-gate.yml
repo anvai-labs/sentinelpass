@@ -2,27 +2,36 @@ name: CI Gate
 
 # Aggregate required-check gate. Branch protection on `main`/`develop` requires
 # ONLY the "Gate" check from this workflow. The heavy workflows (Rust CI, Build
-# All Platforms, Security CI, Android/iOS CI, Extension E2E) are path-filtered
-# and no longer individually required — GitHub would otherwise strand PRs whose
-# changes match no path filter ("Expected — waiting for status" forever).
+# All Platforms, Release CI, Security CI, Android/iOS CI, Extension E2E) are
+# path-filtered and no longer individually required — GitHub would otherwise
+# strand PRs whose changes match no path filter ("Expected — waiting for
+# status" forever).
 #
 # Semantics:
 # - Any check run on the PR's head SHA (other than Gate itself) that concludes
 #   failure/cancelled/timed_out/startup_failure/action_required fails this gate
 #   (fast).
-# - The gate passes once every check run is completed AND a registration grace
-#   period has elapsed. The grace covers the window before other workflows
-#   register their check runs; workflows skipped by path filters never register
-#   at all, so docs-only PRs go green after ~GRACE_SECONDS with zero heavy CI.
-# - Fail-closed floor: if the PR changes anything besides markdown/docs, the
-#   core CI checks in EXPECTED_CHECKS MUST be present among the check runs
-#   before the gate goes green. A workflow that broke, was disabled, or
-#   mis-filters itself out of a non-docs PR can no longer hide behind
-#   "absent = fine" — the gate waits until deadline and then fails.
+# - The gate passes once every check run is completed, the registration grace
+#   period and a set-stability window have elapsed, AND every check expected
+#   for this PR's diff (see EXPECTED_* below) registered with conclusion
+#   success. Docs-only PRs expect nothing: after the grace window the gate is
+#   the only workflow that runs, so docs PRs go green in ~GRACE_SECONDS with
+#   zero heavy CI.
+# - Fail-closed floor: each PR-triggered workflow's path filter is mirrored
+#   below; when the diff matches it, that workflow's anchor check MUST be
+#   present and green. A workflow that broke, was disabled, or mis-filters
+#   itself out of a PR it should cover can no longer hide behind
+#   "absent = fine" — the gate waits out MISSING_TOLERANCE_SECONDS (Actions
+#   queue delay) and then fails red. WHEN ADDING A PR-TRIGGERED WORKFLOW, ADD
+#   ITS FAMILY TO THE EXPECTATION TABLE.
 # - API failures during polling are never interpreted as "no pending checks":
-#   each poll writes to a temp file and is only trusted on success.
-# - New PR-triggered workflows are enforced automatically — no list to maintain
-#   (any failure anywhere fails the gate; only the core floor is explicit).
+#   each poll writes to a temp file and is only trusted on success, with
+#   backoff so a rate-limited token doesn't wedge every gate in the repo.
+#
+# Known residual (accepted): a PR that edits this file runs its own weakened
+# copy — GitHub evaluates the PR's workflow YAML for pull_request events.
+# Mitigated by review policy, not YAML: .github/CODEOWNERS + branch
+# protection requiring code-owner review for .github/ changes.
 
 on:
   pull_request:
@@ -46,13 +55,10 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       SHA: ${{ github.event.pull_request.head.sha }} # check runs for PR workflows attach to the head SHA (verified: merge-ref sha has none)
       GRACE_SECONDS: 300
-      MISSING_TOLERANCE_SECONDS: 900 # extra wait for core checks to register (Actions queue delay) before failing closed
-      POLL_SECONDS: 20
+      MISSING_TOLERANCE_SECONDS: 900 # extra wait for expected checks to register (Actions queue delay) before failing closed
+      STABLE_SECONDS: 120 # green requires the check-run name set unchanged for this long (guards late-registering workflows)
+      POLL_SECONDS: 60 # GITHUB_TOKEN is 1k req/hr per repo — don't poll like it's infinite
       DEADLINE_SECONDS: 7200
-      # Checks that MUST register whenever the diff is not docs-only. Mirrors
-      # the first-tier jobs of rust.yml and security.yml (both use the same
-      # paths-ignore docs filter this gate's docs_only predicate reproduces).
-      EXPECTED_CHECKS: 'Check Rust Formatting|Clippy Lint|TypeScript TDD|Build (ubuntu-latest)|Run Tests (ubuntu-latest)|RustSec Audit'
     steps:
       - name: Aggregate check results for this PR
         run: |
@@ -60,23 +66,88 @@ jobs:
           start=$(date +%s)
           deadline=$(( start + DEADLINE_SECONDS ))
 
-          # Docs-only PRs (every changed file *.md or under docs/) match the
-          # paths-ignore filters on rust.yml/security.yml, so no core checks
-          # are expected for them. Anything else must produce the full set.
-          gh api --paginate \
-            -H "Accept: application/vnd.github+json" \
-            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-            --jq '.[].filename' > pr_files.txt
+          # ---- 1. Changed files (old AND new names: GitHub path filters
+          # evaluate renames against both), fetched with retries — this call
+          # is as flaky as any other API hit and must not red a healthy PR.
+          files_ok=0
+          for delay in 0 5 15 30 60; do
+            sleep "$delay"
+            if gh api --paginate \
+                 -H "Accept: application/vnd.github+json" \
+                 "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                 --jq '.[] | .filename, (.previous_filename // empty)' \
+                 > pr_files.txt 2> fetch_err.txt; then
+              files_ok=1
+              break
+            fi
+            echo "::warning::pulls/files fetch failed: $(head -n 1 fetch_err.txt)"
+          done
+          if [ "$files_ok" != 1 ]; then
+            echo "::error::Could not list PR files after retries — refusing to guess whether core CI is expected"
+            exit 1
+          fi
+          sort -u pr_files.txt -o pr_files.txt
+
+          # ---- 2. Docs-only? (mirrors the paths-ignore filters on
+          # rust.yml/security.yml/release.yml: every changed path — old or
+          # new — is *.md or under docs/)
           non_docs=$(awk '!( $0 ~ /^docs\// || $0 ~ /\.md$/ )' pr_files.txt)
           if [ -n "$non_docs" ]; then
             docs_only=false
           else
             docs_only=true
           fi
-          echo "PR #${PR_NUMBER}: docs_only=${docs_only} ($(wc -l < pr_files.txt | tr -d ' ') changed files)"
+          echo "PR #${PR_NUMBER}: docs_only=${docs_only} ($(wc -l < pr_files.txt | tr -d ' ') changed paths)"
+
+          # ---- 3. Expected checks for this diff.
+          # Always-expected (rust.yml, security.yml, release.yml run on every
+          # non-docs PR — each uses only paths-ignore md/docs). Names are
+          # matched by exact string equality (regex via `awk -v` mangles
+          # escaped metacharacters); keep them in sync with job renames.
+          expect=()
+          if [ "$docs_only" = false ]; then
+            expect+=(
+              'Check Rust Formatting'
+              'Clippy Lint'
+              'TypeScript TDD'
+              'Build (ubuntu-latest)'
+              'Run Tests (ubuntu-latest)'
+              'RustSec Audit'
+              'Release Setup'
+            )
+          fi
+
+          # Path-scoped workflow families (anchor check per workflow; regexes
+          # mirror each workflow's own paths filter — keep in sync when
+          # editing those triggers):
+          build_all_paths='($0 ~ /^sentinelpass-[^\/]+\// || $0 ~ /^(android|ios|browser-extension|scripts)\// || $0 ~ /^\.github\/actions\// || $0 == ".github/workflows/build-all.yml" || $0 ~ /(^|\/)(Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json)$/ || $0 ~ /(^|\/)tsconfig[^\/]*\.json$/) { found=1 } END { exit !found }'
+          android_paths='($0 ~ /^(sentinelpass-core|sentinelpass-mobile-bridge|android)\// || $0 == ".github/workflows/android.yml") { found=1 } END { exit !found }'
+          ios_paths='($0 ~ /^(sentinelpass-core|sentinelpass-mobile-bridge|ios)\// || $0 == ".github/workflows/ios.yml") { found=1 } END { exit !found }'
+          e2e_paths='($0 ~ /^browser-extension\/(chrome|e2e)\// || $0 == ".github/workflows/extension-e2e.yml") { found=1 } END { exit !found }'
+
+          if [ "$docs_only" = false ]; then
+            if printf '%s\n' "$non_docs" | awk "$build_all_paths"; then
+              expect+=('Desktop (ubuntu-latest)')
+            fi
+            if printf '%s\n' "$non_docs" | awk "$android_paths"; then
+              expect+=('Android Unit Tests')
+            fi
+            if printf '%s\n' "$non_docs" | awk "$ios_paths"; then
+              expect+=('iOS Unit Tests')
+            fi
+            if printf '%s\n' "$non_docs" | awk "$e2e_paths"; then
+              expect+=('Run Browser Integration Tests')
+            fi
+          fi
+          echo "Expected anchor checks (${#expect[@]}):"
+          printf '  %s\n' "${expect[@]:-<none — docs-only PR>}"
 
           # Let our own check run register so we can exclude it below.
           sleep 10
+
+          last_hash=""
+          last_change=$start
+          fail_streak=0
 
           while :; do
             now=$(date +%s)
@@ -85,20 +156,25 @@ jobs:
               exit 1
             fi
 
-            # Poll; only trust successful API responses. A failed poll (rate
-            # limit, 5xx, network) must never look like "zero pending checks".
+            # ---- 4. Poll; only trust successful API responses. A failed poll
+            # (rate limit, 5xx, network) must never look like "zero pending".
             if gh api \
                  --paginate \
                  -H "Accept: application/vnd.github+json" \
+                 --arg runid "$GITHUB_RUN_ID" \
                  "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
                  --jq '.check_runs[]
-                       | select(.name != "Gate")
+                       | select((.name != "Gate") and (((.html_url // "") | contains("/runs/" + $runid + "/")) | not))
                        | [.name, .status, (.conclusion // "-")]
-                       | @tsv' > checks.tsv.tmp 2>/dev/null; then
+                       | @tsv' > checks.tsv.tmp 2> poll_err.txt; then
+              fail_streak=0
               mv checks.tsv.tmp checks.tsv
             else
-              echo "::warning::check-runs poll failed — retrying in ${POLL_SECONDS}s (not treating as green)"
-              sleep "$POLL_SECONDS"
+              fail_streak=$(( fail_streak + 1 ))
+              backoff=$(( POLL_SECONDS * fail_streak ))
+              if [ "$backoff" -gt 300 ]; then backoff=300; fi
+              echo "::warning::check-runs poll failed (streak ${fail_streak}): $(head -n 1 poll_err.txt) — backing off ${backoff}s"
+              sleep "$backoff"
               continue
             fi
 
@@ -113,37 +189,42 @@ jobs:
             total=$(wc -l < checks.tsv | tr -d ' ')
             elapsed=$(( now - start ))
 
-            # Fail-closed floor: core checks must have actually registered.
+            # Set-stability: a newly registered check run resets the clock.
+            set_hash=$(cut -f1 checks.tsv | sort | cksum)
+            if [ "$set_hash" != "$last_hash" ]; then
+              last_hash=$set_hash
+              last_change=$now
+            fi
+            stable=$(( now - last_change ))
+
+            # ---- 5. Fail-closed floor: expected checks must be present AND
+            # green (a 'skipped' job does not satisfy the floor).
             missing=""
             missing_n=0
-            if [ "$docs_only" = false ]; then
-              IFS='|' read -r -a expected <<< "$EXPECTED_CHECKS"
-              for name in "${expected[@]}"; do
-                if ! awk -F'\t' -v n="$name" '$1 == n { found=1 } END { exit !found }' checks.tsv; then
-                  missing="${missing}${name}\n"
-                  missing_n=$(( missing_n + 1 ))
-                fi
-              done
-            fi
+            for pattern in "${expect[@]}"; do
+              if ! awk -F'\t' -v n="$pattern" '$1 == n && $3 == "success" { ok=1 } END { exit !ok }' checks.tsv; then
+                missing="${missing}${pattern}\n"
+                missing_n=$(( missing_n + 1 ))
+              fi
+            done
 
-            if [ "$pending" -eq 0 ] && [ "$elapsed" -ge "$GRACE_SECONDS" ]; then
-              if [ -n "$missing" ]; then
+            if [ "$pending" -eq 0 ] && [ "$elapsed" -ge "$GRACE_SECONDS" ] && [ "$stable" -ge "$STABLE_SECONDS" ]; then
+              if [ "$missing_n" -gt 0 ]; then
                 if [ "$elapsed" -ge "$(( GRACE_SECONDS + MISSING_TOLERANCE_SECONDS ))" ]; then
-                  echo "::error::Core CI checks never registered for this non-docs PR:"
+                  echo "::error::Expected CI checks did not run green for this PR:"
                   printf '%b' "$missing"
-                  echo "::error::A required workflow is broken, disabled, or filtered itself out. The gate stays red."
+                  echo "::error::A workflow that should cover this diff is broken, disabled, or mis-filtered. The gate stays red."
                   exit 1
                 fi
-                echo "all reported checks done but core checks still missing (queue delay?) — tolerating until $(( GRACE_SECONDS + MISSING_TOLERANCE_SECONDS ))s"
+                echo "all reported checks done but expected checks still missing (queue delay?) — tolerating until $(( GRACE_SECONDS + MISSING_TOLERANCE_SECONDS ))s"
                 sleep "$POLL_SECONDS"
                 continue
               fi
-              echo "All ${total} check run(s) completed without failures; all expected core checks present (grace ${GRACE_SECONDS}s satisfied)."
+              echo "All ${total} check run(s) completed without failures; all ${#expect[@]} expected anchor checks green; stable ${stable}s (grace ${GRACE_SECONDS}s satisfied)."
               echo "CI Gate: green"
               exit 0
             fi
 
-            missing_n=${missing_n:-0}
-            echo "elapsed=${elapsed}s pending=${pending} total=${total} missing_core=${missing_n} — waiting ${POLL_SECONDS}s"
+            echo "elapsed=${elapsed}s pending=${pending} total=${total} stable=${stable}s missing_expected=${missing_n} — waiting ${POLL_SECONDS}s"
             sleep "$POLL_SECONDS"
           done
