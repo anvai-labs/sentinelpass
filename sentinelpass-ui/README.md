@@ -38,14 +38,20 @@ On first launch the app automatically registers the native messaging host for Ch
 ## Architecture
 
 ```
-index.html          Frontend markup
-app.ts → app.js     Frontend logic (TypeScript source, transpiled JS)
-url-utils.ts        URL/domain helpers
-styles.css          Styles
+index.html            Frontend markup
+app.ts → app.js       App bootstrap and event wiring (TypeScript source, transpiled JS)
+state.ts              Shared state, DOM references, Tauri invoke/clipboard bridge
+credential-types.ts   Credential type model (password, API key, passkey reference)
+entries.ts            Entry list rendering and CRUD
+registry.ts           Credential registry posture dashboard (ADR-001)
+totp.ts               TOTP code display and availability
+utils.ts              Toasts, clipboard, HTML escaping, date formatting
+url-utils.ts          URL/domain helpers
+styles.css            Styles
 src-tauri/
-  src/main.rs       Tauri backend — Rust commands, native host registration
-  resources/bin/    Bundled binaries (daemon, host)
-tauri.conf.json     Tauri configuration (window, CSP, bundle settings)
+  src/main.rs         Tauri backend — Rust commands, native host registration
+  resources/bin/      Bundled binaries (daemon, host)
+tauri.conf.json       Tauri configuration (window, CSP, bundle settings)
 ```
 
 The frontend calls Tauri commands defined in `src-tauri/src/main.rs`, which delegate to `sentinelpass-core` for all cryptographic and vault operations.

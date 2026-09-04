@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed (rev 2, after adversarial review — see git history) |
+| **Status** | Accepted (rev 2, after adversarial review — see git history). Shipped in v0.8.1 |
 | **Date** | 2026-09-02 |
 | **Area** | `sentinelpass-core` (crypto/keyring, crypto/kdf, vault metadata, daemon), `sentinelpass-cli`, `sentinelpass-ui` |
 | **Related** | [ADR-001](ADR-001-credential-registry-by-logical-entity.md) (rotation-recommendation surfacing); [TECHNICAL_DEBT.md](../../../../TECHNICAL_DEBT.md) roadmap; `crypto/keyring.rs` (`KeyHierarchy`), `crypto/kdf.rs` (`KdfParams`), `database/schema.rs` (`db_metadata`), `daemon/vault_state.rs`, `sync/` (pairing bootstrap) |

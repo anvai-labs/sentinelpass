@@ -8,6 +8,8 @@ Local-first password manager with a Rust core, Tauri desktop UI, and browser ext
 | --- | --- |
 | Secret model | Zero-knowledge, local vault; no cloud dependency |
 | Crypto | Argon2id key derivation + AES-256-GCM encryption |
+| Credential registry | Group credentials by logical entity; reuse clusters and rotation posture in CLI + desktop UI |
+| Master password rotation | Re-wraps the data key in place — entries are never re-encrypted |
 | Multi-device sync | Optional E2E encrypted sync via relay (Ed25519 auth, LWW conflict resolution) |
 | App surfaces | CLI (`sentinelpass`), daemon, desktop UI, browser extension, relay server |
 | Platforms | Windows, macOS, Linux |
@@ -43,8 +45,6 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 | macOS | `brew tap anvai-labs/tap https://github.com/anvai-labs/homebrew-tap && brew install anvai-labs/tap/sentinelpass` — or download the DMG from [Releases](../../releases) |
 | Windows | Download the MSI installer from [Releases](../../releases) and run it |
 | Linux (Debian/Ubuntu) | `sudo apt install ./sentinelpass_<VERSION>_amd64.deb` — or `sudo dpkg -i sentinelpass-*.deb` |
-| Windows | Download the MSI installer from [Releases](../../releases) and run it |
-| Linux (Debian/Ubuntu) | `sudo dpkg -i sentinelpass-*.deb` |
 | Linux (Fedora/RHEL) | `sudo dnf install sentinelpass-*.rpm` |
 | Build from source | `npm install && npm run web:build && cargo build --release` |
 
@@ -81,6 +81,39 @@ sentinelpass secret token revoke --client-id victor   # fail-closed
 ```
 
 See `SECURITY_ARCHITECTURE.md` (Secrets Broker section) for the threat model.
+
+## Credential Registry and Rotation Posture
+
+Credentials that belong to the same logical system — a broker, a database, an
+API, a webhook — can be grouped under a registered **entity**. The registry
+uses that grouping (plus reuse detection across the whole vault, per-entity
+criticality, and provider-managed expiries) to answer a question plain
+age-based policies can't: *which credentials actually need rotation now?*
+
+```bash
+# Register an entity and attach credentials to it
+sentinelpass registry entity-add trading-postgres --kind database --criticality high
+sentinelpass registry assign 42 --entity trading-postgres --label prod
+
+# Posture summary without decryption; report adds strength analysis
+sentinelpass registry status
+sentinelpass registry report --only-issues
+
+# Record that a provider-issued key was rotated (resets its age)
+sentinelpass registry mark-rotated 42
+```
+
+The desktop UI shows the same posture: a header badge counts the entries with
+findings, and the registry panel ranks reused/weak/overdue credentials
+worst-first with the exact reason for each finding. Reuse clusters expand to
+show which other entries share the secret. The panel is read-only — entity
+management stays in the CLI for now.
+
+Rotating a provider-issued secret is separate from rotating the vault's own
+master password (`sentinelpass passwd`), which re-wraps the data key without
+touching any stored entries. Both are covered by
+[ADR-001](docs/decisions/adr/ADR-001-credential-registry-by-logical-entity.md)
+and [ADR-002](docs/decisions/adr/ADR-002-master-password-rotation.md).
 
 ## Browser Extension
 
@@ -155,3 +188,5 @@ You can also re-register the native host manually:
 | Build details | `BUILD.md` |
 | Sync protocol & relay | `docs/SYNC.md` |
 | Security internals | `SECURITY_ARCHITECTURE.md` |
+| Architecture decisions (ADRs) | `docs/decisions/adr/README.md` |
+| Roadmap | `ROADMAP.md` |
