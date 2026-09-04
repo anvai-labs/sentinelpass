@@ -1,6 +1,6 @@
 # Technical Debt & Roadmap
 
-Last updated: 2026-05-09 (v0.7.0)
+Last updated: 2026-09-03 (v0.8.1)
 
 ---
 
@@ -191,6 +191,51 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | 2026-02-16 | v0.3.0 | Architecture: extract vault.rs into vault/ directory module (mod.rs + biometric_ops.rs + totp_ops.rs + ssh_ops.rs + tests.rs), add structured DatabaseError enum with 8 variants replacing catch-all String, migrate ~152 call sites across 10 files. CI fix: gate DatabaseError import for biometric platforms, exclude binary entry points from coverage. | #16 |
 | 2026-05-09 | v0.3.0 | Code quality: IPC split (ipc/mod.rs + server.rs + client.rs), CLI command extraction (9 modules), vault sync/health ops, error refinement (anyhow removed, DatabaseError::Other→InvalidInput), DB PRAGMAs + WAL checkpoint, list_ssh_keys_paginated + crate-root re-exports, popup search/add/settings + sender validation fix, Windows TCP IPC encryption verified Done | -- |
 | 2026-05-09 | v0.7.0 | Version bump to 0.7.0; security: rustls-webpki CVE patches; CI: fix 6 clippy errors (collapsible_match, platform cfg, Windows import); align Cargo.toml + tauri.conf.json versions | -- |
+| 2026-09-03 | v0.8.1 | Credential registry (ADR-001) + master-password rotation (ADR-002), single schema v5; adversarial-review fix slice (pair-join epoch threading, biometric epoch-aware unlock, lockout misclassification); CI trigger dedup (drop redundant push:[main,develop]) | #78,#80,#85,#86,#87,#88,#89 |
+
+## v0.8.1 Session Log (2026-09-03)
+
+### Shipped this cycle
+- Credential registry (ADR-001): schema v5 — `entities`, `entity_memberships`,
+  `secret_equality_index` (DEK-encrypted HMAC reuse-detection tags),
+  `entry_lifecycle`, `registry_state`; rotation-policy engine; CLI
+  `sentinelpass registry {entity-add,entity-list,entity-delete,assign,
+  unassign,mark-rotated,expires-at,status,report}`
+- Master-password rotation (ADR-002): `sentinelpass passwd` re-wraps the
+  DEK under a new master key (`key_epoch` bound as AEAD associated data;
+  entries never re-encrypted); `sentinelpass status` (password-free vault
+  metadata + best-effort daemon reachability)
+- Adversarial-review fix slice on the merged combination: pair-join from
+  a rotated vault (the exact recovery flow `passwd` instructs users to
+  run was broken — legacy unlock failed GCM auth against an epoch-bound
+  wrap, and the epoch was never persisted); `enable_biometric_unlock`
+  fixed for the same reason; rotation failures no longer misclassified
+  into brute-force lockout for transient (non-auth) errors
+- `key_epoch` surfaced over IPC (`VaultStatusResponse`) and via a new
+  password-free `sentinelpass status` CLI command; Windows-safe daemon
+  probe replacing an inert `Path::exists()` check on a named pipe
+- CI: dropped redundant `push:[main,develop]` triggers from 6 workflows —
+  every develop -> main promotion PR was double-CI'd (push-on-merge +
+  pull_request-on-promotion for the identical commit); branch protection
+  already gates merges on the pull_request checks, so the push-triggered
+  re-run validated nothing new
+- Branch model change: `develop` is now the integration branch (all
+  feature PRs land there first, squash-merged); promotion to `main` is
+  an explicit, separate merge-commit PR per release
+
+### Deferred (tracked, do not re-derive)
+1. Sync-peer epoch enforcement (ADR-002 D4): peers don't yet reject
+   stale-epoch bootstrap blobs; rotation currently only protects the
+   local `db_metadata`, not synced peer copies of the DEK
+2. `db_metadata` rotation write has no compare-and-set on `key_epoch`
+   (TOCTOU under concurrent rotation attempts — low severity, no
+   observed exploit path)
+3. Registry dashboard (Tauri UI) — ADR-001 P2, not yet started
+4. Rotation UI (Tauri) — ADR-002 D5, CLI-only for now
+5. External-consumer registry aggregate API over `sentinelpass-protocol`
+   — gated on a new grant-class ADR (ADR-001 D3)
+6. Entity editor / policy editor (ADR-001 P4)
+7. Similarity/breach (HIBP) checks on the equality index (ADR-001 later)
 
 ## v0.8.0 Session Log (2026-08-31)
 
