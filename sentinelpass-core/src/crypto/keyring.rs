@@ -4,6 +4,7 @@
 //! Master Password → Argon2id → Master Key → wraps → DEK
 
 use crate::crypto::{cipher::DataEncryptionKey, kdf::KdfParams, CryptoError, Result};
+use bincode::Options as _;
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -93,11 +94,41 @@ impl WrappedKey {
     /// Deserialize a `WrappedKey` from bincode bytes, accepting both the
     /// current 4-field shape and the legacy 3-field shape written by
     /// <= v0.8.0 binaries.
+    ///
+    /// Decoding is SIZE-LIMITED (adversarial-review finding, WBS-307
+    /// round 1): this function parses bytes from untrusted sources — a
+    /// corrupted vault row (open path) or a peer-supplied pairing
+    /// bootstrap (pair-join) — and plain `bincode::deserialize` on a
+    /// `Vec<u8>` field trusts the embedded u64 length prefix,
+    /// `Vec::with_capacity`-ing it before any KDF validation runs. A
+    /// 16-byte input claiming a 2^40-byte vec would abort the process
+    /// ('memory allocation failed') instead of returning a clean error.
+    /// The `SizeLimit` option makes bincode check every collection length
+    /// against the remaining byte budget BEFORE allocating. The limit is
+    /// orders of magnitude above any legitimate wrap (~96 bytes for the
+    /// 4-field shape, smaller for legacy): changing the wrap format's
+    /// size class is a new-format decision, not something that should
+    /// silently ride an allocator.
     pub fn from_bincode_bytes(bytes: &[u8]) -> Result<Self> {
-        match bincode::deserialize::<WrappedKey>(bytes) {
+        // bincode's limit applies per-decode of the OUTER blob (this
+        // function's input), which is exactly the untrusted boundary.
+        //
+        // `bincode::options()` (DefaultOptions) defaults to VARINT int
+        // encoding and allow-trailing — NOT the fixed-width, reject-trailing
+        // behavior of plain `bincode::deserialize` every existing blob was
+        // written under (caught by the legacy-blob test). The extra
+        // `.with_fixint_encoding().reject_trailing_bytes()` restores
+        // byte-for-byte compatibility with the old decode; only the limit
+        // is new.
+        const MAX_WRAPPED_KEY_BLOB: u64 = 4096;
+        let options = bincode::options()
+            .with_limit(MAX_WRAPPED_KEY_BLOB)
+            .with_fixint_encoding()
+            .reject_trailing_bytes();
+        match options.deserialize::<WrappedKey>(bytes) {
             Ok(key) => Ok(key),
             Err(_) => {
-                let legacy: LegacyWrappedKey = bincode::deserialize(bytes).map_err(|e| {
+                let legacy: LegacyWrappedKey = options.deserialize(bytes).map_err(|e| {
                     CryptoError::DecryptionFailed(format!("Invalid wrapped key: {}", e))
                 })?;
                 Ok(Self {
@@ -726,5 +757,43 @@ mod tests {
         let parsed = WrappedKey::from_bincode_bytes(&legacy_bytes).unwrap();
         assert!(!parsed.epoch_bound);
         assert_eq!(parsed.wrapped_dek, vec![1, 2, 3]);
+    }
+
+    /// Adversarial-review finding (WBS-307 round 1): `from_bincode_bytes`
+    /// parses untrusted sources (vault rows, pairing bootstraps) BEFORE any
+    /// KDF validation runs. Plain bincode trusts a `Vec<u8>`'s embedded
+    /// u64 length prefix and `Vec::with_capacity`s it — a tiny hostile
+    /// input claiming a huge vec would abort the process instead of
+    /// returning a clean error. The SizeLimit'd decode must reject it.
+    #[test]
+    fn hostile_length_prefix_is_rejected_not_allocated() {
+        // Hand-build the bytes: bincode's current-shape decode reads
+        // epoch_bound (u32/bool per bincode's default int encoding... the
+        // first field here is wrapped_dek's Vec for the LEGACY shape, so
+        // target that: 8-byte u64 length prefix = 2^40, then nothing.
+        let mut hostile: Vec<u8> = Vec::new();
+        hostile.extend_from_slice(&1u64.wrapping_shl(40).to_le_bytes()); // vec len prefix
+        hostile.extend_from_slice(&[0xAB; 8]); // a few trailing bytes
+                                               // Must return Err — a panic or allocator abort here fails the test.
+        let result = WrappedKey::from_bincode_bytes(&hostile);
+        assert!(result.is_err(), "hostile length prefix must be rejected");
+
+        // Also prove the guard didn't break legit decodes: a real
+        // round-trip still works under the same limit (initialize_vault's
+        // base wrap is legitimately epoch_bound=false — only rotation
+        // epoch-binds).
+        let mut h = KeyHierarchy::new();
+        let (params, wrapped) = h.initialize_vault(b"limit-probe").unwrap();
+        let blob = bincode::serialize(&wrapped).unwrap();
+        assert!(
+            blob.len() < 4096,
+            "real wraps must sit far under the decode limit"
+        );
+        let parsed = WrappedKey::from_bincode_bytes(&blob).unwrap();
+        assert_eq!(parsed.wrapped_dek, wrapped.wrapped_dek);
+        assert_eq!(parsed.nonce, wrapped.nonce);
+        assert_eq!(parsed.auth_tag, wrapped.auth_tag);
+        assert_eq!(parsed.epoch_bound, wrapped.epoch_bound);
+        let _ = params;
     }
 }

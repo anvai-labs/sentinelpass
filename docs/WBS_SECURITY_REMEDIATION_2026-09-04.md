@@ -307,11 +307,38 @@ AAD decisions come from the ADRs; WPs below assume the ADR-004/005 direction.
 - **Reqs/TDs:** SR-CRYPTO-001 · TD-SEC-01 · **Deps:** 301. Includes the
   canonical-JSON profile conformance test (duplicate-key rejection, integer-only,
   depth cap; decode never through untyped Value — ADR-005 rev 3).
-- **Deliverables:** `crypto/aad.rs` (new): typed builder vault/object/purpose/type/
-  epoch/version.
-- **Tests:** P: deterministic encoding golden vectors. N: each input perturbation
-  changes AAD (property test).
-- **Migration:** none until 304 adopts. **Est:** 2d · **Status:** Proposed.
+- **Deliverables:** `crypto/aad.rs` (new): `AadContext` typed builder binding
+  vault/object/purpose/type/schema_version/crypto_version/epoch/tombstone, plus
+  its own `aad_version`. Canonical JSON via `#[derive(Serialize)]` on a flat
+  struct (deterministic field order, no HashMap); duplicate-key rejection via
+  typed-struct decode (never through `serde_json::Value`); a pre-parse byte-level
+  depth guard (own contract, not serde_json's internal recursion limit).
+- **Tests (10, all pass):** P: two golden vectors (with/without tombstone) pinning
+  exact bytes; determinism across repeated calls; encode/decode round-trip.
+  N: every-field-perturbation property test (9 fields, all pairwise-distinct
+  output — proves each field is actually GCM-bound); duplicate-key decode
+  rejection; float-in-integer-field decode rejection; excessive-nesting decode
+  rejection (with a brace-inside-string false-positive guard); snake_case tag
+  serialization for the purpose/type enums.
+- **Migration:** none until 304 adopts. **Est:** 2d · **Status:** Done
+  (2026-09-05, after adversarial review round 1 — genuinely clean on the
+  security-critical claims: field-order determinism, duplicate-key
+  rejection, float-in-integer rejection, and the depth guard's UTF-8/escape
+  handling were all independently verified against the pinned serde_json
+  version, not just read-through. Five findings, none critical, addressed:
+  the 8-positional-argument constructor (two adjacent same-typed i32 fields,
+  a transposition trap for WBS-304's future call sites) replaced with
+  `AadContextBuilder` — named setters, so swapping call ORDER is harmless
+  and swapping the wrong METHOD is a visible mistake, not a silent one; the
+  `tombstone: Option<bool>` ambiguity (unset-because-not-applicable vs.
+  unset-because-forgotten) is now a written contract on the builder's
+  `tombstone()` doc, not an implicit convention; `from_bytes` gained an
+  explicit pre-parse size cap (4096 bytes) — ADR-005's "hard decode limits"
+  applies to AAD, not just the durable envelope; dead test-code cleanup;
+  the `.expect()` in `to_bytes` kept deliberately (provably infallible for
+  this struct's field types — documented why) rather than pushing a
+  never-taken error path onto every future caller) · workspace 514 passed
+  / 0 failed, fmt/clippy/TS clean.
 
 ### WBS-304 — Versioned summary + secret envelopes
 - **Reqs/TDs:** SR-CRYPTO-001/002 · TD-SEC-01 · **Deps:** 303.
@@ -344,10 +371,47 @@ AAD decisions come from the ADRs; WPs below assume the ADR-004/005 direction.
 
 ### WBS-307 — KDF hard maximums + platform profiles
 - **Reqs/TDs:** SR-CRYPTO-003 · TD-ROB-08 · **Deps:** — (independent).
-- **Deliverables:** `crypto/kdf.rs` bounds + profiles.
-- **Tests:** P: calibration evidence recorded. N: hostile m/t/p/output values fail
-  before expensive work.
-- **Est:** 2d · **Status:** Proposed.
+- **Deliverables:** `crypto/kdf.rs`: hard MIN and MAX bounds on mem_cost (64
+  MB–1 GiB), time_cost (1–20), parallelism (1–16), output_length (32–1024
+  bytes), all enforced in `validate()` (pure integer comparison, no
+  allocation) which already runs before every `derive_master_key` call.
+  `KdfParams::mobile_profile()`: a lighter RFC 9106-aligned profile pinned
+  at the hard memory minimum — explicitly documented as published-guidance,
+  NOT on-device-calibrated (no physical mobile hardware available in this
+  environment; on-device wall-clock verification remains open follow-up).
+- **Tests (8):** P: `test_kdf_params_default`; calibration evidence — both
+  profiles' wall-clock time measured and bounded (15s ceiling, sized for
+  unoptimized debug-build Argon2id, ~10-20x slower than release: measured
+  locally ~0.2-0.3s release / ~5-6s debug for the desktop profile), with the
+  mobile profile asserted to never exceed desktop's resource cost on any
+  axis; maximum-inclusive (not off-by-one) boundary check. N: 8 hostile
+  cases (each field just-over-max and at u32::MAX) all rejected by BOTH
+  `validate()` directly and through `derive_master_key`, each measured to
+  return in under 50ms — proves rejection happens before any Argon2
+  allocation is attempted, not just that it eventually fails.
+- **Est:** 2d · **Status:** Done (2026-09-05, after adversarial review
+  round 1 — attack-path verification sound: `KdfParams` is fixed-size
+  bincode (no prealloc risk), `validate()` is the first line of
+  `derive_master_key`, no bypassing call sites, no writer of non-default
+  values exists so no brick risk). Findings addressed: (1) the adjacent
+  untrusted field — `WrappedKey::from_bincode_bytes`'s bincode `Vec`
+  length prefix — could abort the process via `Vec::with_capacity(2^40)`
+  BEFORE KDF validation; now decoded under a 4 KiB `bincode::SizeLimit`
+  (byte-compatible: fixint + reject-trailing restored explicitly — the
+  legacy-blob test caught that `bincode::options()` defaults to varint),
+  with a hostile-length-prefix regression test; (2) citations corrected —
+  RFC 9106's constrained option is 65,536 KiB t=3 p=4 (ours: same t/p,
+  64,000 KiB memory) and OWASP's floor is 19 MiB t=2 p=1 (ours is
+  stricter); "RFC-aligned" wording replaced with exact numbers; (3)
+  timing-test flake margins widened (calibration 15s→60s — the old value
+  held only ~2.1x headroom under workspace-parallel Argon2 contention;
+  hostile-rejection 50ms→1s — CI thread-preemption tolerance that still
+  proves no Argon2 work began); (4) MAX-mem doc no longer overstates —
+  it bounds the REQUEST, not platform executability; pair-join's
+  wholesale adoption of peer params + constrained-device ceilings are
+  documented as open follow-up with ADR-009 calibration; (5) calibration
+  test now asserts mobile ≤ desktop on ALL FOUR axes. · workspace 518
+  passed / 0 failed, fmt/clippy/TS clean.
 
 ### WBS-308 — Zeroize intermediate KDF/envelope buffers
 - **Reqs/TDs:** SR-CRYPTO-004 · TD-ROB-08 · **Deps:** 304/305. **Est:** 2d.
