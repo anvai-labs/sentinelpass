@@ -439,24 +439,40 @@ impl IpcServer {
     /// - `NativeHost` origin: allowed.
     /// - `Cli` origin: denied — a CLI-tagged client has no business on the
     ///   autofill surface.
-    /// - No origin: legacy <= 0.7 hosts. Allowed with a deprecation warning
-    ///   in 0.8; set SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1 to deny now
-    ///   (deny-by-default is planned for 0.9).
-    fn browser_surface_allowed(&self, origin: Option<Origin>) -> bool {
+    /// - No origin: denied by default (legacy <= 0.7 hosts). Operators still
+    ///   running a pre-0.8 native host can temporarily restore legacy
+    ///   behavior with SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1; the escape
+    ///   hatch exists only so upgrades are not forced and is removed in 1.0.
+    fn browser_surface_allowed(origin: Option<Origin>) -> bool {
         match origin {
             Some(Origin::NativeHost) => true,
             Some(Origin::Cli) => false,
-            None => std::env::var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL")
-                .map(|v| v != "1")
-                .unwrap_or(true),
+            None => {
+                let allowed = std::env::var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
+                if !allowed {
+                    // The deny itself is correct; the warn exists so a
+                    // pre-0.8 native host after a daemon-only upgrade is
+                    // DEBUGGABLE (review finding: the silent deny was
+                    // indistinguishable from an empty vault).
+                    warn!(
+                        "denied browser-surface request from an originless (pre-0.8) \
+                         client — upgrade sentinelpass-host, or set \
+                         SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 to temporarily \
+                         re-enable the legacy path (removed in 1.0)"
+                    );
+                }
+                allowed
+            }
         }
     }
 
     fn warn_originless_browser_surface(&self) {
         warn!(
-            "Deprecated: browser-surface request without origin marker from an \
-             untagged client; upgrade sentinelpass-host. This will be denied by \
-             default in v0.9 (SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1 denies now)."
+            "Browser-surface request without origin marker allowed via \
+             SENTINELPASS_ALLOW_LEGACY_ORIGINLESS (legacy pre-0.8 host). \
+             Upgrade sentinelpass-host; this escape hatch is removed in 1.0."
         );
     }
 
@@ -718,7 +734,7 @@ impl IpcServer {
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
-                if !self.browser_surface_allowed(origin) {
+                if !Self::browser_surface_allowed(origin) {
                     return IpcMessage::GetCredentialResponse {
                         username: None,
                         password: None,
@@ -801,7 +817,7 @@ impl IpcServer {
                     base_domain
                 );
 
-                if !self.browser_surface_allowed(origin) {
+                if !Self::browser_surface_allowed(origin) {
                     return IpcMessage::ListDomainCredentialsResponse {
                         credentials: Vec::new(),
                         locked: None,
@@ -845,7 +861,7 @@ impl IpcServer {
             IpcMessage::GetTotpCode { domain } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
-                if !self.browser_surface_allowed(origin) {
+                if !Self::browser_surface_allowed(origin) {
                     return IpcMessage::GetTotpCodeResponse {
                         code: None,
                         seconds_remaining: None,
@@ -899,7 +915,7 @@ impl IpcServer {
                     domain, username
                 );
 
-                if !self.browser_surface_allowed(origin) {
+                if !Self::browser_surface_allowed(origin) {
                     return IpcMessage::SaveCredentialResponse {
                         success: false,
                         error: Some(
@@ -1097,5 +1113,62 @@ impl IpcServer {
                 key_epoch: 0,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod browser_surface_gate_tests {
+    use super::*;
+    use sentinelpass_protocol::Origin;
+
+    #[test]
+    fn native_host_origin_is_allowed() {
+        assert!(IpcServer::browser_surface_allowed(Some(Origin::NativeHost)));
+    }
+
+    #[test]
+    fn cli_origin_is_denied() {
+        assert!(!IpcServer::browser_surface_allowed(Some(Origin::Cli)));
+    }
+
+    /// Originless (pre-0.8 host) requests are denied by default; the explicit
+    /// legacy escape hatch restores them, and only the exact value "1" counts.
+    /// Env mutations are sequential inside this one test to avoid cross-test
+    /// races on the process-global environment.
+    #[test]
+    fn originless_denied_by_default_with_explicit_opt_in() {
+        std::env::remove_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS");
+        assert!(
+            !IpcServer::browser_surface_allowed(None),
+            "originless browser-surface request must be denied by default"
+        );
+
+        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "1");
+        assert!(
+            IpcServer::browser_surface_allowed(None),
+            "SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 must restore the legacy path"
+        );
+
+        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "0");
+        assert!(
+            !IpcServer::browser_surface_allowed(None),
+            "only the exact value 1 opts in"
+        );
+
+        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "yes");
+        assert!(!IpcServer::browser_surface_allowed(None));
+
+        std::env::remove_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS");
+        assert!(!IpcServer::browser_surface_allowed(None));
+
+        // The pre-0.9 opt-in-deny variable must not re-enable originless
+        // access (kept in THIS test: both tests mutated the process-global
+        // environment and raced under the parallel harness — review finding).
+        std::env::set_var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL", "0");
+        assert!(
+            !IpcServer::browser_surface_allowed(None),
+            "old SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=0 must not re-enable originless access"
+        );
+        std::env::remove_var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL");
     }
 }

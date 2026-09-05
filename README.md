@@ -10,9 +10,10 @@ Local-first password manager with a Rust core, Tauri desktop UI, and browser ext
 | Crypto | Argon2id key derivation + AES-256-GCM encryption |
 | Credential registry | Group credentials by logical entity; reuse clusters and rotation posture in CLI + desktop UI |
 | Master password rotation | Re-wraps the data key in place — entries are never re-encrypted |
-| Multi-device sync | Optional E2E encrypted sync via relay (Ed25519 auth, LWW conflict resolution) |
+| Forgotten-password recovery | **Not available** — the master password cannot be recovered or reset; a forgotten password means the vault is lost (recovery key slots are in design, see ADR-004) |
+| Multi-device sync | **Experimental** — opt-in, disabled by default, not approved for production credentials; v1 will be superseded by sync v2 (ADR-006) |
 | App surfaces | CLI (`sentinelpass`), daemon, desktop UI, browser extension, relay server |
-| Platforms | Windows, macOS, Linux |
+| Platforms | Windows, macOS, Linux (Android/iOS clients are unreleased prototypes) |
 | License | Apache License 2.0 |
 
 ## System Map
@@ -124,12 +125,17 @@ and [ADR-002](docs/decisions/adr/ADR-002-master-password-rotation.md).
 
 After installing the extension, **restart the browser** so it picks up the native messaging host manifest written by the app.
 
-## Multi-Device Sync
+## Multi-Device Sync (Experimental)
 
-Sync your vault across devices using the E2E encrypted relay. The relay never sees plaintext.
+> **Not approved for production credentials.** Sync is opt-in, disabled by default, and
+> labeled experimental: v1 has known protocol gaps (aggregate acknowledgements,
+> unauthenticated metadata, six-digit bootstrap) that a v2 replacement will address
+> (ADR-006). The relay never sees plaintext payloads.
 
 1. **Start the relay** (self-hosted): `cargo run --bin sentinelpass-relay`
 2. **Initialize sync** on the first device: `sentinelpass sync init --relay-url http://localhost:8743`
+   — cleartext HTTP is accepted only for loopback development and requires
+   `SENTINELPASS_ALLOW_LOOPBACK_RELAY=1`; non-loopback relays must use HTTPS.
 3. **Pair additional devices**: run `sentinelpass sync pair-start` on device A, then `sentinelpass sync pair-join --relay-url <URL> --code <CODE>` on device B.
 
 See [`docs/SYNC.md`](docs/SYNC.md) for the full protocol reference, CLI commands, and relay configuration.

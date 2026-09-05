@@ -19,6 +19,10 @@ pub struct SyncClient {
 impl SyncClient {
     /// Create a new sync client.
     pub fn new(relay_url: &str, device_id: Uuid, signing_key: SigningKey) -> Result<Self> {
+        // Defense in depth: `init_sync` validates on store, but a config
+        // written by an older build (or hand-edited) is rejected here too,
+        // before any request is signed or sent.
+        crate::sync::config::validate_relay_url(relay_url)?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
