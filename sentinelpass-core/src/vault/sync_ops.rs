@@ -6,7 +6,7 @@ use crate::{
 };
 use chrono::Utc;
 
-use super::VaultManager;
+use super::{epoch_guard, VaultManager};
 
 impl VaultManager {
     /// Get sync status from the database.
@@ -128,7 +128,47 @@ impl VaultManager {
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let wrapped_dek_blob = bincode::serialize(&imported_wrapped)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        let rows = conn
+
+        // Clear any pre-join biometric BEFORE adopting imported material
+        // (round-4 ordering fix): pair-join replaces the DEK, and doing this
+        // after the durable adoption half-commits when the keychain clear
+        // fails — the caller sees failure while disk holds the imported
+        // vault. Clearing first means a later failure merely leaves biometric
+        // disabled on a throwaway vault (fail-safe).
+        if let Some(bio_ref) = Self::load_biometric_ref(&db)? {
+            if let Err(e) = crate::biometric::BiometricManager::clear_vault_dek(&bio_ref) {
+                // Same platform-unsupported tolerance as
+                // disable_biometric_unlock (review round 1): on a platform
+                // with no keychain there is nothing to clear, and refusing
+                // would permanently brick pair-join for vaults that carry a
+                // foreign biometric_ref.
+                let unsupported = matches!(
+                    &e,
+                    PasswordManagerError::NotFound(msg)
+                        if msg.contains(crate::biometric::UNSUPPORTED_PLATFORM_MSG)
+                );
+                if !unsupported {
+                    return Err(e);
+                }
+            }
+            Self::set_biometric_ref(&db, None)?;
+        }
+
+        // db_metadata's wrap and the key-slot registry must become durable
+        // TOGETHER: the registry MAC is bound to the imported DEK
+        // (`sync_password_slot_after_material_change` derives it from
+        // `imported_hierarchy`), so a partial write — metadata reverted but
+        // the registry left reflecting the imported DEK, or vice versa —
+        // produces a vault whose crypto wrap unlocks fine but whose registry
+        // MAC can never again verify (a permanent brick requiring manual SQL
+        // surgery, found by re-deriving the MAC-key/DEK relationship under
+        // adversarial review). One transaction; no partial DB-level
+        // compensation on later failures.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+
+        let rows = tx
             .execute(
                 "UPDATE db_metadata
                  SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3, key_epoch = ?4
@@ -142,17 +182,80 @@ impl VaultManager {
             )
             .map_err(DatabaseError::Sqlite)?;
         if rows == 0 {
+            let _ = tx.rollback();
             return Err(PasswordManagerError::NotFound("Vault metadata".to_string()));
         }
 
-        conn.execute("DELETE FROM sync_devices", [])
+        // Mirror the adopted material into the password slot + recompute the
+        // registry MAC (WBS-302) in the SAME transaction as the metadata
+        // write above.
+        if let Err(e) = Self::sync_password_slot_after_material_change(
+            &imported_hierarchy,
+            &tx,
+            &bootstrap.kdf_params_blob,
+            &wrapped_dek_blob,
+            &nonce_blob,
+            bootstrap.key_epoch,
+            true,
+        ) {
+            let _ = tx.rollback();
+            return Err(e);
+        }
+        // Throwaway sync state from the pre-join vault is part of the
+        // adoption: cleared inside the SAME transaction (review round 1,
+        // finding 6 — previously it ran after the sidecar write, so the
+        // post-commit error path skipped it, leaving stale device/tombstone
+        // rows against the adopted identity).
+        tx.execute("DELETE FROM sync_devices", [])
             .map_err(DatabaseError::Sqlite)?;
-        conn.execute("DELETE FROM sync_tombstones", [])
+        tx.execute("DELETE FROM sync_tombstones", [])
             .map_err(DatabaseError::Sqlite)?;
-
+        tx.commit().map_err(DatabaseError::Sqlite)?;
         drop(db);
 
+        // From here the adoption is DURABLE: the in-memory hierarchy must
+        // match disk no matter what happens next (review round 1, finding
+        // 6 — previously the swap sat at the very end, so a sidecar-rebase
+        // failure returned with the caller holding the OLD throwaway DEK
+        // against imported disk state: any write in that session produced
+        // ciphertext nothing could ever decrypt).
         self.key_hierarchy = imported_hierarchy;
+
+        // Pair-join deliberately adopts the origin vault's epoch and key
+        // material: rebase the epoch high-water sidecar to the imported
+        // state. Without this, a joining device whose origin rotated more
+        // than once would hit the at-most-+1 jump rule at next open and be
+        // permanently locked out (adversarial-review finding).
+        //
+        // The metadata/registry write above is already durable at this
+        // point — a failure here must NOT attempt to revert it (that is the
+        // bug this replaced: a partial revert desyncs the wrap from the
+        // registry MAC and bricks the vault beyond the sidecar's reach). The
+        // vault stays internally consistent; only the external anchor is
+        // stale. Surfacing the error (rather than self-healing, as rotation
+        // does for its always-+1 case) is deliberate: an adopted epoch jump
+        // can exceed +1, so the next open may hard-refuse as "unexplained
+        // jump" until the user deletes the sidecar file named in that error.
+        if let (Some(ref sidecar), Some(ref uuid)) = (&self.epoch_sidecar, &self.vault_uuid) {
+            let digest = {
+                let db = self.lock_db()?;
+                epoch_guard::material_digest(db.conn())?
+            };
+            if let Err(e) = epoch_guard::rebase(sidecar, uuid, bootstrap.key_epoch, &digest) {
+                // The adoption itself is complete and consistent (hierarchy
+                // adopted above; registry + metadata committed together).
+                // Only the external anchor is stale — surface it WITH the
+                // remediation, since the raw Io error does not name the file
+                // (review round 1, finding 6).
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "pair-join adopted the imported vault, but updating the epoch \
+                     high-water sidecar failed: {e}. Delete the sidecar file {} — the \
+                     next open re-bases rollback protection from the adopted state.",
+                    sidecar.display()
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -164,6 +267,10 @@ impl VaultManager {
         vault_id: uuid::Uuid,
         identity: &crate::sync::device::DeviceIdentity,
     ) -> Result<()> {
+        // Transport policy: HTTPS for real relays; cleartext only for an
+        // explicit loopback-development allowance. Rejected before anything
+        // is persisted.
+        crate::sync::config::validate_relay_url(relay_url)?;
         let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig {
             sync_enabled: true,

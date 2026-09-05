@@ -6,7 +6,7 @@ use std::path::Path;
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+pub const CURRENT_SCHEMA_VERSION: i32 = 7;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -77,6 +77,8 @@ impl Database {
     /// Initialize the database schema (creates current tables for new vaults)
     pub fn initialize_schema(&self) -> Result<()> {
         self.create_db_metadata_table()?;
+
+        self.create_key_slots_table()?;
         self.create_entries_table()?;
         self.create_domain_mappings_table()?;
         self.create_failed_attempts_table()?;
@@ -101,9 +103,33 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 last_modified INTEGER NOT NULL,
                 biometric_ref TEXT,
-                key_epoch INTEGER NOT NULL DEFAULT 1
+                key_epoch INTEGER NOT NULL DEFAULT 1,
+                vault_uuid TEXT,
+                format_version INTEGER NOT NULL DEFAULT 1,
+                slot_registry_mac BLOB
             )",
                 [],
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
+    fn create_key_slots_table(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS key_slots (
+                    slot_uuid TEXT PRIMARY KEY,
+                    slot_type TEXT NOT NULL CHECK (slot_type IN
+                        ('password', 'recovery', 'platform', 'trusted_device')),
+                    kdf_params BLOB NOT NULL,
+                    wrapped_dek BLOB NOT NULL,
+                    dek_nonce BLOB NOT NULL,
+                    key_epoch INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    revoked_at INTEGER,
+                    format_version INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS idx_key_slots_type ON key_slots(slot_type);",
             )
             .map_err(DatabaseError::Sqlite)?;
         Ok(())

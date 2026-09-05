@@ -311,8 +311,138 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Migrate schema from v3 to v4: add the credential type discriminator
-/// (`password` | `api_key` | `passkey_reference`) to `entries`.
+/// v5 → v6 (WBS-301, ADR-004 rev 4): durable vault identity and explicit
+/// envelope format version on `db_metadata`. Existing vaults get a generated
+/// stable UUID at migration time; `format_version` starts at 1 (legacy field
+/// encryption — the envelope-v2 format is a later, deliberate migration).
+pub fn migrate_v5_to_v6(conn: &Connection) -> Result<()> {
+    // Take the write lock FIRST (BEGIN IMMEDIATE), then probe: two processes
+    // migrating the same v5 vault cannot both decide to ALTER and race to
+    // "duplicate column" — the loser blocks here and probes committed state
+    // (adversarial-review finding). Column adds tolerate pre-existing columns
+    // (restores, hand-built fixtures).
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        let existing: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('db_metadata')")
+                .map_err(DatabaseError::Sqlite)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(DatabaseError::Sqlite)?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let mut stmts = String::new();
+        if !existing.iter().any(|c| c == "vault_uuid") {
+            stmts.push_str("ALTER TABLE db_metadata ADD COLUMN vault_uuid TEXT;\n");
+        }
+        if !existing.iter().any(|c| c == "format_version") {
+            stmts.push_str(
+                "ALTER TABLE db_metadata ADD COLUMN format_version INTEGER NOT NULL DEFAULT 1;\n",
+            );
+        }
+        // Mint a UUID via SQL's random bytes (deterministic in-shape, v4) so
+        // COALESCE never re-mints an existing value.
+        stmts.push_str(
+            "UPDATE db_metadata SET vault_uuid = COALESCE(vault_uuid, \
+             (SELECT lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || \
+             substr(hex(randomblob(2)), 2) || '-' || substr('89ab', abs(random()) % 4 + 1, 1) || \
+             substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6))) )) \
+             WHERE id = 1;\n",
+        );
+        stmts.push_str("UPDATE db_metadata SET version = 6 WHERE id = 1;\n");
+        conn.execute_batch(&stmts).map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// v6 → v7 (WBS-302 / ADR-004 rev 4): the key-slot registry table and its
+/// MAC column. The password slot row is minted from the existing
+/// `db_metadata` wrap; the MAC itself is computed at the FIRST post-unlock
+/// open (its key derives from the DEK, unavailable here) and the sidecar
+/// digest is rebased in the same step — see `ensure_slot_registry` in
+/// `vault/slot_ops.rs`.
+pub fn migrate_v6_to_v7(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        let existing_meta: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('db_metadata')")
+                .map_err(DatabaseError::Sqlite)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(DatabaseError::Sqlite)?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        let mut stmts = String::from(
+            "CREATE TABLE IF NOT EXISTS key_slots (
+                slot_uuid TEXT PRIMARY KEY,
+                slot_type TEXT NOT NULL CHECK (slot_type IN
+                    ('password', 'recovery', 'platform', 'trusted_device')),
+                kdf_params BLOB NOT NULL,
+                wrapped_dek BLOB NOT NULL,
+                dek_nonce BLOB NOT NULL,
+                key_epoch INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                revoked_at INTEGER,
+                format_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_key_slots_type ON key_slots(slot_type);
+",
+        );
+        if !existing_meta.iter().any(|c| c == "slot_registry_mac") {
+            stmts.push_str("ALTER TABLE db_metadata ADD COLUMN slot_registry_mac BLOB;\n");
+        }
+
+        // Mint the password slot from the existing wrap (no MAC yet).
+        stmts.push_str(
+            "INSERT INTO key_slots
+                (slot_uuid, slot_type, kdf_params, wrapped_dek, dek_nonce,
+                 key_epoch, created_at, revoked_at, format_version)
+             SELECT lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
+                    substr(hex(randomblob(2)), 2) || '-' ||
+                    substr('89ab', abs(random()) % 4 + 1, 1) ||
+                    substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6))),
+                    'password', kdf_params, wrapped_dek, dek_nonce,
+                    COALESCE(key_epoch, 1), strftime('%s','now'), NULL, 1
+             FROM db_metadata WHERE id = 1
+               AND NOT EXISTS (SELECT 1 FROM key_slots);
+",
+        );
+        stmts.push_str("UPDATE db_metadata SET version = 7 WHERE id = 1;\n");
+        conn.execute_batch(&stmts).map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 pub fn migrate_v3_to_v4(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "BEGIN;
@@ -353,6 +483,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 5 {
         migrate_v4_to_v5(conn)?;
+    }
+
+    if version < 6 {
+        migrate_v5_to_v6(conn)?;
+    }
+
+    if version < 7 {
+        migrate_v6_to_v7(conn)?;
     }
 
     Ok(())
@@ -634,6 +772,58 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// v5 database (pre-identity): everything through the registry migration.
+    fn create_v5_db() -> rusqlite::Connection {
+        let conn = create_v4_db();
+        migrate_v4_to_v5(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrate_v5_to_v6_adds_vault_identity() {
+        let conn = create_v5_db();
+        // The production path: validate_schema_version dispatches run_migrations.
+        run_migrations(&conn).unwrap();
+
+        // The migration runner continues to the latest version; v6's
+        // deliverable is the identity columns (asserted below), not the
+        // terminal version number.
+        let version: i32 = conn
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(version >= 6);
+
+        // Every existing vault gets a stable generated UUID.
+        let uuid: String = conn
+            .query_row("SELECT vault_uuid FROM db_metadata WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            uuid::Uuid::parse_str(&uuid).is_ok(),
+            "generated UUID must parse"
+        );
+        // Re-running the migration path must not churn the UUID.
+        let again: String = conn
+            .query_row("SELECT vault_uuid FROM db_metadata WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(uuid, again);
+
+        // Explicit envelope format version starts at 1 (legacy field format).
+        let format_version: i64 = conn
+            .query_row(
+                "SELECT format_version FROM db_metadata WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(format_version, 1);
     }
 
     #[test]
