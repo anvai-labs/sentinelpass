@@ -1,6 +1,12 @@
 # Multi-Device Sync
 
-> Status Note (2026-02-26): This document describes the sync protocol and intended relay behavior. Some relay hardening controls listed here (for example certain config-driven limits and operational safeguards) are partially implemented or pending wiring in the current code. See `docs/GAP_REVIEW_2026-02-26.md`, `docs/REQUIREMENTS.md`, and `ROADMAP.md` for current implementation status and remediation priorities.
+> **Status Note (2026-09-04):** This document describes the experimental v1 sync
+> implementation. It is not approved for production credentials: aggregate
+> acknowledgements, sequence handling, remote-apply transactionality, unauthenticated
+> metadata, epoch enforcement, and six-digit bootstrap security require a coordinated
+> v2 replacement. See `docs/SECURITY_STATUS_MATRIX.md`, ADR-006, and
+> `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`. The protocol details below remain
+> useful implementation documentation for v1, not target-state security claims.
 
 End-to-end encrypted sync between SentinelPass devices via a relay server. The relay never sees plaintext — all payloads are encrypted with the vault's DEK before leaving the device.
 

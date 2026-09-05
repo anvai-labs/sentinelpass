@@ -1,216 +1,173 @@
 # SentinelPass Roadmap
 
-**Last Updated:** 2026-02-26
-**Workspace Version (Cargo):** 0.1.0
-**Roadmap Status:** Active (gap-driven reset)
+**Last Updated:** 2026-09-04
+
+**Workspace Version (Cargo):** 0.8.0
+
+**Roadmap Status:** Active security and recovery reset
 
 ## Purpose
 
-This roadmap replaces feature-first planning with a gap-driven plan based on the current codebase and docs state as of 2026-02-26.
+This roadmap is the milestone view of the active
+[strategic remediation plan](docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md). The
+strategic plan owns detailed scope, sequencing, verification, and exit criteria.
+Requirements and current implementation evidence remain in
+`docs/REQUIREMENTS.md` and `docs/SECURITY_STATUS_MATRIX.md`.
 
-Planning principles:
+## Product Strategy
 
-- Separate `implemented`, `partial`, and `planned` states.
-- Prioritize security posture and trust-boundary hardening before net-new premium features.
-- Keep open-source trust surfaces auditable (crypto, vault, sync protocol, client logic).
-- Build paid tiers as additive capabilities, not hidden changes to core security behavior.
+SentinelPass will mature in this order:
 
-## Current State Snapshot (2026-02-26)
+1. Recoverable, authenticated local vault
+2. Transactional persistence, backup, and restore
+3. Single-authority daemon and capability-based IPC
+4. Adversarially safe optional sync
+5. Hardened desktop and browser experience
+6. Production Android and iOS clients
+7. Broader personal, sharing, and enterprise features
 
-### Strong
+Feature growth does not outrank recovery, data integrity, or trust-boundary work.
+Trust-critical components remain open and auditable. Paid features remain additive and
+must not alter shared cryptographic correctness.
 
-- Local-first Rust core with encrypted vault, lockout, audit logging, TOTP, SSH key storage.
-- Desktop app + daemon + browser extension architecture in place.
-- Optional E2E sync protocol and self-hosted relay implemented.
-- Mobile bridge and native iOS/Android scaffolds exist.
-- Browser save-prompt and extension reliability work has already landed.
+## Current Readiness
 
-### Critical Gaps
+| Surface | Current status | Release posture |
+|---------|----------------|-----------------|
+| Local Rust core/CLI | Security preview | Continue hardening and migrate to envelope v2 |
+| Desktop | Alpha/beta | Do not claim production readiness until daemon/IPC/lifecycle gates close |
+| Browser extension | Alpha/beta | Opt-in; harden HTTP, field targeting, and native-host capability |
+| Relay sync | Experimental | Disabled by default until sync protocol v2 gates pass |
+| Android | Prototype | Not for production credentials |
+| iOS | Prototype | Not for production credentials |
+| Forgotten-password recovery | Planned | No old-password reset; recovery key-slot design required |
 
-- Windows daemon IPC still uses localhost TCP and transmits sensitive IPC payloads as plaintext JSON.
-- Relay production hardening is incomplete (config knobs exist but several are not enforced; cleanup/rate limit wiring missing).
-- Browser extension background trusts message payload domain values without sender URL validation.
-- Security/docs posture is overstated in places (target-state mitigations documented as if already implemented).
-- Product planning artifacts are fragmented and stale (roadmap vs technical debt vs prompt text diverge).
-- No explicit OSS/free/paid boundary and no two-repo operating strategy documented.
+## Release Train
 
-## 2026 Strategic Priorities
+### 0.8.x: Containment and truthful status
 
-1. **Security Truthfulness + Hardening**
-2. **Core Product Completeness (browser + import/export + health)**
-3. **Mobile Autofill Completion**
-4. **Commercial Packaging (free vs paid)**
-5. **Enterprise Foundations (after hardening)**
+- Keep sync opt-in/experimental and mobile prototype-labeled.
+- Deny legacy originless browser IPC by default.
+- Restrict non-TLS relay URLs to explicit loopback development.
+- Align public claims, status matrix, requirements, technical debt, and release checks.
+- Accept or revise ADR-003 through ADR-010 before dependent implementation.
 
-## Phased Roadmap
+**Exit:** unsafe incomplete paths cannot be enabled accidentally and claims match code.
 
-## Phase 1 (0-45 days): Security Hardening and Planning Convergence
+### 0.9: Recovery and authenticated vault foundation
 
-### Goals
+- Stable vault UUID, crypto epoch, and key-slot registry.
+- Password, recovery, and platform/device key slots.
+- Verified recovery-key onboarding and password replacement workflow.
+- Authenticated summary/secret envelope v2 with semantic AAD.
+- Bounded, versioned, language-neutral durable serialization.
+- Hard KDF/decode limits and atomic password rotation.
+- Verified legacy-to-v2 migration and fail-closed forward compatibility.
 
-- Eliminate the highest-risk local and relay trust-boundary gaps.
-- Align docs with reality and establish a single planning source of truth.
+**Exit:** forgotten-password recovery works without storing the password; ciphertext
+substitution fails; every released legacy schema migrates or fails safely.
 
-### Deliverables
+### 0.10: Persistence, backup, daemon, IPC, and client hardening
 
-- Windows IPC hardening design chosen and implemented:
-  - Preferred: named pipes with per-user ACLs.
-  - Interim fallback (if needed): authenticated message encryption on loopback.
-- Browser extension sender validation in background worker:
-  - validate `sender.tab.url`, scheme, frame context, and claimed domain.
-- Relay hardening wiring:
-  - spawn cleanup task,
-  - apply rate limiting,
-  - consume `pairing_ttl_secs`, `max_active_pairings`, `nonce_window_secs`,
-  - tighten CORS defaults.
-- Relay authz review for device registration and pairing endpoints.
-- Relay test baseline:
-  - unit tests for auth and pairing handlers,
-  - integration tests for push/pull and replay protection.
-- Security documentation split into:
-  - `implemented now`,
-  - `partial`,
-  - `planned target state`.
+- Transaction/unit-of-work boundary for all multi-table changes.
+- Correct local vs remote write paths and nullable-field handling.
+- Explicit file permissions/ACLs, owner checks, secret memory sweep, and audit integrity.
+- Authenticated portable backup and verified restore.
+- Daemon as sole desktop key/database owner.
+- Audience/operation-scoped IPC capabilities, peer controls, deadlines, and concurrency.
+- Desktop lifecycle/privacy/clipboard hardening.
+- Browser HTTP/form/iframe/permission hardening and Chrome/Firefox parity.
 
-### Exit Criteria
+**Exit:** crash injection cannot corrupt active data; restore drills pass; ordinary
+same-user clients cannot claim native-host authority; desktop has one key owner.
 
-- Critical review findings in `docs/GAP_REVIEW_2026-02-26.md` are either fixed or tracked with owners and dates.
-- `sentinelpass-relay` has non-zero automated test coverage.
+### 0.11: Sync protocol v2 beta
 
-## Phase 2 (45-120 days): Product Completeness Baseline (Free/OSS-first)
+- Per-object idempotent acknowledgements and distinct sequence/cursor types.
+- Transactional client outbox/inbox and relay mutation processing.
+- Authenticated object metadata, tombstones, epoch, and version lineage.
+- Explicit secret conflicts; no timestamp-only silent overwrite.
+- High-entropy QR or reviewed PAKE pairing.
+- Device revocation and stale-epoch rejection.
+- TLS/redirect/proxy enforcement and bounded relay quotas/resources.
+- Model-based convergence and loss/duplicate/reorder/crash testing.
 
-### Goals
+**Exit:** no accepted change is silently lost; malicious-relay metadata changes are
+detected; recovery can revoke old online authority.
 
-- Make SentinelPass feel complete for individual users before enterprise expansion.
+### 0.12: Mobile beta
 
-### Deliverables
+- One generated/versioned C/JNI ABI with ownership, zeroization, and panic containment.
+- Android JNI builds in CI for supported ABIs; Keystore slot and AutofillService.
+- iOS Keychain slot and Credential Provider.
+- Atomic update, lifecycle lock/privacy cover, safe clipboard, protected storage, and
+  verified backup policy on both platforms.
+- Real simulator/device tests for unlock, CRUD/update, lock, process death, biometric
+  invalidation, sync, autofill, migration, and restore.
 
-- Browser extension popup parity improvements:
-  - search,
-  - add credential,
-  - settings,
-  - better unlock UX.
-- Password health baseline (local analysis first):
-  - weak/reused password detection,
-  - age indicators,
-  - local security score.
-  - *Status:* delivered by the credential registry (ADR-001) — reuse clusters
-    and rotation posture in the CLI and desktop UI, shipped from v0.8.1 — plus
-    master password rotation (ADR-002, v0.8.1). Local security score remains
-    open.
-- Import/export improvements:
-  - KeePass and Bitwarden first,
-  - conflict and validation UX.
-- UX polish:
-  - pagination/virtualization for large vaults,
-  - stronger error recovery flows,
-  - release/debug log gating in extension and desktop UI.
+**Exit:** no release-reachable placeholder operations and applicable mobile security
+controls have evidence.
 
-### Exit Criteria
+### 1.0 RC: Assurance and independent audit
 
-- Free local-first desktop + extension experience covers the common password-manager baseline for a single user.
+- Feature freeze and full security-relevant build matrix.
+- Fuzz/property/chaos suites and historical restore fixtures.
+- Security CI gates tag releases directly.
+- Signed artifacts/checksums/updater metadata, SBOM, provenance, Windows signing, and
+  macOS signing/notarization.
+- Independent review of crypto use, recovery, sync, IPC, desktop/browser, and mobile.
 
-## Phase 3 (Q2-Q3 2026): Mobile Autofill and Sync Quality
+**Exit:** zero unresolved critical/high findings and all recovery, restore, sync,
+platform, and release gates pass.
 
-### Goals
+### 1.0: Production baseline
 
-- Complete mobile usability and make sync trustworthy at scale.
+- Release only after the 1.0 definition of done in the strategic plan is met.
+- Publish supported platforms, threat-model limits, backup/recovery obligations, and
+  compatibility windows.
 
-### Deliverables
+## Post-Foundation Features
 
-- iOS and Android autofill integrations.
-- Mobile CRUD + bridge test coverage.
-- Sync conflict UX beyond silent LWW-only behavior.
-- Device management UX (revocation visibility, sync health indicators).
-- Hosted relay compatibility profile (same protocol as OSS relay).
+### Baseline completeness
 
-### Exit Criteria
+- KeePass and Bitwarden import
+- Encrypted import/export and backup scheduling
+- Credential history and trash
+- Custom fields and secure notes
+- Device/session management
+- Password rotation and recovery UI on every supported client
 
-- Mobile clients are usable as daily drivers with autofill and optional sync.
+### Personal expansion
 
-## Phase 4 (Q3-Q4 2026): Commercial Packaging and Paid Tier Foundations
+- Identities, cards, attachments, tags, and collections
+- Privacy-preserving breach monitoring
+- Emergency/social recovery
+- Secure item sharing
 
-### Goals
+### Deferred architecture programs
 
-- Ship a clear free tier and paid tier without splitting trust-critical core code paths.
+- Multi-user sharing, RBAC, and administrative recovery
+- Enterprise policy, SSO, and SCIM
+- Actual passkey private-key custody and synchronization
 
-### Deliverables
+Passkey reference records remain metadata-only until a separate authenticator or
+credential-provider architecture is accepted and reviewed.
 
-- Capability tiering and entitlement model (documented + implemented).
-- Private repo established for paid/hosted features with compatibility contract.
-- Hosted relay operations stack (private) with billing/admin integrations.
-- Premium personal features (candidate set):
-  - managed encrypted sync hosting,
-  - advanced password health/breach monitoring,
-  - priority support.
+## Quality and Security Gates
 
-### Exit Criteria
+- Every trust-boundary change has a governing ADR, negative tests, and threat-model
+  update.
+- Every migration has fixtures for all supported prior versions and interruption tests.
+- Security controls are not `Implemented` without code and automated evidence.
+- Public protocol/format changes are versioned and carry compatibility notes.
+- No release claim exceeds the status recorded in the security matrix.
+- 1.0 has no unresolved critical/high trust-boundary finding.
 
-- OSS repo remains sufficient to self-host and verify core security claims.
-- Paid features are additive and optional.
+## Planning Sources
 
-## Phase 5 (2027): Teams and Enterprise
-
-### Goals
-
-- Add collaborative and policy features only after personal-product security and completeness are stable.
-
-### Deliverables
-
-- Shared vaults and role-based access.
-- Admin policy engine.
-- SSO/SCIM and directory sync.
-- Audit export and SIEM integrations.
-- Compliance-oriented deployment packaging.
-
-## Active Workstreams (Now / Next / Later)
-
-### Now
-
-- Relay hardening and config wiring
-- Windows IPC channel hardening
-- Extension sender validation
-- Docs convergence (PRD / requirements / design / plan)
-- OSS/private repo strategy
-
-### Next
-
-- Browser popup parity features
-- Local password health dashboard
-- Import/export expansion
-- Mobile autofill
-
-### Later
-
-- Managed sync hosting
-- Team/admin capabilities
-- Enterprise integrations
-
-## Quality and Security Gates (All Phases)
-
-- No major security claims in docs without an `implementation status` marker.
-- New trust-boundary code requires:
-  - unit tests,
-  - negative-path tests,
-  - threat-model update.
-- Release builds should gate or strip verbose credential-flow logs.
-- Public protocol changes require versioning + compatibility notes.
-
-## OSS / Paid Packaging Direction (Summary)
-
-See `docs/OSS_COMMERCIAL_STRATEGY.md` for the full model.
-
-High-level decisions:
-
-- **Open-source and free core:** vault, crypto, CLI, desktop client, extension, native host, daemon, sync protocol, self-host relay.
-- **Paid/private add-ons:** hosted relay operations, billing/licensing, premium breach/monitoring integrations, team/admin/SSO/policy features.
-- **Two repos:** public repo for core + protocols, private repo for additive commercial layers and hosted service operations.
-
-## Related Planning Docs
-
-- `docs/GAP_REVIEW_2026-02-26.md`
-- `docs/PRD.md`
-- `docs/REQUIREMENTS.md`
-- `docs/SOLUTION_DESIGN.md`
-- `docs/IMPLEMENTATION_PLAN.md`
-- `docs/OSS_COMMERCIAL_STRATEGY.md`
+- `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`: detailed active execution plan
+- `docs/REQUIREMENTS.md`: traceable requirements and acceptance criteria
+- `docs/SECURITY_STATUS_MATRIX.md`: current code/test evidence and residual risk
+- `TECHNICAL_DEBT.md`: implementation gap tracker
+- `docs/decisions/adr/README.md`: design decisions and status
+- `docs/OSS_COMMERCIAL_STRATEGY.md`: open/free/paid operating model

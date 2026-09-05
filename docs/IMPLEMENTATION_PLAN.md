@@ -1,8 +1,15 @@
 # SentinelPass Implementation Plan (90-Day)
 
-**Version:** 1.0  
-**Date:** 2026-02-26  
-**Status:** Active execution plan
+**Version:** 1.0
+
+**Date:** 2026-02-26
+
+**Status:** Superseded on 2026-09-04
+
+> This 2026-02-26 90-day plan is retained as historical planning context. The active
+> execution source is
+> [STRATEGIC_REMEDIATION_PLAN_2026-09-04.md](STRATEGIC_REMEDIATION_PLAN_2026-09-04.md),
+> with milestone status summarized in [ROADMAP.md](../ROADMAP.md).
 
 This plan operationalizes the gap review and requirements into a 90-day sequence. It is intentionally security-first.
 

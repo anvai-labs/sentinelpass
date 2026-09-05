@@ -23,6 +23,30 @@ pub enum AuditEventType {
         from_epoch: i64,
         to_epoch: i64,
     },
+    /// Epoch high-water sidecar state changed: `refused: true` marks an
+    /// open REFUSED by the guard (suspected tampering — high severity);
+    /// `refused: false` marks a TOFU mint or one-step heal (context text
+    /// distinguishes them; ADR-004 rev 4).
+    EpochHighWaterRebased {
+        refused: bool,
+    },
+    /// The slot registry failed MAC verification — a distinct control plane
+    /// from the epoch sidecar (review finding: previously logged under
+    /// EpochHighWaterRebased, mislabeling registry tampering as a sidecar
+    /// rollback and vice versa).
+    SlotRegistryIntegrityRefused,
+    /// Vault access was regained via a recovery key: all prior slots
+    /// revoked, new password minted, epoch advanced (local revocation per
+    /// ADR-004 rev 4). Severity 5 — this is the vault-takeover event.
+    RecoveryPerformed {
+        from_epoch: i64,
+        to_epoch: i64,
+    },
+    /// A recovery slot was created or replaced (onboarding).
+    RecoverySlotCreated,
+    /// A key slot was revoked (the core revocation control, ADR-004) —
+    /// previously invisible in the audit trail (review round 2).
+    SlotRevoked,
 
     /// Credential operations
     CredentialCreated {
@@ -211,7 +235,11 @@ impl AuditLogger {
     fn severity_for_event(event: &AuditEventType) -> u8 {
         match event {
             // Critical events (5)
-            AuditEventType::VaultCreated | AuditEventType::DataExported { .. } => 5,
+            AuditEventType::VaultCreated
+            | AuditEventType::DataExported { .. }
+            | AuditEventType::EpochHighWaterRebased { refused: true }
+            | AuditEventType::SlotRegistryIntegrityRefused
+            | AuditEventType::RecoveryPerformed { .. } => 5,
 
             // High severity (4)
             AuditEventType::CredentialDeleted { .. }
@@ -224,7 +252,12 @@ impl AuditLogger {
             | AuditEventType::ExternalSecretAccess { success: true, .. }
             | AuditEventType::ExternalSecretWrite { success: true, .. }
             | AuditEventType::MasterPasswordChanged { success: true, .. }
-            | AuditEventType::BiometricUnlockRequested { success: true } => 3,
+            | AuditEventType::BiometricUnlockRequested { success: true }
+            | AuditEventType::EpochHighWaterRebased { refused: false }
+            | AuditEventType::RecoverySlotCreated => 3,
+
+            // High severity (4)
+            AuditEventType::SlotRevoked => 4,
 
             // Medium severity (2)
             AuditEventType::VaultLocked

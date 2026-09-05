@@ -106,8 +106,26 @@ pub enum PasswordManagerError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
+    #[error(
+        "Vault epoch rollback suspected: on-disk epoch {on_disk} is older than the \
+         recorded high-water mark {high_water}. The vault database may have been \
+         rolled back or restored from an older backup. Refusing to open \
+         (ADR-004: epoch high-water enforcement). If this restore is intentional, \
+         delete the vault's `.epoch` sidecar file next to the vault database to \
+         re-base rollback protection (a supervised restore flow arrives with \
+         backup/restore work)."
+    )]
+    EpochRollback { on_disk: i64, high_water: i64 },
+
     #[error("Not found: {0}")]
     NotFound(String),
+
+    #[error(
+        "slot registry failed integrity verification — a key slot may have been \
+         added, edited, or restored without the vault's authority. Refusing to \
+         open; repair is verified restore only"
+    )]
+    SlotRegistryTampered,
 
     #[error("Not implemented: {0}")]
     NotImplemented(String),
@@ -128,13 +146,28 @@ mod documentation_status_tests {
             .expect("docs/SECURITY_STATUS_MATRIX.md must exist");
 
         for required in [
-            "| Control | Status | Code Location | Test Location | Residual Risk | Next Action |",
-            "Biometric Storage Model",
-            "Memory Locking / Zeroization",
-            "Windows IPC Named Pipes and ACLs",
-            "Extension Sender Validation",
-            "Relay Abuse Controls",
-            "Passkey Support State",
+            // Matrix format (2026-09-04 rewrite, ADR-003 vocabulary):
+            "| Control | Status | Current evidence | Residual risk / missing evidence | Target |",
+            // Evidence rule for the `Implemented` state — the vocabulary must
+            // stay evidence-bound, not code-existence-bound.
+            "`Implemented`: code exists and has relevant positive and negative automated evidence.",
+            // Security-critical controls that must never silently disappear
+            // from the matrix:
+            "Forgotten-password recovery",
+            "Recovery/device/platform key slots",
+            "Native-host/browser IPC authorization",
+            "Windows named-pipe boundary",
+            "Extension sender validation",
+            "Relay request authentication/replay controls",
+            "Sync delivery correctness",
+            "Authenticated portable backup and restore",
+            "Passkey support",
+            "Desktop biometric unlock: Windows",
+            "Android native bridge",
+            "iOS native bridge and biometric",
+            "Artifact signing, updater trust, SBOM, provenance",
+            // Experimental surfaces must stay clearly fenced off:
+            "not approved for production credentials",
         ] {
             assert!(
                 contents.contains(required),

@@ -93,10 +93,13 @@ unwrap the DEK under the current in-memory `KeyHierarchy`, wrap the *same* DEK u
 
 **Rev 2 (F1):** the new `key_epoch` is bound as **AEAD associated data** in the DEK wrap.
 A `db_metadata` row whose epoch column disagrees with the epoch baked into the wrap fails
-GCM authentication at open time — a file-level rollback that swaps an older `wrapped_dek`
-in alongside a matching epoch column is therefore *cryptographically* rejected, not merely
-advisory. (F5: cross-vault `wrapped_dek` swaps fail the tag independently, since the DEKs
-differ.)
+GCM authentication at open time. This rejects only the *inconsistent* pair
+(older `wrapped_dek` + newer epoch column). A file-level rollback that swaps in
+the older `wrapped_dek` **together with its matching older epoch column** is
+self-consistent, authenticates, and opens with the old password — that
+whole-file-rollback boundary is F3 below, and is what the out-of-DB epoch
+high-water sidecar (ADR-004) exists to catch. (F5: cross-vault `wrapped_dek`
+swaps fail the tag independently, since the DEKs differ.)
 
 **D2 — Explicit re-authentication under the existing lockout regime.** The operation begins
 by verifying the *current* password via the existing `verify_master_password` path, and

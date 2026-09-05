@@ -264,7 +264,7 @@ impl KeyHierarchy {
     /// Rotation (ADR-002) binds the `key_epoch` as associated data: a
     /// `db_metadata` row whose epoch column disagrees with the wrap fails
     /// authentication at open time instead of silently opening.
-    fn wrap_dek_under_key(
+    pub(crate) fn wrap_dek_under_key(
         master_key: &MasterKey,
         dek: &DataEncryptionKey,
         aad: Option<&[u8]>,
@@ -319,7 +319,7 @@ impl KeyHierarchy {
     }
 
     /// Unwrap the DEK under the given master key, optionally verifying AAD.
-    fn unwrap_dek_under_key(
+    pub(crate) fn unwrap_dek_under_key(
         master_key: &MasterKey,
         wrapped: &WrappedKey,
         aad: Option<&[u8]>,
@@ -373,8 +373,12 @@ impl KeyHierarchy {
 /// - The old master key is replaced in memory; the DEK (and therefore every
 ///   entry ciphertext) is untouched.
 ///
-/// Returns `(new_kdf_params, new_wrapped_dek, new_epoch)`. The caller persists
-/// them and updates the `key_epoch` column.
+/// Returns the staged rotation `(new_kdf_params, new_wrapped_dek, new_master)`
+/// and does NOT modify the hierarchy: adoption is the caller's last step,
+/// after the staged material is durably committed (WBS-309 / TD-SEC-04 —
+/// stage → verify → commit → adopt). The staged wrap is verified to open
+/// under the new key and yield the same DEK before it is returned, so a
+/// caller can never persist an unopenable rotation.
 pub fn rotate_master_password(
     hierarchy: &mut KeyHierarchy,
     current_password: &[u8],
@@ -382,7 +386,7 @@ pub fn rotate_master_password(
     current_wrapped: &WrappedKey,
     current_epoch: i64,
     new_password: &[u8],
-) -> Result<(KdfParams, WrappedKey)> {
+) -> Result<(KdfParams, WrappedKey, MasterKey)> {
     use crate::crypto::kdf::derive_master_key;
     use subtle::ConstantTimeEq;
 
@@ -422,9 +426,19 @@ pub fn rotate_master_password(
     let wrapped =
         KeyHierarchy::wrap_dek_under_key(&new_master, dek, Some(&new_epoch.to_le_bytes()), true)?;
 
-    hierarchy.adopt_master_key(new_master);
+    // Verify the staged wrap before handing it to the caller: it must open
+    // under the new master key and yield the same DEK. A wrap that cannot
+    // survive its own round-trip must never reach storage.
+    let verified_dek =
+        KeyHierarchy::unwrap_dek_under_key(&new_master, &wrapped, Some(&new_epoch.to_le_bytes()))?;
+    if !bool::from(verified_dek.as_bytes().ct_eq(dek.as_bytes())) {
+        return Err(CryptoError::EncryptionFailed(
+            "staged rotation wrap verification failed: DEK mismatch".to_string(),
+        ));
+    }
 
-    Ok((new_params, wrapped))
+    // Deliberately NOT adopting: the caller adopts only after durable commit.
+    Ok((new_params, wrapped, new_master))
 }
 
 impl Default for KeyHierarchy {
@@ -559,7 +573,7 @@ mod tests {
         // v0.8.0 wraps are not epoch-bound; the first rotation upgrades them.
         assert!(!wrapped.epoch_bound);
 
-        let (new_params, new_wrapped) =
+        let (new_params, new_wrapped, new_master) =
             rotate_master_password(&mut h, old_pw, &params, &wrapped, 1, new_pw).unwrap();
         assert!(new_wrapped.epoch_bound);
         assert_eq!(
@@ -567,6 +581,8 @@ mod tests {
             dek_before,
             "DEK must not change"
         );
+        // Staging does not adopt: the caller commits first (WBS-309).
+        h.adopt_master_key(new_master);
 
         // New password opens the new wrap; old password must fail.
         let mut reopened = KeyHierarchy::new();
@@ -582,16 +598,18 @@ mod tests {
         assert!(matches!(err, crate::CryptoError::AuthenticationFailed));
 
         // Rotation with the wrong current password is rejected.
-        let err = rotate_master_password(
+        match rotate_master_password(
             &mut h,
             b"wrong-password",
             &new_params,
             &new_wrapped,
             2,
             new_pw,
-        )
-        .unwrap_err();
-        assert!(matches!(err, crate::CryptoError::AuthenticationFailed));
+        ) {
+            Err(crate::CryptoError::AuthenticationFailed) => {}
+            Err(other) => panic!("expected AuthenticationFailed, got {other:?}"),
+            Ok(_) => panic!("rotation with the wrong current password must fail"),
+        }
     }
 
     #[test]
@@ -599,8 +617,10 @@ mod tests {
         let mut h = KeyHierarchy::new();
         let pw = b"correct-horse-battery";
         let (params, wrapped) = h.initialize_vault(pw).unwrap();
-        let err = rotate_master_password(&mut h, pw, &params, &wrapped, 1, pw).unwrap_err();
-        assert!(err.to_string().contains("must differ"));
+        match rotate_master_password(&mut h, pw, &params, &wrapped, 1, pw) {
+            Err(e) => assert!(e.to_string().contains("must differ")),
+            Ok(_) => panic!("rotation to the same password must fail"),
+        }
     }
 
     #[test]
@@ -611,7 +631,7 @@ mod tests {
         let new_pw = b"staple-anchor-quantum-42";
         let mut h = KeyHierarchy::new();
         let (params, wrapped) = h.initialize_vault(old_pw).unwrap();
-        let (_, new_wrapped) =
+        let (_, new_wrapped, _) =
             rotate_master_password(&mut h, old_pw, &params, &wrapped, 1, new_pw).unwrap();
 
         // Attacker rolls the epoch column back to 1: the AAD no longer matches
@@ -636,10 +656,56 @@ mod tests {
         h.unlock_vault_with_dek(h.dek().unwrap().clone());
         assert!(h.is_unlocked());
 
-        let (_, new_wrapped) =
+        let (_, new_wrapped, _) =
             rotate_master_password(&mut h, pw, &params, &wrapped, 1, new_pw).unwrap();
         assert_eq!(*h.dek().unwrap().as_bytes(), dek_before);
         assert!(new_wrapped.epoch_bound);
+    }
+
+    #[test]
+    fn rotation_stages_without_adopting_old_key() {
+        // WBS-309: after staging (and before any commit), the in-memory
+        // hierarchy still wraps under the OLD master key — a failed commit
+        // leaves the vault exactly as it was.
+        let old_pw = b"correct-horse-battery";
+        let new_pw = b"staple-anchor-quantum-42";
+        let mut h = KeyHierarchy::new();
+        let (params, wrapped) = h.initialize_vault(old_pw).unwrap();
+        let dek = *h.dek().unwrap().as_bytes();
+
+        let (new_params, new_wrapped, new_master) =
+            rotate_master_password(&mut h, old_pw, &params, &wrapped, 1, new_pw).unwrap();
+
+        // Staged wrap round-trips under the NEW key (the built-in verify).
+        let mut reopened = KeyHierarchy::new();
+        reopened
+            .unlock_vault_with_epoch(new_pw, &new_params, &new_wrapped, 2)
+            .unwrap();
+        assert_eq!(*reopened.dek().unwrap().as_bytes(), dek);
+
+        // In-memory hierarchy still operates under the OLD key: a wrap it
+        // produces opens with the old password.
+        let still_old_wrap = h.wrap_dek().unwrap();
+        let mut old_keyed = KeyHierarchy::new();
+        old_keyed.unlock_vault(old_pw, &params, &wrapped).unwrap();
+        let rewrapped_dek = old_keyed.unwrap_dek(&still_old_wrap).unwrap();
+        assert_eq!(*rewrapped_dek.as_bytes(), dek);
+
+        // After adoption, the hierarchy wraps under the NEW key instead.
+        h.adopt_master_key(new_master);
+        let adopted_wrap = h.wrap_dek().unwrap();
+        assert!(
+            old_keyed.unwrap_dek(&adopted_wrap).is_err(),
+            "post-adoption wrap must not open under the old master key"
+        );
+        let mut new_keyed = KeyHierarchy::new();
+        new_keyed
+            .unlock_vault_with_epoch(new_pw, &new_params, &new_wrapped, 2)
+            .unwrap();
+        assert_eq!(
+            *new_keyed.unwrap_dek(&adopted_wrap).unwrap().as_bytes(),
+            dek
+        );
     }
 
     #[test]

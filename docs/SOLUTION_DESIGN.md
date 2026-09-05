@@ -2,7 +2,12 @@
 
 **Version:** 1.0  
 **Date:** 2026-02-26  
-**Status:** Proposed design response to `docs/GAP_REVIEW_2026-02-26.md`
+**Status:** Historical design response to `docs/GAP_REVIEW_2026-02-26.md`
+
+> The active security-architecture response is
+> `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md` and Proposed ADR-003 through
+> ADR-010. This document remains useful for the earlier OSS/commercial and boundary
+> decisions but does not override the current security status matrix.
 
 ## 1. Design Goals
 
@@ -251,7 +256,8 @@ Required documents and roles:
 - `docs/PRD.md`: product intent and scope
 - `docs/REQUIREMENTS.md`: traceable requirements and acceptance criteria
 - `docs/SOLUTION_DESIGN.md`: architectural response
-- `docs/IMPLEMENTATION_PLAN.md`: short-term execution plan
+- `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`: active execution plan
+- `docs/IMPLEMENTATION_PLAN.md`: superseded historical 90-day plan
 - `ROADMAP.md`: milestone/phasing summary
 
 ## 8.2 Update policy

@@ -4943,6 +4943,7 @@ dependencies = [
  "sentinelpass-core",
  "serde_json",
  "sha2",
+ "subtle",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -9,6 +9,13 @@ use zeroize::Zeroize;
 
 use serde::{Deserialize, Serialize};
 
+/// Message used by every platform-unsupported stub. Matched BY REFERENCE
+/// (see biometric_ops/slot_ops tolerant clears) — never reword without
+/// updating those matches; the const exists so prose drift cannot silently
+/// break the platform-unsupported exception (review finding).
+pub const UNSUPPORTED_PLATFORM_MSG: &str =
+    "Biometric key storage is not supported on this platform";
+
 #[cfg(any(windows, target_os = "macos"))]
 const BIOMETRIC_SERVICE_NAME: &str = "sentinelpass.biometric";
 
@@ -32,7 +39,7 @@ impl BiometricProtectionPolicy {
 
         #[cfg(not(any(windows, target_os = "macos")))]
         return Err(PasswordManagerError::NotFound(
-            "Biometric key storage is not supported on this platform".to_string(),
+            UNSUPPORTED_PLATFORM_MSG.to_string(),
         ));
     }
 
@@ -196,7 +203,7 @@ impl BiometricManager {
         {
             let _ = (vault_path, dek);
             Err(PasswordManagerError::NotFound(
-                "Biometric key storage is not supported on this platform".to_string(),
+                UNSUPPORTED_PLATFORM_MSG.to_string(),
             ))
         }
     }
@@ -235,7 +242,7 @@ impl BiometricManager {
         {
             let _ = biometric_ref;
             Err(PasswordManagerError::NotFound(
-                "Biometric key storage is not supported on this platform".to_string(),
+                UNSUPPORTED_PLATFORM_MSG.to_string(),
             ))
         }
     }
@@ -317,7 +324,7 @@ impl BiometricManager {
         {
             let _ = biometric_ref;
             Err(PasswordManagerError::NotFound(
-                "Biometric key storage is not supported on this platform".to_string(),
+                UNSUPPORTED_PLATFORM_MSG.to_string(),
             ))
         }
     }
