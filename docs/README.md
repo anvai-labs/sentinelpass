@@ -19,6 +19,14 @@ Quick reference to all project documentation. Most docs live at the repository r
 | [docs/decisions/adr/README.md](./decisions/adr/README.md) | Index and conventions for architecture decision records (ADRs) | ADR, decisions, design gate |
 | [ADR-001](./decisions/adr/ADR-001-credential-registry-by-logical-entity.md) | Credential registry by logical entity — entities, reuse clusters, rotation posture | registry, entity, reuse, rotation |
 | [ADR-002](./decisions/adr/ADR-002-master-password-rotation.md) | Master password rotation via DEK re-wrap | rotation, re-wrap, key epoch, DEK |
+| [ADR-003](./decisions/adr/ADR-003-security-baseline-and-release-gates.md) | Security baseline, threat-model limits, and release gates | threat model, assurance, release gate |
+| [ADR-004](./decisions/adr/ADR-004-recovery-key-slots-and-revocation.md) | Recovery key slots, epochs, and revocation | recovery, key slot, epoch, rotation |
+| [ADR-005](./decisions/adr/ADR-005-authenticated-vault-envelope-v2.md) | Authenticated vault envelope v2 and migration | AAD, envelope, schema, migration |
+| [ADR-006](./decisions/adr/ADR-006-sync-protocol-v2.md) | Transactional sync protocol v2 | sync, idempotency, conflict, rollback |
+| [ADR-007](./decisions/adr/ADR-007-daemon-authority-and-ipc-capabilities.md) | Single-authority daemon and capability IPC | daemon, IPC, capability, ACL |
+| [ADR-008](./decisions/adr/ADR-008-authenticated-backup-and-verified-restore.md) | Authenticated backup and verified restore | backup, restore, recovery, snapshot |
+| [ADR-009](./decisions/adr/ADR-009-mobile-abi-and-platform-keystore.md) | Mobile ABI and platform-keystore boundary | Android, iOS, FFI, keystore, autofill |
+| [ADR-010](./decisions/adr/ADR-010-release-assurance-and-provenance.md) | Release assurance, signing, and provenance | signing, SBOM, provenance, audit |
 
 ## Security
 
@@ -42,12 +50,13 @@ Quick reference to all project documentation. Most docs live at the repository r
 | Document | Description | Keywords |
 |----------|-------------|----------|
 | [docs/GAP_REVIEW_2026-05-08.md](./GAP_REVIEW_2026-05-08.md) | Current gap review and integration plan for developer secrets, passkeys, and biometrics | audit, victor, api keys, passkeys, biometric, typed credentials |
+| [docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md](./STRATEGIC_REMEDIATION_PLAN_2026-09-04.md) | Active security-first remediation program through 1.0 | recovery, envelope v2, sync v2, IPC, mobile, release gates |
 | [docs/GAP_REVIEW_2026-02-26.md](./GAP_REVIEW_2026-02-26.md) | Evidence-based gap audit across security, features, design, and implementation | audit, review, gaps, security posture |
 | [docs/PASSKEY_PRODUCT_DESIGN.md](./PASSKEY_PRODUCT_DESIGN.md) | Product and security boundary for passkey references before implementation | passkeys, WebAuthn, AuthenticationServices, FIDO, credential provider |
 | [docs/PRD.md](./PRD.md) | Product requirements document (vision, users, scope, metrics, tiers) | prd, vision, users, scope, metrics |
 | [docs/REQUIREMENTS.md](./REQUIREMENTS.md) | Traceable functional/security/ops/commercial requirements | requirements, acceptance criteria, security requirements |
 | [docs/SOLUTION_DESIGN.md](./SOLUTION_DESIGN.md) | Gap-closing architecture and trust-boundary design | design, trust boundary, ipc, relay, extension |
-| [docs/IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) | 90-day execution plan and workstreams | plan, implementation, sequencing, verification |
+| [docs/IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) | Superseded 2026-02-26 90-day plan retained for history | plan, history, workstreams |
 | [docs/OSS_COMMERCIAL_STRATEGY.md](./OSS_COMMERCIAL_STRATEGY.md) | Open-source/free/paid tier strategy and two-repo operating model | open source, paid tier, private repo, licensing |
 
 ## Subsystem Docs
@@ -75,6 +84,8 @@ Looking for something specific? Use these pointers:
 | **Vault CRUD** | [CLAUDE.md](../CLAUDE.md) § Architecture Overview, `sentinelpass-core/src/vault/` |
 | **Crypto (KDF, cipher)** | [SECURITY_ARCHITECTURE.md](../SECURITY_ARCHITECTURE.md), `sentinelpass-core/src/crypto/` |
 | **Security status evidence** | [docs/SECURITY_STATUS_MATRIX.md](./SECURITY_STATUS_MATRIX.md) |
+| **Active remediation plan** | [docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md](./STRATEGIC_REMEDIATION_PLAN_2026-09-04.md) |
+| **Recovery/key-slot design** | [ADR-004](./decisions/adr/ADR-004-recovery-key-slots-and-revocation.md) |
 | **IPC protocol** | [CLAUDE.md](../CLAUDE.md) § IPC, `sentinelpass-core/src/daemon/ipc.rs` |
 | **Native messaging** | [CLAUDE.md](../CLAUDE.md) § Native Messaging Protocol, `sentinelpass-core/src/daemon/native_messaging.rs` |
 | **Browser extension** | [DEBUGGING.md](../browser-extension/chrome/DEBUGGING.md), `browser-extension/chrome/` |

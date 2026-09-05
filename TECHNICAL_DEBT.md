@@ -1,6 +1,6 @@
 # Technical Debt & Roadmap
 
-Last updated: 2026-09-03 (v0.8.1)
+Last updated: 2026-09-05 (v0.8.2)
 
 ---
 
@@ -255,10 +255,121 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 1. Schema v5 typed payloads: api-key provider/scopes/expiry metadata + entry ownership → real `DeleteSecret`
 2. Full `Zeroizing` sweep on IPC/export/sync/native-messaging secret fields (wire structs still `String`)
 3. Dependency majors: rusqlite 0.30→0.32, thiserror 1→2, rand 0.8→0.9, objc/cocoa replacements
-4. Origin gate deny-by-default (v0.9); remove `SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL` (v1.0)
+4. ~~Origin gate deny-by-default~~ — shipped (WBS-101/102, 2026-09-05): browser-surface IPC denies originless requests by default; `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` is the temporary escape hatch, remove in v1.0
 5. `sentinelpass-protocol` → crates.io (removes git-rev pin in sandhi)
 6. Repository pattern for sync_ops/delete_entry raw SQL; add_entry/update_entry encrypt-block dedup (vault/mod.rs)
 7. audit.toml ignore review; pairing-code lengthening (9 digits, coordinated client+relay)
 8. Headless `.deb` via cargo-deb for servers; systemd user unit; launchd plist for daemon supervision
 9. DaemonVault mutex `.lock().unwrap()` sites (vault_state.rs) — poison handling
 10. CLI CRUD still re-opens the vault + re-runs Argon2id per command; route CRUD through the daemon
+11. Originless-IPC deny warn (`daemon/ipc/server.rs::browser_surface_allowed`) has no rate limit — a pre-0.8 host polling autofill can flood the daemon log (log-hygiene only, not a bypass: gate logic is correct; review round 2, finding 10)
+
+---
+
+## Security and Recovery Reset (2026-09-04)
+
+This section is the current open-debt baseline and supersedes older status statements
+when they conflict. Detailed sequencing and acceptance criteria live in
+`docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`; governing designs are Proposed in
+ADR-003 through ADR-010.
+
+### P0 -- Release-blocking security architecture
+
+| ID | Gap | Evidence area | Required outcome | Target | Status |
+|----|-----|---------------|------------------|--------|--------|
+| TD-SEC-01 | Local encrypted fields lack semantic AAD | `crypto/cipher.rs`; `vault/mod.rs` | Envelope v2 binds vault/entry/purpose/type/epoch/version | 0.9 | Open; ADR-005 Proposed |
+| TD-SEC-02 | Sync identity/version/origin/tombstone metadata is not end-to-end authenticated | `sync/crypto.rs`; `sync/models.rs` | Authenticated v2 mutation envelope and version lineage | 0.11 | Open; ADR-006 Proposed |
+| TD-SEC-03 | No forgotten-password recovery | key hierarchy and UI | Verified recovery key slot; reset access, never recover old password | 0.9 | Done after adversarial review (2026-09-05): slot registry (WBS-302 Done) + 256-bit checksummed recovery key with exhaustive single-char-error rejection (310) + verified onboarding, raw-wrap + full AAD binding (311) + recover-without-old-password flow: verify-before-write, all-slots-revoked, epoch advance, single-use slot (312); CLI recovery setup/recover/status. Desktop-UI flows and the recovery drill remain (WBS-1001/905); ADR-004 Accepted rev 5 |
+| TD-SEC-04 | Password rotation adopts the in-memory key before persistence | `crypto/keyring.rs`; `vault/mod.rs` | Stage, verify, commit, then adopt | 0.9 | Done (WBS-309, 2026-09-04): staged+verified rotation, adopt-after-commit, stale-epoch UPDATE guard, commit-failure test with lock injector |
+| TD-SEC-05 | Key epoch does not revoke normal sync/device authority | pairing bootstrap vs normal sync | Epoch on every request/object; stale device/slot rejection | 0.11 | Open; ADR-004/006 Proposed |
+| TD-SEC-06 | Browser IPC authority relies on a self-asserted origin; originless remains allowed | `protocol/envelope.rs`; daemon IPC server | Native-host-specific capability; deny originless | 0.8.x/0.10 | Containment half done (0.8.x): originless browser-surface requests denied by default with `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS` escape hatch + unit tests; capability model open pending ADR-007 |
+| TD-SEC-07 | Six-digit HKDF pairing permits offline guessing | `sync/pairing.rs` | High-entropy QR bootstrap or reviewed PAKE | 0.11 | Open; ADR-006 Proposed |
+| TD-SEC-08 | Android/iOS security functions are incomplete but user-facing scaffolds exist | mobile bridge and native apps | Prototype labeling now; no release-reachable placeholders later | 0.8.x/0.12 | Open; ADR-009 Proposed |
+
+### P1 -- Data integrity, availability, and privacy
+
+| ID | Gap | Evidence area | Required outcome | Target | Status |
+|----|-----|---------------|------------------|--------|--------|
+| TD-ROB-01 | Sync marks rejected entries synced and uses server cursor as device sequence | `sync/engine.rs`; relay sync handler | Per-object durable ack and distinct counter types | 0.11 | Open |
+| TD-ROB-02 | Remote updates are rewritten pending by local SQLite trigger | `database/schema.rs`; `sync/engine.rs` | Explicit local/remote repositories and transactional unit of work | 0.10/0.11 | Open |
+| TD-ROB-03 | Optional encrypted URL/notes become empty blobs instead of NULL | sync apply | Preserve typed null end to end | 0.10 | Open |
+| TD-ROB-04 | Sync page, mapping, registry, cursor, and relay writes are not atomic | sync engine/relay | Transactional client and relay mutations | 0.11 | Open |
+| TD-ROB-05 | Retry after lost push response is not idempotent | client/relay device sequence | Mutation idempotency record returning original result | 0.11 | Open |
+| TD-ROB-06 | Full sync sequencing/pagination paths diverge from normal sync | client/relay full push/pull | One bounded paginated state machine | 0.11 | Open |
+| TD-ROB-07 | Newer unknown database schema is accepted | `database/schema.rs` | Fail closed with explicit compatibility policy | 0.9 | Open |
+| TD-ROB-08 | KDF parameters have minimums but no hard maximums; intermediate output is not fully zeroized | `crypto/kdf.rs` | Bounded platform profiles and secret buffer cleanup | 0.9 | Open |
+| TD-ROB-09 | Security-sensitive files rely partly on ambient permissions | platform/database/audit/token/grant paths | Explicit modes/ACLs and owner/type/symlink checks | 0.10 | Open |
+| TD-ROB-10 | Domain, SSH/TOTP metadata and audit context leak plaintext identity | database schema and audit call sites | Encrypted originals, keyed indexes, opaque audit IDs | 0.9/0.10 | Open |
+| TD-ROB-11 | Audit has no integrity chain, retention, or rotation contract | `audit.rs` | Verifiable bounded audit subsystem | 0.10 | Open |
+| TD-ROB-12 | No authenticated portable backup and verified restore contract | import/export and platform backup paths | Atomic encrypted snapshot bundle and restore drills | 0.10 | Open; ADR-008 Proposed |
+| TD-ROB-13 | Desktop UI and daemon can both own unlocked vault state | Tauri commands and daemon | Daemon is sole key/database owner | 0.10 | Open; ADR-007 Proposed |
+| TD-ROB-14 | IPC serves one Unix connection at a time without comprehensive deadlines; Argon2 may block async work | daemon IPC server | Bounded concurrent connections and blocking pool | 0.10 | Open |
+| TD-ROB-15 | Windows named pipe lacks explicit current-user security descriptor | daemon Windows transport | User SID ACL and remote-client rejection | 0.10 | Open |
+| TD-ROB-16 | IPC session crypto lacks a derived directional/session context | protocol Windows frame | HKDF session keys, AAD, counters, replay/reflection tests | 0.10 | Open |
+
+### P1 -- Network and relay operations
+
+| ID | Gap | Required outcome | Target | Status |
+|----|-----|------------------|--------|--------|
+| TD-NET-01 | Pairing token is fetched in a GET URL | POST body with one-use scoped material | 0.11 | Open |
+| TD-NET-02 | Clients accept arbitrary HTTP relay URLs | TLS except explicit loopback development; safe redirects/userinfo rules | 0.8.x/0.11 | 0.8.x half done: `validate_relay_url` (sync/config.rs) enforces HTTPS / loopback-only HTTP (`SENTINELPASS_ALLOW_LOOPBACK_RELAY=1`) / no userinfo at init and client construction, with negative tests; client redirect rules remain for v2 |
+| TD-NET-03 | Rate limiting trusts unconfigured forwarded IP values | Trust proxy headers only from configured proxies | 0.11 | Open |
+| TD-NET-04 | Public/pairing limits can be bypassed or interfere across vaults | Target-aware per-vault/device quotas and bounded expiring state | 0.11 | Open |
+| TD-NET-05 | Relay uses blocking serialized SQLite access in async handlers | Bounded storage pool/actor and short transactions | 0.11 | Open |
+| TD-NET-06 | Configured entry/blob/body limits are inconsistent or not all enforced | One validated protocol limit set with negative tests | 0.11 | Open |
+| TD-NET-07 | Production sync padding helper is unused | Either integrate authenticated padding profile or remove claim | 0.11 | Open |
+
+### P1/P2 -- Desktop and browser
+
+| ID | Gap | Required outcome | Target | Status |
+|----|-----|------------------|--------|--------|
+| TD-CLIENT-01 | Full selected credential remains in desktop JS/DOM state | Summary state plus scoped reveal/copy handles; scrub on lock | 0.10 | Open |
+| TD-CLIENT-02 | Desktop visibility change does not enforce lifecycle lock/privacy cover | Inactivity/background/session-lock/suspend/logout policy | 0.10 | Open |
+| TD-CLIENT-03 | Tauri shell/clipboard/CSP permissions are broader than demonstrated need | Least-privilege capabilities and CSP | 0.10 | Open |
+| TD-CLIENT-04 | Windows biometric consent is separate from generic keyring retrieval | Cryptographically Windows Hello/protection-bound slot | 0.10 | Open |
+| TD-CLIENT-05 | Browser permits HTTP and broad hosts | Default-deny HTTP; optional site access where feasible | 0.10 | Open |
+| TD-CLIENT-06 | Autofill ignores target and chooses the first password field | Validated field/form descriptor and ambiguity chooser | 0.10 | Open |
+| TD-CLIENT-07 | Plaintext pending credentials live in extension session storage | Eliminate or minimize/scrub with bounded lifetime | 0.10 | Open |
+| TD-CLIENT-08 | Chrome/Firefox source and native-host identifiers can drift | Shared generation and CI parity checks | 0.10 | Open |
+| TD-CLIENT-09 | Web coverage is concentrated in utilities | Cross-boundary Chromium/Firefox/daemon E2E suite | 0.10 | Open |
+
+### P0/P1 -- Mobile bridge and native clients
+
+| ID | Gap | Required outcome | Target | Status |
+|----|-----|------------------|--------|--------|
+| TD-MOB-01 | Android CI omits JNI and JNI-enabled Rust currently fails | Build every Android ABI with JNI and fail on symbol/signature mismatch | 0.12 | Open |
+| TD-MOB-02 | Kotlin `VaultBridge` declarations do not match Rust `VaultManager` exports | One generated class/package/signature contract | 0.12 | Open |
+| TD-MOB-03 | Android biometric/sync/autofill contain placeholders | Keystore-bound slot, real sync v2, complete AutofillService | 0.12 | Open |
+| TD-MOB-04 | Android update is delete-then-add and handle lifecycle can leak | Atomic update and deterministic destroy | 0.12 | Open |
+| TD-MOB-05 | Android lifecycle/privacy/network/backup policy is incomplete | Lock/privacy cover, cleartext deny, verified backup allowlist/no-backup | 0.12 | Open |
+| TD-MOB-06 | iOS biometric state is process-local and unlock is unimplemented | Keychain access-control platform slot surviving restart | 0.12 | Open |
+| TD-MOB-07 | iOS lacks scene lock/privacy cover and safe pasteboard behavior | Lifecycle lock/cover and local-only expiring pasteboard | 0.12 | Open |
+| TD-MOB-08 | iOS export/delete/backup/Credential Provider are incomplete | Authenticated backup/restore and Credential Provider | 0.12 | Open |
+| TD-MOB-09 | Duplicate Swift bridges and FFI buffers lack one proven ownership/zeroization contract | Generated ABI, one bridge, panic containment, zeroizing free | 0.12 | Open |
+| TD-MOB-10 | Mobile CI does not demonstrate functional native behavior | Simulator/device unlock/CRUD/update/lock/process-death/autofill tests | 0.12 | Open |
+
+### P1 -- Release and supply chain
+
+| ID | Gap | Required outcome | Target | Status |
+|----|-----|------------------|--------|--------|
+| TD-REL-01 | Tag release is not directly gated by all security workflows/features | Required security and feature-matrix dependencies | 1.0 RC | Open |
+| TD-REL-02 | Official artifacts lack complete signing/notarization/updater trust | Platform signing, notarization, signed updater metadata/checksums | 1.0 RC | Open |
+| TD-REL-03 | No published SBOM/provenance assurance | Signed SBOM and provenance attestations | 1.0 RC | Open |
+| TD-REL-04 | Dependency vulnerability exception lacks a full expiry lifecycle | Owner/exposure/mitigation/expiry enforcement | 0.10 | Open |
+| TD-REL-05 | Release smoke tests do not perform a real unlock/round-trip/restore | Installed-artifact functional and recovery smoke suites | 1.0 RC | Open |
+| TD-REL-06 | Relay timing tests remain ignored | Fix deterministic behavior and enable in CI | 0.11 | Open |
+| TD-REL-07 | Independent security review is not yet complete | Full trust-boundary review with critical/high closure | 1.0 RC | Planned |
+
+### P2/P3 -- UX and missing features
+
+| ID | Gap | Target |
+|----|-----|--------|
+| TD-UX-01 | Recovery setup, verification, health, and reauthentication UX | 0.9-0.10 |
+| TD-UX-02 | Device/revocation/epoch/sync-conflict dashboard | 0.11 |
+| TD-UX-03 | Password policy relies on composition cues rather than length/blocklist guidance | 0.9 |
+| TD-UX-04 | Security Center for backup, recovery, device, biometric, password health, and events | 0.11-1.0 |
+| TD-FEAT-01 | Credential history/trash, custom fields, secure notes, device management | Post-foundation baseline |
+| TD-FEAT-02 | Identities, cards, attachments, tags, collections, breach monitoring | Post-1.0 personal expansion |
+| TD-FEAT-03 | Emergency/social recovery and secure sharing | Separate accepted design required |
+| TD-FEAT-04 | Organization/RBAC/SSO/SCIM and admin recovery | Deferred enterprise program |
+| TD-FEAT-05 | Actual passkey private-key custody/provider capability | Deferred separate security architecture |
