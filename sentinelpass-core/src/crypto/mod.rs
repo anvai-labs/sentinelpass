@@ -9,6 +9,7 @@
 //! - Password strength analysis
 //! - Password health assessment
 
+pub mod aad;
 pub mod cipher;
 pub mod health;
 pub mod kdf;
@@ -16,12 +17,17 @@ pub mod keyring;
 pub mod password;
 pub mod strength;
 
+pub use aad::{AadContext, AadContextBuilder, EnvelopePurpose, ObjectType, AAD_VERSION};
 pub use cipher::{decrypt_entry, encrypt_entry, DataEncryptionKey, EncryptedEntry};
 pub use health::{
     HealthScore, PasswordHealth, PasswordHealthAnalyzer, PasswordStrengthInfo,
     StrengthDistribution, VaultHealthSummary, WeakPasswordEntry,
 };
-pub use kdf::{derive_master_key, verify_master_password, KdfParams};
+pub use kdf::{
+    derive_master_key, verify_master_password, KdfParams, MAX_MEM_COST_KIB, MAX_OUTPUT_LENGTH,
+    MAX_PARALLELISM, MAX_TIME_COST, MIN_MEM_COST_KIB, MIN_OUTPUT_LENGTH, MIN_PARALLELISM,
+    MIN_TIME_COST,
+};
 pub use keyring::{
     derive_equality_key, rotate_master_password, KeyHierarchy, MasterKey, WrappedKey,
 };

@@ -297,7 +297,7 @@ ADR-003 through ADR-010.
 | TD-ROB-05 | Retry after lost push response is not idempotent | client/relay device sequence | Mutation idempotency record returning original result | 0.11 | Open |
 | TD-ROB-06 | Full sync sequencing/pagination paths diverge from normal sync | client/relay full push/pull | One bounded paginated state machine | 0.11 | Open |
 | TD-ROB-07 | Newer unknown database schema is accepted | `database/schema.rs` | Fail closed with explicit compatibility policy | 0.9 | Open |
-| TD-ROB-08 | KDF parameters have minimums but no hard maximums; intermediate output is not fully zeroized | `crypto/kdf.rs` | Bounded platform profiles and secret buffer cleanup | 0.9 | Open |
+| TD-ROB-08 | KDF parameters have minimums but no hard maximums; intermediate output is not fully zeroized | `crypto/kdf.rs` | Bounded platform profiles and secret buffer cleanup | 0.9 | Hard maximums + mobile profile Done after adversarial review (WBS-307, 2026-09-05; incl. size-limited WrappedKey decode); intermediate-buffer zeroization sweep remains open (WBS-308); adopted-parameter ceilings for constrained devices under pair-join tracked with on-device calibration (ADR-009) |
 | TD-ROB-09 | Security-sensitive files rely partly on ambient permissions | platform/database/audit/token/grant paths | Explicit modes/ACLs and owner/type/symlink checks | 0.10 | Open |
 | TD-ROB-10 | Domain, SSH/TOTP metadata and audit context leak plaintext identity | database schema and audit call sites | Encrypted originals, keyed indexes, opaque audit IDs | 0.9/0.10 | Open |
 | TD-ROB-11 | Audit has no integrity chain, retention, or rotation contract | `audit.rs` | Verifiable bounded audit subsystem | 0.10 | Open |
