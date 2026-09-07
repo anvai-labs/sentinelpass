@@ -3341,3 +3341,96 @@ mod wbs305_durable_wire {
         cleanup(&path);
     }
 }
+
+// --- WBS-412/413: sensitive-file modes and type validation -----------------
+
+/// Positive: a freshly created vault's database AND its WAL sidecar are born
+/// owner-only (0600), and the epoch sidecar too — nothing sensitive hits
+/// disk group/world-readable. (The -shm sidecar is removed on clean close,
+/// so only files present while the connection is held are asserted.)
+#[cfg(unix)]
+#[test]
+fn created_vault_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.db");
+    let password = b"test_password_123!";
+
+    let vault = VaultManager::create(&path, password).unwrap();
+
+    let mode_of = |p: &std::path::Path| {
+        std::fs::metadata(p)
+            .unwrap_or_else(|e| panic!("{} must exist: {e}", p.display()))
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode_of(&path), 0o600, "vault db must be born 0600");
+    assert_eq!(
+        mode_of(&dir.path().join("vault.db-wal")),
+        0o600,
+        "WAL sidecar must be born 0600"
+    );
+
+    let sidecar = dir.path().join("vault.db.epoch");
+    assert!(sidecar.exists(), "creation must base the epoch sidecar");
+    assert_eq!(mode_of(&sidecar), 0o600, "epoch sidecar must be 0600");
+
+    // Reopening the vault (mode-verified path) succeeds.
+    assert!(VaultManager::open(&path, password).is_ok());
+    drop(vault);
+}
+
+/// Negative: a vault database whose mode was loosened to world-readable is
+/// REFUSED at open with an actionable error naming the chmod remediation —
+/// the documented WBS-412 policy (refuse for the vault db; never silently
+/// tighten, which would launder an attacker-loosened state).
+#[cfg(unix)]
+#[test]
+fn open_refuses_world_readable_vault_db() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.db");
+    let password = b"test_password_123!";
+    drop(VaultManager::create(&path, password).unwrap());
+
+    for loose in [0o644, 0o640, 0o604] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(loose)).unwrap();
+        let err = VaultManager::open(&path, password)
+            .err()
+            .expect("expected mode refusal");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("permissive mode") && msg.contains("chmod 600"),
+            "expected actionable mode refusal, got: {msg}"
+        );
+    }
+
+    // The vault is still intact: restoring 0600 reopens it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(VaultManager::open(&path, password).is_ok());
+}
+
+/// Negative: a symlink planted at the vault path is refused at open with the
+/// typed symlink error (WBS-413).
+#[cfg(unix)]
+#[test]
+fn open_refuses_symlinked_vault_path() {
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real.db");
+    let password = b"test_password_123!";
+    drop(VaultManager::create(&real, password).unwrap());
+
+    let link = dir.path().join("vault.db");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let err = VaultManager::open(&link, password)
+        .err()
+        .expect("expected symlink refusal");
+    assert!(
+        err.to_string().contains("symlink"),
+        "expected symlink refusal, got: {err}"
+    );
+}

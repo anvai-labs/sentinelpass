@@ -2,7 +2,7 @@
 
 use super::VaultManager;
 use crate::{
-    audit::{get_audit_log_dir, AuditEventType, AuditLogger},
+    audit::{AuditEventType, AuditLogger},
     crypto::KeyHierarchy,
     database::Database,
     PasswordManagerError, Result,
@@ -28,7 +28,9 @@ impl VaultManager {
         // silent one); a pending one-step heal is deliberately NOT adopted
         // here — there is no password proof of the new state — and waits for
         // the next password unlock.
-        let early_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let early_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
         let snapshot = Self::load_vault_snapshot(&db)?;
         let (epoch_sidecar, vault_uuid, bio_check) =
             match Self::enforce_epoch_guard(&snapshot, &vault_path) {
@@ -55,6 +57,16 @@ impl VaultManager {
             reason,
         )?;
         key_hierarchy.unlock_vault_with_dek(dek);
+
+        // WBS-414/415: the biometric-released DEK installs the audit key
+        // context — records from here on seal and carry opaque identifiers.
+        // Earlier records on this path (guard refusals) correctly stayed
+        // unsealed. Lease-held (gate review, finding 5): any failure
+        // between here and Ok clears the keys on drop.
+        let audit_lease = key_hierarchy
+            .dek()
+            .ok()
+            .and_then(|dek| crate::audit::AuditLogger::key_lease(dek).ok());
 
         // Registry MAC verification/bootstrap with the DEK in hand — this
         // full unlock surface must not be the one that skips it (review
@@ -87,6 +99,10 @@ impl VaultManager {
         }
 
         Self::clear_failed_attempts(&db)?;
+
+        if let Some(lease) = audit_lease {
+            lease.defuse();
+        }
 
         let audit_logger = early_logger;
 
@@ -134,7 +150,9 @@ impl VaultManager {
         // be caught here too (adversarial-review finding). Outcomes are
         // audited — this DEK-releasing surface must not be the silent one
         // (round-4 finding).
-        let logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
         let snapshot = Self::load_vault_snapshot(&db)?;
         match Self::enforce_epoch_guard(&snapshot, &vault_path) {
             Ok((_, _, check)) => {

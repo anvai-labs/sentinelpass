@@ -41,8 +41,9 @@ pub use kdf::{
     MIN_TIME_COST,
 };
 pub use keyring::{
-    derive_domain_tag_key, derive_equality_key, rotate_master_password, KeyHierarchy, MasterKey,
-    WrappedKey, DOMAIN_TAG_KEY_INFO,
+    derive_audit_chain_key, derive_audit_id_key, derive_domain_tag_key, derive_equality_key,
+    rotate_master_password, KeyHierarchy, MasterKey, WrappedKey, AUDIT_CHAIN_KEY_INFO,
+    AUDIT_ID_KEY_INFO, DOMAIN_TAG_KEY_INFO,
 };
 pub use password::{
     generate_passphrase, generate_password, generate_simple_password, CharacterSets,

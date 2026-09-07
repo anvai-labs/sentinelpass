@@ -1,5 +1,6 @@
 //! Vault management - coordinates crypto and database layers
 
+mod activation_ops;
 mod biometric_ops;
 pub(crate) mod domain_ops;
 pub(crate) mod envelope_ops;
@@ -10,6 +11,7 @@ pub mod recovery;
 mod registry_ops;
 pub(crate) mod slot_ops;
 
+pub use activation_ops::{V2ActivationOutcome, VaultVerificationFailure, VaultVerificationReport};
 pub use domain_ops::DomainSweepReport;
 pub use migration_ops::V2BlobSweepReport;
 pub use slot_ops::{SlotSummary, SlotType};
@@ -20,7 +22,7 @@ mod tests;
 mod totp_ops;
 
 use crate::{
-    audit::{get_audit_log_dir, AuditEventType, AuditLogger},
+    audit::{get_audit_log_dir, AuditEventType, AuditLogger, AuditVerifyReport},
     crypto::cipher::encrypt_string,
     crypto::{KdfParams, KeyHierarchy, WrappedKey},
     database::{
@@ -256,7 +258,19 @@ impl VaultManager {
         }
 
         // Initialize audit logger
-        let audit_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let audit_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
+
+        // WBS-414/415: the DEK exists from `initialize_vault` — install the
+        // audit key context so `VaultCreated` and every subsequent record
+        // seals and carries opaque identifiers.
+        // Lease is defused below (successful create): keys persist for the
+        // session. A panic/unwind between install and defuse clears them.
+        let audit_lease = key_hierarchy
+            .dek()
+            .ok()
+            .and_then(|dek| AuditLogger::key_lease(dek).ok());
 
         let vault_manager = Self {
             key_hierarchy,
@@ -267,6 +281,10 @@ impl VaultManager {
             vault_uuid: Some(vault_uuid),
             session_epoch: std::sync::atomic::AtomicI64::new(1),
         };
+
+        if let Some(lease) = audit_lease {
+            lease.defuse();
+        }
 
         // Log vault creation
         if let Some(ref logger) = vault_manager.audit_logger {
@@ -298,7 +316,9 @@ impl VaultManager {
         // Initialize the audit logger BEFORE the epoch guard: refusals are
         // security-relevant events and must leave a durable trace even though
         // the vault never opens (adversarial-review finding).
-        let early_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let early_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
 
         // Epoch high-water enforcement (WBS-301 / ADR-004 rev 4): refuse a
         // vault whose on-disk epoch or key material disagrees with the
@@ -335,6 +355,21 @@ impl VaultManager {
 
             return Err(PasswordManagerError::Crypto(e));
         }
+
+        // WBS-414/415: with the DEK unwrapped, install the audit key
+        // context — records from here on (heal outcomes, VaultUnlocked,
+        // backfills, CRUD) seal and carry opaque identifiers. Earlier
+        // records on this path (epoch-guard refusals) were correctly
+        // written unsealed: no key material existed.
+        // Key-context lease (WBS-414/415 lifecycle review, finding 5):
+        // installed here (DEK unwrapped) and held for the rest of open();
+        // any fallible step between here and Ok clears the keys on drop so
+        // a failed open never leaves HKDF material in a failed/locked
+        // process. Defused at the Ok return — keys persist for the session.
+        let audit_lease = key_hierarchy
+            .dek()
+            .ok()
+            .and_then(|dek| AuditLogger::key_lease(dek).ok());
 
         // A pending one-step heal is adopted ONLY now: the unlock above just
         // proved the on-disk wrap under this epoch (epoch-bound wraps verify
@@ -453,6 +488,39 @@ impl VaultManager {
                     "v1→v2 blob sweep failed; will retry on next open"
                 );
             }
+        }
+
+        // v2-format activation (WBS-405/406): once the blob sweep has run
+        // its course, the full verification pass proves every converted
+        // envelope + relation and stamps the durable activation marker
+        // (db_metadata.format_version) in one transaction. Best-effort
+        // like the sweeps: never fails the unlock; deterministic blocks
+        // dead-letter (clear `v2_activation_blocked` to retry).
+        if vault_manager.v2_activation_needed().unwrap_or(false) {
+            match vault_manager.activate_v2_format() {
+                Ok(activation_ops::V2ActivationOutcome::Activated { ref verified_at }) => {
+                    tracing::info!(verified_at = %verified_at, "v2 format activated at open");
+                }
+                Ok(activation_ops::V2ActivationOutcome::AlreadyActivated) => {}
+                Ok(activation_ops::V2ActivationOutcome::Blocked {
+                    report,
+                    dead_lettered,
+                }) => {
+                    tracing::warn!(
+                        summary = %report.summary_line(),
+                        dead_lettered,
+                        "v2 format activation blocked; will retry on next open unless \
+                         dead-lettered"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "v2 format activation failed; will retry on next open");
+                }
+            }
+        }
+
+        if let Some(lease) = audit_lease {
+            lease.defuse();
         }
 
         Ok(vault_manager)
@@ -580,12 +648,31 @@ impl VaultManager {
 
     /// Lock the vault (clear keys from memory)
     pub fn lock(&mut self) {
-        self.key_hierarchy.lock_vault();
-
-        // Log vault lock event
+        // Log the lock event while the audit key context is still
+        // installed so the record seals (WBS-415); the context is
+        // process-global and independent of `key_hierarchy`.
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(AuditEventType::VaultLocked, "Vault locked");
         }
+
+        self.key_hierarchy.lock_vault();
+
+        // Zeroize the derived audit keys together with the DEK (WBS-414/415
+        // key discipline: no audit key material outlives the lock).
+        AuditLogger::clear_keys();
+    }
+
+    /// Verify the audit trail hash chain under this vault's DEK (WBS-415).
+    ///
+    /// Walks every retained audit file oldest-first and reports the first
+    /// broken record (tamper, deletion, or reorder). Legacy pre-0.10
+    /// records are grandfathered (exempt but flagged). Requires the vault
+    /// to be unlocked: sealed records verify only under the DEK-derived
+    /// chain key.
+    pub fn verify_audit_trail(&self) -> Result<AuditVerifyReport> {
+        let dek = self.key_hierarchy.dek()?;
+        let chain_key = crate::crypto::derive_audit_chain_key(dek)?;
+        crate::audit::verify_audit_chain(&get_audit_log_dir(), Some(chain_key.as_slice()))
     }
 
     /// Check if vault is unlocked
@@ -765,11 +852,13 @@ impl VaultManager {
         // here deadlocks the vault).
         drop(db);
 
-        // Log credential creation
+        // Log credential creation. Context is deliberately free of the
+        // title: the audit log is plaintext and outside vault.db (WBS-414
+        // — the opaqued entry id in the event payload identifies it).
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialCreated { entry_id },
-                &format!("Created credential: {}", entry.title),
+                "Credential created",
             );
         }
 
@@ -821,9 +910,10 @@ impl VaultManager {
         };
 
         if let Some(ref logger) = self.audit_logger {
+            // Context carries no title: plaintext log outside vault.db (WBS-414).
             let _ = logger.log(
                 AuditEventType::CredentialViewed { entry_id },
-                &format!("Viewed credential: {}", entry.title),
+                "Credential viewed",
             );
         }
 
@@ -994,11 +1084,12 @@ impl VaultManager {
 
         tx.commit().map_err(DatabaseError::Sqlite)?;
 
-        // Log credential deletion
+        // Log credential deletion (no raw id in context: the event payload
+        // carries the opaque token, WBS-414).
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialDeleted { entry_id },
-                &format!("Deleted credential: {}", entry_id),
+                "Credential deleted",
             );
         }
 
@@ -1181,11 +1272,11 @@ impl VaultManager {
         // — see add_entry).
         drop(db);
 
-        // Log credential modification
+        // Log credential modification (no title in context: WBS-414).
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialModified { entry_id },
-                &format!("Modified credential: {}", entry.title),
+                "Credential modified",
             );
         }
 

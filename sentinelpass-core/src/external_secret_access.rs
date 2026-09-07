@@ -89,6 +89,17 @@ impl ExternalSecretAllowlist {
             return Ok(Self::default());
         }
 
+        // WBS-413: fail closed on a tampered allowlist surface — a symlink
+        // would feed attacker-chosen content in as authorization, and a
+        // foreign-owned or non-regular file is refused outright. A loose
+        // mode warns and tightens (WarnAndRepair: the allowlist is a
+        // non-vault sensitive file).
+        crate::platform::validate_sensitive_path(
+            path,
+            crate::platform::OwnerOnlyPolicy::WarnAndRepair,
+        )
+        .map_err(PasswordManagerError::from)?;
+
         let contents = std::fs::read_to_string(path)?;
         serde_json::from_str(&contents).map_err(|e| {
             PasswordManagerError::from(DatabaseError::Serialization(format!(
@@ -99,8 +110,26 @@ impl ExternalSecretAllowlist {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        // WBS-413: never write THROUGH a symlink planted at the allowlist
+        // path (it would hand grant-control to whatever the link targets).
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "external secret allowlist {} is a symlink; refusing to write \
+                     through it (possible symlink swap). Remove the symlink and retry",
+                    path.display()
+                )));
+            }
+        }
+
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            // Created owner-only when we have to create it; a pre-existing
+            // parent is left untouched (chmod-ing shared dirs can fail or
+            // break other tools — the grants FILE itself is the fix, born
+            // 0600 below).
+            if !parent.exists() {
+                crate::platform::create_private_dir(parent)?;
+            }
         }
 
         let contents = serde_json::to_string_pretty(self).map_err(|e| {
@@ -109,13 +138,23 @@ impl ExternalSecretAllowlist {
                 e
             )))
         })?;
-        std::fs::write(path, contents)?;
-
+        // Born-0600 (gate review, finding: the write-then-chmod form had a
+        // permissive window where the grants file — client ids + allowed
+        // domains/fields — was world-readable). On non-Unix the chmod
+        // fallback retains the old behavior (Windows ACLs are inherited).
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        std::fs::write(path, contents).map_err(|e| {
+            PasswordManagerError::from(DatabaseError::FileIo(format!(
+                "Failed to write external secret allowlist: {}",
+                e
+            )))
+        })?;
 
         Ok(())
     }
@@ -718,5 +757,46 @@ mod tests {
         assert_eq!(allowlist.revoke_all_for_client("victor").unwrap(), 2);
         assert!(!allowlist.is_allowed("victor", "a", ExternalSecretField::Password));
         assert!(allowlist.is_allowed("sandhi", "a", ExternalSecretField::Password));
+    }
+
+    // --- WBS-413: the allowlist is never followed through a symlink --------
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_symlinked_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = tmp.path().join("allowlist.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = ExternalSecretAllowlist::load_from_path(&link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_to_write_through_symlinked_allowlist() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = tmp.path().join("allowlist.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut allowlist = ExternalSecretAllowlist::default();
+        allowlist
+            .allow("victor", "anthropic", ExternalSecretField::Password)
+            .unwrap();
+
+        let err = allowlist.save_to_path(&link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+        // The link target is untouched.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
     }
 }
