@@ -583,6 +583,54 @@ pub fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migrate schema from v8 to v9: drop the `update_entry_modified_timestamp`
+/// echo trigger (WBS-409 / TD-ROB-02).
+///
+/// The trigger rewrote `sync_state` back to `'pending'` AFTER a remote sync
+/// apply had explicitly written `'synced'` (the applied change re-pushed
+/// forever), and it double-bumped `sync_version` on local edits (the
+/// repository's own UPDATE already bumps). It is load-bearing for nothing:
+/// every local mutation path writes sync bookkeeping explicitly (repository
+/// insert/update, `delete_entry`, the v1→v2 blob sweep). See
+/// `schema::create_triggers` for the exhaustive site list.
+///
+/// Both historical shapes are dropped by name:
+/// - the OF-list shape (`AFTER UPDATE OF title, username, ...`) created by
+///   `create_triggers` on newer vaults;
+/// - the legacy no-list shape (`AFTER UPDATE ON entries`, modified_at only)
+///   carried by v1-era vaults (the same shape the WBS-404 sweep
+///   capture/drop/recreates around its work — that neutralization became
+///   dead code with this migration and was removed).
+///
+/// `DROP TRIGGER` is transactional in SQLite; ONE transaction with the
+/// version bump (ADR-005 rev 3) — a failure rolls back to a consistent v8.
+/// `IF EXISTS` keeps the migration a no-op for vaults (and programmatic
+/// fixtures) that never had the trigger installed.
+pub fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS update_entry_modified_timestamp;
+             UPDATE db_metadata SET version = 9 WHERE id = 1;",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -617,6 +665,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 8 {
         migrate_v7_to_v8(conn)?;
+    }
+
+    if version < 9 {
+        migrate_v8_to_v9(conn)?;
     }
 
     Ok(())
@@ -978,7 +1030,9 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(version, 8);
+        // The continuation runs the FULL remaining ladder (v8→v9 dropped the
+        // echo trigger, WBS-409), so it lands on the current version.
+        assert_eq!(version, crate::database::schema::CURRENT_SCHEMA_VERSION);
 
         let has_domain_enc: bool = conn
             .query_row(
@@ -1335,5 +1389,190 @@ mod tests {
             })
             .unwrap();
         assert_eq!(version, crate::database::schema::CURRENT_SCHEMA_VERSION);
+    }
+
+    // --- WBS-409 / TD-ROB-02: v8 → v9 drops the entries echo trigger ------
+
+    /// The exact OF-list trigger shape `create_triggers` installed on
+    /// vaults created by v8-and-earlier current-era binaries.
+    const OF_LIST_TRIGGER_SQL: &str = "CREATE TRIGGER update_entry_modified_timestamp
+         AFTER UPDATE OF title, username, password, url, notes, favorite ON entries
+         FOR EACH ROW
+         BEGIN
+             UPDATE entries SET
+                 modified_at = (strftime('%s', 'now')),
+                 sync_version = OLD.sync_version + 1,
+                 sync_state = 'pending'
+             WHERE entry_id = NEW.entry_id;
+         END;";
+
+    /// The legacy no-list shape carried by v1-era vaults (`AFTER UPDATE ON
+    /// entries`, modified_at only) — fires on EVERY column update.
+    const LEGACY_NO_LIST_TRIGGER_SQL: &str = "CREATE TRIGGER update_entry_modified_timestamp
+         AFTER UPDATE ON entries
+         FOR EACH ROW
+         BEGIN
+             UPDATE entries SET modified_at = (strftime('%s', 'now')) WHERE entry_id = NEW.entry_id;
+         END;";
+
+    /// A vault migrated to exactly v8 (the pre-WBS-409 current shape),
+    /// optionally with one of the historical trigger shapes installed.
+    fn create_v8_db_with_trigger(trigger_sql: Option<&str>) -> rusqlite::Connection {
+        let conn = create_v1_db();
+        migrate_v1_to_v2(&conn).unwrap();
+        migrate_v2_to_v3(&conn).unwrap();
+        migrate_v3_to_v4(&conn).unwrap();
+        migrate_v4_to_v5(&conn).unwrap();
+        migrate_v5_to_v6(&conn).unwrap();
+        migrate_v6_to_v7(&conn).unwrap();
+        migrate_v7_to_v8(&conn).unwrap();
+        if let Some(sql) = trigger_sql {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn
+    }
+
+    fn trigger_installed(conn: &rusqlite::Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' \
+             AND name='update_entry_modified_timestamp')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn schema_version(conn: &rusqlite::Connection) -> i32 {
+        conn.query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn migrate_v8_to_v9_drops_both_historical_trigger_shapes() {
+        for (shape, sql) in [
+            ("of-list", OF_LIST_TRIGGER_SQL),
+            ("legacy-no-list", LEGACY_NO_LIST_TRIGGER_SQL),
+        ] {
+            let conn = create_v8_db_with_trigger(Some(sql));
+            assert!(trigger_installed(&conn), "{shape}: fixture must install");
+
+            migrate_v8_to_v9(&conn).unwrap();
+
+            assert_eq!(schema_version(&conn), 9, "{shape}");
+            assert!(
+                !trigger_installed(&conn),
+                "{shape}: the echo trigger must be dropped"
+            );
+
+            // Idempotence: the ladder re-runs cleanly (DROP IF EXISTS).
+            run_migrations(&conn).unwrap();
+            assert_eq!(schema_version(&conn), 9, "{shape}");
+        }
+    }
+
+    #[test]
+    fn migrate_v8_to_v9_without_trigger_is_a_pure_version_bump() {
+        let conn = create_v8_db_with_trigger(None);
+        assert!(!trigger_installed(&conn));
+
+        migrate_v8_to_v9(&conn).unwrap();
+
+        assert_eq!(schema_version(&conn), 9);
+        assert!(!trigger_installed(&conn));
+    }
+
+    /// THE WBS-409 negative, at the migration boundary: after the v8 → v9
+    /// migration, a sync-apply-shaped UPDATE (explicit
+    /// `sync_state = 'synced'` + explicit `sync_version`, touching
+    /// OF-list columns) survives intact — the trigger can no longer
+    /// rewrite it back to `'pending'`.
+    #[test]
+    fn migrated_vault_remote_apply_bookkeeping_survives() {
+        let conn = create_v8_db_with_trigger(Some(OF_LIST_TRIGGER_SQL));
+
+        // A synced entry with known bookkeeping.
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                entry_nonce, auth_tag, created_at, modified_at, favorite,
+                sync_id, sync_version, sync_state)
+             VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                     '11111111-1111-1111-1111-111111111111', 7, 'synced')",
+            [],
+        )
+        .unwrap();
+
+        migrate_v8_to_v9(&conn).unwrap();
+
+        // The exact column set the sync apply UPDATE writes
+        // (`sync/engine.rs::apply_credential`).
+        conn.execute(
+            "UPDATE entries SET
+                title = X'0A', username = X'0B', password = X'0C', url = NULL, notes = NULL,
+                credential_type = 'password', modified_at = 200, favorite = 1,
+                sync_version = 8, sync_state = 'synced', last_synced_at = 300
+             WHERE sync_id = '11111111-1111-1111-1111-111111111111'",
+            [],
+        )
+        .unwrap();
+
+        let (state, version): (String, i64) = conn
+            .query_row(
+                "SELECT sync_state, sync_version FROM entries \
+                 WHERE sync_id = '11111111-1111-1111-1111-111111111111'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state, "synced",
+            "remote apply must not be re-marked pending"
+        );
+        assert_eq!(version, 8, "remote apply must keep its explicit version");
+    }
+
+    /// The migrated-vault local path: explicit local bookkeeping marks the
+    /// row pending with exactly ONE version bump (the old trigger layout
+    /// double-bumped: repository SET + trigger fire).
+    #[test]
+    fn migrated_vault_local_update_marks_pending_with_single_version_bump() {
+        let conn = create_v8_db_with_trigger(Some(OF_LIST_TRIGGER_SQL));
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                entry_nonce, auth_tag, created_at, modified_at, favorite,
+                sync_id, sync_version, sync_state)
+             VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                     '11111111-1111-1111-1111-111111111111', 7, 'synced')",
+            [],
+        )
+        .unwrap();
+
+        migrate_v8_to_v9(&conn).unwrap();
+
+        // The repository update shape (`database/repository.rs::update`):
+        // field writes + explicit `sync_version = sync_version + 1,
+        // sync_state = 'pending'`.
+        conn.execute(
+            "UPDATE entries SET title = X'0A', modified_at = 200,
+                sync_version = sync_version + 1, sync_state = 'pending'
+             WHERE sync_id = '11111111-1111-1111-1111-111111111111'",
+            [],
+        )
+        .unwrap();
+
+        let (state, version): (String, i64) = conn
+            .query_row(
+                "SELECT sync_state, sync_version FROM entries \
+                 WHERE sync_id = '11111111-1111-1111-1111-111111111111'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "pending");
+        assert_eq!(
+            version, 8,
+            "exactly one bump: 7 -> 8 (no trigger double-bump)"
+        );
     }
 }

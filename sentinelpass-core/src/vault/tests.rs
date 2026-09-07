@@ -3434,3 +3434,156 @@ fn open_refuses_symlinked_vault_path() {
         "expected symlink refusal, got: {err}"
     );
 }
+
+// --- WBS-409 / TD-ROB-02: explicit local vs remote write paths ----------
+
+/// Helper: read an entry row's sync bookkeeping.
+fn entry_sync_bookkeeping(vault: &VaultManager, entry_id: i64) -> (String, i64) {
+    let db = vault.lock_db().unwrap();
+    db.conn()
+        .query_row(
+            "SELECT sync_state, sync_version FROM entries WHERE entry_id = ?1",
+            [entry_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A local edit marks the row pending with EXACTLY ONE version bump.
+/// (With the pre-v9 echo trigger this exact flow double-bumped: the
+/// repository's own `sync_version = sync_version + 1` plus the trigger's
+/// `OLD.sync_version + 1` rewrite.)
+#[test]
+fn local_update_marks_pending_with_single_version_bump() {
+    let vault = VaultManager::create(":memory:", b"wbs409-local-bump").unwrap();
+    let entry = Entry {
+        entry_id: None,
+        title: "Bump Me".to_string(),
+        username: "u@example.com".to_string(),
+        password: "first-pass".to_string().into(),
+        url: None,
+        notes: None,
+        credential_type: CredentialType::Password,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let (_, version_after_add) = entry_sync_bookkeeping(&vault, entry_id);
+    assert_eq!(version_after_add, 1, "fresh rows start at version 1");
+
+    let mut edited = vault.get_entry(entry_id).unwrap();
+    edited.title = "Bump Me Edited".to_string();
+    vault.update_entry(entry_id, &edited).unwrap();
+
+    let (state, version) = entry_sync_bookkeeping(&vault, entry_id);
+    assert_eq!(state, "pending", "a local edit must mark the row pending");
+    assert_eq!(
+        version,
+        version_after_add + 1,
+        "exactly one version bump per local edit (no trigger double-bump)"
+    );
+}
+
+/// A local soft delete marks the row pending and bumps once (this flow
+/// already wrote explicit bookkeeping before WBS-409; pinned so the
+/// trigger removal cannot regress it).
+#[test]
+fn local_delete_marks_pending_with_single_version_bump() {
+    let vault = VaultManager::create(":memory:", b"wbs409-delete-bump").unwrap();
+    let entry = Entry {
+        entry_id: None,
+        title: "Delete Me".to_string(),
+        username: "u@example.com".to_string(),
+        password: "some-pass".to_string().into(),
+        url: None,
+        notes: None,
+        credential_type: CredentialType::Password,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let (_, version_before) = entry_sync_bookkeeping(&vault, entry_id);
+
+    vault.delete_entry(entry_id).unwrap();
+
+    let (state, version) = entry_sync_bookkeeping(&vault, entry_id);
+    assert_eq!(state, "pending", "a local delete must mark the row pending");
+    assert_eq!(version, version_before + 1);
+}
+
+/// The MIGRATED-vault path (the highest-risk WBS-409 regression): a real
+/// v8 fixture is given the exact OF-list echo trigger the v8 binaries
+/// installed, then opened with the CURRENT binary. The v8→v9 migration
+/// must drop the trigger, and the vault must behave like any other v9:
+/// a local edit marks pending with a single bump, and the row stays
+/// readable through the whole sweep/activate pipeline.
+#[test]
+fn migrated_v8_vault_with_echo_trigger_edits_mark_pending_after_open() {
+    use crate::database::fixtures::{build_fixture_set, FIXTURE_CONTENT};
+
+    let set = build_fixture_set();
+    let v8 = set
+        .fixtures
+        .iter()
+        .find(|f| f.version == 8)
+        .expect("fixture set must contain a v8 fixture");
+
+    // Copy (the fixture set is shared by many tests) and install the
+    // historical OF-list trigger on the copy.
+    let path = v8.path.with_extension("wbs409-echo.db");
+    std::fs::copy(&v8.path, &path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER update_entry_modified_timestamp
+             AFTER UPDATE OF title, username, password, url, notes, favorite ON entries
+             FOR EACH ROW
+             BEGIN
+                 UPDATE entries SET
+                     modified_at = (strftime('%s', 'now')),
+                     sync_version = OLD.sync_version + 1,
+                     sync_state = 'pending'
+                 WHERE entry_id = NEW.entry_id;
+             END;",
+        )
+        .unwrap();
+    }
+
+    let vault = VaultManager::open(&path, &set.material.password).unwrap();
+
+    // The migration dropped the trigger.
+    let trigger_gone: bool = {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type='trigger' AND name='update_entry_modified_timestamp')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert!(trigger_gone, "v8→v9 migration must drop the echo trigger");
+
+    // The migrated vault reads fine and edits mark pending, one bump.
+    let entries = vault.list_entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry_id = entries[0].entry_id;
+    let got = vault.get_entry(entry_id).unwrap();
+    assert_eq!(got.title, FIXTURE_CONTENT.entry_title);
+
+    let (_, version_before) = entry_sync_bookkeeping(&vault, entry_id);
+    let mut edited = got;
+    edited.title = "Edited After Migration".to_string();
+    vault.update_entry(entry_id, &edited).unwrap();
+
+    let (state, version) = entry_sync_bookkeeping(&vault, entry_id);
+    assert_eq!(state, "pending");
+    assert_eq!(
+        version,
+        version_before + 1,
+        "single bump on the migrated vault"
+    );
+}

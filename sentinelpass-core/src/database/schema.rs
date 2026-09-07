@@ -15,7 +15,13 @@ use tracing::warn;
 /// domain) + the `domain_mapping_tags` keyed-lookup table; the plaintext
 /// domain INDEX is dropped (lookups move to tags). The legacy plaintext
 /// `domain` COLUMN remains until the WBS-404 bulk migration clears it.
-pub const CURRENT_SCHEMA_VERSION: i32 = 8;
+/// v9 (WBS-409 / TD-ROB-02): the `update_entry_modified_timestamp` echo
+/// trigger is DROPPED — remote sync applies wrote `sync_state = 'synced'`
+/// explicitly, and this trigger rewrote it back to `'pending'` (the applied
+/// change re-pushed forever). Every local mutation path writes sync
+/// bookkeeping explicitly (repository insert/update, delete, sweeps), so
+/// the trigger is load-bearing for nothing; see `migrate_v8_to_v9`.
+pub const CURRENT_SCHEMA_VERSION: i32 = 9;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -481,9 +487,10 @@ impl Database {
     /// DEK-encrypted blobs (same field-encryption pattern as entry fields);
     /// kind/criticality/policy columns are declared policy and stay
     /// plaintext. `entry_lifecycle` is deliberately a sibling table rather
-    /// than columns on `entries`: the `update_entry_modified_timestamp`
-    /// trigger bumps `sync_version` on entry-field UPDATEs, so rotation
-    /// stamps must not live there (they would fabricate sync churn).
+    /// than columns on `entries`: rotation stamps must not fabricate sync
+    /// churn there. (Historically this also kept them out of the reach of
+    /// the `update_entry_modified_timestamp` echo trigger, removed in
+    /// schema v9 / WBS-409.)
     fn create_registry_tables(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -569,6 +576,25 @@ impl Database {
         Ok(())
     }
 
+    /// Create the database triggers.
+    ///
+    /// Only the `db_metadata` timestamp trigger remains here as of schema
+    /// v9 (WBS-409 / TD-ROB-02): the former `update_entry_modified_timestamp`
+    /// echo trigger on `entries` was removed. It rewrote `sync_state` back
+    /// to `'pending'` after a remote sync apply had explicitly written
+    /// `'synced'` (the TD-ROB-02 echo), and it double-bumped `sync_version`
+    /// on local edits (the repository already bumps it). Every local
+    /// mutation writes sync bookkeeping explicitly:
+    /// - insert: `repository::create` (version 1, `'pending'`)
+    /// - update: `repository::update` (version + 1, `'pending'`)
+    /// - delete: `VaultManager::delete_entry` (version + 1, `'pending'`,
+    ///   inside one transaction)
+    /// - v1→v2 blob sweep: `vault::migration_ops` (preserves scanned
+    ///   bookkeeping)
+    ///
+    /// so the trigger is load-bearing for nothing. Vaults that predate v9
+    /// have the trigger dropped by `migrate_v8_to_v9` (both the OF-list
+    /// shape created here and the legacy no-list shape from v1 binaries).
     fn create_triggers(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -577,17 +603,6 @@ impl Database {
                  FOR EACH ROW
                  BEGIN
                      UPDATE db_metadata SET last_modified = (strftime('%s', 'now')) WHERE id = 1;
-                 END;
-
-                 CREATE TRIGGER IF NOT EXISTS update_entry_modified_timestamp
-                 AFTER UPDATE OF title, username, password, url, notes, favorite ON entries
-                 FOR EACH ROW
-                 BEGIN
-                     UPDATE entries SET
-                         modified_at = (strftime('%s', 'now')),
-                         sync_version = OLD.sync_version + 1,
-                         sync_state = 'pending'
-                     WHERE entry_id = NEW.entry_id;
                  END;",
             )
             .map_err(DatabaseError::Sqlite)?;
@@ -932,7 +947,10 @@ mod tests {
             .unwrap();
 
         assert!(trigger_names.contains(&"update_db_metadata_timestamp".to_string()));
-        assert!(trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
+        // WBS-409 (TD-ROB-02): the entries echo trigger must NEVER come
+        // back — it rewrote remote applies from 'synced' to 'pending'
+        // (re-push loop) and double-bumped sync_version on local edits.
+        assert!(!trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
     }
 
     #[test]

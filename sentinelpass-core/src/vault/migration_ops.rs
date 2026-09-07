@@ -38,20 +38,17 @@
 //!   unreadable rows — so the open hook stops re-running.
 //! - Sync interplay: only blob columns (+ a minted `sync_id` + the
 //!   deprecated zeroed v1 nonce/tag columns) change. Sync bookkeeping is
-//!   NOT touched — see the trigger note below.
+//!   NOT touched.
 //!
-//! The entries sync trigger (adversarial pre-check A1): the
-//! `update_entry_modified_timestamp` trigger fires on UPDATE OF exactly
-//! the columns this sweep must rewrite and stamps `sync_version + 1`,
-//! `sync_state = 'pending'`, and a fresh `modified_at` — silently
-//! re-marking every converted row for a full-vault re-push (conflict
-//! churn against peers, LWW clobbering a peer's concurrent edit with
-//! byte-identical content under a newer version). The sweep captures each
-//! row's (sync_version, sync_state, modified_at) at scan time and
-//! restores them with a second UPDATE that touches only NON-trigger
-//! columns (so it cannot re-fire), inside the same transaction. Net row
-//! diff: blob columns only. A dedicated test pins this, with a control
-//! proving `update_entry` still bumps (so a regression here is caught).
+//! The entries sync trigger (historical note — adversarial pre-check A1):
+//! the former `update_entry_modified_timestamp` trigger fired on UPDATE OF
+//! exactly the columns this sweep must rewrite, silently re-marking every
+//! converted row for a full-vault re-push. The sweep used to capture and
+//! restore each row's (sync_version, sync_state, modified_at) around its
+//! writes. That trigger was DROPPED by the schema v9 migration
+//! (`migrate_v8_to_v9`, WBS-409 / TD-ROB-02) — it cannot exist by the time
+//! any sweep runs — so the capture/restore neutralization is removed and
+//! the blob UPDATE alone is the net row diff.
 //!
 //! Reentrancy (adversarial pre-check A3): the DB Mutex is not reentrant.
 //! The sweep takes `lock_db()` ONCE, fetches (vault_uuid, epoch) once via
@@ -173,9 +170,10 @@ fn seal_and_verify_field(
 // Entries
 // ---------------------------------------------------------------------------
 
-/// One scan row of the `entries` table: identity, credential class, the
-/// five blob columns, and the sync bookkeeping the entries trigger would
-/// otherwise stamp (see the module docs — A1).
+/// One scan row of the `entries` table: identity, credential class, and
+/// the five blob columns. (Sync bookkeeping columns are deliberately NOT
+/// scanned: the sweep never writes them, and the echo trigger that made a
+/// restore necessary was dropped by the schema v9 migration — WBS-409.)
 type EntryScanRow = (
     i64,
     Option<String>,
@@ -185,9 +183,6 @@ type EntryScanRow = (
     Vec<u8>,
     Option<Vec<u8>>,
     Option<Vec<u8>>,
-    i64,
-    String,
-    i64,
 );
 
 /// The five present-or-absent blob columns of one entry row (borrowed scan
@@ -319,7 +314,7 @@ fn sweep_entry_rows(
         let mut stmt = tx
             .prepare(
                 "SELECT entry_id, sync_id, credential_type, title, username, password,
-                        url, notes, sync_version, sync_state, modified_at
+                        url, notes
                  FROM entries",
             )
             .map_err(DatabaseError::Sqlite)?;
@@ -334,9 +329,6 @@ fn sweep_entry_rows(
                     row.get(5)?,
                     row.get(6)?,
                     row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
                 ))
             })
             .map_err(DatabaseError::Sqlite)?
@@ -345,20 +337,7 @@ fn sweep_entry_rows(
         collected
     };
 
-    for (
-        entry_id,
-        sync_id,
-        credential_type,
-        title,
-        username,
-        password,
-        url,
-        notes,
-        sync_version,
-        sync_state,
-        modified_at,
-    ) in rows
-    {
+    for (entry_id, sync_id, credential_type, title, username, password, url, notes) in rows {
         report.scanned += 1;
         let already_v2 = envelope_ops::is_envelope_blob(&title)
             && envelope_ops::is_envelope_blob(&username)
@@ -429,6 +408,14 @@ fn sweep_entry_rows(
             };
 
         let (zero_nonce, zero_tag) = envelope_ops::zeroed_legacy_v1_columns();
+        // The blob UPDATE below touches ONLY blob columns (+ identity) —
+        // sync bookkeeping is never written, so the scanned
+        // sync_version/sync_state/modified_at are preserved byte-identical.
+        // (Historically a follow-up UPDATE restored bookkeeping clobbered
+        // by the `update_entry_modified_timestamp` echo trigger; that
+        // trigger was dropped by the schema v9 migration — WBS-409 /
+        // TD-ROB-02 — so no restore is needed, and `modified_at` stays
+        // exactly as scanned.)
         tx.execute(
             "UPDATE entries SET title = ?1, username = ?2, password = ?3, url = ?4,
              notes = ?5, entry_nonce = ?6, auth_tag = ?7, sync_id = ?8
@@ -444,18 +431,6 @@ fn sweep_entry_rows(
                 sync_id,
                 entry_id
             ],
-        )
-        .map_err(DatabaseError::Sqlite)?;
-        // Neutralize the entries sync trigger (module docs, A1): the blob
-        // UPDATE above fires `update_entry_modified_timestamp` (it watches
-        // exactly these columns and stamps sync_version/sync_state/
-        // modified_at). Restore the scanned bookkeeping with an UPDATE over
-        // non-trigger columns only — it cannot re-fire. Net row diff: blob
-        // columns (+ identity) only; sync bookkeeping byte-identical.
-        tx.execute(
-            "UPDATE entries SET sync_version = ?1, sync_state = ?2, modified_at = ?3
-             WHERE entry_id = ?4",
-            rusqlite::params![sync_version, sync_state, modified_at, entry_id],
         )
         .map_err(DatabaseError::Sqlite)?;
 
@@ -587,6 +562,13 @@ impl VaultManager {
     /// the `v2_blob_sweep_complete` flag. Called post-unlock, best-effort:
     /// any propagated error rolls the transaction back whole and retries
     /// on the next open — it never fails the unlock.
+    ///
+    /// Trigger note (WBS-409): the sweep never touches sync bookkeeping.
+    /// Historically this required an in-transaction capture/drop/recreate
+    /// of the `update_entry_modified_timestamp` echo trigger, which fired
+    /// on the blob UPDATEs; the schema v9 migration dropped the trigger
+    /// (both shapes) before any sweep can run, so the neutralization is
+    /// gone.
     pub fn sweep_v1_blobs_to_v2(&self) -> Result<V2BlobSweepReport> {
         if !self.is_unlocked() {
             return Err(PasswordManagerError::VaultLocked);
@@ -598,29 +580,6 @@ impl VaultManager {
             .conn()
             .unchecked_transaction()
             .map_err(DatabaseError::Sqlite)?;
-
-        // Legacy-trigger neutralization (gate review, finding 1): vaults
-        // created before the OF-list change carry
-        // `AFTER UPDATE ON entries` WITHOUT a column list — it fires on
-        // the bookkeeping-restore UPDATE and overwrites restored
-        // modified_at with sweep time (silently falsifying last-modified
-        // and flipping LWW ties). Capture, drop, and recreate the EXACT
-        // definition inside this transaction: crash-safe (rolls back
-        // together) and shape-agnostic.
-        let legacy_trigger_sql: Option<String> = tx
-            .query_row(
-                "SELECT sql FROM sqlite_master
-                 WHERE type = 'trigger' AND name = 'update_entry_modified_timestamp'
-                   AND sql NOT LIKE '%UPDATE OF%'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(DatabaseError::Sqlite)?;
-        if legacy_trigger_sql.is_some() {
-            tx.execute("DROP TRIGGER update_entry_modified_timestamp;", [])
-                .map_err(DatabaseError::Sqlite)?;
-        }
 
         let mut report = V2BlobSweepReport::default();
         sweep_entry_rows(&tx, dek, &vault_uuid, epoch, &mut report)?;
@@ -670,9 +629,6 @@ impl VaultManager {
             )?;
         } else if report.converted == 0 && report.skipped_unreadable == 0 && report.failed == 0 {
             set_sweep_complete_flag(&tx, &Utc::now().to_rfc3339())?;
-        }
-        if let Some(sql) = &legacy_trigger_sql {
-            tx.execute_batch(sql).map_err(DatabaseError::Sqlite)?;
         }
         tx.commit().map_err(DatabaseError::Sqlite)?;
 
@@ -1377,12 +1333,15 @@ mod tests {
         }
     }
 
-    /// THE sync-interplay property (adversarial pre-check A1): converting a
-    /// row does NOT re-mark it pending — sync_version, sync_state, and
-    /// modified_at are byte-identical after the sweep, even though the
-    /// entries trigger fires on exactly the columns the sweep rewrites.
-    /// The CONTROL at the end proves the trigger exists at all, so a
-    /// regression in the suppression is caught by this test.
+    /// THE sync-interplay property (adversarial pre-check A1, post-WBS-409
+    /// shape): converting a row does NOT re-mark it pending — sync_version,
+    /// sync_state, and modified_at are byte-identical after the sweep,
+    /// because the sweep writes only blob columns and (since schema v9) no
+    /// echo trigger exists to stamp bookkeeping behind its back.
+    /// The CONTROL at the end proves a real update still bumps via the
+    /// repository's EXPLICIT bookkeeping, so a regression on either side
+    /// (sweep touching bookkeeping, or local edits losing theirs) is
+    /// caught by this test.
     #[test]
     fn sweep_does_not_remark_converted_rows_pending() {
         let vault = test_vault();

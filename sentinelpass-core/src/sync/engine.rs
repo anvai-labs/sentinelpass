@@ -348,7 +348,13 @@ impl SyncEngine {
     }
 
     /// Apply a single remote entry to the local database.
-    fn apply_remote_entry(
+    ///
+    /// `pub(crate)` (not private) so tests can drive the apply logic
+    /// directly against a real vault database — the engine's HTTP client
+    /// is never involved in an apply. `conn` may be a transaction handle
+    /// (it derefs), which is how the pull loop wraps each apply atomically
+    /// (WBS-411).
+    pub(crate) fn apply_remote_entry(
         &self,
         conn: &rusqlite::Connection,
         dek: &DataEncryptionKey,
@@ -950,5 +956,194 @@ impl SyncEngine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::crypto::encrypt_for_sync;
+    use crate::sync::models::CredentialPayload;
+
+    /// A vault-shaped in-memory database: current schema + the
+    /// db_metadata identity (vault_uuid, key_epoch) that `read_local_identity`
+    /// requires on every apply path.
+    fn apply_test_db() -> Database {
+        fn seed_identity(db: &Database) {
+            db.conn()
+                .execute(
+                    "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, vault_uuid, format_version, key_epoch)
+                     VALUES (1, 9, X'00', X'00', X'00', strftime('%s','now'), strftime('%s','now'), '11111111-1111-1111-1111-111111111111', 1, 1)",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+        seed_identity(&db);
+        db
+    }
+
+    fn apply_engine(db: Database) -> (SyncEngine, Arc<Mutex<Database>>) {
+        let db = Arc::new(Mutex::new(db));
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        // The client is never used by an apply; the URL only has to pass
+        // transport validation.
+        let client = SyncClient::new("https://relay.invalid", Uuid::new_v4(), signing_key).unwrap();
+        let engine = SyncEngine::new(client, db.clone(), Uuid::new_v4());
+        (engine, db)
+    }
+
+    fn credential_blob(dek: &DataEncryptionKey, sync_id: Uuid, version: u64) -> SyncEntryBlob {
+        let payload = CredentialPayload {
+            title: "Remote Title".to_string(),
+            username: "remote-user".to_string(),
+            password: Zeroizing::new("remote-pass".to_string()),
+            credential_type: crate::CredentialType::Password,
+            url: Some("https://remote.example".to_string()),
+            notes: None,
+            favorite: false,
+            domains: vec![],
+            created_at: 1_700_000_000,
+            modified_at: 1_700_000_100,
+        };
+        let plaintext = Zeroizing::new(serde_json::to_vec(&payload).unwrap());
+        let encrypted = encrypt_for_sync(dek, &plaintext).unwrap();
+        SyncEntryBlob {
+            sync_id,
+            entry_type: SyncEntryType::Credential,
+            sync_version: version,
+            modified_at: payload.modified_at,
+            encrypted_payload: encrypted,
+            is_tombstone: false,
+            origin_device_id: Uuid::new_v4(),
+        }
+    }
+
+    /// THE WBS-409 / TD-ROB-02 negative: a remote apply writes
+    /// `sync_state = 'synced'` (and its explicit sync_version) and it
+    /// STAYS that way — the echo trigger that rewrote applies back to
+    /// `'pending'` (re-push loop) is gone from the schema and must never
+    /// come back (the schema test asserts its absence; migrate_v8_to_v9
+    /// drops it on legacy vaults).
+    #[tokio::test]
+    async fn remote_apply_does_not_remark_pending() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let sync_id = Uuid::new_v4();
+
+        let (engine, db) = apply_engine(apply_test_db());
+        {
+            let conn = db.lock().unwrap();
+            // An existing local row, already synced at version 3.
+            conn.conn()
+                .execute(
+                    "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                        entry_nonce, auth_tag, created_at, modified_at, favorite,
+                        sync_id, sync_version, sync_state, is_deleted)
+                     VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                             ?1, 3, 'synced', 0)",
+                    [&sync_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        let blob = credential_blob(&dek, sync_id, 4);
+        {
+            let conn = db.lock().unwrap();
+            engine.apply_remote_entry(conn.conn(), &dek, &blob).unwrap();
+        }
+
+        let (state, version, last_synced): (String, i64, Option<i64>) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, sync_version, last_synced_at FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            state, "synced",
+            "remote apply must not be re-marked pending"
+        );
+        assert_eq!(version, 4, "the applied version must survive");
+        assert!(last_synced.is_some());
+    }
+
+    /// A remote apply of an UNKNOWN sync_id inserts the row directly as
+    /// `'synced'` (INSERTs never fired the old trigger, but this pins the
+    /// full explicit-bookkeeping contract of the apply path).
+    #[tokio::test]
+    async fn remote_apply_insert_lands_synced() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let sync_id = Uuid::new_v4();
+
+        let (engine, db) = apply_engine(apply_test_db());
+        let blob = credential_blob(&dek, sync_id, 1);
+        {
+            let conn = db.lock().unwrap();
+            engine.apply_remote_entry(conn.conn(), &dek, &blob).unwrap();
+        }
+
+        let (state, version, url_is_null): (String, i64, bool) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, sync_version, url IS NULL FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "synced");
+        assert_eq!(version, 1);
+        assert!(!url_is_null, "Some(url) payload must store a url blob");
+    }
+
+    /// A stale remote blob (older sync_version) must NOT clobber the local
+    /// row's bookkeeping (rollback protection — the LWW gate refuses
+    /// before any write happens).
+    #[tokio::test]
+    async fn remote_apply_stale_version_keeps_local_row() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let sync_id = Uuid::new_v4();
+
+        let (engine, db) = apply_engine(apply_test_db());
+        {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .execute(
+                    "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                        entry_nonce, auth_tag, created_at, modified_at, favorite,
+                        sync_id, sync_version, sync_state, is_deleted)
+                     VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                             ?1, 5, 'pending', 0)",
+                    [&sync_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        let blob = credential_blob(&dek, sync_id, 4);
+        {
+            let conn = db.lock().unwrap();
+            engine.apply_remote_entry(conn.conn(), &dek, &blob).unwrap();
+        }
+
+        let (state, version): (String, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, sync_version FROM entries WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "pending", "local pending state must be untouched");
+        assert_eq!(version, 5, "the local (newer) version must be untouched");
     }
 }
