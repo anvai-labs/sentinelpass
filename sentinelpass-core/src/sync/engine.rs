@@ -4,7 +4,7 @@ use crate::crypto::cipher::DataEncryptionKey;
 use crate::database::Database;
 use crate::sync::change_tracker::{
     collect_pending_credential_blobs, collect_pending_ssh_key_blobs, collect_pending_totp_blobs,
-    count_pending_changes, mark_entries_synced,
+    count_pending_changes, mark_entries_synced_in,
 };
 use crate::sync::client::SyncClient;
 use crate::sync::config::SyncConfig;
@@ -170,6 +170,30 @@ pub struct SyncEngine {
     device_id: Uuid,
 }
 
+/// Mark the pushed blobs synced and advance the push cursor as ONE
+/// transaction (SR-DATA-001 / WBS-411): an interruption leaves either both
+/// untouched (everything re-pushes next cycle — LWW makes that idempotent)
+/// or both applied — never a partially-marked batch against a moved cursor.
+/// Free function so tests can fault-inject every statement without an HTTP
+/// client.
+pub(crate) fn complete_push_checkpoint(
+    conn: &rusqlite::Connection,
+    sync_ids: &[Uuid],
+    server_sequence: u64,
+) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    mark_entries_synced_in(&tx, sync_ids)?;
+
+    let mut config = SyncConfig::load(&tx)?;
+    config.last_push_sequence = server_sequence;
+    config.save(&tx)?;
+
+    tx.commit().map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
 impl SyncEngine {
     /// Create a new sync engine with the given client, database, and device identity.
     pub fn new(client: SyncClient, db: Arc<Mutex<Database>>, device_id: Uuid) -> Self {
@@ -250,16 +274,13 @@ impl SyncEngine {
 
         let response = self.client.push(&request).await?;
 
-        // Mark synced
+        // Mark synced + advance the push cursor as ONE unit (see
+        // [`Self::complete_push_checkpoint`]).
         let db = self
             .db
             .lock()
             .map_err(|_| DatabaseError::LockPoisoned("mark synced".to_string()))?;
-        mark_entries_synced(db.conn(), &sync_ids)?;
-
-        let mut config = SyncConfig::load(db.conn())?;
-        config.last_push_sequence = response.server_sequence;
-        config.save(db.conn())?;
+        complete_push_checkpoint(db.conn(), &sync_ids, response.server_sequence)?;
 
         Ok(count)
     }
@@ -308,6 +329,12 @@ impl SyncEngine {
                 // wedging every future sync on the same blob forever.
                 // Skip-and-warn names the blob; the experimental-sync
                 // data-loss tradeoff is spelled out in docs/SYNC.md.
+                //
+                // Each blob applies inside its OWN transaction — see
+                // [`Self::apply_remote_entry`] (SR-DATA-001 / WBS-411):
+                // a failure at any statement rolls that blob back entirely
+                // (complete-old for this entry) while the rest of the page
+                // proceeds.
                 if let Err(e) = self.apply_remote_entry(db.conn(), dek, blob) {
                     apply_failures += 1;
                     tracing::warn!(
@@ -349,22 +376,35 @@ impl SyncEngine {
 
     /// Apply a single remote entry to the local database.
     ///
+    /// UNIT OF WORK (SR-DATA-001 / WBS-411): the entry write, the
+    /// domain-mapping rewrite, and the registry index write for this blob
+    /// run inside ONE transaction created here — a failure at any statement
+    /// rolls the whole blob back (complete-old state), and the caller's
+    /// per-blob resilience can never strand a partially-applied entry.
+    ///
     /// `pub(crate)` (not private) so tests can drive the apply logic
     /// directly against a real vault database — the engine's HTTP client
-    /// is never involved in an apply. `conn` may be a transaction handle
-    /// (it derefs), which is how the pull loop wraps each apply atomically
-    /// (WBS-411).
+    /// is never involved in an apply.
     pub(crate) fn apply_remote_entry(
         &self,
         conn: &rusqlite::Connection,
         dek: &DataEncryptionKey,
         blob: &SyncEntryBlob,
     ) -> Result<()> {
-        match blob.entry_type {
-            SyncEntryType::Credential => self.apply_credential(conn, dek, blob),
-            SyncEntryType::SshKey => self.apply_ssh_key(conn, dek, blob),
-            SyncEntryType::TotpSecret => self.apply_totp(conn, dek, blob),
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        let result = match blob.entry_type {
+            SyncEntryType::Credential => self.apply_credential(&tx, dek, blob),
+            SyncEntryType::SshKey => self.apply_ssh_key(&tx, dek, blob),
+            SyncEntryType::TotpSecret => self.apply_totp(&tx, dek, blob),
+        };
+        if let Err(e) = result {
+            // tx drops on return: the whole blob rolls back.
+            let _ = tx.rollback();
+            return Err(e);
         }
+        Ok(tx.commit().map_err(DatabaseError::Sqlite)?)
     }
 
     fn apply_credential(
@@ -474,17 +514,18 @@ impl SyncEngine {
             // Registry equality index (ADR-001): sync apply is a first-class
             // write site — this entry never passes through VaultManager, so
             // without this hook remote-origin rotations would never stamp.
-            // Best-effort; the next sweep repairs.
-            if let Err(e) = crate::registry::upsert_equality_tag(
+            // REQUIRED, not best-effort (SR-DATA-001 / WBS-411): the blob
+            // apply is one transaction, so an index failure rolls the whole
+            // blob back — the pull cursor advances past it (skip-and-warn)
+            // and the blob re-delivers on a later sync (LWW idempotent).
+            crate::registry::upsert_equality_tag(
                 conn,
                 dek,
                 entry_id,
                 payload.credential_type,
                 &payload.password,
                 now,
-            ) {
-                tracing::warn!(entry_id, error = %e, "registry index update failed");
-            }
+            )?;
         } else {
             if skip_new_entry(blob) {
                 return Ok(());
@@ -530,17 +571,16 @@ impl SyncEngine {
             }
 
             // Registry equality index for pulled-in entries (same rationale
-            // as the update branch above).
-            if let Err(e) = crate::registry::upsert_equality_tag(
+            // and same REQUIRED semantics as the update branch above —
+            // SR-DATA-001 / WBS-411).
+            crate::registry::upsert_equality_tag(
                 conn,
                 dek,
                 entry_id,
                 payload.credential_type,
                 &payload.password,
                 now,
-            ) {
-                tracing::warn!(entry_id, error = %e, "registry index update failed");
-            }
+            )?;
         }
 
         Ok(())
@@ -970,13 +1010,12 @@ mod tests {
     /// requires on every apply path.
     fn apply_test_db() -> Database {
         fn seed_identity(db: &Database) {
-            db.conn()
-                .execute(
-                    "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, vault_uuid, format_version, key_epoch)
-                     VALUES (1, 9, X'00', X'00', X'00', strftime('%s','now'), strftime('%s','now'), '11111111-1111-1111-1111-111111111111', 1, 1)",
-                    [],
-                )
-                .unwrap();
+            let sql = format!(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, vault_uuid, format_version, key_epoch)
+                 VALUES (1, {}, X'00', X'00', X'00', strftime('%s','now'), strftime('%s','now'), '11111111-1111-1111-1111-111111111111', 1, 1)",
+                crate::database::schema::CURRENT_SCHEMA_VERSION
+            );
+            db.conn().execute(&sql, []).unwrap();
         }
 
         let db = Database::in_memory().unwrap();
@@ -1054,14 +1093,14 @@ mod tests {
             engine.apply_remote_entry(conn.conn(), &dek, &blob).unwrap();
         }
 
-        let (state, version, last_synced): (String, i64, Option<i64>) = {
+        let (state, version, modified, last_synced): (String, i64, i64, Option<i64>) = {
             let conn = db.lock().unwrap();
             conn.conn()
                 .query_row(
-                    "SELECT sync_state, sync_version, last_synced_at FROM entries \
-                     WHERE sync_id = ?1",
+                    "SELECT sync_state, sync_version, modified_at, last_synced_at \
+                     FROM entries WHERE sync_id = ?1",
                     [&sync_id.to_string()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .unwrap()
         };
@@ -1070,6 +1109,9 @@ mod tests {
             "remote apply must not be re-marked pending"
         );
         assert_eq!(version, 4, "the applied version must survive");
+        // The echo trigger clobbered modified_at to apply-time, which then
+        // won the peer's LWW tie-break (see-saw). It must survive untouched.
+        assert_eq!(modified, 1_700_000_100, "the wire modified_at must survive");
         assert!(last_synced.is_some());
     }
 
@@ -1145,5 +1187,251 @@ mod tests {
         };
         assert_eq!(state, "pending", "local pending state must be untouched");
         assert_eq!(version, 5, "the local (newer) version must be untouched");
+    }
+
+    // --- WBS-411 / SR-DATA-001: the apply paths are units of work ----------
+
+    fn install_fault(db: &Database, fail_at: usize) {
+        crate::database::fault_injection::install_write_fault(db.conn(), fail_at);
+    }
+
+    fn clear_fault(db: &Database) {
+        crate::database::fault_injection::clear_write_fault(db.conn());
+    }
+
+    /// THE apply-update negative (SR-DATA-001): one blob = entry UPDATE +
+    /// mapping rewrite + registry index, all inside ONE transaction.
+    /// Failing any statement leaves the entry, its mappings, and the index
+    /// in the complete-OLD state; success applies all of it.
+    #[tokio::test]
+    async fn remote_apply_update_arm_fault_injection_is_all_or_nothing() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let sync_id = Uuid::new_v4();
+
+        let (engine, db) = apply_engine(apply_test_db());
+        {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .execute(
+                    "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                        entry_nonce, auth_tag, created_at, modified_at, favorite,
+                        sync_id, sync_version, sync_state, is_deleted)
+                     VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                             ?1, 3, 'synced', 0)",
+                    [&sync_id.to_string()],
+                )
+                .unwrap();
+            let entry_id: i64 = conn
+                .conn()
+                .query_row(
+                    "SELECT entry_id FROM entries WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            conn.conn()
+                .execute(
+                    "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, 'old.example', 1)",
+                    [entry_id],
+                )
+                .unwrap();
+        }
+
+        // A blob carrying one NEW domain.
+        let payload = CredentialPayload {
+            title: "Remote Title".to_string(),
+            username: "remote-user".to_string(),
+            password: Zeroizing::new("remote-pass".to_string()),
+            credential_type: crate::CredentialType::Password,
+            url: None,
+            notes: None,
+            favorite: false,
+            domains: vec![crate::sync::models::DomainPayload {
+                domain: "applied.example".to_string(),
+                is_primary: true,
+            }],
+            created_at: 1_700_000_000,
+            modified_at: 1_700_000_100,
+        };
+        let plaintext = Zeroizing::new(serde_json::to_vec(&payload).unwrap());
+        let mut blob = credential_blob(&dek, sync_id, 4);
+        blob.encrypted_payload = encrypt_for_sync(&dek, &plaintext).unwrap();
+
+        let old_title: Vec<u8> = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT title FROM entries WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+
+        let mut fail_at = 0usize;
+        let mut injected_failures = 0usize;
+        loop {
+            {
+                let conn = db.lock().unwrap();
+                install_fault(&conn, fail_at);
+            }
+            let result = {
+                let conn = db.lock().unwrap();
+                engine.apply_remote_entry(conn.conn(), &dek, &blob)
+            };
+            {
+                let conn = db.lock().unwrap();
+                clear_fault(&conn);
+            }
+
+            let (state, version, entry_id): (String, i64, i64) = {
+                let conn = db.lock().unwrap();
+                conn.conn()
+                    .query_row(
+                        "SELECT sync_state, sync_version, entry_id FROM entries WHERE sync_id = ?1",
+                        [&sync_id.to_string()],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .unwrap()
+            };
+            let mappings: Vec<String> = {
+                let conn = db.lock().unwrap();
+                let mut stmt = conn
+                    .conn()
+                    .prepare("SELECT domain FROM domain_mappings WHERE entry_id = ?1")
+                    .unwrap();
+                let rows = stmt
+                    .query_map([entry_id], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                rows
+            };
+            let index: i64 = {
+                let conn = db.lock().unwrap();
+                conn.conn()
+                    .query_row(
+                        "SELECT COUNT(*) FROM secret_equality_index WHERE entry_id = ?1",
+                        [entry_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+
+            match result {
+                Err(_) => {
+                    injected_failures += 1;
+                    assert_eq!(state, "synced", "complete-old at write {fail_at}");
+                    assert_eq!(version, 3, "complete-old at write {fail_at}");
+                    let title: Vec<u8> = {
+                        let conn = db.lock().unwrap();
+                        conn.conn()
+                            .query_row(
+                                "SELECT title FROM entries WHERE sync_id = ?1",
+                                [&sync_id.to_string()],
+                                |r| r.get(0),
+                            )
+                            .unwrap()
+                    };
+                    assert_eq!(title, old_title, "complete-old at write {fail_at}");
+                    assert_eq!(
+                        mappings,
+                        vec!["old.example".to_string()],
+                        "complete-old: old mapping survives at write {fail_at}"
+                    );
+                    assert_eq!(index, 0, "complete-old: no index row at write {fail_at}");
+                }
+                Ok(()) => {
+                    assert_eq!(version, 4, "complete-new at write {fail_at}");
+                    assert_eq!(state, "synced", "complete-new at write {fail_at}");
+                    assert_eq!(
+                        mappings,
+                        vec!["applied.example".to_string()],
+                        "complete-new: mapping rewrite committed WITH the row"
+                    );
+                    assert_eq!(
+                        index, 1,
+                        "complete-new: registry index committed WITH the row"
+                    );
+                    break;
+                }
+            }
+            fail_at += 1;
+            assert!(fail_at < 96, "apply never succeeded within the sweep bound");
+        }
+        assert!(
+            injected_failures >= 1,
+            "the sweep must inject at least one real failure to be meaningful"
+        );
+    }
+
+    /// The push checkpoint: mark-synced for the whole batch + the cursor
+    /// advance commit together — an injected failure leaves every row
+    /// pending and the cursor untouched.
+    #[test]
+    fn complete_push_checkpoint_fault_injection_is_all_or_nothing() {
+        let db = apply_test_db();
+        let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
+        {
+            let conn = db.conn();
+            for id in &ids {
+                conn.execute(
+                    "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                        entry_nonce, auth_tag, created_at, modified_at, favorite,
+                        sync_id, sync_version, sync_state, is_deleted)
+                     VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                             ?1, 1, 'pending', 0)",
+                    [&id.to_string()],
+                )
+                .unwrap();
+            }
+        }
+
+        let mut fail_at = 0usize;
+        let mut injected_failures = 0usize;
+        loop {
+            install_fault(&db, fail_at);
+            let result = complete_push_checkpoint(db.conn(), &ids, 42);
+            clear_fault(&db);
+
+            let (pending, synced): (i64, i64) = {
+                let conn = db.conn();
+                conn.query_row(
+                    "SELECT \
+                         (SELECT COUNT(*) FROM entries WHERE sync_state = 'pending'), \
+                         (SELECT COUNT(*) FROM entries WHERE sync_state = 'synced')",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+            };
+            let cursor: i64 = crate::sync::config::SyncConfig::load(db.conn())
+                .unwrap()
+                .last_push_sequence as i64;
+
+            match result {
+                Err(_) => {
+                    injected_failures += 1;
+                    assert_eq!(pending, 2, "complete-old at write {fail_at}");
+                    assert_eq!(synced, 0, "complete-old at write {fail_at}");
+                    assert_eq!(cursor, 0, "complete-old: cursor unmoved at write {fail_at}");
+                }
+                Ok(()) => {
+                    assert_eq!(pending, 0, "complete-new at write {fail_at}");
+                    assert_eq!(synced, 2, "complete-new at write {fail_at}");
+                    assert_eq!(cursor, 42, "complete-new: cursor advanced WITH the marks");
+                    break;
+                }
+            }
+            fail_at += 1;
+            assert!(
+                fail_at < 64,
+                "checkpoint never succeeded within the sweep bound"
+            );
+        }
+        assert!(
+            injected_failures >= 1,
+            "the sweep must inject at least one real failure to be meaningful"
+        );
     }
 }

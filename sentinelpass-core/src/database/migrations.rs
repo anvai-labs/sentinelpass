@@ -586,11 +586,14 @@ pub fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
 /// Migrate schema from v8 to v9: drop the `update_entry_modified_timestamp`
 /// echo trigger (WBS-409 / TD-ROB-02).
 ///
-/// The trigger rewrote `sync_state` back to `'pending'` AFTER a remote sync
-/// apply had explicitly written `'synced'` (the applied change re-pushed
-/// forever), and it double-bumped `sync_version` on local edits (the
-/// repository's own UPDATE already bumps). It is load-bearing for nothing:
-/// every local mutation path writes sync bookkeeping explicitly (repository
+/// On a remote sync apply the trigger rewrote the applied row behind the
+/// apply's back: `sync_state` back to `'pending'` (the applied change
+/// re-pushed), `modified_at` stamped to apply-time (which then won the
+/// peer's LWW tie-break, see-sawing the entry between devices), and
+/// `sync_version = OLD.sync_version + 1` — silently CORRUPTING the applied
+/// version whenever the local row was more than one version behind (remote
+/// v5 over a local v2 landed as v3). It is load-bearing for nothing: every
+/// local mutation path writes sync bookkeeping explicitly (repository
 /// insert/update, `delete_entry`, the v1→v2 blob sweep). See
 /// `schema::create_triggers` for the exhaustive site list.
 ///
@@ -1532,9 +1535,9 @@ mod tests {
         assert_eq!(version, 8, "remote apply must keep its explicit version");
     }
 
-    /// The migrated-vault local path: explicit local bookkeeping marks the
-    /// row pending with exactly ONE version bump (the old trigger layout
-    /// double-bumped: repository SET + trigger fire).
+    /// The migrated-vault local path: explicit local bookkeeping is the
+    /// ONLY marking (no trigger exists to stamp or rewrite anything).
+    /// Pins the repository bookkeeping shape on a post-migration vault.
     #[test]
     fn migrated_vault_local_update_marks_pending_with_single_version_bump() {
         let conn = create_v8_db_with_trigger(Some(OF_LIST_TRIGGER_SQL));
@@ -1570,9 +1573,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "pending");
-        assert_eq!(
-            version, 8,
-            "exactly one bump: 7 -> 8 (no trigger double-bump)"
-        );
+        assert_eq!(version, 8, "exactly one bump: 7 -> 8");
     }
 }

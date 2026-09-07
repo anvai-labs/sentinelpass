@@ -3449,10 +3449,9 @@ fn entry_sync_bookkeeping(vault: &VaultManager, entry_id: i64) -> (String, i64) 
         .unwrap()
 }
 
-/// A local edit marks the row pending with EXACTLY ONE version bump.
-/// (With the pre-v9 echo trigger this exact flow double-bumped: the
-/// repository's own `sync_version = sync_version + 1` plus the trigger's
-/// `OLD.sync_version + 1` rewrite.)
+/// A local edit marks the row pending with EXACTLY ONE version bump:
+/// the repository's explicit bookkeeping is the ONLY marking (schema v9
+/// removed the echo trigger; nothing else may stamp `entries`).
 #[test]
 fn local_update_marks_pending_with_single_version_bump() {
     let vault = VaultManager::create(":memory:", b"wbs409-local-bump").unwrap();
@@ -3481,7 +3480,7 @@ fn local_update_marks_pending_with_single_version_bump() {
     assert_eq!(
         version,
         version_after_add + 1,
-        "exactly one version bump per local edit (no trigger double-bump)"
+        "exactly one version bump per local edit"
     );
 }
 
@@ -3585,5 +3584,360 @@ fn migrated_v8_vault_with_echo_trigger_edits_mark_pending_after_open() {
         version,
         version_before + 1,
         "single bump on the migrated vault"
+    );
+}
+
+// --- WBS-411 / SR-DATA-001: transactional unit of work ------------------
+//
+// Acceptance: fault injection at each statement produces either the
+// complete old or the complete new state, never a partial state. The
+// injector (crate::database::fault_injection) denies the Nth top-level
+// write action at statement-PREPARE time, mid-transaction; sweeping
+// fail_at = 0, 1, 2, ... until the mutation first succeeds covers every
+// statement of the unit of work.
+//
+// Locking note: the DB Mutex is NOT reentrant — every helper below takes
+// lock_db() itself, so call sites must drop their guard before asserting.
+
+use crate::database::fault_injection;
+use rusqlite::OptionalExtension;
+
+fn count_rows(vault: &VaultManager, sql: &str) -> i64 {
+    let db = vault.lock_db().unwrap();
+    db.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+fn count_rows_for_entry(vault: &VaultManager, sql: &str, entry_id: i64) -> i64 {
+    let db = vault.lock_db().unwrap();
+    db.conn().query_row(sql, [entry_id], |r| r.get(0)).unwrap()
+}
+
+fn password_blob(vault: &VaultManager, entry_id: i64) -> Vec<u8> {
+    let db = vault.lock_db().unwrap();
+    db.conn()
+        .query_row(
+            "SELECT password FROM entries WHERE entry_id = ?1",
+            [entry_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn title_blob(vault: &VaultManager, entry_id: i64) -> Vec<u8> {
+    let db = vault.lock_db().unwrap();
+    db.conn()
+        .query_row(
+            "SELECT title FROM entries WHERE entry_id = ?1",
+            [entry_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn index_tag(vault: &VaultManager, entry_id: i64) -> Option<Vec<u8>> {
+    let db = vault.lock_db().unwrap();
+    db.conn()
+        .query_row(
+            "SELECT tag_cipher FROM secret_equality_index WHERE entry_id = ?1",
+            [entry_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn rotated_at(vault: &VaultManager, entry_id: i64) -> Option<i64> {
+    let db = vault.lock_db().unwrap();
+    db.conn()
+        .query_row(
+            "SELECT password_rotated_at FROM entry_lifecycle WHERE entry_id = ?1",
+            [entry_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn wbs411_entry(title: &str, password: &str) -> Entry {
+    Entry {
+        entry_id: None,
+        title: title.to_string(),
+        username: "wbs411@example.com".to_string(),
+        password: password.to_string().into(),
+        url: Some("https://wbs411.example".to_string()),
+        notes: None,
+        credential_type: CredentialType::Password,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    }
+}
+
+/// add_entry = entry INSERT + registry equality-index INSERT in ONE
+/// transaction: failing any statement leaves NO entry and NO index row;
+/// the first succeeding injection point leaves exactly both.
+#[test]
+fn add_entry_fault_injection_at_every_statement_is_all_or_nothing() {
+    let vault = VaultManager::create(":memory:", b"wbs411-add-tx-pass").unwrap();
+    let entry = wbs411_entry("Add Tx", "wbs411-add-secret");
+
+    let mut fail_at = 0usize;
+    let mut injected_failures = 0usize;
+    loop {
+        {
+            let db = vault.lock_db().unwrap();
+            fault_injection::install_write_fault(db.conn(), fail_at);
+        }
+        let result = vault.add_entry(&entry);
+        {
+            let db = vault.lock_db().unwrap();
+            fault_injection::clear_write_fault(db.conn());
+        }
+        let entries = count_rows(&vault, "SELECT COUNT(*) FROM entries");
+        let index = count_rows(&vault, "SELECT COUNT(*) FROM secret_equality_index");
+        match result {
+            Err(_) => {
+                injected_failures += 1;
+                assert_eq!(
+                    entries, 0,
+                    "complete-old: no entry row after failure at write {fail_at}"
+                );
+                assert_eq!(
+                    index, 0,
+                    "complete-old: no index row after failure at write {fail_at}"
+                );
+            }
+            Ok(entry_id) => {
+                assert_eq!(entries, 1, "complete-new at write {fail_at}");
+                assert_eq!(
+                    index, 1,
+                    "complete-new: the index row commits WITH the entry"
+                );
+                assert!(index_tag(&vault, entry_id).is_some());
+                break;
+            }
+        }
+        fail_at += 1;
+        assert!(
+            fail_at < 64,
+            "add_entry never succeeded within the sweep bound"
+        );
+    }
+    assert!(
+        injected_failures >= 1,
+        "the sweep must inject at least one real failure to be meaningful"
+    );
+}
+
+/// update_entry = entry UPDATE + registry index upsert (+ rotation stamp on
+/// a password change) in ONE transaction: failing any statement leaves the
+/// row and its index byte-identical to before; success applies all of it.
+#[test]
+fn update_entry_fault_injection_at_every_statement_is_all_or_nothing() {
+    let vault = VaultManager::create(":memory:", b"wbs411-update-tx-pass").unwrap();
+    let entry_id = vault
+        .add_entry(&wbs411_entry("Update Tx", "wbs411-before-secret"))
+        .unwrap();
+
+    let old_title = title_blob(&vault, entry_id);
+    let old_password = password_blob(&vault, entry_id);
+    let old_tag = index_tag(&vault, entry_id);
+    let (old_state, old_version) = entry_sync_bookkeeping(&vault, entry_id);
+    assert!(old_tag.is_some(), "precondition: entry is indexed");
+    assert_eq!(old_state, "pending");
+
+    let mut edited = vault.get_entry(entry_id).unwrap();
+    edited.title = "Update Tx Edited".to_string();
+    edited.password = "wbs411-after-secret".to_string().into();
+
+    let mut fail_at = 0usize;
+    let mut injected_failures = 0usize;
+    loop {
+        {
+            let db = vault.lock_db().unwrap();
+            fault_injection::install_write_fault(db.conn(), fail_at);
+        }
+        let result = vault.update_entry(entry_id, &edited);
+        {
+            let db = vault.lock_db().unwrap();
+            fault_injection::clear_write_fault(db.conn());
+        }
+        let (state, version) = entry_sync_bookkeeping(&vault, entry_id);
+        match result {
+            Err(_) => {
+                injected_failures += 1;
+                assert_eq!(
+                    title_blob(&vault, entry_id),
+                    old_title,
+                    "complete-old at write {fail_at}"
+                );
+                assert_eq!(
+                    password_blob(&vault, entry_id),
+                    old_password,
+                    "complete-old at write {fail_at}"
+                );
+                assert_eq!(version, old_version, "complete-old at write {fail_at}");
+                assert_eq!(state, old_state, "complete-old at write {fail_at}");
+                assert_eq!(
+                    index_tag(&vault, entry_id),
+                    old_tag,
+                    "complete-old: index untouched at write {fail_at}"
+                );
+                assert_eq!(
+                    rotated_at(&vault, entry_id),
+                    None,
+                    "complete-old: no rotation stamp at write {fail_at}"
+                );
+            }
+            Ok(()) => {
+                assert_ne!(
+                    title_blob(&vault, entry_id),
+                    old_title,
+                    "complete-new at write {fail_at}"
+                );
+                assert_ne!(
+                    password_blob(&vault, entry_id),
+                    old_password,
+                    "complete-new at write {fail_at}"
+                );
+                assert_eq!(version, old_version + 1, "complete-new at write {fail_at}");
+                assert_eq!(state, "pending", "complete-new at write {fail_at}");
+                assert_ne!(
+                    index_tag(&vault, entry_id),
+                    old_tag,
+                    "complete-new: rotation re-indexed WITH the row"
+                );
+                assert!(
+                    rotated_at(&vault, entry_id).is_some(),
+                    "complete-new: rotation stamped WITH the row"
+                );
+                break;
+            }
+        }
+        fail_at += 1;
+        assert!(
+            fail_at < 96,
+            "update_entry never succeeded within the sweep bound"
+        );
+    }
+    assert!(
+        injected_failures >= 1,
+        "the sweep must inject at least one real failure to be meaningful"
+    );
+}
+
+/// delete_entry (already transactional pre-WBS-411, now PROVEN): failing
+/// any statement keeps the entry fully alive (row, mapping, registry rows,
+/// no tombstone); success purges all of it and records the tombstone
+/// together.
+#[test]
+fn delete_entry_fault_injection_at_every_statement_is_all_or_nothing() {
+    let vault = VaultManager::create(":memory:", b"wbs411-delete-tx-pass").unwrap();
+    let entry_id = vault
+        .add_entry(&wbs411_entry("Delete Tx", "wbs411-delete-secret"))
+        .unwrap();
+    let entity = vault
+        .create_entity(
+            "wbs411-entity",
+            crate::registry::EntityKind::Application,
+            crate::registry::Criticality::Low,
+            None,
+            None,
+        )
+        .unwrap();
+    vault
+        .assign_entry(entry_id, &entity.entity_id, None)
+        .unwrap();
+    // A domain mapping to exercise the mapping DELETE inside the unit of
+    // work (add_entry never writes mappings, so seed one directly).
+    {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, 'wbs411.example', 1)",
+                [entry_id],
+            )
+            .unwrap();
+    }
+
+    // Precondition: the row is fully connected.
+    assert_eq!(
+        count_rows(&vault, "SELECT COUNT(*) FROM entity_memberships"),
+        1
+    );
+    assert_eq!(
+        count_rows_for_entry(
+            &vault,
+            "SELECT COUNT(*) FROM domain_mappings WHERE entry_id = ?1",
+            entry_id
+        ),
+        1
+    );
+
+    let mut fail_at = 0usize;
+    let mut injected_failures = 0usize;
+    loop {
+        {
+            let db = vault.lock_db().unwrap();
+            fault_injection::install_write_fault(db.conn(), fail_at);
+        }
+        let result = vault.delete_entry(entry_id);
+        {
+            let db = vault.lock_db().unwrap();
+            fault_injection::clear_write_fault(db.conn());
+        }
+        let alive = count_rows_for_entry(
+            &vault,
+            "SELECT COUNT(*) FROM entries WHERE entry_id = ?1 AND is_deleted = 0",
+            entry_id,
+        );
+        let mappings = count_rows_for_entry(
+            &vault,
+            "SELECT COUNT(*) FROM domain_mappings WHERE entry_id = ?1",
+            entry_id,
+        );
+        let index = count_rows_for_entry(
+            &vault,
+            "SELECT COUNT(*) FROM secret_equality_index WHERE entry_id = ?1",
+            entry_id,
+        );
+        let membership = count_rows_for_entry(
+            &vault,
+            "SELECT COUNT(*) FROM entity_memberships WHERE entry_id = ?1",
+            entry_id,
+        );
+        let tombstones = count_rows(&vault, "SELECT COUNT(*) FROM sync_tombstones");
+        match result {
+            Err(_) => {
+                injected_failures += 1;
+                assert_eq!(alive, 1, "complete-old at write {fail_at}");
+                assert_eq!(
+                    mappings, 1,
+                    "complete-old: mapping survives at write {fail_at}"
+                );
+                assert_eq!(index, 1, "complete-old at write {fail_at}");
+                assert_eq!(membership, 1, "complete-old at write {fail_at}");
+                assert_eq!(tombstones, 0, "complete-old at write {fail_at}");
+            }
+            Ok(()) => {
+                assert_eq!(alive, 0, "complete-new at write {fail_at}");
+                assert_eq!(index, 0, "complete-new at write {fail_at}");
+                assert_eq!(membership, 0, "complete-new at write {fail_at}");
+                assert_eq!(
+                    tombstones, 1,
+                    "complete-new: tombstone commits WITH the purge"
+                );
+                break;
+            }
+        }
+        fail_at += 1;
+        assert!(
+            fail_at < 96,
+            "delete_entry never succeeded within the sweep bound"
+        );
+    }
+    assert!(
+        injected_failures >= 1,
+        "the sweep must inject at least one real failure to be meaningful"
     );
 }

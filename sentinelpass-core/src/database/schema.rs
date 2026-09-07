@@ -580,11 +580,16 @@ impl Database {
     ///
     /// Only the `db_metadata` timestamp trigger remains here as of schema
     /// v9 (WBS-409 / TD-ROB-02): the former `update_entry_modified_timestamp`
-    /// echo trigger on `entries` was removed. It rewrote `sync_state` back
-    /// to `'pending'` after a remote sync apply had explicitly written
-    /// `'synced'` (the TD-ROB-02 echo), and it double-bumped `sync_version`
-    /// on local edits (the repository already bumps it). Every local
-    /// mutation writes sync bookkeeping explicitly:
+    /// echo trigger on `entries` was removed. On a remote sync apply it
+    /// rewrote the applied row behind the apply's back: `sync_state` back
+    /// to `'pending'` (the applied change re-pushed; with `modified_at`
+    /// stamped to apply-time the rewritten row also won the peer's LWW
+    /// tie-break, see-sawing the entry between devices), and
+    /// `sync_version = OLD.sync_version + 1` — which silently CORRUPTED the
+    /// applied version whenever the local row was more than one version
+    /// behind (remote v5 over a local v2 landed as v3). Every local
+    /// mutation writes sync bookkeeping explicitly, so the trigger was
+    /// load-bearing for nothing:
     /// - insert: `repository::create` (version 1, `'pending'`)
     /// - update: `repository::update` (version + 1, `'pending'`)
     /// - delete: `VaultManager::delete_entry` (version + 1, `'pending'`,
@@ -592,9 +597,9 @@ impl Database {
     /// - v1→v2 blob sweep: `vault::migration_ops` (preserves scanned
     ///   bookkeeping)
     ///
-    /// so the trigger is load-bearing for nothing. Vaults that predate v9
-    /// have the trigger dropped by `migrate_v8_to_v9` (both the OF-list
-    /// shape created here and the legacy no-list shape from v1 binaries).
+    /// Vaults that predate v9 have the trigger dropped by
+    /// `migrate_v8_to_v9` (both the OF-list shape created here and the
+    /// legacy no-list shape from v1 binaries).
     fn create_triggers(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -948,8 +953,10 @@ mod tests {
 
         assert!(trigger_names.contains(&"update_db_metadata_timestamp".to_string()));
         // WBS-409 (TD-ROB-02): the entries echo trigger must NEVER come
-        // back — it rewrote remote applies from 'synced' to 'pending'
-        // (re-push loop) and double-bumped sync_version on local edits.
+        // back — it rewrote remote applies behind the apply's back
+        // ('synced' -> 'pending', modified_at clobbered to apply-time
+        // feeding an LWW see-saw, and the applied sync_version corrupted
+        // to OLD+1 whenever the local row was >1 version behind).
         assert!(!trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
     }
 
