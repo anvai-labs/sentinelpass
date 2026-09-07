@@ -11,6 +11,7 @@
 
 pub mod aad;
 pub mod cipher;
+pub mod dbwire;
 pub mod envelope;
 pub mod health;
 pub mod kdf;
@@ -20,6 +21,11 @@ pub mod strength;
 
 pub use aad::{AadContext, AadContextBuilder, EnvelopePurpose, ObjectType, AAD_VERSION};
 pub use cipher::{decrypt_entry, encrypt_entry, DataEncryptionKey, EncryptedEntry};
+pub use dbwire::{
+    decode_dek_nonce, decode_kdf_params, decode_wrapped_key, encode_dek_nonce, encode_kdf_params,
+    encode_metadata_blobs, encode_wrapped_key, ALG_ARGON2ID, DBWIRE_VERSION, KDF_MAGIC,
+    KDF_MAGIC_STR, MAX_DBWIRE_BYTES, NONCE_MAGIC, NONCE_MAGIC_STR, WRAP_MAGIC, WRAP_MAGIC_STR,
+};
 pub use envelope::{
     open_envelope, open_envelope_relaxed_epoch, seal_envelope, seal_envelope_with_nonce, Envelope,
     ALG_A256GCM, ENVELOPE_MAGIC, ENVELOPE_MAGIC_STR, ENVELOPE_VERSION, MAX_CIPHERTEXT_BYTES,

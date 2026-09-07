@@ -663,12 +663,20 @@ impl VaultManager {
             )
             .map_err(DatabaseError::Sqlite)?;
 
+            // Two encodings of the SAME material (WBS-305): the key_slots
+            // row keeps the frozen legacy bincode slot format (slot
+            // recovery depends on it); the db_metadata columns carry the
+            // bounded SPKDF/SPWRAP/SPNONCE documents. Semantically
+            // identical — both from the same typed values.
             let kdf_blob = bincode::serialize(&new_kdf)
                 .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
             let wrapped_blob = bincode::serialize(&new_wrapped)
                 .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
             let nonce_blob = bincode::serialize(&new_wrapped.nonce)
                 .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+            let (kdf_doc, wrap_doc, nonce_doc) =
+                crate::crypto::dbwire::encode_metadata_blobs(&new_kdf, &new_wrapped)
+                    .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
             conn.execute(
                 "INSERT INTO key_slots
                     (slot_uuid, slot_type, kdf_params, wrapped_dek, dek_nonce,
@@ -691,9 +699,9 @@ impl VaultManager {
                      key_epoch = ?4, last_modified = ?5
                  WHERE id = 1 AND key_epoch = ?6",
                 rusqlite::params![
-                    &kdf_blob,
-                    &wrapped_blob,
-                    &nonce_blob,
+                    &kdf_doc,
+                    &wrap_doc,
+                    &nonce_doc,
                     new_epoch,
                     now,
                     snapshot.key_epoch

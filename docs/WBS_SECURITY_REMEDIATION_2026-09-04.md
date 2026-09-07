@@ -492,6 +492,43 @@ AAD decisions come from the ADRs; WPs below assume the ADR-004/005 direction.
 - **Reqs/TDs:** SR-CRYPTO-002 · (bincode debt) · **Deps:** 304. **Est:** 3d.
 - **Tests:** P: cross-language shape doc + golden files. N: oversized/truncated/
   unknown-version decode rejected before allocation.
+- **Status:** Done (2026-09-06, scoped to the `db_metadata` key-material columns —
+  the entry/entity/SSH/TOTP blob classes were adopted by WBS-304's envelope work;
+  entry/blob re-encryption is WBS-404). `crypto/dbwire.rs` (new): the three
+  columns move to versioned SPKDF/SPWRAP/SPNONCE JSON documents — magic +
+  version + alg fail-closed, integers only, standard padded base64 with
+  exact/declared-length checks, `deny_unknown_fields`, typed-struct decode
+  (never `serde_json::Value`). DUAL-READ dispatches on the FULL magic byte
+  prefix (never a bare `{`: a legacy bincode KdfParams/nonce blob starts with
+  random bytes that are `{` with p≈1/256 — a first-byte sniff would misroute
+  ~0.4% of legacy vaults), and the document branch has NO bincode fallback (a
+  magic-bearing blob that fails to parse fails closed — no format confusion).
+  Ordered pre-parse gates: 4 KiB raw cap BEFORE any parse, shared byte-level
+  depth scan, magic pre-scan. Legacy bincode path decoded under
+  limit(4096)+fixint+reject_trailing — also closing pair-join's previously
+  unbounded `bincode::deserialize` of a PEER-supplied kdf blob. All four
+  db_metadata writers (create, rotation, pair-join, recovery) encode through
+  `dbwire::encode_metadata_blobs`; pair-join now re-encodes canonically
+  instead of storing peer bytes verbatim. Scope boundaries held: `key_slots`
+  keeps the frozen bincode slot format (slot recovery depends on it;
+  conversion documented as follow-up), pairing-bootstrap transport stays
+  bincode (cross-version compat; joiners dual-read), no schema bump, in-memory
+  types unchanged. The pre-bootstrap byte-mirror invariant stays intact: real
+  NULL-MAC vaults predate the switch (bincode both sides); a document-format
+  vault with a NULLed MAC is writer tampering and is REFUSED (pinned by test),
+  with the epoch guard refusing the sidecar-bearing variant. Deliverables:
+  `docs/DURABLE_WIRE_FORMATS.md` (byte-level field tables for the three
+  documents + SPENV v2 summary + frozen legacy bincode layouts). Tests: 21
+  codec tests (3 byte-exact golden vectors, dual-read legacy/3-field wrap,
+  14 negatives: oversized/truncated/empty/unknown-version/wrong-class/
+  unknown-key/duplicate-key/float/short-b64/invalid-b64+utf8/depth-bomb/
+  hostile-bincode-prefix/alg/magic-field) + 6 adoption tests (new-vault docs;
+  legacy bincode load via both readers; rotation, pair-join, and recovery all
+  write documents while the password slot stays bincode and reopens work;
+  NULL-MAC document-format tamper refused). Adversarial pre-check resolved:
+  dispatch confusion (full-magic + no-fallback), cap bypass (gates ordered
+  before allocation), cross-language drift (writer output golden-pinned,
+  reader contract structural — the doc states the split normatively).
 
 ### WBS-306 — Encrypt identity metadata / keyed lookup tags
 - **Reqs/TDs:** SR-CRYPTO-001, SR-DATA-004 (privacy) · TD-ROB-10 · **Deps:** 304.
@@ -697,6 +734,17 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   UUIDs; N ID collisions rejected. Est 2d.
 - **WBS-404 — Re-encrypt all records with v2 AAD.** TD-SEC-01. Tests: P count parity;
   N any record failing verification aborts whole migration (atomic). Est 4d.
+  **Status:** Done (2026-09-07) — post-unlock sweep per the v5-registry
+  precedent (DEK unavailable at migration time). DOCUMENTED SPEC DEVIATION
+  (gate review, finding 5): the atomic-abort semantics above are implemented
+  as per-row skip-and-continue — abort-on-first-bad-row would let one corrupt
+  row wedge the migration forever. Safety preserved: failing rows are skipped
+  byte-untouched with a warning naming the row; seal+open-back+constant-time
+  compare verification runs BEFORE any write; deterministic failures
+  dead-letter via a residual completion marker (clear the registry key to
+  retry). Sync-trigger suppression neutralizes both trigger shapes
+  (OF-list and legacy no-list, captured/recreated in-transaction).
+  TD-ROB-02 trigger ratchet remains tracked separately.
 - **WBS-405 — Verify before activation.** TV-005. Tests: P every envelope + relation
   decrypt/verify. N corrupted target aborts without touching legacy. Est 2d.
 - **WBS-406 — Atomic activation; block downgrade.** SR-CRYPTO-005, TD-ROB-07. Tests:

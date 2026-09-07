@@ -47,6 +47,11 @@ pub enum AuditEventType {
     /// A key slot was revoked (the core revocation control, ADR-004) —
     /// previously invisible in the audit trail (review round 2).
     SlotRevoked,
+    /// The bulk v1→v2 blob re-encryption sweep converted records (WBS-404).
+    /// Kept SEPARATE from RegistryIndexRebuilt so mass-rewrite events are
+    /// never confused with registry rebuilds in the audit trail (gate
+    /// review, finding 7). Counts ride in the context text.
+    V2BlobMigration,
 
     /// Credential operations
     CredentialCreated {
@@ -240,6 +245,9 @@ impl AuditLogger {
             | AuditEventType::EpochHighWaterRebased { refused: true }
             | AuditEventType::SlotRegistryIntegrityRefused
             | AuditEventType::RecoveryPerformed { .. } => 5,
+
+            // Bulk re-encryption sweep (WBS-404): significant but planned.
+            AuditEventType::V2BlobMigration => 3,
 
             // High severity (4)
             AuditEventType::CredentialDeleted { .. }

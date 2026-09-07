@@ -322,13 +322,18 @@ pub fn migrate_v4_to_v5(conn: &Connection) -> Result<()> {
                 |row| row.get(0),
             )
             .map_err(crate::DatabaseError::Sqlite)?;
-        // Tolerant read accepts both the legacy 3-field shape and the current
-        // 4-field shape; the rewrite normalizes legacy blobs so every later open
-        // deserializes cleanly.
+        // Tolerant read accepts the legacy 3-field shape, the current
+        // 4-field shape, and (defensively) a WBS-305 `SPWRAP` document — a
+        // v4 vault cannot legitimately carry one, but the dual-read decoder
+        // costs nothing and keeps this migration format-agnostic. The
+        // rewrite target stays current-shape bincode: this migration's job
+        // is normalizing legacy BINCODE shapes so later opens deserialize;
+        // document-format writes belong to the live metadata writers, and
+        // the next rotation rewrites the column as a document.
         // A blob that is not a recognizable wrap (e.g. a test fixture placeholder)
         // is left as-is: forcing it here would turn a data quirk into a migration
         // failure. Real wraps rewrite into the current shape.
-        if let Ok(key) = crate::crypto::keyring::WrappedKey::from_bincode_bytes(&wrapped_blob) {
+        if let Ok(key) = crate::crypto::dbwire::decode_wrapped_key(&wrapped_blob) {
             let upgraded_blob = bincode::serialize(&key).map_err(|e| {
                 crate::DatabaseError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
             })?;
