@@ -57,11 +57,20 @@ impl IpcServer {
         auth_token: String,
         external_secret_allowlist_path: PathBuf,
     ) -> Self {
-        let audit_logger = match AuditLogger::new(crate::get_audit_log_dir()) {
-            Ok(lg) => Some(Arc::new(lg)),
+        let audit_logger = match crate::platform::ensure_audit_log_dir() {
+            Ok(dir) => match AuditLogger::new(dir) {
+                Ok(lg) => Some(Arc::new(lg)),
+                Err(e) => {
+                    warn!(
+                        "IpcServer: audit logger unavailable — audit events will be dropped: {}",
+                        e
+                    );
+                    None
+                }
+            },
             Err(e) => {
                 warn!(
-                    "IpcServer: audit logger unavailable — audit events will be dropped: {}",
+                    "IpcServer: audit log directory unavailable — audit events will be dropped: {}",
                     e
                 );
                 None

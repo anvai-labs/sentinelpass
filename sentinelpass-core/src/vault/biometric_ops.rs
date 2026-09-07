@@ -2,7 +2,7 @@
 
 use super::VaultManager;
 use crate::{
-    audit::{get_audit_log_dir, AuditEventType, AuditLogger},
+    audit::{AuditEventType, AuditLogger},
     crypto::KeyHierarchy,
     database::Database,
     PasswordManagerError, Result,
@@ -28,7 +28,9 @@ impl VaultManager {
         // silent one); a pending one-step heal is deliberately NOT adopted
         // here — there is no password proof of the new state — and waits for
         // the next password unlock.
-        let early_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let early_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
         let snapshot = Self::load_vault_snapshot(&db)?;
         let (epoch_sidecar, vault_uuid, bio_check) =
             match Self::enforce_epoch_guard(&snapshot, &vault_path) {
@@ -134,7 +136,9 @@ impl VaultManager {
         // be caught here too (adversarial-review finding). Outcomes are
         // audited — this DEK-releasing surface must not be the silent one
         // (round-4 finding).
-        let logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
         let snapshot = Self::load_vault_snapshot(&db)?;
         match Self::enforce_epoch_guard(&snapshot, &vault_path) {
             Ok((_, _, check)) => {

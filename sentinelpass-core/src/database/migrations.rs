@@ -717,6 +717,15 @@ mod tests {
     /// connections cannot express.
     fn create_v1_db_at(path: &std::path::Path) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open(path).unwrap();
+        // WBS-412: the production open path now refuses a vault database with
+        // group/world-read bits, and this fixture bypasses Database::open's
+        // creation-time mode pinning — match the enforced mode explicitly
+        // (test-only change; no migration logic affected).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         conn.execute_batch(V1_SCHEMA_SQL).unwrap();
         seed_v1_metadata(&conn);

@@ -172,8 +172,12 @@ pub fn export_to_keepass_xml(vault: &VaultManager, output: &Path) -> Result<()> 
 
     let xml_output = xml::generate_keepass_xml(&ke_entries)?;
 
-    let mut file = std::fs::File::create(output).map_err(|e| {
-        PasswordManagerError::from(crate::DatabaseError::FileIo(format!(
+    // WBS-412/413: this export is UNENCRYPTED XML — create it owner-only
+    // from birth and refuse to write through a symlink at the target.
+    // (The JSON/CSV exports had a create-then-chmod window; this export had
+    // NO mode hardening at all before 0.10.)
+    let mut file = crate::platform::create_owner_only_file(output).map_err(|e| {
+        crate::PasswordManagerError::from(crate::DatabaseError::FileIo(format!(
             "Failed to create export file: {}",
             e
         )))
@@ -304,5 +308,61 @@ mod tests {
         assert!(exported.contains("Example Password"));
         assert!(!exported.contains("Example Passkey"));
         assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
+    }
+
+    // --- WBS-412/413: KeePass XML exports are owner-only, symlink-refused --
+
+    #[cfg(unix)]
+    #[test]
+    fn keepass_xml_export_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let output_path = tmp.path().join("export.xml");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        export_to_keepass_xml(&vault, &output_path).unwrap();
+
+        let mode = std::fs::metadata(&output_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "KeePass XML export is unencrypted plaintext");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keepass_xml_export_refuses_symlinked_output_path() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry(
+                "Example Password",
+                "password-secret",
+                CredentialType::Password,
+            ))
+            .unwrap();
+
+        let target = tmp.path().join("target.txt");
+        std::fs::write(&target, b"innocent").unwrap();
+        let link = tmp.path().join("export.xml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = export_to_keepass_xml(&vault, &link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"innocent");
     }
 }

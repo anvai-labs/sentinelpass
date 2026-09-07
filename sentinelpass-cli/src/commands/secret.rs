@@ -296,8 +296,12 @@ pub fn parse_external_secret_grant_duration(value: &str) -> Result<chrono::Durat
 pub fn load_external_secret_audit_events(
     limit: usize,
 ) -> Result<Vec<sentinelpass_core::AuditEntry>> {
-    let logger = sentinelpass_core::AuditLogger::new(sentinelpass_core::get_audit_log_dir())
-        .map_err(|e| anyhow::anyhow!("Failed to open audit log: {}", e))?;
+    let logger = sentinelpass_core::platform::ensure_audit_log_dir()
+        .map_err(|e| anyhow::anyhow!("Failed to open audit log directory: {}", e))
+        .and_then(|dir| {
+            sentinelpass_core::AuditLogger::new(dir)
+                .map_err(|e| anyhow::anyhow!("Failed to open audit log: {}", e))
+        })?;
     logger
         .get_entries(limit)
         .map_err(|e| anyhow::anyhow!("Failed to read audit log: {}", e))
