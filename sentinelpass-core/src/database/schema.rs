@@ -69,15 +69,25 @@ impl Database {
         if fs_guarded {
             warn_on_loose_parent_dir(path);
             match std::fs::symlink_metadata(path) {
-                Ok(meta) if meta.len() == 0 => {
+                // Regular file only: a directory (Windows reports len() 0
+                // for directories — the Unix assumption that zero length
+                // implies a touch(1)-leftover file does NOT hold there) or
+                // a FIFO/device node falls through to the full validation,
+                // which refuses non-regular targets.
+                Ok(meta) if meta.len() == 0 && meta.is_file() => {
                     // Zero-byte file (e.g. a touch(1) leftover — the
                     // documented create-path allowance: there is no data to
                     // destroy). ADOPT it: pin the mode owner-only and take
-                    // the creation path so WAL/SHM are born private too. A
-                    // symlink always has a nonzero link length, so this
-                    // branch cannot swallow one.
+                    // the creation path so WAL/SHM are born private too.
                     set_owner_only_mode(path, false)?;
                     created = true;
+                }
+                Ok(meta) if meta.is_dir() => {
+                    return Err(PasswordManagerError::InvalidInput(format!(
+                        "{} is a directory, not a regular file — a vault database \\
+                         path must be a regular file; remove the directory and retry",
+                        path.display()
+                    )));
                 }
                 Ok(_) => {
                     Self::validate_vault_file(path)?;
