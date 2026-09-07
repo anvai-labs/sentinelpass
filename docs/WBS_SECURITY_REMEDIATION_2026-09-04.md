@@ -747,11 +747,22 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   TD-ROB-02 trigger ratchet remains tracked separately.
 - **WBS-405 — Verify before activation.** TV-005. Tests: P every envelope + relation
   decrypt/verify. N corrupted target aborts without touching legacy. Est 2d.
+  **Status:** Done (2026-09-07, PR #107) — `vault/activation_ops.rs` full-vault
+  verification pass (every envelope + domain-mapping relation opens under the v2
+  path) before the activation marker is written; corrupted-target abort leaves the
+  legacy state untouched.
 - **WBS-406 — Atomic activation; block downgrade.** SR-CRYPTO-005, TD-ROB-07. Tests:
   N older client refuses v2 vault. Est 2d.
+  **Status:** Done (2026-09-07, PR #107) — `db_metadata.format_version` = 2
+  activation marker written via atomic replace; open refuses `format_version`
+  greater than `CURRENT_VAULT_FORMAT_VERSION` (fail-closed downgrade/upgrade gate,
+  `database/schema.rs`).
 - **WBS-407 — Fixtures for every released schema (v1→current).** TV-005.
   Regenerated from actual released schema dumps, not the drifted
   `migrations/v1_initial.sql` labels (ADR-005 rev 3). Est 2d.
+  **Status:** Done (2026-09-07, PR #107) — per-version schema fixture ladder
+  (v1→v8) regenerated from actual migration shapes; the ladder drives the
+  migration/compat tests incl. the Windows directory-refusal regression.
 - **WBS-408 — Application services / unit-of-work boundary.** SR-DATA-001, TD-ROB-02.
   Deps — may start after ADR-007 direction. Est 4d.
 - **WBS-409 — Explicit local vs remote write paths (remove trigger echo).** TD-ROB-02.
@@ -762,11 +773,31 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   Est 3d.
 - **WBS-412 — Explicit Unix modes + Windows ACLs for sensitive files.** SR-DATA-003,
   TD-ROB-09. Est 2d.
+  **Status:** Done (2026-09-07, PR #107) — born-0600 creation for vault db (+WAL/SHM
+  via private-umask window), epoch sidecar, IPC token (0700 dir), grants, exports;
+  Refuse policy at open for loose existing vault modes with typed
+  `SensitivePathError` + remediation hint; Windows ACL coverage documented as
+  profile-inheritance (matrix residual). Evidence: `SECURITY_STATUS_MATRIX.md`
+  SR-DATA-003 row.
 - **WBS-413 — Owner/type/symlink validation.** TD-ROB-09. Tests: N symlink swap
   rejected. Est 1.5d.
+  **Status:** Done (2026-09-07, PR #107) — symlink/regular-file/owner (uid) checks
+  at every sensitive open with typed refusals; negative tests incl. symlink swap
+  (Unix-gated where uid checks require it); TOCTOU residual documented.
 - **WBS-414 — Opaque audit identifiers.** SR-DATA-004, TD-ROB-10/11. Est 1.5d.
+  **Status:** Done (2026-09-07, PR #107) — credential/registry identifier fields
+  opaqued at record time under DEK-derived keys (`opaque_value`/`opaque_event_type`,
+  `audit.rs`); negative: raw identifiers never appear (`recorded_entry_contains_opaque_token_not_raw_entry_id`,
+  `recorded_entries_contain_opaque_domain_and_entity_tokens`).
 - **WBS-415 — Audit chaining/rotation/retention/verification.** SR-DATA-004,
   TD-ROB-11. Tests: N tamper detection. Est 3d.
+  **Status:** Done (2026-09-07, PR #107) — HMAC-SHA256 chain under DEK-derived
+  key (keyless SHA-256 for locked-period records), size-bounded rotation with
+  retention pruning, public `verify_audit_chain` + `AuditVerifyReport`
+  (key-bound); negatives detect byte-flip/deletion/reordering/forged-tail and
+  locked-period tampering at exact position, plus stripped-chain splice
+  suspicion counting; `AuditKeyLease` scope guard bounds key lifetime.
+  CLI/UI surface for the verifier remains open (library-level today).
 - **WBS-416 — Portable authenticated backup (SQLite snapshot API).** SR-DATA-005,
   TD-ROB-12, ADR-008. Bundle carries vault UUID + epoch but NOT the high-water
   sidecar (ADR-004 rev 4: restore re-baselines via TOFU-warning or override).
@@ -866,6 +897,9 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
 - **WBS-706 — Structured URL parsing; HTTP warn/refuse.** TD-CLIENT-06 (URL half). Est 1.5d.
 - **WBS-707 — Minimize Tauri capabilities + CSP.** SR-CLIENT-002, TD-CLIENT-03. Est 2d.
 - **WBS-708 — Remove production debug-unlock artifacts.** Est 1d.
+  **Status:** Done (2026-09-07, PR #107) — debug-unlock paths removed from
+  production wiring; no plaintext unlock shortcut remains (stream C verification
+  + gate review).
 - **WBS-709 — Native expiring/sensitive clipboard.** Est 1.5d.
 - **WBS-710 — Windows Hello-bound key release.** TD-CLIENT-04, SR-CLIENT (biometric
   parity). Est 3d.
