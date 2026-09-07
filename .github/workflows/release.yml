@@ -552,40 +552,7 @@ jobs:
           cd release-assets
           gh release upload "v${VERSION}" --clobber $(find . -type f)
 
-  homebrew:
-    name: Bump Homebrew formula
-    runs-on: ubuntu-latest
-    needs: [setup, release]
-    if: needs.setup.outputs.is-release == 'true'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Mint scoped tap token
-        id: tap_token
-        if: env.TAP_APP_CONFIGURED == 'true'
-        env:
-          TAP_APP_CONFIGURED: ${{ secrets.TAP_APP_ID != '' }}
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
-        with:
-          app-id: ${{ secrets.TAP_APP_ID }}
-          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
-          owner: anvai-labs
-          repositories: homebrew-tap
-
-      - name: Bump formula in anvai-labs/homebrew-tap
-        if: env.TAP_APP_CONFIGURED == 'true'
-        env:
-          TAP_APP_CONFIGURED: ${{ secrets.TAP_APP_ID != '' }}
-          GH_TOKEN: ${{ steps.tap_token.outputs.token }}
-          VERSION: ${{ needs.setup.outputs.version }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "TAP_APP_ID / TAP_APP_PRIVATE_KEY secrets not set — skipping Homebrew formula bump."
-            echo "Configure the sentinelpass-release-bot GitHub App credentials to enable."
-            exit 0
-          fi
-          # GH_TOKEN authenticates gh API calls but NOT raw `git push` over
-          # https — register gh as the git credential helper or the script's
-          # push fails with "could not read Username" (v0.8.2 release).
-          gh auth setup-git
-          bash scripts/bump-homebrew-formula.sh "$VERSION"
+  # The Homebrew formula bump lives in anvai-labs/homebrew-tap
+  # (update-sentinelpass.yml there); this workflow no longer touches the tap.
+  # The push-based job this replaces failed on every release: it committed to
+  # main directly, which the tap's checks-only branch protection rejects.
