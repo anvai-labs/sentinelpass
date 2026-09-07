@@ -734,6 +734,17 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   UUIDs; N ID collisions rejected. Est 2d.
 - **WBS-404 — Re-encrypt all records with v2 AAD.** TD-SEC-01. Tests: P count parity;
   N any record failing verification aborts whole migration (atomic). Est 4d.
+  **Status:** Done (2026-09-07) — post-unlock sweep per the v5-registry
+  precedent (DEK unavailable at migration time). DOCUMENTED SPEC DEVIATION
+  (gate review, finding 5): the atomic-abort semantics above are implemented
+  as per-row skip-and-continue — abort-on-first-bad-row would let one corrupt
+  row wedge the migration forever. Safety preserved: failing rows are skipped
+  byte-untouched with a warning naming the row; seal+open-back+constant-time
+  compare verification runs BEFORE any write; deterministic failures
+  dead-letter via a residual completion marker (clear the registry key to
+  retry). Sync-trigger suppression neutralizes both trigger shapes
+  (OF-list and legacy no-list, captured/recreated in-transaction).
+  TD-ROB-02 trigger ratchet remains tracked separately.
 - **WBS-405 — Verify before activation.** TV-005. Tests: P every envelope + relation
   decrypt/verify. N corrupted target aborts without touching legacy. Est 2d.
 - **WBS-406 — Atomic activation; block downgrade.** SR-CRYPTO-005, TD-ROB-07. Tests:

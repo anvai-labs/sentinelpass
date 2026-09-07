@@ -599,6 +599,29 @@ impl VaultManager {
             .unchecked_transaction()
             .map_err(DatabaseError::Sqlite)?;
 
+        // Legacy-trigger neutralization (gate review, finding 1): vaults
+        // created before the OF-list change carry
+        // `AFTER UPDATE ON entries` WITHOUT a column list — it fires on
+        // the bookkeeping-restore UPDATE and overwrites restored
+        // modified_at with sweep time (silently falsifying last-modified
+        // and flipping LWW ties). Capture, drop, and recreate the EXACT
+        // definition inside this transaction: crash-safe (rolls back
+        // together) and shape-agnostic.
+        let legacy_trigger_sql: Option<String> = tx
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'trigger' AND name = 'update_entry_modified_timestamp'
+                   AND sql NOT LIKE '%UPDATE OF%'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(DatabaseError::Sqlite)?;
+        if legacy_trigger_sql.is_some() {
+            tx.execute("DROP TRIGGER update_entry_modified_timestamp;", [])
+                .map_err(DatabaseError::Sqlite)?;
+        }
+
         let mut report = V2BlobSweepReport::default();
         sweep_entry_rows(&tx, dek, &vault_uuid, epoch, &mut report)?;
         sweep_three_part_rows(
@@ -628,8 +651,28 @@ impl VaultManager {
             &|dek, blob, nonce, tag| crate::totp::decrypt_totp_secret(dek, blob, nonce, tag),
         )?;
 
-        if report.converted == 0 && report.skipped_unreadable == 0 && report.failed == 0 {
+        // Terminal state for DETERMINISTIC failures (gate review,
+        // finding 2): decrypt/seal failures are input-determined — the
+        // same row fails identically on every pass — so a pass that
+        // converts nothing while rows still fail records the completion
+        // flag WITH a residual annotation and stops re-running. Without
+        // this, one corrupt or cap-exceeding row re-scans the whole vault
+        // at every open forever. The rows stay byte-untouched (readable
+        // via dual-read if decryptable; otherwise every read fails closed
+        // — the standing tamper signal). Clear the registry key to retry.
+        if report.converted == 0 && (report.skipped_unreadable > 0 || report.failed > 0) {
+            set_sweep_complete_flag(
+                &tx,
+                &format!(
+                    "residual: {} unreadable + {} failed rows left as-is (deterministic                      failures; clear this key to retry)",
+                    report.skipped_unreadable, report.failed
+                ),
+            )?;
+        } else if report.converted == 0 && report.skipped_unreadable == 0 && report.failed == 0 {
             set_sweep_complete_flag(&tx, &Utc::now().to_rfc3339())?;
+        }
+        if let Some(sql) = &legacy_trigger_sql {
+            tx.execute_batch(sql).map_err(DatabaseError::Sqlite)?;
         }
         tx.commit().map_err(DatabaseError::Sqlite)?;
 
@@ -644,9 +687,7 @@ impl VaultManager {
         if report.converted > 0 {
             if let Some(ref logger) = self.audit_logger {
                 let _ = logger.log(
-                    crate::audit::AuditEventType::RegistryIndexRebuilt {
-                        entries: report.scanned,
-                    },
+                    crate::audit::AuditEventType::V2BlobMigration,
                     &format!(
                         "v1-to-v2 blob sweep: {} converted, {} skipped (unreadable), {} \
                          failed seal/verify, of {} rows",
@@ -1310,7 +1351,30 @@ mod tests {
             "a failed seal/verify must leave the row untouched"
         );
         assert!(!after.1.starts_with(crate::crypto::ENVELOPE_MAGIC));
-        assert!(vault.v2_blob_sweep_needed().unwrap());
+
+        // Terminal state (gate review, finding 2): the deterministic
+        // failure dead-letters — the completion flag records the residual
+        // and the sweep stops re-running at every open forever. The row
+        // itself stays byte-untouched; clearing the registry key retries.
+        assert!(
+            !vault.v2_blob_sweep_needed().unwrap(),
+            "a deterministic failure must dead-letter, not retry forever"
+        );
+        {
+            let db = vault.lock_db().unwrap();
+            let marker: String = db
+                .conn()
+                .query_row(
+                    "SELECT value FROM registry_state WHERE key = 'v2_blob_sweep_complete'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                marker.contains("residual"),
+                "expected the residual annotation, got: {marker}"
+            );
+        }
     }
 
     /// THE sync-interplay property (adversarial pre-check A1): converting a

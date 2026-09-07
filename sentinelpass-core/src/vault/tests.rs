@@ -1641,11 +1641,26 @@ fn bootstrap_refuses_a_tampered_slot_row_during_the_null_mac_window() {
     {
         let db = crate::database::Database::open(&path).unwrap();
         // Enter the NULL-MAC window and tamper the slot's wrapped material.
+        // Format-faithful (gate review, finding 4): a real pre-registry
+        // vault predates WBS-305, so db_metadata is downgraded to legacy
+        // bincode here — same as the sibling bootstrap-success test — so
+        // the refusal below is produced by the NULL-MAC row-swap
+        // byte-compare clauses, not by a document/bincode format
+        // mismatch that would mask a regression in those clauses.
+        let (kdf, wrapped, _key_epoch) = VaultManager::load_vault_metadata(&db).unwrap();
         db.conn()
-            .execute_batch(
-                "UPDATE db_metadata SET slot_registry_mac = NULL;
-                 UPDATE key_slots SET wrapped_dek = X'DEADBEEF';",
+            .execute(
+                "UPDATE db_metadata SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3,
+                 slot_registry_mac = NULL",
+                rusqlite::params![
+                    &bincode::serialize(&kdf).unwrap(),
+                    &bincode::serialize(&wrapped).unwrap(),
+                    &bincode::serialize(&wrapped.nonce).unwrap(),
+                ],
             )
+            .unwrap();
+        db.conn()
+            .execute("UPDATE key_slots SET wrapped_dek = X'DEADBEEF'", [])
             .unwrap();
     }
     // The pre-/3 sidecar fails the new magic → TOFU re-mint at open (the

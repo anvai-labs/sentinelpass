@@ -214,7 +214,13 @@ impl VaultManager {
         if let Err(e) = Self::sync_password_slot_after_material_change(
             &imported_hierarchy,
             &tx,
-            &bootstrap.kdf_params_blob,
+            // Canonical LOCAL bincode re-encode, never the raw peer bytes:
+            // the slot table's format is frozen bincode, and a peer could
+            // legitimately send a newer document shape we decode but must
+            // not store verbatim into the frozen-format mirror (gate
+            // review, finding 3).
+            &bincode::serialize(&imported_kdf)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
             &wrapped_dek_blob,
             &nonce_blob,
             bootstrap.key_epoch,

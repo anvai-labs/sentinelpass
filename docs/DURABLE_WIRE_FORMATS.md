@@ -20,7 +20,7 @@ in sections 1–2 are UTF-8 JSON obeying ONE profile:
 
 | Rule | Writer contract | Reader enforcement |
 |---|---|---|
-| Encoding | Compact UTF-8, no whitespace, no BOM | Any JSON-legal whitespace tolerated on read (semantic, not byte, checking) |
+| Encoding | Compact UTF-8, no whitespace, no BOM | Any JSON-legal whitespace tolerated on read (semantic, not byte, checking) | — READER TOLERANCE BEGINS AFTER THE FIXED MAGIC PREFIX: the first bytes must be the exact canonical magic; canonicalization (whitespace, key order) applies only to the remainder of the document.
 | Field order | Declaration order shown in each table (part of the frozen contract) | JSON-object order irrelevant on read |
 | Numbers | Integers only, plain decimal spelling | Floats (`3.0`), exponent spellings, and string-typed numbers are REJECTED by the typed decode |
 | Binary fields | Standard base64 (`RFC 4648`, `+`/`/`, WITH `=` padding) | URL-safe or unpadded variants are rejected; fixed-size fields get an exact declared-length check BEFORE decoding |
@@ -55,7 +55,7 @@ Dispatch never uses a bare leading `{`: a legacy `bincode(KdfParams)` blob
 begins with 16 random salt bytes (and a legacy nonce blob with 12 random
 nonce bytes), so it starts with `{` (0x7B) with probability ~1/256 — a
 first-byte sniff would misroute ~0.4% of real legacy vaults. A random collision
-with the full 13–16 byte magic is ~2^-100; only a deliberate forgery could
+with the full magic prefix is negligible (exact 0 for the 12-byte nonce vs the 18-byte SPNONCE prefix; ~2^-128 for random 16-byte salts vs the 16-byte SPKDF prefix); only a deliberate forgery could
 arrange it, and a writer that forges DB rows already controls the vault.
 The two encodings may legally coexist across columns and across time (e.g. a
 legacy `kdf_params` next to a post-rotation document `wrapped_dek`); each
@@ -196,7 +196,7 @@ implementation that claims to open historical vaults.
 | 20+N | 16 | `auth_tag` | raw bytes |
 | 36+N | 1 | `epoch_bound` | byte `0x00`/`0x01` |
 
-68 bytes for the common 32-byte-DEK case (N=32 → 69 bytes including the
+69 bytes for the common 32-byte-DEK case (N=32 → 69 bytes including the
 flag). Decode accepts the length prefix only under a 4096-byte size limit
 (WBS-307: a hostile prefix must fail cleanly, never allocate).
 
