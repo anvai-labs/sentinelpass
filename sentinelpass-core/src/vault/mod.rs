@@ -1,5 +1,6 @@
 //! Vault management - coordinates crypto and database layers
 
+mod activation_ops;
 mod biometric_ops;
 pub(crate) mod domain_ops;
 pub(crate) mod envelope_ops;
@@ -10,6 +11,7 @@ pub mod recovery;
 mod registry_ops;
 pub(crate) mod slot_ops;
 
+pub use activation_ops::{V2ActivationOutcome, VaultVerificationFailure, VaultVerificationReport};
 pub use domain_ops::DomainSweepReport;
 pub use migration_ops::V2BlobSweepReport;
 pub use slot_ops::{SlotSummary, SlotType};
@@ -452,6 +454,35 @@ impl VaultManager {
                     error = %e,
                     "v1→v2 blob sweep failed; will retry on next open"
                 );
+            }
+        }
+
+        // v2-format activation (WBS-405/406): once the blob sweep has run
+        // its course, the full verification pass proves every converted
+        // envelope + relation and stamps the durable activation marker
+        // (db_metadata.format_version) in one transaction. Best-effort
+        // like the sweeps: never fails the unlock; deterministic blocks
+        // dead-letter (clear `v2_activation_blocked` to retry).
+        if vault_manager.v2_activation_needed().unwrap_or(false) {
+            match vault_manager.activate_v2_format() {
+                Ok(activation_ops::V2ActivationOutcome::Activated { ref verified_at }) => {
+                    tracing::info!(verified_at = %verified_at, "v2 format activated at open");
+                }
+                Ok(activation_ops::V2ActivationOutcome::AlreadyActivated) => {}
+                Ok(activation_ops::V2ActivationOutcome::Blocked {
+                    report,
+                    dead_lettered,
+                }) => {
+                    tracing::warn!(
+                        summary = %report.summary_line(),
+                        dead_lettered,
+                        "v2 format activation blocked; will retry on next open unless \
+                         dead-lettered"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "v2 format activation failed; will retry on next open");
+                }
             }
         }
 

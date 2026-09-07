@@ -13,6 +13,23 @@ use tracing::warn;
 /// `domain` COLUMN remains until the WBS-404 bulk migration clears it.
 pub const CURRENT_SCHEMA_VERSION: i32 = 8;
 
+/// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
+/// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
+/// table/column layout): this tracks the CONTENT format —
+/// `1` = legacy context-free field encryption (v1 blobs, dual-read),
+/// `2` = the ACTIVATED v2 envelope state: every stored blob is an
+/// identity-bound SPENV envelope AND the full WBS-405 verification pass
+/// proved every one of them (plus every domain-mapping relation) opens.
+///
+/// The value is stamped ONLY by the post-unlock activation step
+/// (`vault/activation_ops.rs`) — migrations run before the DEK exists and
+/// cannot verify content, so they never touch it. An open refuses a
+/// `format_version` GREATER than this constant with the same fail-closed
+/// discipline as the schema gate (SR-CRYPTO-005 / TD-ROB-07): a newer
+/// content format's rows must never be interpreted by an older binary.
+/// Absent column (pre-v6 schemas) and NULL both read as legacy `1`.
+pub const CURRENT_VAULT_FORMAT_VERSION: i64 = 2;
+
 /// Main database connection and schema manager
 pub struct Database {
     conn: Connection,
@@ -452,8 +469,41 @@ impl Database {
         Ok(())
     }
 
+    /// The stored vault envelope format version (WBS-406 activation
+    /// marker), tolerant of pre-v6 schemas whose `db_metadata` predates the
+    /// column: an absent column or a NULL value is the legacy format `1`.
+    /// Never fails on legacy vaults — only on genuine SQLite errors.
+    pub fn stored_format_version(&self) -> Result<i64> {
+        let has_column: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('db_metadata') \
+                 WHERE name = 'format_version')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        if !has_column {
+            return Ok(1);
+        }
+        let value: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT format_version FROM db_metadata WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(value.unwrap_or(1))
+    }
+
     /// Validate the database schema version, running migrations if needed.
     ///
+    /// - The envelope FORMAT gate (WBS-406) runs FIRST: a vault activated
+    ///   by a newer binary (`format_version` > [`CURRENT_VAULT_FORMAT_VERSION`])
+    ///   is refused with the typed [`DatabaseError::UnsupportedFutureFormat`]
+    ///   before the schema version is even read — there is no downgrade
+    ///   path into a content format this build cannot interpret.
     /// - Older databases are auto-migrated forward (v1 → v2 → … → current).
     /// - Newer databases (created by a newer binary) fail CLOSED with the
     ///   typed [`DatabaseError::UnsupportedFutureSchema`] error (WBS-315 /
@@ -462,6 +512,21 @@ impl Database {
     ///   or modified, so a future schema's rows are never interpreted by an
     ///   older binary that cannot know their shape.
     pub fn validate_schema_version(&self) -> Result<()> {
+        let format_version = self.stored_format_version()?;
+        if format_version > CURRENT_VAULT_FORMAT_VERSION {
+            warn!(
+                format_version = format_version,
+                supported = CURRENT_VAULT_FORMAT_VERSION,
+                "vault envelope format is newer than this binary supports; refusing to open"
+            );
+            return Err(PasswordManagerError::from(
+                DatabaseError::UnsupportedFutureFormat {
+                    found: format_version,
+                    supported: CURRENT_VAULT_FORMAT_VERSION,
+                },
+            ));
+        }
+
         let version: i32 = self
             .conn
             .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |row| {
@@ -654,6 +719,115 @@ mod tests {
             })) => {}
             other => panic!("version gate must fire before any other table access, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn newer_format_version_fails_closed() {
+        // WBS-406 / SR-CRYPTO-005: a vault whose envelope format version is
+        // NEWER than this build's activated format must be refused with the
+        // specific typed compatibility error — the downgrade-block twin of
+        // `newer_db_version_fails_closed`. Expressed RELATIVE to
+        // CURRENT_VAULT_FORMAT_VERSION so an activation-level bump by
+        // another workstream does not require edits here.
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+
+        let future = CURRENT_VAULT_FORMAT_VERSION + 1;
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, format_version)
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0, ?2)",
+                rusqlite::params![CURRENT_SCHEMA_VERSION, future],
+            )
+            .unwrap();
+
+        match db.validate_schema_version() {
+            Err(PasswordManagerError::Database(DatabaseError::UnsupportedFutureFormat {
+                found,
+                supported,
+            })) => {
+                assert_eq!(found, future);
+                assert_eq!(supported, CURRENT_VAULT_FORMAT_VERSION);
+            }
+            other => panic!(
+                "future-format vault must fail closed with UnsupportedFutureFormat, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn format_gate_runs_before_the_schema_version_read() {
+        // Ordering proof for WBS-406: the format gate precedes even the
+        // schema version read. With the entries table ABSENT (renamed away)
+        // and a future format_version, the open must surface the TYPED
+        // FORMAT error — a Sqlite error of any other kind would mean the
+        // open proceeded past the format gate.
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+        db.conn().execute("DROP TABLE entries", []).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, format_version)
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0, ?2)",
+                rusqlite::params![CURRENT_SCHEMA_VERSION, CURRENT_VAULT_FORMAT_VERSION + 1],
+            )
+            .unwrap();
+
+        match db.validate_schema_version() {
+            Err(PasswordManagerError::Database(DatabaseError::UnsupportedFutureFormat {
+                ..
+            })) => {}
+            other => panic!("format gate must fire before any other access, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_and_activated_format_versions_validate_cleanly() {
+        // Positive control for the downgrade-block flip: DEFAULT-omitted
+        // (legacy write path), explicit 1 (migrated, not yet activated),
+        // and explicit 2 (activated) must ALL keep validating — the gate
+        // refuses only genuinely newer formats and never locks out vaults
+        // this build understands.
+        for format_version in [
+            Option::<i64>::None,
+            Some(1),
+            Some(CURRENT_VAULT_FORMAT_VERSION),
+        ] {
+            let db = Database::in_memory().unwrap();
+            db.initialize_schema().unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, format_version)
+                     VALUES (1, ?1, X'00', X'00', X'00', 0, 0, COALESCE(?2, 1))",
+                    rusqlite::params![CURRENT_SCHEMA_VERSION, format_version],
+                )
+                .unwrap();
+            db.validate_schema_version()
+                .unwrap_or_else(|e| panic!("format {format_version:?} must validate, got {e}"));
+        }
+    }
+
+    #[test]
+    fn absent_format_version_column_reads_as_legacy() {
+        // A raw pre-v6 schema has no format_version column at all; the
+        // gate must treat that as legacy format 1 (never a Sqlite error,
+        // which would brick every v1-v5 vault at open). The full v1
+        // schema is shared with the WBS-407 fixture builder.
+        let db = Database::in_memory().unwrap();
+        db.conn()
+            .execute_batch(crate::database::fixtures::V1_SCHEMA_SQL)
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
+                 VALUES (1, 1, X'00', X'00', X'00', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.stored_format_version().unwrap(), 1);
+        // The full validate path migrates and still succeeds.
+        db.validate_schema_version().unwrap();
     }
 
     #[test]
