@@ -50,6 +50,10 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             println!("  Vault ID:    {}", vault_id);
             println!("  Relay URL:   {}", relay_url);
             println!();
+            println!("WARNING: sync is EXPERIMENTAL and not approved for production");
+            println!("credentials (see docs/SYNC.md). The sync protocol is being");
+            println!("redesigned in v2; v1 data will require re-bootstrap.");
+            println!();
             println!("Next: register this device with the relay server:");
             println!("  sentinelpass sync now");
         }

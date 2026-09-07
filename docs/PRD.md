@@ -167,8 +167,10 @@ SentinelPass aims to provide:
 ## 11. Traceability
 
 - Gap review source: `docs/GAP_REVIEW_2026-02-26.md`
+- Current security evidence: `docs/SECURITY_STATUS_MATRIX.md`
 - Requirements: `docs/REQUIREMENTS.md`
 - Design: `docs/SOLUTION_DESIGN.md`
-- Execution plan: `docs/IMPLEMENTATION_PLAN.md`
+- Active execution plan: `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`
+- Historical execution plan: `docs/IMPLEMENTATION_PLAN.md`
 - Roadmap: `ROADMAP.md`
 - OSS/private strategy: `docs/OSS_COMMERCIAL_STRATEGY.md`

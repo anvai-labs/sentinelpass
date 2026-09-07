@@ -351,6 +351,11 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
         Ok(exists)
     }
 
+    /// Find entries by an EXACT plaintext domain. Since WBS-306 this is the
+    /// legacy fallback surface only: it is restricted to mappings that
+    /// still carry ONLY the plaintext column (`domain_enc IS NULL`) — the
+    /// sealed lookup path (vault/domain_ops) is the authoritative index,
+    /// and a sealed row's lingering plaintext copy is inert by contract.
     fn find_by_domain(&self, domain: &str) -> Result<Vec<RawEntryRow>, DatabaseError> {
         let conn = self.db.conn();
 
@@ -361,7 +366,7 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
                  e.sync_id, e.sync_version
                  FROM entries e
                  JOIN domain_mappings dm ON dm.entry_id = e.entry_id
-                 WHERE dm.domain = ?1 AND e.is_deleted = 0",
+                 WHERE dm.domain = ?1 AND dm.domain_enc IS NULL AND e.is_deleted = 0",
             )
             .map_err(DatabaseError::Sqlite)?;
 

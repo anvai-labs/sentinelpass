@@ -1,5 +1,12 @@
 # iOS App Build & Wire-Up Guide
 
+> **Prototype status (2026-09-04):** the iOS client is an unreleased prototype.
+> Biometric state is process-local (does not survive restart), and Credential Provider,
+> protected backup, and lifecycle policies are not implemented; these are not security
+> controls. Do not store production credentials in a prototype build. See
+> `docs/SECURITY_STATUS_MATRIX.md` (iOS rows) and ADR-009 for the production-readiness
+> plan.
+
 This guide explains how to build and wire up the SentinelPass iOS app with the Rust mobile bridge.
 
 ## Prerequisites

@@ -6,7 +6,12 @@ use std::path::Path;
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+///
+/// v8 (WBS-306 / ADR-005 rev 4): `domain_mappings.domain_enc` (sealed
+/// domain) + the `domain_mapping_tags` keyed-lookup table; the plaintext
+/// domain INDEX is dropped (lookups move to tags). The legacy plaintext
+/// `domain` COLUMN remains until the WBS-404 bulk migration clears it.
+pub const CURRENT_SCHEMA_VERSION: i32 = 8;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -77,8 +82,11 @@ impl Database {
     /// Initialize the database schema (creates current tables for new vaults)
     pub fn initialize_schema(&self) -> Result<()> {
         self.create_db_metadata_table()?;
+
+        self.create_key_slots_table()?;
         self.create_entries_table()?;
         self.create_domain_mappings_table()?;
+        self.create_domain_mapping_tags_table()?;
         self.create_failed_attempts_table()?;
         self.create_ssh_keys_table()?;
         self.create_totp_secrets_table()?;
@@ -101,9 +109,33 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 last_modified INTEGER NOT NULL,
                 biometric_ref TEXT,
-                key_epoch INTEGER NOT NULL DEFAULT 1
+                key_epoch INTEGER NOT NULL DEFAULT 1,
+                vault_uuid TEXT,
+                format_version INTEGER NOT NULL DEFAULT 1,
+                slot_registry_mac BLOB
             )",
                 [],
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
+    fn create_key_slots_table(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS key_slots (
+                    slot_uuid TEXT PRIMARY KEY,
+                    slot_type TEXT NOT NULL CHECK (slot_type IN
+                        ('password', 'recovery', 'platform', 'trusted_device')),
+                    kdf_params BLOB NOT NULL,
+                    wrapped_dek BLOB NOT NULL,
+                    dek_nonce BLOB NOT NULL,
+                    key_epoch INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    revoked_at INTEGER,
+                    format_version INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS idx_key_slots_type ON key_slots(slot_type);",
             )
             .map_err(DatabaseError::Sqlite)?;
         Ok(())
@@ -152,7 +184,34 @@ impl Database {
                 sync_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
+                domain_enc BLOB,
                 FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE
+            )",
+                [],
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Keyed equality tags for encrypted domain lookups (WBS-306 /
+    /// ADR-005 rev 4): one HMAC-SHA256 per label-chain suffix of the
+    /// mapping's normalized host, under the DEK-derived domain-tag key.
+    /// `is_chain_root` marks the FULL-host tag (the suffix-match predicate
+    /// needs the root/suffix distinction — shared suffix chains alone, e.g.
+    /// `com`, must never produce matches). Tags make the sealed
+    /// `domain_enc` column searchable WITHOUT a plaintext index; rows die
+    /// with their mapping (FK CASCADE).
+    fn create_domain_mapping_tags_table(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "CREATE TABLE IF NOT EXISTS domain_mapping_tags (
+                tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mapping_id INTEGER NOT NULL,
+                tag BLOB NOT NULL,
+                is_chain_root INTEGER NOT NULL DEFAULT 0,
+                equality_key_id INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (mapping_id) REFERENCES domain_mappings(mapping_id)
+                    ON DELETE CASCADE
             )",
                 [],
             )
@@ -342,7 +401,11 @@ impl Database {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_sync_id ON entries(sync_id)",
             "CREATE INDEX IF NOT EXISTS idx_entries_sync_state ON entries(sync_state)",
             "CREATE INDEX IF NOT EXISTS idx_domain_mappings_entry_id ON domain_mappings(entry_id)",
-            "CREATE INDEX IF NOT EXISTS idx_domain_mappings_domain ON domain_mappings(domain)",
+            // v8 (WBS-306): lookups run through keyed equality tags; the
+            // plaintext domain index is gone (dropped by migrate_v7_to_v8).
+            "CREATE INDEX IF NOT EXISTS idx_domain_mapping_tags_tag ON domain_mapping_tags(tag)",
+            "CREATE INDEX IF NOT EXISTS idx_domain_mapping_tags_root ON domain_mapping_tags(tag, is_chain_root)",
+            "CREATE INDEX IF NOT EXISTS idx_domain_mapping_tags_mapping ON domain_mapping_tags(mapping_id)",
             "CREATE INDEX IF NOT EXISTS idx_totp_secrets_entry_id ON totp_secrets(entry_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_ssh_keys_sync_id ON ssh_keys(sync_id)",
             "CREATE INDEX IF NOT EXISTS idx_ssh_keys_sync_state ON ssh_keys(sync_state)",
@@ -391,10 +454,13 @@ impl Database {
 
     /// Validate the database schema version, running migrations if needed.
     ///
-    /// - Older databases are auto-migrated forward (v1 → v2 → v3).
-    /// - Newer databases (created by a newer binary) are allowed if they are
-    ///   within a forward-compatible range, since newer schema versions only add
-    ///   non-breaking changes (indexes, optional columns).
+    /// - Older databases are auto-migrated forward (v1 → v2 → … → current).
+    /// - Newer databases (created by a newer binary) fail CLOSED with the
+    ///   typed [`DatabaseError::UnsupportedFutureSchema`] error (WBS-315 /
+    ///   SR-CRYPTO-005). This is the FIRST read on every vault-open path and
+    ///   touches only `db_metadata` — a refused vault has no entry data read
+    ///   or modified, so a future schema's rows are never interpreted by an
+    ///   older binary that cannot know their shape.
     pub fn validate_schema_version(&self) -> Result<()> {
         let version: i32 = self
             .conn
@@ -429,16 +495,21 @@ impl Database {
             return Ok(());
         }
 
-        // Database was created/migrated by a newer binary. Allow it — newer
-        // schema versions only add non-breaking changes (indexes, optional
-        // columns, new tables). The code queries specific columns/tables and
-        // SQLite will produce a clear error if something is truly missing.
+        // Database was created/migrated by a newer binary — refuse without
+        // reading or mutating any entry data. Newer versions may change row
+        // shapes, column semantics, or crypto formats in ways this build
+        // cannot know; "works by luck" is not an open policy.
         warn!(
             db_version = version,
             code_version = CURRENT_SCHEMA_VERSION,
-            "Database schema version is newer than this binary expects; proceeding anyway"
+            "vault schema is newer than this binary supports; refusing to open"
         );
-        Ok(())
+        Err(PasswordManagerError::from(
+            DatabaseError::UnsupportedFutureSchema {
+                found: version,
+                supported: CURRENT_SCHEMA_VERSION,
+            },
+        ))
     }
 
     /// Get a reference to the underlying connection
@@ -492,7 +563,12 @@ mod tests {
         assert!(index_names.contains(&"idx_entries_vault_id".to_string()));
         assert!(index_names.contains(&"idx_entries_favorite".to_string()));
         assert!(index_names.contains(&"idx_domain_mappings_entry_id".to_string()));
-        assert!(index_names.contains(&"idx_domain_mappings_domain".to_string()));
+        // v8 (WBS-306): the plaintext domain index is replaced by the
+        // keyed tag indexes.
+        assert!(index_names.contains(&"idx_domain_mapping_tags_tag".to_string()));
+        assert!(index_names.contains(&"idx_domain_mapping_tags_root".to_string()));
+        assert!(index_names.contains(&"idx_domain_mapping_tags_mapping".to_string()));
+        assert!(!index_names.contains(&"idx_domain_mappings_domain".to_string()));
         assert!(index_names.contains(&"idx_totp_secrets_entry_id".to_string()));
         // v3 indexes must be present for new vaults too
         assert!(index_names.contains(&"idx_entries_modified_at".to_string()));
@@ -518,22 +594,83 @@ mod tests {
     }
 
     #[test]
-    fn newer_db_version_does_not_error() {
-        // Simulates opening a DB that was migrated by a newer binary.
-        // The code should allow this instead of hard-failing.
+    fn newer_db_version_fails_closed() {
+        // WBS-315 / SR-CRYPTO-005: a vault whose schema version is NEWER than
+        // this build must be refused with the specific typed compatibility
+        // error — never opened, never migrated backward, never probed.
+        // (Supersedes the pre-WBS-315 `newer_db_version_does_not_error`,
+        // which pinned the old warn-and-proceed behavior.) The version is
+        // expressed RELATIVE to CURRENT_SCHEMA_VERSION so a routine bump by
+        // another workstream does not require edits here.
         let db = Database::in_memory().unwrap();
         db.initialize_schema().unwrap();
 
-        // Insert metadata at a future version (e.g., v99)
+        let future = CURRENT_SCHEMA_VERSION + 1;
         db.conn()
             .execute(
                 "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
-                 VALUES (1, 99, X'00', X'00', X'00', 0, 0)",
-                [],
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0)",
+                rusqlite::params![future],
             )
             .unwrap();
 
-        // Should succeed (warn, not error)
+        match db.validate_schema_version() {
+            Err(PasswordManagerError::Database(DatabaseError::UnsupportedFutureSchema {
+                found,
+                supported,
+            })) => {
+                assert_eq!(found, future);
+                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+            }
+            other => panic!(
+                "future-version vault must fail closed with UnsupportedFutureSchema, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn newer_version_gate_runs_before_any_entry_table_read() {
+        // Ordering proof for WBS-315: the version check must precede ANY
+        // entry/metadata-content read. With the version set to a future
+        // value and the entries table ABSENT (here: renamed away), a
+        // fail-closed open must surface the TYPED version error — a Sqlite
+        // "no such table" error would mean the open proceeded past the
+        // version gate and started touching other tables.
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+        db.conn().execute("DROP TABLE entries", []).unwrap();
+        let future = CURRENT_SCHEMA_VERSION + 1;
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0)",
+                rusqlite::params![future],
+            )
+            .unwrap();
+
+        match db.validate_schema_version() {
+            Err(PasswordManagerError::Database(DatabaseError::UnsupportedFutureSchema {
+                ..
+            })) => {}
+            other => panic!("version gate must fire before any other table access, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_schema_version_validates_cleanly() {
+        // Positive control for the fail-closed flip: a CURRENT-version vault
+        // must keep validating without error (the flip must never lock out
+        // vaults this build fully understands).
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0)",
+                rusqlite::params![CURRENT_SCHEMA_VERSION],
+            )
+            .unwrap();
+
         db.validate_schema_version().unwrap();
     }
 

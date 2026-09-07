@@ -5,6 +5,7 @@
 
 use crate::crypto::cipher::DataEncryptionKey;
 use crate::crypto::CryptoError;
+use zeroize::Zeroizing;
 
 /// Encrypt a JSON payload for sync transport.
 ///
@@ -40,8 +41,13 @@ pub fn encrypt_for_sync(dek: &DataEncryptionKey, plaintext: &[u8]) -> Result<Vec
 
 /// Decrypt a sync transport payload.
 ///
-/// Expects `nonce(12) || ciphertext || auth_tag(16)`.
-pub fn decrypt_from_sync(dek: &DataEncryptionKey, blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// Expects `nonce(12) || ciphertext || auth_tag(16)`. The decrypted
+/// plaintext (a serialized sync payload carrying credential/SSH/TOTP
+/// secrets) is zeroize-on-drop (WBS-308 / SR-CRYPTO-004).
+pub fn decrypt_from_sync(
+    dek: &DataEncryptionKey,
+    blob: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     use aes_gcm::{aead::Aead, aead::KeyInit, Aes256Gcm, Nonce};
 
     // Minimum: 12 (nonce) + 1 (ciphertext) + 16 (tag) = 29 bytes
@@ -61,6 +67,7 @@ pub fn decrypt_from_sync(dek: &DataEncryptionKey, blob: &[u8]) -> Result<Vec<u8>
 
     cipher
         .decrypt(&nonce, ciphertext_with_tag)
+        .map(Zeroizing::new)
         .map_err(|_| CryptoError::AuthenticationFailed)
 }
 
@@ -86,8 +93,9 @@ pub fn pad_payload(data: &[u8]) -> Vec<u8> {
     padded
 }
 
-/// Remove padding from a padded payload.
-pub fn unpad_payload(padded: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// Remove padding from a padded payload. The unpadded plaintext is
+/// zeroize-on-drop (WBS-308 / SR-CRYPTO-004).
+pub fn unpad_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     if padded.len() < 8 {
         return Err(CryptoError::DecryptionFailed(
             "Padded payload too short".to_string(),
@@ -105,7 +113,7 @@ pub fn unpad_payload(padded: &[u8]) -> Result<Vec<u8>, CryptoError> {
         ));
     }
 
-    Ok(padded[8..8 + original_len].to_vec())
+    Ok(Zeroizing::new(padded[8..8 + original_len].to_vec()))
 }
 
 #[cfg(test)]
@@ -120,7 +128,7 @@ mod tests {
         let encrypted = encrypt_for_sync(&dek, plaintext).unwrap();
         let decrypted = decrypt_from_sync(&dek, &encrypted).unwrap();
 
-        assert_eq!(plaintext.to_vec(), decrypted);
+        assert_eq!(plaintext.to_vec(), decrypted.as_slice());
     }
 
     #[test]
@@ -166,7 +174,7 @@ mod tests {
         assert_eq!(padded.len() % 256, 0);
 
         let unpadded = unpad_payload(&padded).unwrap();
-        assert_eq!(data.to_vec(), unpadded);
+        assert_eq!(data.to_vec(), unpadded.as_slice());
     }
 
     #[test]
@@ -270,6 +278,6 @@ mod tests {
         let large = vec![0u8; 9000];
         let padded = pad_payload(&large);
         assert_eq!(padded.len(), 16384); // 2 * 8192
-        assert_eq!(unpad_payload(&padded).unwrap(), large);
+        assert_eq!(unpad_payload(&padded).unwrap().as_slice(), large);
     }
 }

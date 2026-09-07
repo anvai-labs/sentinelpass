@@ -453,6 +453,12 @@ enum Commands {
         input: PathBuf,
     },
 
+    /// Recovery key management (setup, recover without master password, status)
+    Recovery {
+        #[command(subcommand)]
+        command: commands::recovery::RecoveryCommands,
+    },
+
     /// Sync subcommands for encrypted cloud sync
     #[command(subcommand)]
     Sync(SyncCommands),
@@ -887,6 +893,21 @@ fn main() -> Result<()> {
         Commands::Unlock => {
             let vault_path = get_vault_path(&cli, false);
             commands::vault::handle_unlock(vault_path)?;
+        }
+
+        Commands::Recovery { ref command } => {
+            let vault_path = get_vault_path(&cli, false);
+            match command {
+                commands::recovery::RecoveryCommands::Setup => {
+                    commands::recovery::handle_setup(vault_path)?
+                }
+                commands::recovery::RecoveryCommands::Recover => {
+                    commands::recovery::handle_recover(vault_path)?
+                }
+                commands::recovery::RecoveryCommands::Status => {
+                    commands::recovery::handle_status(vault_path)?
+                }
+            }
         }
 
         Commands::Lock => {

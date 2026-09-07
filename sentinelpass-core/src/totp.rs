@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::Sha256;
 use std::str::FromStr;
+use zeroize::Zeroizing;
 
 type HmacSha1 = Hmac<Sha1>;
 type HmacSha256 = Hmac<Sha256>;
@@ -185,6 +186,11 @@ pub fn parse_otpauth_uri(uri: &str) -> Result<ParsedTotpUri> {
         PasswordManagerError::InvalidInput("TOTP URI is missing secret parameter".to_string())
     })?;
     let secret = normalize_secret(&secret)?;
+    // ParsedTotpUri's public field shape is String (consumed by the UI and
+    // CLI); this explicit conversion is the documented boundary — the
+    // zeroizing intermediate is dropped here (follow-up: widen the public
+    // field to Zeroizing<String> in a dedicated API-shape change).
+    let secret_string = secret.to_string();
 
     if let (Some(label_issuer), Some(query_issuer)) = (&issuer_from_label, &issuer_from_query) {
         if !label_issuer.eq_ignore_ascii_case(query_issuer) {
@@ -195,7 +201,7 @@ pub fn parse_otpauth_uri(uri: &str) -> Result<ParsedTotpUri> {
     }
 
     Ok(ParsedTotpUri {
-        secret_base32: secret,
+        secret_base32: secret_string,
         algorithm,
         digits,
         period,
@@ -218,13 +224,14 @@ pub fn encrypt_totp_secret(
     ))
 }
 
-/// Decrypt a stored TOTP secret using the vault DEK.
+/// Decrypt a stored TOTP secret using the vault DEK. The returned seed is
+/// zeroize-on-drop (WBS-308 / SR-CRYPTO-004).
 pub fn decrypt_totp_secret(
     dek: &crate::crypto::DataEncryptionKey,
     secret_encrypted: &[u8],
     nonce: &[u8],
     auth_tag: &[u8],
-) -> Result<String> {
+) -> Result<Zeroizing<String>> {
     let nonce_arr: [u8; 12] = nonce
         .try_into()
         .map_err(|_| PasswordManagerError::InvalidInput("Invalid TOTP nonce length".to_string()))?;
@@ -319,11 +326,16 @@ pub fn seconds_remaining(period: u32, timestamp: i64) -> u32 {
     }
 }
 
-fn normalize_secret(secret_base32: &str) -> Result<String> {
-    let normalized = secret_base32
-        .trim()
-        .replace([' ', '-'], "")
-        .to_ascii_uppercase();
+/// Normalize a base32 TOTP secret (trim, strip spaces/dashes, uppercase).
+/// The returned normalized secret IS the seed material — zeroize-on-drop
+/// (WBS-308 / SR-CRYPTO-004).
+pub(crate) fn normalize_secret(secret_base32: &str) -> Result<Zeroizing<String>> {
+    let normalized = Zeroizing::new(
+        secret_base32
+            .trim()
+            .replace([' ', '-'], "")
+            .to_ascii_uppercase(),
+    );
 
     if normalized.is_empty() {
         return Err(PasswordManagerError::InvalidInput(
@@ -335,7 +347,9 @@ fn normalize_secret(secret_base32: &str) -> Result<String> {
     Ok(normalized)
 }
 
-fn decode_secret(secret_base32: &str) -> Result<Vec<u8>> {
+/// Decode the base32 seed to its raw bytes. The raw bytes ARE the HMAC
+/// key entropy — zeroize-on-drop (WBS-308 / SR-CRYPTO-004).
+fn decode_secret(secret_base32: &str) -> Result<Zeroizing<Vec<u8>>> {
     let normalized = secret_base32
         .trim()
         .replace([' ', '-'], "")
@@ -354,7 +368,7 @@ fn decode_secret(secret_base32: &str) -> Result<Vec<u8>> {
         ));
     }
 
-    Ok(decoded)
+    Ok(Zeroizing::new(decoded))
 }
 
 fn percent_decode(input: &str) -> Result<String> {
@@ -445,7 +459,19 @@ mod tests {
 
         let (ciphertext, nonce, auth_tag) = encrypt_totp_secret(&dek, secret).unwrap();
         let decrypted = decrypt_totp_secret(&dek, &ciphertext, &nonce, &auth_tag).unwrap();
-        assert_eq!(decrypted, secret);
+        assert_eq!(decrypted.as_str(), secret);
+    }
+
+    /// WBS-308 / SR-CRYPTO-004: the decrypted TOTP seed is returned in a
+    /// zeroizing type. Type-level guard — relaxing `decrypt_totp_secret`
+    /// back to a bare `String` stops this from compiling.
+    #[test]
+    fn decrypted_totp_seed_is_zeroizing() {
+        fn require_zeroing_string(_: &Zeroizing<String>) {}
+
+        let dek = DataEncryptionKey::new().unwrap();
+        let (ciphertext, nonce, auth_tag) = encrypt_totp_secret(&dek, "JBSWY3DPEHPK3PXP").unwrap();
+        require_zeroing_string(&decrypt_totp_secret(&dek, &ciphertext, &nonce, &auth_tag).unwrap());
     }
 
     #[test]
@@ -533,16 +559,16 @@ mod tests {
     #[test]
     fn test_normalize_secret_strips_spaces_and_dashes() {
         let result = normalize_secret("JBSW Y3DP EHPK 3PXP").unwrap();
-        assert_eq!(result, "JBSWY3DPEHPK3PXP");
+        assert_eq!(result.as_str(), "JBSWY3DPEHPK3PXP");
 
         let result = normalize_secret("JBSW-Y3DP-EHPK-3PXP").unwrap();
-        assert_eq!(result, "JBSWY3DPEHPK3PXP");
+        assert_eq!(result.as_str(), "JBSWY3DPEHPK3PXP");
     }
 
     #[test]
     fn test_normalize_secret_lowercases_to_upper() {
         let result = normalize_secret("jbswy3dpehpk3pxp").unwrap();
-        assert_eq!(result, "JBSWY3DPEHPK3PXP");
+        assert_eq!(result.as_str(), "JBSWY3DPEHPK3PXP");
     }
 
     #[test]

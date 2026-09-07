@@ -1,6 +1,12 @@
 # Multi-Device Sync
 
-> Status Note (2026-02-26): This document describes the sync protocol and intended relay behavior. Some relay hardening controls listed here (for example certain config-driven limits and operational safeguards) are partially implemented or pending wiring in the current code. See `docs/GAP_REVIEW_2026-02-26.md`, `docs/REQUIREMENTS.md`, and `ROADMAP.md` for current implementation status and remediation priorities.
+> **Status Note (2026-09-04):** This document describes the experimental v1 sync
+> implementation. It is not approved for production credentials: aggregate
+> acknowledgements, sequence handling, remote-apply transactionality, unauthenticated
+> metadata, epoch enforcement, and six-digit bootstrap security require a coordinated
+> v2 replacement. See `docs/SECURITY_STATUS_MATRIX.md`, ADR-006, and
+> `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`. The protocol details below remain
+> useful implementation documentation for v1, not target-state security claims.
 
 End-to-end encrypted sync between SentinelPass devices via a relay server. The relay never sees plaintext — all payloads are encrypted with the vault's DEK before leaving the device.
 
@@ -302,6 +308,35 @@ Canonical string (signed):
 - Timestamp: Unix epoch seconds; must be within 300s of server time
 - Nonce: UUID v4; checked for uniqueness (replay protection)
 - Body hash: SHA-256 of raw request body (empty string if no body)
+
+## Pull Resilience & Data-Loss Semantics (WBS-304, envelope v2)
+
+Sync v1 (experimental) degrades per-blob, not per-vault:
+
+- **Push**: a pending row whose blob fails to decrypt/open (bit-rot,
+  tamper caught by the envelope MAC) is SKIPPED with a `warn` naming the
+  row (entry_id / sync_id); every other pending change still pushes. The
+  skipped row stays `pending`, so it retries every sync — a tampered row
+  therefore also surfaces as a persistent warning, not a silent drop.
+- **Pull**: a blob that fails to apply (unparseable payload, unknown
+  wire shape, unreadable after decrypt) is SKIPPED with a `warn` naming
+  its sync_id, and the pull cursor advances. This is **permanent data
+  loss for that blob on this device** — the sender has already marked it
+  synced and the relay page is consumed; there is no retry. This is a
+  deliberate tradeoff: the alternative (aborting the page) let ONE bad
+  blob wedge a device's entire sync forever. Sync v2 (ADR-006) replaces
+  this with a requeue/dead-letter mechanism.
+- **Mixed versions**: SSH/TOTP payloads interoperate in BOTH directions
+  with v0.8.x peers. This build emits the legacy triplet
+  (`private_key_encrypted`/`nonce`/`auth_tag` — a context-free
+  encryption of the same plaintext) alongside the current plaintext
+  fields, so an old peer applies the triplet and ignores the unknown
+  plaintext fields (plain serde derives, no `deny_unknown_fields`); and
+  this build accepts an old peer's legacy-only payload, decrypting the
+  triplet with the shared DEK. Credential payloads are unchanged. Note
+  an old peer stores/re-emits the context-free form (no envelope
+  identity) — upgrade both sides of a pairing so stored copies gain
+  the identity binding.
 
 ## Conflict Resolution
 

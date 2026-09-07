@@ -4,10 +4,17 @@ use crate::crypto::DataEncryptionKey;
 use crate::DatabaseError;
 use crate::{PasswordManagerError, Result};
 use std::path::Path;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", test))]
 use zeroize::Zeroize;
 
 use serde::{Deserialize, Serialize};
+
+/// Message used by every platform-unsupported stub. Matched BY REFERENCE
+/// (see biometric_ops/slot_ops tolerant clears) — never reword without
+/// updating those matches; the const exists so prose drift cannot silently
+/// break the platform-unsupported exception (review finding).
+pub const UNSUPPORTED_PLATFORM_MSG: &str =
+    "Biometric key storage is not supported on this platform";
 
 #[cfg(any(windows, target_os = "macos"))]
 const BIOMETRIC_SERVICE_NAME: &str = "sentinelpass.biometric";
@@ -32,7 +39,7 @@ impl BiometricProtectionPolicy {
 
         #[cfg(not(any(windows, target_os = "macos")))]
         return Err(PasswordManagerError::NotFound(
-            "Biometric key storage is not supported on this platform".to_string(),
+            UNSUPPORTED_PLATFORM_MSG.to_string(),
         ));
     }
 
@@ -143,15 +150,25 @@ impl BiometricManager {
     }
 
     #[cfg(any(windows, target_os = "macos", test))]
-    fn decode_vault_dek_bytes(decoded: Vec<u8>) -> Result<DataEncryptionKey> {
-        let key_bytes: [u8; 32] = decoded.try_into().map_err(|bytes: Vec<u8>| {
-            PasswordManagerError::from(DatabaseError::Keyring(format!(
+    fn decode_vault_dek_bytes(mut decoded: Vec<u8>) -> Result<DataEncryptionKey> {
+        // The decoded bytes ARE the vault DEK (WBS-308 / SR-CRYPTO-004):
+        // zeroize the buffer on every path — after the copy on success,
+        // and before the length error surfaces the failure.
+        if decoded.len() != 32 {
+            let got = decoded.len();
+            decoded.zeroize();
+            return Err(PasswordManagerError::from(DatabaseError::Keyring(format!(
                 "Stored biometric keyring secret has invalid length: expected 32 bytes, got {}",
-                bytes.len()
-            )))
-        })?;
+                got
+            ))));
+        }
 
-        Ok(DataEncryptionKey::from_bytes(&mut { key_bytes }))
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&decoded);
+        decoded.zeroize();
+
+        // `from_bytes` zeroizes the stack array after copying into the key.
+        Ok(DataEncryptionKey::from_bytes(&mut key_bytes))
     }
 
     /// Store the vault DEK in an OS-protected key store for biometric unlock.
@@ -196,7 +213,7 @@ impl BiometricManager {
         {
             let _ = (vault_path, dek);
             Err(PasswordManagerError::NotFound(
-                "Biometric key storage is not supported on this platform".to_string(),
+                UNSUPPORTED_PLATFORM_MSG.to_string(),
             ))
         }
     }
@@ -225,8 +242,12 @@ impl BiometricManager {
                 ))
             })?;
 
-            let dek = Self::decode_vault_dek(&encoded)?;
+            // Zeroize the encoded DEK on BOTH paths — the previous `?`
+            // before `zeroize()` leaked it on the decode-failure path
+            // (WBS-308 / SR-CRYPTO-004).
+            let decoded = Self::decode_vault_dek(&encoded);
             encoded.zeroize();
+            let dek = decoded?;
 
             Ok(dek)
         }
@@ -235,7 +256,7 @@ impl BiometricManager {
         {
             let _ = biometric_ref;
             Err(PasswordManagerError::NotFound(
-                "Biometric key storage is not supported on this platform".to_string(),
+                UNSUPPORTED_PLATFORM_MSG.to_string(),
             ))
         }
     }
@@ -317,7 +338,7 @@ impl BiometricManager {
         {
             let _ = biometric_ref;
             Err(PasswordManagerError::NotFound(
-                "Biometric key storage is not supported on this platform".to_string(),
+                UNSUPPORTED_PLATFORM_MSG.to_string(),
             ))
         }
     }

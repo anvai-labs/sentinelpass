@@ -1,10 +1,18 @@
 # PASSWORD MANAGER - SECURITY ARCHITECTURE SPECIFICATION
 
-> **Status Note (2026-02-27):** This document has been updated with implementation status markers. All Phase 1 security hardening is complete. For evidence-based gaps and priorities, see `docs/GAP_REVIEW_2026-02-26.md`.
+> **Status Note (2026-09-04):** This document contains a mixture of implemented
+> controls and target-state architecture. The 2026-09-04 review identified new
+> release-blocking work in recovery, authenticated ciphertext context, sync, IPC,
+> mobile, backup, and release assurance. Use
+> `docs/SECURITY_STATUS_MATRIX.md` for current implementation evidence and
+> `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md` plus ADR-003 through ADR-010 for
+> the active remediation design. A section in this document must not be treated as a
+> shipped claim unless the status matrix marks the control Implemented or Verified.
 
 **Status Key:**
 - ✅ **Implemented** - Fully implemented and verified
 - ⚠️ **Partial** - Partially implemented (see notes)
+- 🧪 **Experimental** - Reachable but not approved for production credentials
 - 📋 **Planned** - Target-state design, not yet implemented
 
 ## 1. HIGH-LEVEL ARCHITECTURE
@@ -60,12 +68,12 @@
 | Threat | Attack Vector | Mitigation Strategy | Status |
 |--------|---------------|---------------------|--------|
 | **Stolen Laptop** | Physical access to encrypted database | • Argon2id with high memory cost (256MB)<br>• Master password required<br>• No plaintext keys stored<br>• Biometric unlock stores OS-protected DEK material, not the master password | ✅ |
-| **Malware** | Process memory reading | • Zeroization on unlock timeout<br>• mlock() to prevent swap<br>• Memory encryption for sensitive buffers<br>• ASLR and PIE enabled | ✅ |
-| **Memory Scraping** | Heap inspection for keys | • SecureString wrappers with zeroize<br>• Secrets in locked memory pages<br>• No string copies of secrets<br>• Minimize time in memory | ✅ |
+| **Malware** | Process memory reading | • Zeroization on unlock timeout<br>• ~~mlock() to prevent swap~~ (memory locking was removed with the unused `memsec` dependency; secrets are zeroized but not locked)<br>• ASLR and PIE enabled | ⚠️ (zeroization only; no memory locking) |
+| **Memory Scraping** | Heap inspection for keys | • Zeroizing wrappers for owned secrets<br>• ~~Secrets in locked memory pages~~ (memory locking removed; no swap protection today)<br>• Minimize time in memory<br>• Wire/IPC/export structs still carry `String` secrets in places (SR-CRYPTO-004 sweep pending) | ⚠️ |
 | **Clipboard Snooping** | Other apps reading clipboard | • Auto-clear clipboard after 30s<br>• Protected API on macOS<br>• User notification on copy | ⚠️ (auto-clear partial) |
 | **Keylogging** | Input capture of master password | • Virtual keyboard option (desktop)<br>• Biometric bypass<br>• Password quality meter | 📋 (virtual keyboard) |
 | **Browser Extension Compromise** | Malicious extension accessing vault | • Native messaging whitelist<br>• Domain matching enforced daemon-side<br>• User approval per domain<br>• No API access to full vault | ✅ |
-| **SQLite File Theft** | Copy of database file | • Full DB encryption with AES-256-GCM<br>• Per-file random salt<br>• Key wrapping with KDF<br>• No plaintext anywhere | ✅ |
+| **SQLite File Theft** | Copy of database file | • Per-field AES-256-GCM encryption of secret values (not whole-database encryption)<br>• Per-entry random nonce<br>• Key wrapping with KDF<br>• Identity metadata (domain mappings, SSH/TOTP metadata) is still stored in plaintext and is not yet AAD-bound (ADR-005) | ⚠️ (per-field only; metadata plaintext) |
 | **Offline Brute Force** | Dictionary attacks on DB | • Argon2id: t=3, m=256MB, p=4<br>• Exponential backoff on failures<br>• Account lockout after 10 attempts<br>• No timing leak on password check | ✅ |
 | **Timing Attacks** | Response time analysis | • Constant-time comparisons<br>• Fixed delay on auth<br>• Dummy operations for padding | ⚠️ (constant-time only) |
 | **Phishing** | Fake websites requesting credentials | • Domain matching with TLD validation<br>• Visual domain confirmation<br>• URL bar integration | ⚠️ (domain matching only) |
@@ -73,9 +81,9 @@
 | **Relay Compromise** | Attacker gains relay server access | • All payloads encrypted with vault DEK (relay is zero-knowledge)<br>• Ed25519 device keys never stored on relay<br>• Relay holds only public keys + opaque blobs | ✅ |
 | **Device Impersonation** | Forged sync requests | • Ed25519 signature over canonical request string<br>• Signing key stored encrypted with DEK locally<br>• Public key registered at pairing time | ✅ |
 | **Replay Attack (Sync)** | Re-sending captured sync requests | • UUID nonce in every auth header, checked for uniqueness<br>• Timestamp freshness window (300s)<br>• Monotonic device_sequence validation | ✅ |
-| **Pairing Interception** | Eavesdropping on pairing exchange | • Bootstrap encrypted with HKDF-derived key (6-digit code + salt)<br>• 5-minute TTL, single-use consumption<br>• Code transmitted out-of-band | ✅ |
-| **Metadata Leakage (Sync)** | Payload size reveals entry type/length | • Payloads padded to fixed buckets (256, 512, 1024, 2048, 4096, 8192) before encryption<br>• Entry type visible but content opaque | ✅ |
-| **Rollback Attack** | Pushing older entry versions | • sync_version must be monotonically increasing<br>• Lower versions rejected by both relay and client<br>• Tombstones require higher version | ✅ |
+| **Pairing Interception** | Eavesdropping on pairing exchange | • Bootstrap encrypted with HKDF-derived key (6-digit code + salt)<br>• 5-minute TTL, single-use consumption<br>• Code transmitted out-of-band<br>• **Known gap:** a 6-digit code gives limited entropy and permits offline guessing; v2 replaces it with a high-entropy QR secret or PAKE (ADR-006) | 🧪 |
+| **Metadata Leakage (Sync)** | Payload size reveals entry type/length | • A padding helper exists but is **not used** by the production sync path — payload sizes leak today; either authenticated padding lands with sync v2 or this mitigation claim is removed (TD-NET-07) | 🧪 |
+| **Rollback Attack** | Pushing older entry versions | • sync_version must be monotonically increasing<br>• Lower versions rejected by both relay and client<br>• **Known gap:** version numbers and tombstone state are not cryptographically authenticated end to end, so version lineage cannot be fully trusted; authenticated lineage lands with sync v2 (ADR-006) | ⚠️ |
 | **Cross-Vault Access** | Device accessing wrong vault | • vault_id scoped per device at registration<br>• Relay enforces vault isolation on all queries | ✅ |
 
 ---
@@ -172,7 +180,7 @@
 3. Derive MK = Argon2id(password, salt, ...)
 4. Decrypt DEK = AES-256-GCM-Decrypt(MK, nonce1, WDEK)
 5. Verify authentication tag (constant-time compare)
-6. DEK kept in locked memory (mlock)
+6. DEK zeroized on drop (memory locking was removed with the unused `memsec` dependency; swap protection is **not** currently provided)
 7. Zero MK immediately after DEK extraction
 ```
 
@@ -497,7 +505,7 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 | Category | Item | Status | Notes |
 |----------|------|--------|-------|
 | **Memory** | Zeroization | ✅ | `zeroize` crate on all secrets (`crypto/zero.rs`) |
-| **Memory** | Locked pages | ✅ | `memsec` crate prevents swap |
+| **Memory** | Zeroized buffers | ⚠️ | `zeroize` on drop; memory locking was removed with the unused `memsec` dependency — no swap protection today |
 | **Memory** | No string copies | ✅ | `SecureBuffer` in `crypto/keyring.rs` |
 | **Timing** | Constant-time compare | ✅ | `subtle` crate for password checks |
 | **Timing** | Fixed delay on auth | 📋 | Not yet implemented |
@@ -617,7 +625,7 @@ they were granted — no more.
 | Process → daemon | 32-byte IPC token file (`<config>/ipc.token`, 0600), constant-time compared | Same-OS-user trust root. Any process running as the user can read the token. |
 | Tool → secret scope | `ExternalSecretGrant` (client_id × domain × field [+ expires_at]) in `<config>/external-secret-access.json` (0600) | Exact scope match, no wildcards. |
 | Tool identity | Per-client token (`spt_…`, 32 random bytes, SHA-256 at rest, shown once at mint) | A client with a `client_tokens` entry is token-enforced on **all** its grants; revocation is fail-closed. Legacy (tokenless) clients keep working during the migration window but are warned about. |
-| Browser autofill | Native-messaging origin label on every envelope | **Provenance labeling, not authentication.** Originless requests are allowed with a deprecation warning in 0.8 and denied by default from 0.9 (`SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=1` denies now). |
+| Browser autofill | Native-messaging origin label on every envelope | **Provenance labeling, not authentication.** Originless requests are **denied by default** (with a warning naming the upgrade path); `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily **re-allows** the legacy pre-0.8-host path (removed in 1.0). |
 
 ### Rules enforced by the daemon
 

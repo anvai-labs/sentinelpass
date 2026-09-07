@@ -17,6 +17,7 @@ use crate::sync::models::{
 use crate::{DatabaseError, PasswordManagerError, Result};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Decrypt a sync blob's payload and deserialize it into `T`.
 fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
@@ -68,9 +69,32 @@ fn skip_new_entry(blob: &SyncEntryBlob) -> bool {
     blob.is_tombstone || !ConflictResolver::accept_new(blob)
 }
 
-/// Serialize a value with bincode, mapping errors to `DatabaseError::Serialization`.
-fn bincode_ser<T: serde::Serialize>(v: &T) -> Result<Vec<u8>> {
-    bincode::serialize(v).map_err(|e| DatabaseError::Serialization(e.to_string()).into())
+/// Resolve a sync payload's secret to plaintext: the current-build field
+/// (plaintext) when present, else the v0.8.x legacy three-part shape
+/// (old wire field names) decrypted with the shared DEK — wire backward
+/// compatibility: old-peer payloads must apply, not wedge the pull.
+/// (Note: the legacy path recovers the plaintext the SENDER stored under
+/// the shared DEK; the receiver then re-seals under its OWN identity.)
+fn resolve_sync_secret(
+    plaintext: &str,
+    legacy_ct: Option<&[u8]>,
+    legacy_nonce: Option<&[u8]>,
+    legacy_auth_tag: Option<&[u8]>,
+    // WBS-308: v1 decryptors return zeroizing secrets, matching the v2
+    // envelope path.
+    decrypt_v1: impl Fn(&[u8], &[u8], &[u8]) -> Result<Zeroizing<String>>,
+) -> Result<Zeroizing<String>> {
+    if !plaintext.is_empty() {
+        return Ok(plaintext.to_string().into());
+    }
+    match (legacy_ct, legacy_nonce, legacy_auth_tag) {
+        (Some(ct), Some(nonce), Some(tag)) => decrypt_v1(ct, nonce, tag),
+        _ => Err(PasswordManagerError::InvalidInput(
+            "sync payload carries neither the current plaintext field nor the complete \
+             legacy secret shape"
+                .to_string(),
+        )),
+    }
 }
 
 struct CredentialBlobs {
@@ -84,30 +108,58 @@ struct CredentialBlobs {
 }
 
 fn prepare_credential_blobs(
+    conn: &rusqlite::Connection,
     dek: &DataEncryptionKey,
     payload: &CredentialPayload,
+    sync_id: &str,
 ) -> Result<CredentialBlobs> {
-    let title_enc = crate::encrypt_string(dek, &payload.title)?;
-    let username_enc = crate::encrypt_string(dek, &payload.username)?;
-    let password_enc = crate::encrypt_string(dek, &payload.password)?;
-    let url_enc = payload
+    // Seal v2 under the LOCAL identity (adoption review, finding 3): the
+    // old shape wrote context-free v1 blobs, silently stripping the
+    // identity binding from synced rows (and the sync trigger re-marked
+    // them pending, propagating the downgrade to every peer). The vault
+    // UUID comes from db_metadata on this connection; the entry's stable
+    // sync_id is the object identity.
+    let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
+    let seal = |purpose, plaintext: &str| {
+        crate::vault::envelope_ops::seal_object_field(
+            dek,
+            &vault_uuid,
+            sync_id,
+            crate::vault::envelope_ops::envelope_object_type(payload.credential_type),
+            purpose,
+            plaintext,
+            epoch,
+        )
+    };
+    let title = seal(crate::crypto::aad::EnvelopePurpose::Summary, &payload.title)?;
+    let username = seal(
+        crate::crypto::aad::EnvelopePurpose::Summary,
+        &payload.username,
+    )?;
+    let password = seal(
+        crate::crypto::aad::EnvelopePurpose::Secret,
+        &payload.password,
+    )?;
+    let url = payload
         .url
         .as_ref()
-        .map(|u| crate::encrypt_string(dek, u))
+        .map(|u| seal(crate::crypto::aad::EnvelopePurpose::Secret, u))
         .transpose()?;
-    let notes_enc = payload
+    let notes = payload
         .notes
         .as_ref()
-        .map(|n| crate::encrypt_string(dek, n))
+        .map(|n| seal(crate::crypto::aad::EnvelopePurpose::Secret, n))
         .transpose()?;
+    // Deprecated v1 columns — zero-filled on v2 rows (see envelope_ops).
+    let (nonce, auth_tag) = crate::vault::envelope_ops::zeroed_legacy_v1_columns();
     Ok(CredentialBlobs {
-        nonce: bincode_ser(&title_enc.nonce)?,
-        auth_tag: bincode_ser(&title_enc.auth_tag)?,
-        title: bincode_ser(&title_enc)?,
-        username: bincode_ser(&username_enc)?,
-        password: bincode_ser(&password_enc)?,
-        url: url_enc.as_ref().map(bincode_ser).transpose()?,
-        notes: notes_enc.as_ref().map(bincode_ser).transpose()?,
+        nonce,
+        auth_tag,
+        title,
+        username,
+        password,
+        url,
+        notes,
     })
 }
 
@@ -244,12 +296,35 @@ impl SyncEngine {
                 .lock()
                 .map_err(|_| DatabaseError::LockPoisoned("apply pull".to_string()))?;
 
+            let mut apply_failures: u64 = 0;
             for blob in &response.entries {
                 // Skip our own changes
                 if blob.origin_device_id == self.device_id {
                     continue;
                 }
-                self.apply_remote_entry(db.conn(), dek, blob)?;
+                // Per-blob resilience (adoption review): one unreadable
+                // blob — an old-peer payload shape, a decode failure —
+                // must NOT abort the page before the cursor advances,
+                // wedging every future sync on the same blob forever.
+                // Skip-and-warn names the blob; the experimental-sync
+                // data-loss tradeoff is spelled out in docs/SYNC.md.
+                if let Err(e) = self.apply_remote_entry(db.conn(), dek, blob) {
+                    apply_failures += 1;
+                    tracing::warn!(
+                        sync_id = %blob.sync_id,
+                        entry_type = ?blob.entry_type,
+                        error = %e,
+                        "sync pull: skipping unappliable blob (cursor advances; \
+                         the change is NOT applied)"
+                    );
+                }
+            }
+            if apply_failures > 0 {
+                tracing::warn!(
+                    failures = apply_failures,
+                    "sync pull completed with skipped blobs — inspect the warnings \
+                     above; affected entries were not applied"
+                );
             }
 
             if response.server_sequence <= cursor {
@@ -294,6 +369,17 @@ impl SyncEngine {
     ) -> Result<()> {
         let sync_id_str = blob.sync_id.to_string();
 
+        // Local identity + domain-tag key for v2 sealing (WBS-304/WBS-306):
+        // entry fields AND domain mappings seal under the LOCAL identity.
+        let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
+        let domain_tag_key = crate::crypto::keyring::derive_domain_tag_key(dek)?;
+        let mapping_ctx = crate::vault::domain_ops::MappingSealCtx {
+            dek,
+            vault_uuid: &vault_uuid,
+            epoch,
+            tag_key: &domain_tag_key,
+        };
+
         // Check if we have this entry locally
         let local: Option<(i64, i64, i64)> = conn
             .query_row(
@@ -334,7 +420,7 @@ impl SyncEngine {
             }
 
             let payload: CredentialPayload = decrypt_sync_payload(dek, blob)?;
-            let blobs = prepare_credential_blobs(dek, &payload)?;
+            let blobs = prepare_credential_blobs(conn, dek, &payload, &sync_id_str)?;
             let now = chrono::Utc::now().timestamp();
 
             conn.execute(
@@ -348,8 +434,8 @@ impl SyncEngine {
                     blobs.title,
                     blobs.username,
                     blobs.password,
-                    blobs.url.as_deref().unwrap_or(&[]),
-                    blobs.notes.as_deref().unwrap_or(&[]),
+                    blobs.url.as_deref().filter(|b| !b.is_empty()),
+                    blobs.notes.as_deref().filter(|b| !b.is_empty()),
                     payload.credential_type.as_str(),
                     blobs.nonce,
                     blobs.auth_tag,
@@ -362,18 +448,21 @@ impl SyncEngine {
             )
             .map_err(DatabaseError::Sqlite)?;
 
-            // Update domain mappings
+            // Update domain mappings (sealed + tagged, WBS-306 — the
+            // mapping delete cascades its tag rows).
             conn.execute(
                 "DELETE FROM domain_mappings WHERE entry_id = ?1",
                 [entry_id],
             )
             .map_err(DatabaseError::Sqlite)?;
             for dm in &payload.domains {
-                conn.execute(
-                    "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![entry_id, dm.domain, dm.is_primary],
-                )
-                .map_err(DatabaseError::Sqlite)?;
+                crate::vault::domain_ops::insert_sealed_domain_mapping(
+                    conn,
+                    &mapping_ctx,
+                    entry_id,
+                    &dm.domain,
+                    dm.is_primary,
+                )?;
             }
 
             // Registry equality index (ADR-001): sync apply is a first-class
@@ -395,7 +484,7 @@ impl SyncEngine {
                 return Ok(());
             }
             let payload: CredentialPayload = decrypt_sync_payload(dek, blob)?;
-            let blobs = prepare_credential_blobs(dek, &payload)?;
+            let blobs = prepare_credential_blobs(conn, dek, &payload, &sync_id_str)?;
             let now = chrono::Utc::now().timestamp();
 
             conn.execute(
@@ -408,8 +497,8 @@ impl SyncEngine {
                     blobs.title,
                     blobs.username,
                     blobs.password,
-                    blobs.url.as_deref().unwrap_or(&[]),
-                    blobs.notes.as_deref().unwrap_or(&[]),
+                    blobs.url.as_deref().filter(|b| !b.is_empty()),
+                    blobs.notes.as_deref().filter(|b| !b.is_empty()),
                     payload.credential_type.as_str(),
                     blobs.nonce,
                     blobs.auth_tag,
@@ -425,11 +514,13 @@ impl SyncEngine {
 
             let entry_id = conn.last_insert_rowid();
             for dm in &payload.domains {
-                conn.execute(
-                    "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![entry_id, dm.domain, dm.is_primary],
-                )
-                .map_err(DatabaseError::Sqlite)?;
+                crate::vault::domain_ops::insert_sealed_domain_mapping(
+                    conn,
+                    &mapping_ctx,
+                    entry_id,
+                    &dm.domain,
+                    dm.is_primary,
+                )?;
             }
 
             // Registry equality index for pulled-in entries (same rationale
@@ -456,6 +547,10 @@ impl SyncEngine {
         blob: &SyncEntryBlob,
     ) -> Result<()> {
         let sync_id_str = blob.sync_id.to_string();
+        // Local identity for v2 sealing (WBS-304): fetched from this
+        // connection's db_metadata, never assumed from config.
+        // Local identity for v2 sealing (WBS-304) — see read_local_identity.
+        let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
         let local: Option<(i64, i64, i64)> = conn
             .query_row(
@@ -479,6 +574,45 @@ impl SyncEngine {
                 return Ok(());
             }
             let payload: SshKeyPayload = decrypt_sync_payload(dek, blob)?;
+            let private_key = resolve_sync_secret(
+                &payload.private_key,
+                payload.private_key_encrypted.as_deref(),
+                payload.legacy_nonce.as_deref(),
+                payload.legacy_auth_tag.as_deref(),
+                |ct, nonce, tag| crate::ssh::SshKey::decrypt_private_key(dek, ct, nonce, tag),
+            )?;
+            // Seal v2 under the LOCAL identity (WBS-304 — never store the
+            // peer's envelope; see prepare_credential_blobs). Seals the
+            // RESOLVED plaintext (a legacy-shape peer's payload.private_key
+            // is empty; the plaintext came from its v1 triplet).
+            let private_key_blob = crate::vault::envelope_ops::seal_object_field(
+                dek,
+                &vault_uuid,
+                &sync_id_str,
+                crate::crypto::aad::ObjectType::SshKey,
+                crate::crypto::aad::EnvelopePurpose::Secret,
+                &private_key,
+                epoch,
+            )?;
+            let (nonce_blob, auth_tag_blob) =
+                crate::vault::envelope_ops::zeroed_legacy_v1_columns();
+            // Identity metadata sealed in place (WBS-306): the comment
+            // column carries a Summary envelope under the row's identity.
+            let comment_blob = payload
+                .comment
+                .as_deref()
+                .map(|c| {
+                    crate::vault::envelope_ops::seal_object_field(
+                        dek,
+                        &vault_uuid,
+                        &sync_id_str,
+                        crate::crypto::aad::ObjectType::SshKey,
+                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        c,
+                        epoch,
+                    )
+                })
+                .transpose()?;
 
             let now = chrono::Utc::now().timestamp();
             conn.execute(
@@ -490,13 +624,13 @@ impl SyncEngine {
                  WHERE key_id = ?13",
                 rusqlite::params![
                     payload.name,
-                    payload.comment,
+                    comment_blob,
                     payload.key_type,
                     payload.key_size,
                     payload.public_key,
-                    payload.private_key_encrypted,
-                    payload.nonce,
-                    payload.auth_tag,
+                    &private_key_blob,
+                    &nonce_blob,
+                    &auth_tag_blob,
                     payload.fingerprint,
                     payload.modified_at,
                     blob.sync_version as i64,
@@ -510,6 +644,40 @@ impl SyncEngine {
                 return Ok(());
             }
             let payload: SshKeyPayload = decrypt_sync_payload(dek, blob)?;
+            let private_key = resolve_sync_secret(
+                &payload.private_key,
+                payload.private_key_encrypted.as_deref(),
+                payload.legacy_nonce.as_deref(),
+                payload.legacy_auth_tag.as_deref(),
+                |ct, nonce, tag| crate::ssh::SshKey::decrypt_private_key(dek, ct, nonce, tag),
+            )?;
+            let private_key_blob = crate::vault::envelope_ops::seal_object_field(
+                dek,
+                &vault_uuid,
+                &sync_id_str,
+                crate::crypto::aad::ObjectType::SshKey,
+                crate::crypto::aad::EnvelopePurpose::Secret,
+                &private_key,
+                epoch,
+            )?;
+            let (nonce_blob, auth_tag_blob) =
+                crate::vault::envelope_ops::zeroed_legacy_v1_columns();
+            // Identity metadata sealed in place (WBS-306 — see UPDATE arm).
+            let comment_blob = payload
+                .comment
+                .as_deref()
+                .map(|c| {
+                    crate::vault::envelope_ops::seal_object_field(
+                        dek,
+                        &vault_uuid,
+                        &sync_id_str,
+                        crate::crypto::aad::ObjectType::SshKey,
+                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        c,
+                        epoch,
+                    )
+                })
+                .transpose()?;
             let now = chrono::Utc::now().timestamp();
             conn.execute(
                 "INSERT INTO ssh_keys (
@@ -520,13 +688,13 @@ impl SyncEngine {
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'synced', ?14, 0)",
                 rusqlite::params![
                     payload.name,
-                    payload.comment,
+                    comment_blob,
                     payload.key_type,
                     payload.key_size,
                     payload.public_key,
-                    payload.private_key_encrypted,
-                    payload.nonce,
-                    payload.auth_tag,
+                    &private_key_blob,
+                    &nonce_blob,
+                    &auth_tag_blob,
                     payload.fingerprint,
                     payload.created_at,
                     payload.modified_at,
@@ -548,6 +716,9 @@ impl SyncEngine {
         blob: &SyncEntryBlob,
     ) -> Result<()> {
         let sync_id_str = blob.sync_id.to_string();
+        // Local identity for v2 sealing (WBS-304 — see apply_ssh_key).
+        // Local identity for v2 sealing (WBS-304) — see read_local_identity.
+        let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
         let local: Option<(i64, i64, i64)> = conn
             .query_row(
@@ -571,6 +742,13 @@ impl SyncEngine {
                 return Ok(());
             }
             let payload: TotpPayload = decrypt_sync_payload(dek, blob)?;
+            let secret = resolve_sync_secret(
+                &payload.secret,
+                payload.secret_encrypted.as_deref(),
+                payload.legacy_nonce.as_deref(),
+                payload.legacy_auth_tag.as_deref(),
+                |ct, nonce, tag| crate::totp::decrypt_totp_secret(dek, ct, nonce, tag),
+            )?;
 
             // Re-link entry_id from parent_credential_sync_id
             let entry_id = payload.parent_credential_sync_id.and_then(|pid| {
@@ -582,8 +760,70 @@ impl SyncEngine {
                 .ok()
             });
 
+            // Seal v2 under the LOCAL identity (WBS-304 — never store
+            // the peer's envelope; see prepare_credential_blobs). The
+            // totp row keeps its OWN sync_id (sync_id_str), which the
+            // envelope binds.
+            let secret_blob = crate::vault::envelope_ops::seal_object_field(
+                dek,
+                &vault_uuid,
+                &sync_id_str,
+                crate::crypto::aad::ObjectType::TotpSecret,
+                crate::crypto::aad::EnvelopePurpose::Secret,
+                &secret,
+                epoch,
+            )?;
+            let (nonce_blob, auth_tag_blob) =
+                crate::vault::envelope_ops::zeroed_legacy_v1_columns();
+            // Identity metadata sealed in place (WBS-306): issuer/
+            // account_name carry Summary envelopes under the row's identity.
+            let issuer_blob = payload
+                .issuer
+                .as_deref()
+                .map(|c| {
+                    crate::vault::envelope_ops::seal_object_field(
+                        dek,
+                        &vault_uuid,
+                        &sync_id_str,
+                        crate::crypto::aad::ObjectType::TotpSecret,
+                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        c,
+                        epoch,
+                    )
+                })
+                .transpose()?;
+            let account_name_blob = payload
+                .account_name
+                .as_deref()
+                .map(|c| {
+                    crate::vault::envelope_ops::seal_object_field(
+                        dek,
+                        &vault_uuid,
+                        &sync_id_str,
+                        crate::crypto::aad::ObjectType::TotpSecret,
+                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        c,
+                        epoch,
+                    )
+                })
+                .transpose()?;
+
+            let Some(eid) = entry_id else {
+                // The parent credential has not landed locally (relay
+                // ordering or a conflicting local version). Dropping the
+                // blob silently loses the TOTP forever — warn loudly
+                // (re-sync after the credential lands re-delivers only if
+                // the peer re-pushes; sync v2's requeue is WBS-605).
+                tracing::warn!(
+                    sync_id = %sync_id_str,
+                    "sync pull: TOTP blob skipped — parent credential is not \
+                     present locally; the secret was NOT applied"
+                );
+                return Ok(());
+            };
+
             let now = chrono::Utc::now().timestamp();
-            if let Some(eid) = entry_id {
+            {
                 conn.execute(
                     "UPDATE totp_secrets SET
                         entry_id = ?1, secret_encrypted = ?2, nonce = ?3, auth_tag = ?4,
@@ -592,14 +832,14 @@ impl SyncEngine {
                      WHERE totp_id = ?12",
                     rusqlite::params![
                         eid,
-                        payload.secret_encrypted,
-                        payload.nonce,
-                        payload.auth_tag,
+                        &secret_blob,
+                        &nonce_blob,
+                        &auth_tag_blob,
                         payload.algorithm,
                         payload.digits as i32,
                         payload.period as i32,
-                        payload.issuer,
-                        payload.account_name,
+                        issuer_blob,
+                        account_name_blob,
                         blob.sync_version as i64,
                         now,
                         totp_id,
@@ -612,6 +852,13 @@ impl SyncEngine {
                 return Ok(());
             }
             let payload: TotpPayload = decrypt_sync_payload(dek, blob)?;
+            let secret = resolve_sync_secret(
+                &payload.secret,
+                payload.secret_encrypted.as_deref(),
+                payload.legacy_nonce.as_deref(),
+                payload.legacy_auth_tag.as_deref(),
+                |ct, nonce, tag| crate::totp::decrypt_totp_secret(dek, ct, nonce, tag),
+            )?;
             let entry_id = payload.parent_credential_sync_id.and_then(|pid| {
                 conn.query_row(
                     "SELECT entry_id FROM entries WHERE sync_id = ?1",
@@ -621,7 +868,60 @@ impl SyncEngine {
                 .ok()
             });
 
-            if let Some(eid) = entry_id {
+            // Seal v2 under the LOCAL identity (WBS-304 — see above).
+            let secret_blob = crate::vault::envelope_ops::seal_object_field(
+                dek,
+                &vault_uuid,
+                &sync_id_str,
+                crate::crypto::aad::ObjectType::TotpSecret,
+                crate::crypto::aad::EnvelopePurpose::Secret,
+                &secret,
+                epoch,
+            )?;
+            let (nonce_blob, auth_tag_blob) =
+                crate::vault::envelope_ops::zeroed_legacy_v1_columns();
+            // Identity metadata sealed in place (WBS-306 — see UPDATE arm).
+            let issuer_blob = payload
+                .issuer
+                .as_deref()
+                .map(|c| {
+                    crate::vault::envelope_ops::seal_object_field(
+                        dek,
+                        &vault_uuid,
+                        &sync_id_str,
+                        crate::crypto::aad::ObjectType::TotpSecret,
+                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        c,
+                        epoch,
+                    )
+                })
+                .transpose()?;
+            let account_name_blob = payload
+                .account_name
+                .as_deref()
+                .map(|c| {
+                    crate::vault::envelope_ops::seal_object_field(
+                        dek,
+                        &vault_uuid,
+                        &sync_id_str,
+                        crate::crypto::aad::ObjectType::TotpSecret,
+                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        c,
+                        epoch,
+                    )
+                })
+                .transpose()?;
+
+            if entry_id.is_none() {
+                tracing::warn!(
+                    sync_id = %sync_id_str,
+                    "sync pull: TOTP blob skipped — parent credential is not \
+                     present locally; the secret was NOT applied"
+                );
+                return Ok(());
+            }
+            let eid = entry_id.unwrap();
+            {
                 let now = chrono::Utc::now().timestamp();
                 conn.execute(
                     "INSERT INTO totp_secrets (
@@ -631,14 +931,14 @@ impl SyncEngine {
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'synced', ?13, 0)",
                     rusqlite::params![
                         eid,
-                        payload.secret_encrypted,
-                        payload.nonce,
-                        payload.auth_tag,
+                        &secret_blob,
+                        &nonce_blob,
+                        &auth_tag_blob,
                         payload.algorithm,
                         payload.digits as i32,
                         payload.period as i32,
-                        payload.issuer,
-                        payload.account_name,
+                        issuer_blob,
+                        account_name_blob,
                         payload.created_at,
                         sync_id_str,
                         blob.sync_version as i64,

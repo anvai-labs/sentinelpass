@@ -142,12 +142,17 @@ pub fn encrypt_entry(dek: &DataEncryptionKey, plaintext: &[u8]) -> Result<Encryp
 /// * `encrypted` - The encrypted entry with nonce and ciphertext
 ///
 /// # Returns
-/// The decrypted plaintext
+/// The decrypted plaintext, wrapped in a zeroizing guard (WBS-308 /
+/// SR-CRYPTO-004): the owned plaintext buffer is wiped when the caller
+/// drops it, so decrypted secrets do not linger on the heap.
 ///
 /// # Security
 /// - Returns error if authentication tag doesn't verify
 /// - This prevents tampering with encrypted data
-pub fn decrypt_entry(dek: &DataEncryptionKey, encrypted: &EncryptedEntry) -> Result<Vec<u8>> {
+pub fn decrypt_entry(
+    dek: &DataEncryptionKey,
+    encrypted: &EncryptedEntry,
+) -> Result<Zeroizing<Vec<u8>>> {
     // Create cipher with the DEK
     let cipher = Aes256Gcm::new(dek.as_bytes().into());
 
@@ -164,7 +169,7 @@ pub fn decrypt_entry(dek: &DataEncryptionKey, encrypted: &EncryptedEntry) -> Res
         .decrypt(&nonce, ciphertext_with_tag.as_slice())
         .map_err(|_| CryptoError::AuthenticationFailed)?;
 
-    Ok(plaintext)
+    Ok(Zeroizing::new(plaintext))
 }
 
 /// Encrypt a string using the DEK
@@ -176,10 +181,18 @@ pub fn encrypt_string(dek: &DataEncryptionKey, plaintext: &str) -> Result<Encryp
 
 /// Decrypt to a string using the DEK
 ///
-/// Convenience function that handles bytes-to-string conversion
-pub fn decrypt_to_string(dek: &DataEncryptionKey, encrypted: &EncryptedEntry) -> Result<String> {
+/// Convenience function that handles bytes-to-string conversion. The
+/// returned string is zeroize-on-drop (WBS-308 / SR-CRYPTO-004).
+pub fn decrypt_to_string(
+    dek: &DataEncryptionKey,
+    encrypted: &EncryptedEntry,
+) -> Result<Zeroizing<String>> {
     let bytes = decrypt_entry(dek, encrypted)?;
-    String::from_utf8(bytes).map_err(|_| CryptoError::DecryptionFailed("Invalid UTF-8".to_string()))
+    // The copied byte buffer is moved into the String (no second plaintext
+    // copy); the guarded original is zeroized when it drops.
+    String::from_utf8(bytes.as_slice().to_vec())
+        .map(Zeroizing::new)
+        .map_err(|_| CryptoError::DecryptionFailed("Invalid UTF-8".to_string()))
 }
 
 #[cfg(test)]
@@ -200,7 +213,7 @@ mod tests {
         let encrypted = encrypt_entry(&dek, plaintext).unwrap();
         let decrypted = decrypt_entry(&dek, &encrypted).unwrap();
 
-        assert_eq!(plaintext.to_vec(), decrypted);
+        assert_eq!(plaintext.to_vec(), decrypted.as_slice());
     }
 
     #[test]
@@ -211,7 +224,22 @@ mod tests {
         let encrypted = encrypt_string(&dek, plaintext).unwrap();
         let decrypted = decrypt_to_string(&dek, &encrypted).unwrap();
 
-        assert_eq!(plaintext, decrypted);
+        assert_eq!(plaintext, decrypted.as_str());
+    }
+
+    /// WBS-308 / SR-CRYPTO-004: the v1 decrypt boundary returns zeroizing
+    /// buffers. These calls are type-level guards — if someone relaxes
+    /// `decrypt_entry`/`decrypt_to_string` back to bare `Vec<u8>`/`String`,
+    /// this test stops compiling.
+    #[test]
+    fn decrypt_boundaries_return_zeroizing_buffers() {
+        fn require_zeroing_vec(_: &Zeroizing<Vec<u8>>) {}
+        fn require_zeroing_string(_: &Zeroizing<String>) {}
+
+        let dek = DataEncryptionKey::new().unwrap();
+        let encrypted = encrypt_string(&dek, "type-shape probe").unwrap();
+        require_zeroing_vec(&decrypt_entry(&dek, &encrypted).unwrap());
+        require_zeroing_string(&decrypt_to_string(&dek, &encrypted).unwrap());
     }
 
     #[test]
@@ -230,8 +258,8 @@ mod tests {
 
         // But both should decrypt to the same plaintext
         assert_eq!(
-            decrypt_entry(&dek, &encrypted1).unwrap(),
-            decrypt_entry(&dek, &encrypted2).unwrap()
+            decrypt_entry(&dek, &encrypted1).unwrap().as_slice(),
+            decrypt_entry(&dek, &encrypted2).unwrap().as_slice()
         );
     }
 
@@ -293,7 +321,7 @@ mod tests {
             let dek = DataEncryptionKey::new().unwrap();
             let encrypted = encrypt_entry(&dek, &data).unwrap();
             let decrypted = decrypt_entry(&dek, &encrypted).unwrap();
-            prop_assert_eq!(data, decrypted);
+            prop_assert_eq!(data, decrypted.as_slice());
         }
 
         #[test]

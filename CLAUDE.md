@@ -117,7 +117,7 @@ sentinelpass-daemon
 ### Key Components
 
 **sentinelpass-core/** - Core library (all other crates depend on this):
-- `crypto/` - `kdf.rs` (Argon2id), `cipher.rs` (AES-256-GCM), `keyring.rs` (KeyHierarchy/MasterKey/WrappedKey), `password.rs` (generation), `strength.rs` (analysis), `zero.rs` (SecureBuffer/zeroization)
+- `crypto/` - `kdf.rs` (Argon2id), `cipher.rs` (AES-256-GCM), `keyring.rs` (KeyHierarchy/MasterKey/WrappedKey), `password.rs` (generation), `strength.rs` (analysis), zeroize discipline (SecureBuffer/`zero.rs` removed)
 - `daemon/` - `ipc.rs` (IPC server/client), `vault_state.rs` (DaemonVault with auto-lock), `native_messaging.rs` (browser protocol), `autolock.rs`
 - `database/` - `schema.rs` (SQLite ops), `models.rs` (Entry/DomainMapping/TotpSecret), `migrations.rs` (refinery runner)
 - `vault.rs` - VaultManager: central CRUD, encryption, lock/unlock, TOTP, SSH keys, biometric, import/export
@@ -196,6 +196,8 @@ sentinelpass-daemon
 **Legacy TCP:** Custom `tcp://...` paths use loopback TCP with AES-256-GCM encryption
 **Auth:** All IPC requests require a 32-byte hex token from `~/.config/sentinelpass/ipc.token` (mode 0600). Messages use length-prefixed JSON with an envelope containing the token.
 
+**Origin gate (browser-surface containment):** browser-autofill IPC (`GetCredential`, `GetTotpCode`, `ListDomainCredentials`, `SaveCredential`) is denied for clients that present no origin marker (pre-0.8 hosts) — denied by default since 0.8.x containment. `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily restores the legacy path (removed in 1.0). CLI-tagged origins are denied; only `NativeHost` is allowed. External tools must use `GetExternalSecret`/`SaveSecret` grants.
+
 ### Sync Protocol
 
 **Auth Header:**
@@ -232,6 +234,8 @@ POST /api/v1/sync/pull
 ```
 
 See `docs/SYNC.md` for the full endpoint table, pairing flow, and conflict resolution rules.
+
+**Transport policy (containment):** relay URLs must use HTTPS; cleartext HTTP is accepted only for loopback hosts and only when `SENTINELPASS_ALLOW_LOOPBACK_RELAY=1` is set (development profile). URLs carrying userinfo are rejected. Enforced at `init_sync` and again in `SyncClient::new` (`sync/config.rs::validate_relay_url`).
 
 ## Cryptographic Architecture
 
@@ -275,7 +279,7 @@ Pairing: 6-digit code + salt → HKDF-SHA256 → pairing key
 
 ### NEVER:
 1. **Log secrets** - Use redacted logging for sensitive data
-2. **Use `String` for passwords** - Always use `SecureBuffer` from `crypto/keyring.rs`
+2. **Keep secrets in zeroizing types** - Owned secret buffers use `Zeroizing` (`SecureBuffer` was removed with `crypto/zero.rs`); borrowed `&[u8]` is fine with caller-side zeroization
 3. **Compare passwords with `==`** - Use constant-time compare from `subtle` crate
 4. **Reuse nonces** - Always generate random per-entry nonce
 5. **Skip authentication tag validation** - GCM tag is mandatory
@@ -289,15 +293,14 @@ Pairing: 6-digit code + salt → HKDF-SHA256 → pairing key
 
 ### ALWAYS:
 1. Use parameterized queries only (SQL injection protection)
-2. Call `zeroize()` on secrets before dropping
-3. Use `mlock()` via `memsec` crate to prevent swap
-4. Validate domain on daemon-side, not browser-side
-5. Use exponential backoff for failed auth attempts
-6. Implement constant-time operations for secret comparison
-7. Run `cargo clippy` and `cargo test` before committing
-8. Pad sync payloads to fixed bucket sizes before encryption (metadata leakage prevention)
-9. Verify auth nonce uniqueness on the relay (replay protection)
-10. Include body hash in the canonical signing string (tamper protection)
+2. Zeroize owned secret buffers on drop (`Zeroizing`); memory locking (`mlock`/`memsec`) was removed with its unused dependency — do not claim swap protection
+3. Validate domain on daemon-side, not browser-side
+4. Use exponential backoff for failed auth attempts
+5. Implement constant-time operations for secret comparison
+6. Run `cargo clippy` and `cargo test` before committing
+7. Pad sync payloads to fixed bucket sizes before encryption (metadata leakage prevention) — NOTE: the production sync path does not currently pad (TD-NET-07); do not rely on or claim this until v2
+8. Verify auth nonce uniqueness on the relay (replay protection)
+9. Include body hash in the canonical signing string (tamper protection)
 
 ## Testing Browser Extension
 
@@ -402,7 +405,7 @@ cargo run --bin sentinelpass -- init --dev
 cargo run --bin sentinelpass-daemon  # Daemon auto-runs migrations
 
 # Verify schema
-sqlite3 ~/.sentinelpass/vault.db ".schema"
+sqlite3 ~/Library/Application\ Support/PasswordManager/vault.db ".schema"  # macOS path shown; see Important File Locations below for other platforms
 ```
 
 ### Adding a New Sync Entry Type
@@ -415,7 +418,11 @@ sqlite3 ~/.sentinelpass/vault.db ".schema"
 
 ## Important File Locations
 
-- **Vault database:** `~/.sentinelpass/vault.db` (SQLite, encrypted entries)
+- **Vault database:** platform data dir + `vault.db` (`platform::get_default_vault_path()`), NOT `~/.sentinelpass/`:
+  - macOS: `~/Library/Application Support/PasswordManager/vault.db`
+  - Linux: `~/.local/share/PasswordManager/vault.db` (or `$XDG_DATA_HOME`)
+  - Windows: `%LOCALAPPDATA%\PasswordManager\vault.db` (`get_data_dir()` tries `data_local_dir` first; the module's own doc comment saying `%APPDATA%` predates this and is also stale)
+  - The epoch high-water sidecar (`vault.db.epoch`) and recovery-related state live next to this file; epoch-guard refusal messages that say "delete the sidecar file next to the vault database" mean this path, not `~/.sentinelpass/`.
 - **IPC token:** `~/.config/sentinelpass/ipc.token` (32-byte hex token for IPC auth)
 - **Daemon logs:** Platform-specific (Windows: Event Viewer, Unix: syslog)
 - **Native messaging config:**

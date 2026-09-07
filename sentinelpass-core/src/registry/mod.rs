@@ -224,6 +224,11 @@ pub struct SweepReport {
     pub rekeyed: usize,
     pub removed: usize,
     pub orphans_pruned: usize,
+    /// Rows skipped because their blob refused to open (tampered,
+    /// relocated, or corrupt — WBS-304 adoption review, finding 9). Each
+    /// skip is warn-logged with its entry_id; the index stays completable
+    /// and the tamper stays visible.
+    pub failed: usize,
 }
 
 /// Result of one equality-index upsert.
@@ -273,7 +278,13 @@ fn serialize_tag_cipher(dek: &DataEncryptionKey, tag_hex: &str) -> Result<Vec<u8
 fn deserialize_tag_cipher(dek: &DataEncryptionKey, blob: &[u8]) -> Result<String> {
     let encrypted: EncryptedEntry =
         bincode::deserialize(blob).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-    decrypt_to_string(dek, &encrypted).map_err(PasswordManagerError::from)
+    // WBS-308: the decrypt boundary now returns a zeroizing buffer; the
+    // equality tag is a hex HMAC (not raw secret material), so this
+    // explicit unguard is the documented registry-side boundary. Widening
+    // the registry return types is tracked in docs/SECRET_LIFETIME_AUDIT.md.
+    decrypt_to_string(dek, &encrypted)
+        .map(|z| z.to_string())
+        .map_err(PasswordManagerError::from)
 }
 
 /// Decrypt a stored equality tag back to its hex form (key holders only —

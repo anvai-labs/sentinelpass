@@ -112,13 +112,14 @@ impl SshKey {
         ))
     }
 
-    /// Decrypt a private key using the vault's DEK
+    /// Decrypt a private key using the vault's DEK. The returned PEM is
+    /// zeroize-on-drop (WBS-308 / SR-CRYPTO-004).
     pub fn decrypt_private_key(
         dek: &crate::crypto::DataEncryptionKey,
         private_key_encrypted: &[u8],
         nonce: &[u8],
         auth_tag: &[u8],
-    ) -> Result<String> {
+    ) -> Result<zeroize::Zeroizing<String>> {
         use crate::crypto::cipher::{decrypt_entry, EncryptedEntry};
 
         let nonce_arr: [u8; 12] = nonce
@@ -136,9 +137,13 @@ impl SshKey {
 
         let decrypted = decrypt_entry(dek, &encrypted).map_err(PasswordManagerError::Crypto)?;
 
-        String::from_utf8(decrypted).map_err(|_| {
-            PasswordManagerError::InvalidInput("Invalid UTF-8 in private key".to_string())
-        })
+        // The copied byte buffer is moved into the String; the guarded
+        // original is zeroized when it drops.
+        String::from_utf8(decrypted.as_slice().to_vec())
+            .map(zeroize::Zeroizing::new)
+            .map_err(|_| {
+                PasswordManagerError::InvalidInput("Invalid UTF-8 in private key".to_string())
+            })
     }
 
     /// Create an SshKey with encrypted private key

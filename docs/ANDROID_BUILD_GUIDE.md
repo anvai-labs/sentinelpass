@@ -1,5 +1,11 @@
 # Android App Build & Wire-Up Guide
 
+> **Prototype status (2026-09-04):** the Android client is an unreleased prototype.
+> Biometric unlock, sync, and autofill contain placeholder implementations and are not
+> security controls; the JNI-enabled build does not yet compile in CI. Do not store
+> production credentials in a prototype build. See `docs/SECURITY_STATUS_MATRIX.md`
+> (Android rows) and ADR-009 for the production-readiness plan.
+
 This guide explains how to build and wire up the SentinelPass Android app with the Rust mobile bridge via JNI.
 
 ## Prerequisites

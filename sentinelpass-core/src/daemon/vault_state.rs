@@ -4,6 +4,7 @@
 //! and responding to credential requests.
 
 use crate::{
+    domain::{domains_match, normalize_host},
     get_default_vault_path, CredentialType, DatabaseError, LifecycleSource, PasswordManagerError,
     Result, VaultManager,
 };
@@ -13,7 +14,6 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 use tracing::{info, warn};
-use url::Url;
 
 /// Vault state for the daemon
 #[derive(Clone, Copy, Debug)]
@@ -31,76 +31,10 @@ pub struct DaemonVault {
     inactivity_timeout: Duration,
 }
 
-/// Extract the bare hostname from a URL or hostname string.
-///
-/// Tries the `url` crate first (handles schemes, auth, ports, IPv6, encoding).
-/// Falls back to treating the input as a bare hostname so that plain domain
-/// strings like `"example.com"` still work without a scheme prefix.
-fn normalize_host(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_matches('.').to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // Extract the host string from a parsed URL, stripping IPv6 brackets that
-    // url::Url includes in host_str() (e.g. "[::1]" → "::1").
-    let extract = |url: Url| -> Option<String> {
-        let h = url.host_str()?.trim_matches('.');
-        let h = h
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(h);
-        if h.is_empty() {
-            None
-        } else {
-            Some(h.to_string())
-        }
-    };
-
-    // Try parsing as a full URL first; only use the result if a host was found.
-    // "example.com:8443" parses as scheme="example.com" with no host — skip it.
-    if let Ok(url) = Url::parse(&trimmed) {
-        if let Some(host) = extract(url) {
-            return Some(host);
-        }
-    }
-
-    // No scheme, or scheme-only parse produced no host — prepend a dummy scheme.
-    if let Ok(url) = Url::parse(&format!("dummy://{}", trimmed)) {
-        if let Some(host) = extract(url) {
-            return Some(host);
-        }
-    }
-
-    // Last resort: bare hostname. Strip stray brackets (e.g. "[]" → "") and dots.
-    let host = trimmed
-        .trim_matches('.')
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim_matches('.');
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
-    }
-}
-
-fn domains_match(request_domain: &str, entry_url_or_domain: &str) -> bool {
-    let Some(request_host) = normalize_host(request_domain) else {
-        return false;
-    };
-    let Some(entry_host) = normalize_host(entry_url_or_domain) else {
-        return false;
-    };
-
-    if request_host == entry_host {
-        return true;
-    }
-
-    let request_suffix = format!(".{}", request_host);
-    let entry_suffix = format!(".{}", entry_host);
-    request_host.ends_with(&entry_suffix) || entry_host.ends_with(&request_suffix)
-}
+// `normalize_host` and `domains_match` moved to `crate::domain` (WBS-306):
+// the encrypted domain-lookup path needs the exact same normalization and
+// suffix-chain semantics, so they live in one shared module. This file's
+// daemon autofill handlers import them unchanged.
 
 fn usernames_match(lhs: &str, rhs: &str) -> bool {
     lhs.trim().eq_ignore_ascii_case(rhs.trim())
@@ -716,129 +650,9 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_host_handles_urls_and_ports() {
-        assert_eq!(
-            normalize_host("https://Login.Example.com:443/path"),
-            Some("login.example.com".to_string())
-        );
-        assert_eq!(
-            normalize_host("example.com"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            normalize_host("example.com:8443"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(normalize_host(""), None);
-    }
-
-    #[test]
-    fn test_domains_match_exact_and_subdomains_only() {
-        assert!(domains_match("example.com", "https://example.com/login"));
-        assert!(domains_match(
-            "accounts.example.com",
-            "https://example.com/login"
-        ));
-        assert!(domains_match(
-            "example.com",
-            "https://accounts.example.com/login"
-        ));
-        assert!(!domains_match(
-            "evil-example.com",
-            "https://example.com/login"
-        ));
-        assert!(!domains_match(
-            "notexample.com",
-            "https://example.com/login"
-        ));
-    }
-
-    #[test]
     fn test_usernames_match_case_insensitive_and_trimmed() {
         assert!(usernames_match(" User@Example.com ", "user@example.com"));
         assert!(!usernames_match("alice@example.com", "bob@example.com"));
-    }
-
-    #[test]
-    fn test_normalize_host_strips_userinfo() {
-        assert_eq!(
-            normalize_host("https://user:pass@example.com/path"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            normalize_host("user@host.com"),
-            Some("host.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_normalize_host_strips_query_and_fragment() {
-        assert_eq!(
-            normalize_host("example.com/path?query=1#frag"),
-            Some("example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_normalize_host_trailing_dots() {
-        assert_eq!(
-            normalize_host("example.com."),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            normalize_host("..example.com.."),
-            Some("example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_normalize_host_whitespace_only() {
-        assert_eq!(normalize_host("   "), None);
-        assert_eq!(normalize_host(" . "), None);
-    }
-
-    #[test]
-    fn test_normalize_host_bracketed_ipv6() {
-        assert_eq!(normalize_host("[::1]:8080"), Some("::1".to_string()));
-        assert_eq!(
-            normalize_host("https://[::1]:443/path"),
-            Some("::1".to_string())
-        );
-    }
-
-    #[test]
-    fn test_normalize_host_empty_bracketed_ipv6() {
-        assert_eq!(normalize_host("[]"), None);
-    }
-
-    #[test]
-    fn test_normalize_host_bare_ipv6() {
-        // Non-bracketed IPv6 -- colons not stripped since it looks like IPv6
-        let result = normalize_host("::1");
-        assert_eq!(result, Some("::1".to_string()));
-    }
-
-    #[test]
-    fn test_domains_match_both_empty() {
-        assert!(!domains_match("", ""));
-        assert!(!domains_match("", "example.com"));
-        assert!(!domains_match("example.com", ""));
-    }
-
-    #[test]
-    fn test_domains_match_different_schemes() {
-        assert!(domains_match(
-            "http://example.com",
-            "https://example.com/login"
-        ));
-    }
-
-    #[test]
-    fn test_domains_match_with_ports() {
-        assert!(domains_match(
-            "example.com:8443",
-            "https://example.com:443/"
-        ));
     }
 
     #[test]

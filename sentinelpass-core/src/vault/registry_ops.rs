@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use rusqlite::OptionalExtension;
 
-use crate::crypto::cipher::{decrypt_to_string, encrypt_string, DataEncryptionKey, EncryptedEntry};
+use crate::crypto::cipher::{encrypt_string, DataEncryptionKey};
 use crate::crypto::{analyze_password, PasswordStrength};
 use crate::database::{EntryFilter, EntryRepository, SqliteEntryRepository};
 use crate::registry::policy::{self, RecommendationInput};
@@ -48,7 +48,7 @@ impl VaultManager {
         let db = self.lock_db()?;
         let conn = db.conn();
 
-        let existing = load_entities(conn, dek)?;
+        let existing = load_entities(conn, dek, self.vault_uuid.as_deref())?;
         if existing.iter().any(|entity| entity.name == name) {
             return Err(PasswordManagerError::InvalidInput(format!(
                 "Entity name already exists: {}",
@@ -57,9 +57,30 @@ impl VaultManager {
         }
 
         let entity_id = uuid::Uuid::new_v4().to_string();
-        let name_blob = serialize_encrypted_string(dek, name)?;
+        // Entities seal v2 (WBS-304): entity_id is the PRIMARY KEY — a
+        // stable identity that always exists, so every write can be v2.
+        let vault_uuid = self.vault_uuid_str()?;
+        let name_blob = crate::vault::envelope_ops::seal_object_field(
+            dek,
+            vault_uuid,
+            &entity_id,
+            crate::crypto::aad::ObjectType::RegistryEntity,
+            crate::crypto::aad::EnvelopePurpose::Summary,
+            name,
+            self.session_epoch(),
+        )?;
         let notes_blob = notes
-            .map(|value| serialize_encrypted_string(dek, value))
+            .map(|value| {
+                crate::vault::envelope_ops::seal_object_field(
+                    dek,
+                    vault_uuid,
+                    &entity_id,
+                    crate::crypto::aad::ObjectType::RegistryEntity,
+                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    value,
+                    self.session_epoch(),
+                )
+            })
             .transpose()?;
 
         conn.execute(
@@ -108,7 +129,7 @@ impl VaultManager {
     pub fn list_entities(&self) -> Result<Vec<Entity>> {
         let dek = self.key_hierarchy.dek()?;
         let db = self.lock_db()?;
-        load_entities(db.conn(), dek)
+        load_entities(db.conn(), dek, self.vault_uuid.as_deref())
     }
 
     /// Delete an entity. Memberships cascade (hard delete — registry tables
@@ -385,7 +406,28 @@ impl VaultManager {
                 if !credential_type.is_retrievable_secret() {
                     continue;
                 }
-                let secret = decrypt_blob_string(dek, &row.password)?;
+                // Skip-and-name on refusal (adoption review, finding 9):
+                // a tampered/corrupt row must not leave the equality
+                // index permanently incomplete with no clue WHICH row —
+                // the sweep logs the entry_id and moves on; the tamper
+                // stays visible in the log and in report.failed.
+                let secret = match self.open_entry_field(
+                    row.sync_id.as_deref(),
+                    credential_type,
+                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    &row.password,
+                ) {
+                    Ok(secret) => secret.to_string(),
+                    Err(e) => {
+                        report.failed += 1;
+                        tracing::warn!(
+                            entry_id = row.entry_id,
+                            error = %e,
+                            "registry sweep: skipping unreadable entry blob"
+                        );
+                        continue;
+                    }
+                };
                 let outcome = upsert_equality_tag_with_key(
                     db.conn(),
                     dek,
@@ -454,7 +496,7 @@ impl VaultManager {
         let db = self.lock_db()?;
         let conn = db.conn();
 
-        let entities = load_entities(conn, dek)?;
+        let entities = load_entities(conn, dek, self.vault_uuid.as_deref())?;
         let entity_by_id: HashMap<&str, &Entity> =
             entities.iter().map(|e| (e.entity_id.as_str(), e)).collect();
 
@@ -570,7 +612,28 @@ impl VaultManager {
                     raw_rows
                         .iter()
                         .find(|row| row.entry_id == *entry_id)
-                        .and_then(|row| decrypt_blob_string(dek, &row.title).ok())
+                        // Skip-and-warn (containment parity with the
+                        // sweep): one unreadable row must not kill the
+                        // whole overview.
+                        .and_then(|row| {
+                            let cred = super::CredentialType::parse(&row.credential_type).ok()?;
+                            match self.open_entry_field(
+                                row.sync_id.as_deref(),
+                                cred,
+                                crate::crypto::aad::EnvelopePurpose::Summary,
+                                &row.title,
+                            ) {
+                                Ok(t) => Some(t.to_string()),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        entry_id = row.entry_id,
+                                        error = %e,
+                                        "registry overview: skipping unreadable entry title"
+                                    );
+                                    None
+                                }
+                            }
+                        })
                 })
                 .collect::<Vec<_>>();
             clusters.push(ReuseCluster {
@@ -590,7 +653,22 @@ impl VaultManager {
             if !credential_type.is_retrievable_secret() {
                 continue;
             }
-            let title = decrypt_blob_string(dek, &row.title)?;
+            let title = match self.open_entry_field(
+                row.sync_id.as_deref(),
+                credential_type,
+                crate::crypto::aad::EnvelopePurpose::Summary,
+                &row.title,
+            ) {
+                Ok(t) => t.to_string(),
+                Err(e) => {
+                    tracing::warn!(
+                        entry_id = row.entry_id,
+                        error = %e,
+                        "registry overview: skipping unreadable entry"
+                    );
+                    continue;
+                }
+            };
 
             let membership_entity_id = membership_entity.get(&row.entry_id);
             let entity = membership_entity_id.and_then(|id| entity_by_id.get(id.as_str()).copied());
@@ -607,7 +685,22 @@ impl VaultManager {
             let strength_score = if include_strength
                 && crate::registry::is_equality_eligible(credential_type, "x")
             {
-                let secret = decrypt_blob_string(dek, &row.password)?;
+                let secret = match self.open_entry_field(
+                    row.sync_id.as_deref(),
+                    credential_type,
+                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    &row.password,
+                ) {
+                    Ok(s) => s.to_string(),
+                    Err(e) => {
+                        tracing::warn!(
+                            entry_id = row.entry_id,
+                            error = %e,
+                            "registry overview: strength analysis skipped (unreadable blob)"
+                        );
+                        continue;
+                    }
+                };
                 let analysis = analyze_password(secret.as_str())?;
                 Some(analysis.strength.score())
             } else {
@@ -669,14 +762,11 @@ fn serialize_encrypted_string(dek: &DataEncryptionKey, value: &str) -> Result<Ve
     bincode::serialize(&encrypted).map_err(|e| DatabaseError::Serialization(e.to_string()).into())
 }
 
-/// Decrypt a bincode-wrapped [`EncryptedEntry`] string column.
-fn decrypt_blob_string(dek: &DataEncryptionKey, blob: &[u8]) -> Result<String> {
-    let encrypted: EncryptedEntry =
-        bincode::deserialize(blob).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-    decrypt_to_string(dek, &encrypted).map_err(PasswordManagerError::from)
-}
-
-fn load_entities(conn: &rusqlite::Connection, dek: &DataEncryptionKey) -> Result<Vec<Entity>> {
+fn load_entities(
+    conn: &rusqlite::Connection,
+    dek: &DataEncryptionKey,
+    vault_uuid: Option<&str>,
+) -> Result<Vec<Entity>> {
     let mut stmt = conn
         .prepare(
             "SELECT entity_id, name, kind, criticality, notes, rotation_interval_days_override,
@@ -712,14 +802,36 @@ fn load_entities(conn: &rusqlite::Connection, dek: &DataEncryptionKey) -> Result
             created_at,
             modified_at,
         ) = row.map_err(DatabaseError::Sqlite)?;
+        // Dual-read (WBS-304): v2 entity envelopes open against the
+        // entity's own PRIMARY KEY identity; v1 rows fall back.
+        let name = crate::vault::envelope_ops::open_object_field(
+            dek,
+            vault_uuid,
+            Some(&entity_id),
+            crate::crypto::aad::ObjectType::RegistryEntity,
+            crate::crypto::aad::EnvelopePurpose::Summary,
+            &name_blob,
+        )?
+        .to_string();
+        let notes = notes_blob
+            .map(|blob| {
+                crate::vault::envelope_ops::open_object_field(
+                    dek,
+                    vault_uuid,
+                    Some(&entity_id),
+                    crate::crypto::aad::ObjectType::RegistryEntity,
+                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    &blob,
+                )
+                .map(|z| z.to_string())
+            })
+            .transpose()?;
         entities.push(Entity {
             entity_id,
-            name: decrypt_blob_string(dek, &name_blob)?,
+            name,
             kind: EntityKind::parse(&kind)?,
             criticality: Criticality::parse(&criticality)?,
-            notes: notes_blob
-                .map(|blob| decrypt_blob_string(dek, &blob))
-                .transpose()?,
+            notes,
             rotation_interval_days_override: override_days,
             created_at,
             modified_at,

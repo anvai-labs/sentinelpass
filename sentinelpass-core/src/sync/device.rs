@@ -80,6 +80,9 @@ impl DeviceIdentity {
                     PasswordManagerError::InvalidInput(format!("Invalid device_id: {}", e))
                 })?;
 
+                // The decrypted Ed25519 seed is zeroize-on-drop (WBS-308):
+                // the buffer is wiped after the copy into the fixed-size
+                // key, on this success path and on every error path.
                 let signing_key_bytes =
                     decrypt_from_sync(dek, &encrypted).map_err(PasswordManagerError::Crypto)?;
 
@@ -89,9 +92,10 @@ impl DeviceIdentity {
                     ));
                 }
 
-                let key_array: [u8; 32] = signing_key_bytes.try_into().map_err(|_| {
-                    PasswordManagerError::InvalidInput("Invalid signing key".to_string())
-                })?;
+                let key_array: [u8; 32] =
+                    signing_key_bytes.as_slice().try_into().map_err(|_| {
+                        PasswordManagerError::InvalidInput("Invalid signing key".to_string())
+                    })?;
 
                 let signing_key = SigningKey::from_bytes(&key_array);
 

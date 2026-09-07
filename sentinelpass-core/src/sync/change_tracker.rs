@@ -8,6 +8,7 @@ use crate::sync::models::{
 use crate::{CredentialType, DatabaseError, PasswordManagerError, Result};
 use rusqlite::Connection;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Query all entries with `sync_state = 'pending'` and build sync blobs.
 pub fn collect_pending_credential_blobs(
@@ -45,6 +46,12 @@ pub fn collect_pending_credential_blobs(
         .map_err(DatabaseError::Sqlite)?;
 
     let mut blobs = Vec::new();
+
+    // Vault identity for v2 envelope opens (adoption review, finding 1:
+    // this collector decrypted v1-only, so every v2 entry — what add_entry
+    // now writes — permanently aborted the whole push). Fetched once;
+    // v1 rows don't need it.
+    let (vault_uuid, _epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
     for row in rows {
         let (
@@ -85,31 +92,71 @@ pub fn collect_pending_credential_blobs(
             continue;
         }
 
-        // Load domain mappings for this entry
-        let domains = load_domain_mappings(conn, entry_id)?;
+        // Load domain mappings for this entry (dual-read, WBS-306: the
+        // sealed domain opens; legacy plaintext rows pass through).
+        let domains = load_domain_mappings(conn, dek, &vault_uuid, entry_id)?;
 
         // Build credential payload from raw encrypted blobs
         // Note: we re-serialize the raw blobs as-is since they're already
         // encrypted locally. For sync, we need the *logical* plaintext to
         // re-encrypt under the sync wire format. But since the DEK is the
         // same, we decrypt locally and re-encrypt for transport.
-        let title = decrypt_blob(dek, &title_blob)?;
-        let username = decrypt_blob(dek, &username_blob)?;
-        let password = decrypt_blob(dek, &password_blob)?;
+        // Dual-read, SKIP-AND-WARN per unreadable row (adoption review):
+        // one corrupt/tampered pending row must not permanently wedge the
+        // whole push (the row stays pending; every other change still
+        // syncs).
+        let cred = match CredentialType::parse(&credential_type) {
+            Ok(cred) => cred,
+            Err(e) => {
+                tracing::warn!(entry_id, error = %e, "push: skipping entry with invalid type");
+                continue;
+            }
+        };
+        let identity = Some(crate::vault::envelope_ops::EntryFieldIdentity {
+            vault_uuid: &vault_uuid,
+            sync_id: &sync_id_str,
+            cred,
+        });
+        let open = |purpose, blob: &Vec<u8>| {
+            // Zeroizing plaintext straight from the envelope open (WBS-308);
+            // identity metadata fields are unguarded explicitly below.
+            crate::vault::envelope_ops::open_entry_field_with_identity(dek, identity, purpose, blob)
+        };
+        let (title, username, password) = match (
+            open(crate::crypto::aad::EnvelopePurpose::Summary, &title_blob),
+            open(crate::crypto::aad::EnvelopePurpose::Summary, &username_blob),
+            open(crate::crypto::aad::EnvelopePurpose::Secret, &password_blob),
+        ) {
+            (Ok(t), Ok(u), Ok(p)) => (t.to_string(), u.to_string(), p),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                tracing::warn!(entry_id, error = %e, "push: skipping unreadable entry");
+                continue;
+            }
+        };
+        // Optional fields: skip-and-warn per row (same containment as the
+        // required fields above) — a corrupt url/notes blob skips the
+        // WHOLE row (partial application would silently lose fields).
         let url = url_blob
             .filter(|b| !b.is_empty())
-            .map(|b| decrypt_blob(dek, &b))
-            .transpose()?;
+            .map(|b| open(crate::crypto::aad::EnvelopePurpose::Secret, &b).map(|z| z.to_string()))
+            .transpose();
         let notes = notes_blob
             .filter(|b| !b.is_empty())
-            .map(|b| decrypt_blob(dek, &b))
-            .transpose()?;
+            .map(|b| open(crate::crypto::aad::EnvelopePurpose::Secret, &b).map(|z| z.to_string()))
+            .transpose();
+        let (url, notes) = match (url, notes) {
+            (Ok(u), Ok(n)) => (u, n),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!(entry_id, error = %e, "push: skipping entry (unreadable url/notes)");
+                continue;
+            }
+        };
 
         let payload = CredentialPayload {
             title,
             username,
             password,
-            credential_type: CredentialType::parse(&credential_type)?,
+            credential_type: cred,
             url,
             notes,
             favorite,
@@ -118,8 +165,12 @@ pub fn collect_pending_credential_blobs(
             modified_at,
         };
 
-        let payload_json = serde_json::to_vec(&payload)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        // The serialized payload carries the plaintext secret(s) until
+        // encryption — zeroized on drop (WBS-308 / SR-CRYPTO-004).
+        let payload_json = Zeroizing::new(
+            serde_json::to_vec(&payload)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
+        );
 
         let encrypted =
             encrypt_for_sync(dek, &payload_json).map_err(crate::PasswordManagerError::Crypto)?;
@@ -157,25 +208,28 @@ pub fn collect_pending_ssh_key_blobs(
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, String>(1)?,         // sync_id
-                row.get::<_, i64>(2)?,            // sync_version
-                row.get::<_, i64>(3)?,            // modified_at
-                row.get::<_, bool>(4)?,           // is_deleted
-                row.get::<_, String>(5)?,         // name
-                row.get::<_, Option<String>>(6)?, // comment
-                row.get::<_, String>(7)?,         // key_type
-                row.get::<_, Option<i64>>(8)?,    // key_size
-                row.get::<_, String>(9)?,         // public_key
-                row.get::<_, Vec<u8>>(10)?,       // private_key_encrypted
-                row.get::<_, Vec<u8>>(11)?,       // nonce
-                row.get::<_, Vec<u8>>(12)?,       // auth_tag
-                row.get::<_, String>(13)?,        // fingerprint
-                row.get::<_, i64>(14)?,           // created_at
+                row.get::<_, String>(1)?,                         // sync_id
+                row.get::<_, i64>(2)?,                            // sync_version
+                row.get::<_, i64>(3)?,                            // modified_at
+                row.get::<_, bool>(4)?,                           // is_deleted
+                row.get::<_, String>(5)?,                         // name
+                row.get::<_, Option<rusqlite::types::Value>>(6)?, // comment (envelope BLOB or legacy TEXT)
+                row.get::<_, String>(7)?,                         // key_type
+                row.get::<_, Option<i64>>(8)?,                    // key_size
+                row.get::<_, String>(9)?,                         // public_key
+                row.get::<_, Vec<u8>>(10)?,                       // private_key_encrypted
+                row.get::<_, Vec<u8>>(11)?,                       // nonce
+                row.get::<_, Vec<u8>>(12)?,                       // auth_tag
+                row.get::<_, String>(13)?,                        // fingerprint
+                row.get::<_, i64>(14)?,                           // created_at
             ))
         })
         .map_err(DatabaseError::Sqlite)?;
 
     let mut blobs = Vec::new();
+
+    // Fetched ONCE per push (fail-closed) — hoisted from the per-row loop.
+    let (vault_uuid, _epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
     for row in rows {
         let (
@@ -216,22 +270,76 @@ pub fn collect_pending_ssh_key_blobs(
             continue;
         }
 
+        // Decrypt the local private-key blob for the wire payload
+        // (class-aware dual-read, WBS-304): the whole payload is
+        // re-encrypted for transport, so it must carry PLAINTEXT — the
+        // peer seals under ITS OWN identity on apply. Passing the local
+        // v2 envelope through would transplant it with the wrong
+        // identity. v1 rows are the SSH three-part shape (ct + separate
+        // nonce/tag columns). Per-row skip-and-warn: one unreadable row
+        // must not wedge the whole push.
+        let private_key = if crate::vault::envelope_ops::is_envelope_blob(&private_key_encrypted) {
+            crate::vault::envelope_ops::open_object_field(
+                dek,
+                Some(vault_uuid.as_str()),
+                Some(&sync_id_str),
+                crate::crypto::aad::ObjectType::SshKey,
+                crate::crypto::aad::EnvelopePurpose::Secret,
+                &private_key_encrypted,
+            )
+        } else {
+            crate::ssh::SshKey::decrypt_private_key(dek, &private_key_encrypted, &nonce, &auth_tag)
+        };
+        let private_key = match private_key {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    sync_id = %sync_id_str,
+                    error = %e,
+                    "push: skipping unreadable SSH key (row stays pending)"
+                );
+                continue;
+            }
+        };
+
+        // v0.8.x peers require the OLD wire fields (required Vec<u8>s, no
+        // defaults): emit a context-free v1-style encryption of the same
+        // plaintext so mixed fleets keep working in BOTH directions. New
+        // peers prefer `private_key` and ignore these.
+        let legacy_enc = crate::crypto::cipher::encrypt_string(dek, private_key.as_str())
+            .map_err(crate::PasswordManagerError::Crypto)?;
+
+        // Identity metadata dual-read (WBS-306): the sealed comment opens
+        // against the row's identity; legacy plaintext passes through.
+        let comment = crate::vault::envelope_ops::open_metadata_text_field(
+            dek,
+            Some(vault_uuid.as_str()),
+            Some(&sync_id_str),
+            crate::crypto::aad::ObjectType::SshKey,
+            comment,
+        )?;
+
         let payload = SshKeyPayload {
             name,
             comment,
             key_type,
             key_size,
             public_key,
-            private_key_encrypted,
-            nonce,
-            auth_tag,
+            private_key,
+            private_key_encrypted: Some(legacy_enc.ciphertext),
+            legacy_nonce: Some(legacy_enc.nonce.to_vec()),
+            legacy_auth_tag: Some(legacy_enc.auth_tag.to_vec()),
             fingerprint,
             created_at,
             modified_at,
         };
 
-        let payload_json = serde_json::to_vec(&payload)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        // The serialized payload carries the plaintext secret(s) until
+        // encryption — zeroized on drop (WBS-308 / SR-CRYPTO-004).
+        let payload_json = Zeroizing::new(
+            serde_json::to_vec(&payload)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
+        );
 
         let encrypted =
             encrypt_for_sync(dek, &payload_json).map_err(crate::PasswordManagerError::Crypto)?;
@@ -271,24 +379,27 @@ pub fn collect_pending_totp_blobs(
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, String>(1)?,          // sync_id
-                row.get::<_, i64>(2)?,             // sync_version
-                row.get::<_, i64>(3)?,             // created_at (used as modified_at)
-                row.get::<_, bool>(4)?,            // is_deleted
-                row.get::<_, Vec<u8>>(6)?,         // secret_encrypted
-                row.get::<_, Vec<u8>>(7)?,         // nonce
-                row.get::<_, Vec<u8>>(8)?,         // auth_tag
-                row.get::<_, String>(9)?,          // algorithm
-                row.get::<_, u8>(10)?,             // digits
-                row.get::<_, u32>(11)?,            // period
-                row.get::<_, Option<String>>(12)?, // issuer
-                row.get::<_, Option<String>>(13)?, // account_name
-                row.get::<_, Option<String>>(14)?, // parent_sync_id
+                row.get::<_, String>(1)?,                          // sync_id
+                row.get::<_, i64>(2)?,                             // sync_version
+                row.get::<_, i64>(3)?,     // created_at (used as modified_at)
+                row.get::<_, bool>(4)?,    // is_deleted
+                row.get::<_, Vec<u8>>(6)?, // secret_encrypted
+                row.get::<_, Vec<u8>>(7)?, // nonce
+                row.get::<_, Vec<u8>>(8)?, // auth_tag
+                row.get::<_, String>(9)?,  // algorithm
+                row.get::<_, u8>(10)?,     // digits
+                row.get::<_, u32>(11)?,    // period
+                row.get::<_, Option<rusqlite::types::Value>>(12)?, // issuer (envelope BLOB or legacy TEXT)
+                row.get::<_, Option<rusqlite::types::Value>>(13)?, // account_name
+                row.get::<_, Option<String>>(14)?,                 // parent_sync_id
             ))
         })
         .map_err(DatabaseError::Sqlite)?;
 
     let mut blobs = Vec::new();
+
+    // Fetched ONCE per push (fail-closed) — hoisted from the per-row loop.
+    let (vault_uuid, _epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
     for row in rows {
         let (
@@ -330,10 +441,62 @@ pub fn collect_pending_totp_blobs(
 
         let parent_credential_sync_id = parent_sync_id_str.and_then(|s| Uuid::parse_str(&s).ok());
 
+        // Decrypt for the wire payload (dual-read, WBS-304 — see SSH).
+        // Class-aware dual-read (see SSH above): TOTP v1 rows are
+        // ct + separate nonce/tag columns. Per-row skip-and-warn: one
+        // unreadable row must not wedge the whole push. (Identity was
+        // fetched once above the loop, with the SSH collector.)
+        let secret = if crate::vault::envelope_ops::is_envelope_blob(&secret_encrypted) {
+            crate::vault::envelope_ops::open_object_field(
+                dek,
+                Some(vault_uuid.as_str()),
+                Some(&sync_id_str),
+                crate::crypto::aad::ObjectType::TotpSecret,
+                crate::crypto::aad::EnvelopePurpose::Secret,
+                &secret_encrypted,
+            )
+        } else {
+            crate::totp::decrypt_totp_secret(dek, &secret_encrypted, &nonce, &auth_tag)
+        };
+        let secret = match secret {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    sync_id = %sync_id_str,
+                    error = %e,
+                    "push: skipping unreadable TOTP secret (row stays pending)"
+                );
+                continue;
+            }
+        };
+
+        // v0.8.x peers require the OLD wire fields — emit a context-free
+        // v1-style encryption of the same plaintext (see SSH collector).
+        let legacy_enc = crate::crypto::cipher::encrypt_string(dek, secret.as_str())
+            .map_err(crate::PasswordManagerError::Crypto)?;
+
+        // Identity metadata dual-read (WBS-306): sealed envelopes open
+        // against the row's identity; legacy plaintext passes through.
+        let issuer = crate::vault::envelope_ops::open_metadata_text_field(
+            dek,
+            Some(vault_uuid.as_str()),
+            Some(&sync_id_str),
+            crate::crypto::aad::ObjectType::TotpSecret,
+            issuer,
+        )?;
+        let account_name = crate::vault::envelope_ops::open_metadata_text_field(
+            dek,
+            Some(vault_uuid.as_str()),
+            Some(&sync_id_str),
+            crate::crypto::aad::ObjectType::TotpSecret,
+            account_name,
+        )?;
+
         let payload = TotpPayload {
-            secret_encrypted,
-            nonce,
-            auth_tag,
+            secret,
+            secret_encrypted: Some(legacy_enc.ciphertext),
+            legacy_nonce: Some(legacy_enc.nonce.to_vec()),
+            legacy_auth_tag: Some(legacy_enc.auth_tag.to_vec()),
             algorithm,
             digits,
             period,
@@ -343,8 +506,12 @@ pub fn collect_pending_totp_blobs(
             parent_credential_sync_id,
         };
 
-        let payload_json = serde_json::to_vec(&payload)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        // The serialized payload carries the plaintext secret(s) until
+        // encryption — zeroized on drop (WBS-308 / SR-CRYPTO-004).
+        let payload_json = Zeroizing::new(
+            serde_json::to_vec(&payload)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
+        );
 
         let encrypted =
             encrypt_for_sync(dek, &payload_json).map_err(crate::PasswordManagerError::Crypto)?;
@@ -419,31 +586,77 @@ pub fn count_pending_changes(conn: &Connection) -> Result<u64> {
 
 // --- Helpers ---
 
-fn load_domain_mappings(conn: &Connection, entry_id: i64) -> Result<Vec<DomainPayload>> {
+/// Load a credential's domain mappings for the wire payload (dual-read,
+/// WBS-306): the sealed `domain_enc` envelope opens against the mapping
+/// row's identity; rows not yet backfilled pass their legacy plaintext
+/// domain through. The wire payload carries PLAINTEXT domains — the whole
+/// payload is re-encrypted for transport, and the peer seals under ITS OWN
+/// identity on apply.
+fn load_domain_mappings(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    vault_uuid: &str,
+    entry_id: i64,
+) -> Result<Vec<DomainPayload>> {
     let mut stmt = conn
-        .prepare("SELECT domain, is_primary FROM domain_mappings WHERE entry_id = ?1")
+        .prepare(
+            "SELECT domain, is_primary, domain_enc, sync_id
+             FROM domain_mappings WHERE entry_id = ?1",
+        )
         .map_err(DatabaseError::Sqlite)?;
 
-    let domains = stmt
+    let rows = stmt
         .query_map([entry_id], |row| {
-            Ok(DomainPayload {
-                domain: row.get(0)?,
-                is_primary: row.get(1)?,
-            })
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, Option<rusqlite::types::Value>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
         })
         .map_err(DatabaseError::Sqlite)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(DatabaseError::Sqlite)?;
 
-    Ok(domains)
-}
+    let mut domains = Vec::with_capacity(rows.len());
+    for (mapping_index, (legacy_domain, is_primary, domain_enc, sync_id)) in
+        rows.into_iter().enumerate()
+    {
+        let domain = match domain_enc {
+            Some(blob) => {
+                // Per-mapping skip-and-warn (containment parity with the
+                // pending-row collectors): one tampered/corrupt mapping
+                // must not wedge the whole push. The open still FAILS —
+                // tamper is never honored — it is just not allowed to
+                // take unrelated mappings down with it.
+                match crate::vault::envelope_ops::open_metadata_text_field(
+                    dek,
+                    Some(vault_uuid),
+                    sync_id.as_deref(),
+                    crate::crypto::aad::ObjectType::DomainMapping,
+                    Some(blob),
+                ) {
+                    Ok(domain) => domain,
+                    Err(e) => {
+                        tracing::warn!(
+                            entry_id,
+                            mapping_index,
+                            error = %e,
+                            "push: skipping unreadable domain mapping"
+                        );
+                        continue;
+                    }
+                }
+            }
+            None => legacy_domain,
+        };
+        let Some(domain) = domain else {
+            continue; // sealed column empty AND no legacy value: nothing to push
+        };
+        domains.push(DomainPayload { domain, is_primary });
+    }
 
-/// Decrypt a bincode-serialized EncryptedEntry blob to a String.
-fn decrypt_blob(dek: &DataEncryptionKey, blob: &[u8]) -> Result<String> {
-    let encrypted: crate::crypto::EncryptedEntry =
-        bincode::deserialize(blob).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-    crate::crypto::cipher::decrypt_to_string(dek, &encrypted)
-        .map_err(crate::PasswordManagerError::Crypto)
+    Ok(domains)
 }
 
 #[cfg(test)]
@@ -453,8 +666,19 @@ mod tests {
     use crate::database::Database;
 
     fn setup_db_with_sync_schema() -> Database {
+        fn seed_identity(db: &Database) {
+            db.conn()
+                .execute(
+                    "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, vault_uuid, format_version, key_epoch)
+                     VALUES (1, 7, X'00', X'00', X'00', strftime('%s','now'), strftime('%s','now'), '11111111-1111-1111-1111-111111111111', 1, 1)",
+                    [],
+                )
+                .unwrap();
+        }
+
         let db = Database::in_memory().unwrap();
         db.initialize_schema().unwrap();
+        seed_identity(&db);
         db
     }
 
@@ -504,7 +728,19 @@ mod tests {
     }
 
     /// Insert a pending SSH key entry and return its sync_id.
-    fn insert_pending_ssh_key(conn: &Connection, name: &str, is_deleted: bool) -> Uuid {
+    fn insert_pending_ssh_key(
+        conn: &Connection,
+        dek: &DataEncryptionKey,
+        name: &str,
+        is_deleted: bool,
+    ) -> Uuid {
+        // Real v1-encrypted private key material, sealed under the SAME
+        // DEK the collector will decrypt with.
+        let enc = crate::crypto::cipher::encrypt_string(
+            dek,
+            "-----BEGIN OPENSSH PRIVATE KEY-----fixture-----END-----",
+        )
+        .unwrap();
         let sync_id = Uuid::new_v4();
         let now = chrono::Utc::now().timestamp();
 
@@ -514,9 +750,18 @@ mod tests {
                 private_key_encrypted, nonce, auth_tag, fingerprint,
                 created_at, modified_at,
                 sync_id, sync_version, sync_state, is_deleted
-            ) VALUES (?1, NULL, 'ed25519', 256, 'ssh-ed25519 AAAA...', X'deadbeef', X'aabb', X'ccdd', 'SHA256:test',
-                      ?2, ?3, ?4, 1, 'pending', ?5)",
-            rusqlite::params![name, now, now, sync_id.to_string(), is_deleted],
+            ) VALUES (?1, NULL, 'ed25519', 256, 'ssh-ed25519 AAAA...', ?2, ?3, ?4, 'SHA256:test',
+                      ?5, ?6, ?7, 1, 'pending', ?8)",
+            rusqlite::params![
+                name,
+                enc.ciphertext,
+                enc.nonce.to_vec(),
+                enc.auth_tag.to_vec(),
+                now,
+                now,
+                sync_id.to_string(),
+                is_deleted
+            ],
         )
         .unwrap();
 
@@ -524,7 +769,15 @@ mod tests {
     }
 
     /// Insert a pending TOTP entry and return its sync_id.
-    fn insert_pending_totp(conn: &Connection, entry_id: i64, is_deleted: bool) -> Uuid {
+    fn insert_pending_totp(
+        conn: &Connection,
+        dek: &DataEncryptionKey,
+        entry_id: i64,
+        is_deleted: bool,
+    ) -> Uuid {
+        // Real v1-encrypted TOTP secret under the collector's DEK.
+        let (ct, nonce, auth_tag) =
+            crate::totp::encrypt_totp_secret(dek, "JBSWY3DPEHPK3PXP").unwrap();
         let sync_id = Uuid::new_v4();
         let now = chrono::Utc::now().timestamp();
 
@@ -533,9 +786,18 @@ mod tests {
                 entry_id, secret_encrypted, nonce, auth_tag,
                 algorithm, digits, period, issuer, account_name, created_at,
                 sync_id, sync_version, sync_state, is_deleted
-            ) VALUES (?1, X'deadbeef', X'aabbccddeeff', X'00112233445566778899aabbccddeeff',
-                      'SHA1', 6, 30, 'Test', 'user@test.com', ?2, ?3, 1, 'pending', ?4)",
-            rusqlite::params![entry_id, now, sync_id.to_string(), is_deleted],
+            ) VALUES (?1, ?2, ?3, ?4,
+                      'SHA1', 6, 30, 'Test', 'user@test.com', ?5,
+                      ?6, 1, 'pending', ?7)",
+            rusqlite::params![
+                entry_id,
+                ct,
+                nonce,
+                auth_tag,
+                now,
+                sync_id.to_string(),
+                is_deleted
+            ],
         )
         .unwrap();
 
@@ -557,7 +819,7 @@ mod tests {
 
         insert_pending_credential(conn, &dek, "Site A", "user1", "pass1", false);
         insert_pending_credential(conn, &dek, "Site B", "user2", "pass2", false);
-        let sync_id_ssh = insert_pending_ssh_key(conn, "my-key", false);
+        let sync_id_ssh = insert_pending_ssh_key(conn, &dek, "my-key", false);
 
         let count = count_pending_changes(conn).unwrap();
         assert_eq!(count, 3);
@@ -575,7 +837,7 @@ mod tests {
         let dek = DataEncryptionKey::new().unwrap();
 
         let cred_id = insert_pending_credential(conn, &dek, "Test", "user", "pass", false);
-        let ssh_id = insert_pending_ssh_key(conn, "key1", false);
+        let ssh_id = insert_pending_ssh_key(conn, &dek, "key1", false);
 
         assert_eq!(count_pending_changes(conn).unwrap(), 2);
 
@@ -730,13 +992,37 @@ mod tests {
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
-        let sync_id = insert_pending_ssh_key(conn, "deploy-key", false);
+        let sync_id = insert_pending_ssh_key(conn, &dek, "deploy-key", false);
 
         let blobs = collect_pending_ssh_key_blobs(conn, &dek, device_id).unwrap();
         assert_eq!(blobs.len(), 1);
         assert_eq!(blobs[0].sync_id, sync_id);
         assert_eq!(blobs[0].entry_type, SyncEntryType::SshKey);
         assert!(!blobs[0].is_tombstone);
+
+        // Gate-review finding 6: the EMITTED wire payload must carry BOTH
+        // shapes — the current plaintext (for upgraded peers) AND the
+        // populated legacy triplet (for v0.8.x peers, whose structs
+        // require these fields). A collector refactor dropping either
+        // shape fails here instead of wedging a mixed fleet.
+        let payload_json =
+            crate::sync::crypto::decrypt_from_sync(&dek, &blobs[0].encrypted_payload).unwrap();
+        let payload: SshKeyPayload = serde_json::from_slice(&payload_json).unwrap();
+        assert!(!payload.private_key.is_empty(), "plaintext must be present");
+        let legacy = payload
+            .private_key_encrypted
+            .expect("legacy triplet must be emitted for v0.8.x peers");
+        assert!(!legacy.is_empty());
+        assert!(payload
+            .legacy_nonce
+            .as_deref()
+            .map(|n| n.len() == 12)
+            .unwrap_or(false));
+        assert!(payload
+            .legacy_auth_tag
+            .as_deref()
+            .map(|t| t.len() == 16)
+            .unwrap_or(false));
     }
 
     #[test]
@@ -746,7 +1032,7 @@ mod tests {
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
-        let sync_id = insert_pending_ssh_key(conn, "revoked-key", true);
+        let sync_id = insert_pending_ssh_key(conn, &dek, "revoked-key", true);
 
         let blobs = collect_pending_ssh_key_blobs(conn, &dek, device_id).unwrap();
         assert_eq!(blobs.len(), 1);
@@ -781,7 +1067,7 @@ mod tests {
             )
             .unwrap();
 
-        let totp_sync_id = insert_pending_totp(conn, entry_id, false);
+        let totp_sync_id = insert_pending_totp(conn, &dek, entry_id, false);
 
         let blobs = collect_pending_totp_blobs(conn, &dek, device_id).unwrap();
         assert_eq!(blobs.len(), 1);
@@ -812,7 +1098,7 @@ mod tests {
             )
             .unwrap();
 
-        let sync_id = insert_pending_totp(conn, entry_id, true);
+        let sync_id = insert_pending_totp(conn, &dek, entry_id, true);
 
         let blobs = collect_pending_totp_blobs(conn, &dek, device_id).unwrap();
         assert_eq!(blobs.len(), 1);
@@ -823,7 +1109,10 @@ mod tests {
     #[test]
     fn load_domain_mappings_empty() {
         let db = setup_db_with_sync_schema();
-        let domains = load_domain_mappings(db.conn(), 999).unwrap();
+        let dek = DataEncryptionKey::new().unwrap();
+        let domains =
+            load_domain_mappings(db.conn(), &dek, "11111111-1111-1111-1111-111111111111", 999)
+                .unwrap();
         assert!(domains.is_empty());
     }
 
@@ -853,7 +1142,9 @@ mod tests {
         )
         .unwrap();
 
-        let domains = load_domain_mappings(conn, entry_id).unwrap();
+        let domains =
+            load_domain_mappings(conn, &dek, "11111111-1111-1111-1111-111111111111", entry_id)
+                .unwrap();
         assert_eq!(domains.len(), 2);
     }
 
@@ -864,7 +1155,7 @@ mod tests {
         let dek = DataEncryptionKey::new().unwrap();
 
         insert_pending_credential(conn, &dek, "Cred1", "u", "p", false);
-        insert_pending_ssh_key(conn, "key1", false);
+        insert_pending_ssh_key(conn, &dek, "key1", false);
 
         let cred2_sync = insert_pending_credential(conn, &dek, "Cred2", "u2", "p2", false);
         let entry_id: i64 = conn
@@ -874,7 +1165,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        insert_pending_totp(conn, entry_id, false);
+        insert_pending_totp(conn, &dek, entry_id, false);
 
         assert_eq!(count_pending_changes(conn).unwrap(), 4);
     }
