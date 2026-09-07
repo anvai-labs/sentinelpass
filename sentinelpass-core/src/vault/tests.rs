@@ -1580,8 +1580,26 @@ mod wbs302_slot_registry {
         // NULLed MAC is tampering and is correctly refused).
         {
             let db = crate::database::Database::open(&path).unwrap();
+            // A real pre-registry vault predates WBS-305, so its db_metadata
+            // columns are legacy bincode (the v6->v7 migration minted the
+            // slot by verbatim byte copy — bincode on BOTH sides, which is
+            // exactly the state the pre-bootstrap byte-mirror invariant
+            // blesses). The downgrade below is what makes the simulation
+            // faithful: a document-format vault with a NULLed MAC could only
+            // come from tampering (WBS-305 writers commit the MAC in the
+            // same transaction) and is refused — pinned by
+            // `null_mac_on_a_document_format_vault_is_refused` below.
+            let (kdf, wrapped, _) = VaultManager::load_vault_metadata(&db).unwrap();
             db.conn()
-                .execute_batch("UPDATE db_metadata SET slot_registry_mac = NULL;")
+                .execute(
+                    "UPDATE db_metadata SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3,
+                     slot_registry_mac = NULL",
+                    rusqlite::params![
+                        &bincode::serialize(&kdf).unwrap(),
+                        &bincode::serialize(&wrapped).unwrap(),
+                        &bincode::serialize(&wrapped.nonce).unwrap(),
+                    ],
+                )
                 .unwrap();
         }
         fs::remove_file(crate::vault::epoch_guard::sidecar_path(&path)).unwrap();
@@ -3028,4 +3046,283 @@ fn domain_mapping_backfill_runs_at_open() {
     let found = reopened.find_entries_by_domain("sub.open.example").unwrap();
     assert_eq!(found.len(), 1, "open-time sweep must backfill tags");
     assert_eq!(found[0].password.as_str(), "backfill-secret");
+}
+
+/// WBS-305 / SR-CRYPTO-002: the `db_metadata` key-material columns move to
+/// the bounded, versioned SPKDF/SPWRAP/SPNONCE documents; legacy bincode
+/// rows stay readable via the dual-read decoders; the `key_slots` mirror
+/// deliberately keeps the frozen bincode slot format.
+mod wbs305_durable_wire {
+    use super::*;
+    use crate::crypto::dbwire::{KDF_MAGIC, NONCE_MAGIC, WRAP_MAGIC};
+    use std::fs;
+
+    fn temp_vault(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sp-wbs305-{}-{}.db",
+            name,
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(crate::vault::epoch_guard::sidecar_path(&path));
+        path
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(crate::vault::epoch_guard::sidecar_path(path));
+    }
+
+    fn raw_columns(conn: &rusqlite::Connection) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let row: (Vec<u8>, Vec<u8>, Vec<u8>) = conn
+            .query_row(
+                "SELECT kdf_params, wrapped_dek, dek_nonce FROM db_metadata WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        row
+    }
+
+    #[test]
+    fn new_vault_stores_wire_documents_in_db_metadata() {
+        let vault = VaultManager::create(":memory:", b"docs-not-bincode-1").unwrap();
+        let db = vault.db.lock().unwrap();
+        let (kdf_blob, wrap_blob, nonce_blob) = raw_columns(db.conn());
+        assert!(
+            kdf_blob.starts_with(KDF_MAGIC),
+            "kdf_params must be an SPKDF document, got: {}",
+            String::from_utf8_lossy(&kdf_blob)
+        );
+        assert!(
+            wrap_blob.starts_with(WRAP_MAGIC),
+            "wrapped_dek must be an SPWRAP document, got: {}",
+            String::from_utf8_lossy(&wrap_blob)
+        );
+        assert!(
+            nonce_blob.starts_with(NONCE_MAGIC),
+            "dek_nonce must be an SPNONCE document, got: {}",
+            String::from_utf8_lossy(&nonce_blob)
+        );
+        // The documents are bounded metadata, not full-blob-scale payloads.
+        assert!(
+            kdf_blob.len() < crate::crypto::dbwire::MAX_DBWIRE_BYTES / 4
+                && wrap_blob.len() < crate::crypto::dbwire::MAX_DBWIRE_BYTES / 4,
+            "metadata documents must sit far under the size cap"
+        );
+    }
+
+    #[test]
+    fn legacy_bincode_columns_still_load() {
+        // Simulate a pre-WBS-305 vault: the columns carry legacy bincode.
+        // Both read paths (load_vault_metadata and the single-snapshot
+        // loader used at open) must decode it to the exact typed values.
+        let vault = VaultManager::create(":memory:", b"legacy-still-opens").unwrap();
+        let (kdf, wrapped, epoch) = {
+            let db = vault.db.lock().unwrap();
+            VaultManager::load_vault_metadata(&db).unwrap()
+        };
+
+        let legacy_kdf = bincode::serialize(&kdf).unwrap();
+        let legacy_wrap = bincode::serialize(&wrapped).unwrap();
+        let legacy_nonce = bincode::serialize(&wrapped.nonce).unwrap();
+        assert!(!legacy_kdf.starts_with(KDF_MAGIC));
+        {
+            let db = vault.db.lock().unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE db_metadata SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3",
+                    rusqlite::params![&legacy_kdf, &legacy_wrap, &legacy_nonce],
+                )
+                .unwrap();
+        }
+
+        let (kdf2, wrapped2, epoch2) = {
+            let db = vault.db.lock().unwrap();
+            VaultManager::load_vault_metadata(&db).unwrap()
+        };
+        assert_eq!(epoch2, epoch);
+        assert_eq!(kdf2.salt, kdf.salt);
+        assert_eq!(kdf2.mem_cost, kdf.mem_cost);
+        assert_eq!(kdf2.time_cost, kdf.time_cost);
+        assert_eq!(kdf2.parallelism, kdf.parallelism);
+        assert_eq!(kdf2.output_length, kdf.output_length);
+        assert_eq!(wrapped2.wrapped_dek, wrapped.wrapped_dek);
+        assert_eq!(wrapped2.nonce, wrapped.nonce);
+        assert_eq!(wrapped2.auth_tag, wrapped.auth_tag);
+        assert_eq!(wrapped2.epoch_bound, wrapped.epoch_bound);
+
+        // The snapshot loader (open path) sees the same bytes and types,
+        // and its epoch-guard digest is computed over the stored bytes
+        // whatever their format.
+        let snapshot = {
+            let db = vault.db.lock().unwrap();
+            VaultManager::load_vault_snapshot(&db).unwrap()
+        };
+        assert_eq!(snapshot.raw_kdf_params, legacy_kdf);
+        assert_eq!(snapshot.raw_wrapped_dek, legacy_wrap);
+        assert_eq!(snapshot.raw_dek_nonce, legacy_nonce);
+        assert_eq!(snapshot.key_epoch, epoch);
+    }
+
+    #[test]
+    fn rotation_writes_documents_keeps_slot_bincode_and_reopens() {
+        let path = temp_vault("rotation");
+        let old_pw = b"correct-horse-battery";
+        let new_pw = b"staple-anchor-quantum-42";
+        {
+            let mut vault = VaultManager::create(&path, old_pw).unwrap();
+            vault.change_master_password(old_pw, new_pw).unwrap();
+        }
+
+        // db_metadata now carries documents...
+        {
+            let reopened = VaultManager::open(&path, new_pw).unwrap();
+            let db = reopened.db.lock().unwrap();
+            let (kdf_blob, wrap_blob, nonce_blob) = raw_columns(db.conn());
+            assert!(kdf_blob.starts_with(KDF_MAGIC));
+            assert!(wrap_blob.starts_with(WRAP_MAGIC));
+            assert!(nonce_blob.starts_with(NONCE_MAGIC));
+
+            // ...while the password slot keeps the frozen bincode format.
+            let slot_wrap: Vec<u8> = db
+                .conn()
+                .query_row(
+                    "SELECT wrapped_dek FROM key_slots
+                     WHERE slot_type = 'password' AND revoked_at IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                !slot_wrap.starts_with(WRAP_MAGIC),
+                "key_slots must keep the legacy bincode slot format"
+            );
+            let (_, loaded_wrapped, _) = VaultManager::load_vault_metadata(&db).unwrap();
+            assert_eq!(
+                bincode::serialize(&loaded_wrapped).unwrap(),
+                slot_wrap,
+                "slot mirror must be the bincode encoding of the same wrap"
+            );
+        }
+
+        // The dual-read path is what makes the reopen above work; the old
+        // password must stay refused.
+        assert!(VaultManager::open(&path, old_pw).is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn pair_join_writes_documents_from_a_bincode_bootstrap() {
+        let password = b"pairing-password";
+        let source = VaultManager::create(":memory:", password).unwrap();
+        let source_identity = crate::sync::device::DeviceIdentity::generate("Source Device");
+        source
+            .init_sync(
+                "https://relay.example.com",
+                "Source Device",
+                uuid::Uuid::new_v4(),
+                &source_identity,
+            )
+            .unwrap();
+        let bootstrap = source.export_pairing_bootstrap().unwrap();
+        // The transport stays legacy bincode (cross-version compatibility).
+        assert!(!bootstrap.kdf_params_blob.starts_with(KDF_MAGIC));
+        assert!(!bootstrap.wrapped_dek_blob.starts_with(WRAP_MAGIC));
+
+        let mut target = VaultManager::create(":memory:", password).unwrap();
+        target
+            .import_pairing_bootstrap(password, &bootstrap)
+            .unwrap();
+
+        let db = target.db.lock().unwrap();
+        let (kdf_blob, wrap_blob, nonce_blob) = raw_columns(db.conn());
+        assert!(
+            kdf_blob.starts_with(KDF_MAGIC),
+            "adopted kdf column must be an SPKDF document, got: {}",
+            String::from_utf8_lossy(&kdf_blob)
+        );
+        assert!(wrap_blob.starts_with(WRAP_MAGIC));
+        assert!(nonce_blob.starts_with(NONCE_MAGIC));
+        // Semantically identical to what the peer sent.
+        let (kdf, wrapped, _) = VaultManager::load_vault_metadata(&db).unwrap();
+        assert_eq!(bincode::serialize(&kdf).unwrap(), bootstrap.kdf_params_blob);
+        assert_eq!(
+            bincode::serialize(&wrapped).unwrap(),
+            bootstrap.wrapped_dek_blob
+        );
+    }
+
+    #[test]
+    fn null_mac_on_a_document_format_vault_is_refused() {
+        // The pre-bootstrap byte-mirror invariant is format-honest: every
+        // WBS-305 writer commits the registry MAC in the same transaction
+        // as the document-format columns, so a document-format vault whose
+        // MAC is NULL can only be writer tampering (MAC stripped). The
+        // invariant's byte-compare sees bincode slot vs document metadata
+        // and refuses — the WBS-302 fail-closed property must survive the
+        // format switch for the NEW format too, not just protect legacy
+        // vaults.
+        let path = temp_vault("nullmac");
+        let vault = VaultManager::create(&path, b"correct-horse-battery").unwrap();
+        drop(vault);
+        {
+            let db = crate::database::Database::open(&path).unwrap();
+            db.conn()
+                .execute_batch("UPDATE db_metadata SET slot_registry_mac = NULL;")
+                .unwrap();
+        }
+        // The sidecar is deleted too: its digest covers the registry MAC,
+        // so with the sidecar intact the EPOCH guard refuses this tamper
+        // first (material rewind at the same epoch — also fail-closed, see
+        // epoch_guard). Deleting the sidecar is the attacker's TOFU path,
+        // and THAT must land in the registry invariant's byte-mirror
+        // refusal.
+        fs::remove_file(crate::vault::epoch_guard::sidecar_path(&path)).unwrap();
+        match VaultManager::open(&path, b"correct-horse-battery") {
+            Err(PasswordManagerError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("pre-bootstrap state"),
+                    "expected the byte-mirror invariant refusal, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected the invariant refusal, got: {other}"),
+            Ok(_) => panic!("NULL-MAC document-format vault must refuse"),
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn recovery_writes_documents_and_slot_stays_bincode() {
+        use crate::vault::recovery::{parse_recovery_key, RecoveryKey};
+        let path = temp_vault("recovery");
+        let vault = VaultManager::create(&path, b"correct-horse-battery").unwrap();
+        let key =
+            parse_recovery_key(&RecoveryKey::generate().unwrap().to_display_string()).unwrap();
+        vault.create_recovery_slot(&key).unwrap();
+        drop(vault);
+        // One password open bootstraps the registry MAC (recovery refuses a
+        // NULL-MAC vault by design).
+        VaultManager::open(&path, b"correct-horse-battery").unwrap();
+
+        VaultManager::recover_access(&path, &key, b"a-brand-new-password-42").unwrap();
+
+        let reopened = VaultManager::open(&path, b"a-brand-new-password-42").unwrap();
+        let db = reopened.db.lock().unwrap();
+        let (kdf_blob, wrap_blob, nonce_blob) = raw_columns(db.conn());
+        assert!(kdf_blob.starts_with(KDF_MAGIC));
+        assert!(wrap_blob.starts_with(WRAP_MAGIC));
+        assert!(nonce_blob.starts_with(NONCE_MAGIC));
+        let slot_wrap: Vec<u8> = db
+            .conn()
+            .query_row(
+                "SELECT wrapped_dek FROM key_slots
+                 WHERE slot_type = 'password' AND revoked_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!slot_wrap.starts_with(WRAP_MAGIC));
+        cleanup(&path);
+    }
 }

@@ -204,6 +204,10 @@ impl VaultManager {
 
             let inner = || -> Result<()> {
                 Self::store_vault_metadata(&db, &kdf_params, &wrapped_dek, &vault_uuid)?;
+                // The bincode blobs below feed ONLY the key_slots mirror —
+                // that table keeps the frozen legacy bincode slot format
+                // (WBS-305 scope boundary); db_metadata itself now carries
+                // the SPKDF/SPWRAP/SPNONCE documents written above.
                 let kdf_blob = bincode::serialize(&kdf_params)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
                 let wrapped_blob = bincode::serialize(&wrapped_dek)
@@ -1178,19 +1182,23 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Store vault metadata in database
+    /// Store vault metadata in database.
+    ///
+    /// The `db_metadata` key-material columns are written in the WBS-305
+    /// document format (`SPKDF`/`SPWRAP`/`SPNONCE` — bounded, versioned,
+    /// language-neutral); legacy bincode rows remain readable via the
+    /// dual-read decoders. The `key_slots` mirror keeps the frozen legacy
+    /// bincode slot format — callers mint slots from their own bincode
+    /// blobs, NOT from these.
     pub(super) fn store_vault_metadata(
         db: &Database,
         kdf_params: &KdfParams,
         wrapped_dek: &WrappedKey,
         vault_uuid: &str,
     ) -> Result<()> {
-        let kdf_params_blob = bincode::serialize(kdf_params)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        let wrapped_dek_blob = bincode::serialize(wrapped_dek)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        let nonce_blob = bincode::serialize(&wrapped_dek.nonce)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let (kdf_params_blob, wrapped_dek_blob, nonce_blob) =
+            crate::crypto::dbwire::encode_metadata_blobs(kdf_params, wrapped_dek)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         let now = Utc::now().timestamp();
 
@@ -1326,12 +1334,22 @@ impl VaultManager {
             Ok((new_kdf_params, new_wrapped, new_master)) => {
                 {
                     let db = self.lock_db()?;
+                    // Two encodings of the SAME material (WBS-305): the
+                    // db_metadata columns move to the bounded SPKDF/SPWRAP/
+                    // SPNONCE documents; the key_slots mirror keeps the
+                    // frozen legacy bincode slot format (slot recovery
+                    // depends on it — conversion is a documented
+                    // follow-up). Both come from the same typed values, so
+                    // metadata and slot mirror stay semantically identical.
                     let kdf_params_blob = bincode::serialize(&new_kdf_params)
                         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
                     let wrapped_blob = bincode::serialize(&new_wrapped)
                         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
                     let nonce_blob = bincode::serialize(&new_wrapped.nonce)
                         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+                    let (kdf_doc, wrap_doc, nonce_doc) =
+                        crate::crypto::dbwire::encode_metadata_blobs(&new_kdf_params, &new_wrapped)
+                            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
                     let now = chrono::Utc::now().timestamp();
                     // ONE transaction covers the wrap UPDATE, the password-
                     // slot mirror, and the registry-MAC recompute (WBS-302):
@@ -1367,12 +1385,7 @@ impl VaultManager {
                              dek_nonce = ?3, key_epoch = ?4, last_modified = ?5 \
                              WHERE id = 1 AND key_epoch = ?6",
                         rusqlite::params![
-                            &kdf_params_blob,
-                            &wrapped_blob,
-                            &nonce_blob,
-                            new_epoch,
-                            now,
-                            key_epoch
+                            &kdf_doc, &wrap_doc, &nonce_doc, new_epoch, now, key_epoch
                         ],
                     );
                     let rows = match rows {
@@ -1521,7 +1534,12 @@ impl VaultManager {
         Ok(key_epoch + 1)
     }
 
-    /// Load vault metadata from database
+    /// Load vault metadata from database.
+    ///
+    /// Dual-read (WBS-305): `SPKDF`/`SPWRAP` documents if the column
+    /// carries the new magic, else legacy bincode — every vault written
+    /// before the format switch stays readable. Fail-closed with typed
+    /// errors on truncated/oversized/unknown-version blobs either way.
     pub(super) fn load_vault_metadata(
         db: &crate::database::Database,
     ) -> Result<(KdfParams, WrappedKey, i64)> {
@@ -1539,9 +1557,9 @@ impl VaultManager {
 
         match result {
             Ok((kdf_params_blob, wrapped_dek_blob, key_epoch)) => {
-                let kdf_params: KdfParams = bincode::deserialize(&kdf_params_blob)
+                let kdf_params = crate::crypto::dbwire::decode_kdf_params(&kdf_params_blob)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-                let wrapped_dek = WrappedKey::from_bincode_bytes(&wrapped_dek_blob)
+                let wrapped_dek = crate::crypto::dbwire::decode_wrapped_key(&wrapped_dek_blob)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
                 Ok((kdf_params, wrapped_dek, key_epoch))
             }
@@ -1584,9 +1602,9 @@ impl VaultManager {
                 },
             )
             .map_err(DatabaseError::Sqlite)?;
-        let kdf_params: KdfParams = bincode::deserialize(&row.0)
+        let kdf_params = crate::crypto::dbwire::decode_kdf_params(&row.0)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        let wrapped_dek = WrappedKey::from_bincode_bytes(&row.1)
+        let wrapped_dek = crate::crypto::dbwire::decode_wrapped_key(&row.1)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         Ok(VaultSnapshot {
             kdf_params,

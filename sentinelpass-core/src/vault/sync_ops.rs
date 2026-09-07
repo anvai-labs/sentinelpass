@@ -1,9 +1,6 @@
 //! Sync-related VaultManager methods.
 
-use crate::{
-    crypto::{KdfParams, KeyHierarchy, WrappedKey},
-    DatabaseError, PasswordManagerError, Result,
-};
+use crate::{crypto::KeyHierarchy, DatabaseError, PasswordManagerError, Result};
 use chrono::Utc;
 
 use super::{epoch_guard, VaultManager};
@@ -44,6 +41,11 @@ impl VaultManager {
         })?;
 
         let (kdf_params, wrapped_dek, key_epoch) = Self::load_vault_metadata(&db)?;
+        // Transport encoding stays legacy bincode (WBS-305 scope note): the
+        // bootstrap is a CROSS-VERSION wire, and a doc-emitting origin must
+        // not strand older joining devices. Joiners dual-read, so a future
+        // doc-emitting origin is accepted by new binaries without a
+        // transport bump.
         let kdf_params_blob = bincode::serialize(&kdf_params)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let wrapped_dek_blob = bincode::serialize(&wrapped_dek)
@@ -93,13 +95,17 @@ impl VaultManager {
             )));
         }
 
-        let imported_kdf: KdfParams = bincode::deserialize(&bootstrap.kdf_params_blob)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        // Peer-supplied input, decoded through the bounded dual-read
+        // decoders (WBS-305): documents or legacy bincode, hard size caps,
+        // typed errors — never an unbounded deserialize of wire bytes.
+        let imported_kdf = crate::crypto::dbwire::decode_kdf_params(&bootstrap.kdf_params_blob)
+            .map_err(PasswordManagerError::Crypto)?;
         // Accept both the current 4-field wrap shape and the legacy
         // (<= v0.8.0) 3-field shape a pre-ADR-002 origin device may still
         // export.
-        let imported_wrapped = WrappedKey::from_bincode_bytes(&bootstrap.wrapped_dek_blob)
-            .map_err(PasswordManagerError::Crypto)?;
+        let imported_wrapped =
+            crate::crypto::dbwire::decode_wrapped_key(&bootstrap.wrapped_dek_blob)
+                .map_err(PasswordManagerError::Crypto)?;
 
         let mut imported_hierarchy = KeyHierarchy::new();
         imported_hierarchy.unlock_vault_with_epoch(
@@ -136,10 +142,19 @@ impl VaultManager {
             ));
         }
 
+        // The bincode blobs feed the key_slots mirror (frozen slot format);
+        // the db_metadata columns are written as WBS-305 documents,
+        // re-encoded CANONICALLY from the decoded material — the joining
+        // device no longer stores peer bytes verbatim, so whatever the
+        // transport carried (bincode today, documents later) lands on disk
+        // as the one durable format, under our own bounded encoder.
         let nonce_blob = bincode::serialize(&imported_wrapped.nonce)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let wrapped_dek_blob = bincode::serialize(&imported_wrapped)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let (kdf_doc, wrap_doc, nonce_doc) =
+            crate::crypto::dbwire::encode_metadata_blobs(&imported_kdf, &imported_wrapped)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         // Clear any pre-join biometric BEFORE adopting imported material
         // (round-4 ordering fix): pair-join replaces the DEK, and doing this
@@ -185,12 +200,7 @@ impl VaultManager {
                 "UPDATE db_metadata
                  SET kdf_params = ?1, wrapped_dek = ?2, dek_nonce = ?3, key_epoch = ?4
                  WHERE id = 1",
-                rusqlite::params![
-                    &bootstrap.kdf_params_blob,
-                    &wrapped_dek_blob,
-                    &nonce_blob,
-                    bootstrap.key_epoch,
-                ],
+                rusqlite::params![&kdf_doc, &wrap_doc, &nonce_doc, bootstrap.key_epoch,],
             )
             .map_err(DatabaseError::Sqlite)?;
         if rows == 0 {
