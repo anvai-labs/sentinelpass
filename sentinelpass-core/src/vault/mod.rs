@@ -5,11 +5,13 @@ pub(crate) mod domain_ops;
 pub(crate) mod envelope_ops;
 pub(crate) mod epoch_guard;
 mod health_ops;
+pub(crate) mod migration_ops;
 pub mod recovery;
 mod registry_ops;
 pub(crate) mod slot_ops;
 
 pub use domain_ops::DomainSweepReport;
+pub use migration_ops::V2BlobSweepReport;
 pub use slot_ops::{SlotSummary, SlotType};
 mod ssh_ops;
 mod sync_ops;
@@ -429,6 +431,22 @@ impl VaultManager {
                 tracing::warn!(
                     error = %e,
                     "domain-mapping index backfill failed; will retry on next open"
+                );
+            }
+        }
+
+        // Bulk v1→v2 blob re-encryption (WBS-404): every remaining v1 blob
+        // (entry fields, SSH private keys, TOTP secrets) is re-sealed as a
+        // v2 envelope bound to the row's identity. Flag-gated (a completed
+        // zero-v1 pass records `v2_blob_sweep_complete`) and idempotent
+        // (per-row SPENV-magic skip). Best-effort like the backfills above:
+        // a failed pass retries on the next open and NEVER fails the
+        // unlock — dual reads keep unconverted rows readable meanwhile.
+        if vault_manager.v2_blob_sweep_needed().unwrap_or(false) {
+            if let Err(e) = vault_manager.sweep_v1_blobs_to_v2() {
+                tracing::warn!(
+                    error = %e,
+                    "v1→v2 blob sweep failed; will retry on next open"
                 );
             }
         }
