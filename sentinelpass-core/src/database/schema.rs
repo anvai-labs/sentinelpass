@@ -84,8 +84,8 @@ impl Database {
                 }
                 Ok(meta) if meta.is_dir() => {
                     return Err(PasswordManagerError::InvalidInput(format!(
-                        "{} is a directory, not a regular file — a vault database \\
-                         path must be a regular file; remove the directory and retry",
+                        "{} is a directory, not a regular file — a vault database path \
+                         must be a regular file; remove the directory and retry",
                         path.display()
                     )));
                 }
