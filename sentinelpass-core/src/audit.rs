@@ -649,7 +649,7 @@ fn lock_exclusive(file: &File) -> Result<()> {
             LockFileEx(
                 handle,
                 LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
+                None,
                 1,
                 0,
                 &mut overlapped,
@@ -674,7 +674,7 @@ fn unlock_file(file: &File) -> Result<()> {
 
     let handle = HANDLE(file.as_raw_handle());
     let mut overlapped = OVERLAPPED::default();
-    unsafe { UnlockFileEx(handle, 0, 1, 0, &mut overlapped) }.map_err(|e| {
+    unsafe { UnlockFileEx(handle, None, 1, 0, &mut overlapped) }.map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to unlock audit directory: {}",
             e

@@ -92,13 +92,21 @@ impl Database {
 
         // Hold a private umask across open + PRAGMAs so a freshly created
         // database and its WAL/SHM sidecars are born owner-only (same
-        // technique as the daemon's Unix-socket bind).
+        // technique as the daemon's Unix-socket bind). Unix-only: the
+        // umask swap is a libc operation; on non-Unix the guard (and its
+        // drop) never existed, so the restore is cfg-gated to match
+        // (Windows CI compile failure, gate-review fix cycle).
+        // The guard restores at the end of the cfg block; the connection
+        // outlives it (umask only needs to cover the CREATE).
         #[cfg(unix)]
-        let _umask_guard = UmaskGuard::if_created(created);
-
+        let conn = {
+            let _umask_guard = UmaskGuard::if_created(created);
+            let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
+            Self::apply_pragmas(&conn)?;
+            conn
+        };
+        #[cfg(not(unix))]
         let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
-        Self::apply_pragmas(&conn)?;
-        drop(_umask_guard);
 
         if created && fs_guarded {
             // Belt-and-braces: explicit owner-only mode even if another
