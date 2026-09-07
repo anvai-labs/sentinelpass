@@ -92,6 +92,14 @@ pub enum DatabaseError {
     )]
     UnsupportedFutureSchema { found: i32, supported: i32 },
 
+    #[error(
+        "vault envelope format version {found} is newer than this build supports ({supported}). \
+         The vault was activated by a newer version of SentinelPass; upgrade this application \
+         and retry. The vault was NOT opened: no entry data was read or modified \
+         (fail-closed downgrade block, WBS-406 / SR-CRYPTO-005)"
+    )]
+    UnsupportedFutureFormat { found: i64, supported: i64 },
+
     #[error("{0}")]
     Other(String),
 }

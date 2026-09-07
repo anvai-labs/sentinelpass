@@ -370,6 +370,46 @@ fn stored_tags_match_expected(stored: &[(Vec<u8>, bool)], expected: &ChainTags) 
     consistent == 1
 }
 
+/// Verify one mapping row's sealed domain + tag set (WBS-405 full-vault
+/// verification pass). Opens the envelope under the row's identity,
+/// recomputes the chain tags of the decrypted host, and requires the
+/// stored tag rows to match EXACTLY — the same integrity contract the
+/// lookup enforces per candidate, applied vault-wide. Returns the
+/// decrypted domain. An unnormalizable host expects an EMPTY tag set (the
+/// sweep's sealed-but-unfindable semantics); anything else is a refusal,
+/// never a match.
+pub(crate) fn verify_mapping_seal(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    vault_uuid: &str,
+    tag_key: &[u8],
+    mapping_id: i64,
+    sync_id: &str,
+    domain_enc: &[u8],
+) -> Result<String> {
+    let domain = envelope_ops::open_object_field(
+        dek,
+        Some(vault_uuid),
+        Some(sync_id),
+        ObjectType::DomainMapping,
+        EnvelopePurpose::Summary,
+        domain_enc,
+    )?;
+    let expected = compute_domain_chain_tags(tag_key, &domain)?;
+    let stored = load_stored_tags(conn, mapping_id)?;
+    let consistent = match &expected {
+        Some(tags) => stored_tags_match_expected(&stored, tags),
+        None => stored.is_empty(),
+    };
+    if !consistent {
+        return Err(PasswordManagerError::InvalidInput(format!(
+            "domain mapping {mapping_id}: tag index does not match its sealed domain — \
+             the tag index may have been tampered with"
+        )));
+    }
+    Ok(domain.to_string())
+}
+
 /// Legacy fallback: entry_ids of mappings that still carry ONLY the
 /// plaintext column (pre-backfill rows). Exact-match semantics — the same
 /// semantics the plaintext index had (suffix chains arrive via the tag
