@@ -510,9 +510,9 @@ impl VaultManager {
         // Audit logger BEFORE the guard (review round 2, finding 2): the
         // highest-severity attack signal on this feature — an epoch-guard
         // refusal on the recovery path — must leave a durable trace.
-        let audit_logger = AuditLogger::new(crate::get_audit_log_dir())
-            .map(Arc::new)
-            .ok();
+        let audit_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
 
         // Epoch high-water enforcement BEFORE anything else (review round 1,
         // critical finding): recovery is a vault-opening path and must refuse

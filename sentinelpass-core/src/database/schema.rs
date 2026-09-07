@@ -1,8 +1,12 @@
 //! Database schema and connection management.
 
+use crate::platform::{
+    set_owner_only_mode, validate_sensitive_path, warn_on_loose_parent_dir, OwnerOnlyPolicy,
+    SensitivePathError,
+};
 use crate::{DatabaseError, PasswordManagerError, Result};
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
@@ -19,11 +23,101 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open a database at the specified path
+    /// Open a database at the specified path.
+    ///
+    /// The vault database is sensitive at rest, so the open path enforces its
+    /// on-disk file protections (WBS-412/413, SR-DATA-003):
+    ///
+    /// - **New file**: created with an explicit owner-only mode. On Unix a
+    ///   private umask (0o077) is held across the open and the PRAGMA setup
+    ///   so the database AND the `-wal`/`-shm` sidecars SQLite creates are
+    ///   born 0600 — no umask-exposed window — with an explicit chmod as a
+    ///   belt-and-braces backstop.
+    /// - **Existing file**: validated (not a symlink, regular file, owned by
+    ///   the current user) and its mode verified owner-only under the Refuse
+    ///   policy: a vault database with group/world read is REFUSED with a
+    ///   remediation hint. Silent tightening was deliberately rejected — it
+    ///   would launder an attacker-loosened state without the user ever
+    ///   learning about it. Chosen policy, documented in
+    ///   docs/SECURITY_STATUS_MATRIX.md.
+    ///
+    /// `:memory:` (in-memory/dev vaults) skips all FS guards: Windows stats
+    /// the reserved colon as ERROR_INVALID_NAME, not NotFound (WBS-306
+    /// lesson), and there is no file to protect.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let fs_guarded = path != std::path::Path::new(":memory:");
+
+        let mut created = false;
+        if fs_guarded {
+            warn_on_loose_parent_dir(path);
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if meta.len() == 0 => {
+                    // Zero-byte file (e.g. a touch(1) leftover — the
+                    // documented create-path allowance: there is no data to
+                    // destroy). ADOPT it: pin the mode owner-only and take
+                    // the creation path so WAL/SHM are born private too. A
+                    // symlink always has a nonzero link length, so this
+                    // branch cannot swallow one.
+                    set_owner_only_mode(path, false)?;
+                    created = true;
+                }
+                Ok(_) => {
+                    Self::validate_vault_file(path)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => created = true,
+                // A stat error on a real path is allowed through (matching
+                // the create-path precedent): Connection::open below
+                // surfaces any genuine problem.
+                Err(_) => {}
+            }
+        }
+
+        // Hold a private umask across open + PRAGMAs so a freshly created
+        // database and its WAL/SHM sidecars are born owner-only (same
+        // technique as the daemon's Unix-socket bind).
+        #[cfg(unix)]
+        let _umask_guard = UmaskGuard::if_created(created);
+
         let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
         Self::apply_pragmas(&conn)?;
+        drop(_umask_guard);
+
+        if created && fs_guarded {
+            // Belt-and-braces: explicit owner-only mode even if another
+            // thread raced the umask or the filesystem ignored it.
+            set_owner_only_mode(path, false)?;
+            for ext in ["-wal", "-shm"] {
+                // Sidecars are transient (SQLite removes them on clean
+                // close); best-effort is sufficient here.
+                let _ = set_owner_only_mode(&sidecar_path(path, ext), false);
+            }
+        } else if fs_guarded {
+            // Post-open re-check: narrows the check-then-open TOCTOU window
+            // (a symlink or mode swap landing between the pre-open stat and
+            // the open is refused here; rusqlite exposes no O_NOFOLLOW open,
+            // so the residual race is documented rather than eliminated).
+            Self::validate_vault_file(path)?;
+        }
+
         Ok(Self { conn })
+    }
+
+    /// Validate an existing vault database file under the Refuse policy,
+    /// with an actionable error for the loose-mode case.
+    fn validate_vault_file(path: &Path) -> Result<()> {
+        validate_sensitive_path(path, OwnerOnlyPolicy::Refuse).map_err(|e| match e {
+            SensitivePathError::LooseMode { path, actual } => {
+                PasswordManagerError::InvalidInput(format!(
+                    "vault database {} has permissive mode {actual:#06o} \
+                     (group/world-readable); refusing to open (SR-DATA-003). \
+                     If this is your own vault, repair with: chmod 600 {}",
+                    path.display(),
+                    path.display()
+                ))
+            }
+            other => other.into(),
+        })
     }
 
     /// Create a new in-memory database for testing
@@ -518,9 +612,161 @@ impl Database {
     }
 }
 
+/// Path of a SQLite sidecar file (`-wal` / `-shm`) for a database path.
+fn sidecar_path(db_path: &Path, ext: &str) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+/// (Unix) RAII guard holding a private umask (0o077) so files created while
+/// it is held are born owner-only; the previous umask is restored on drop.
+#[cfg(unix)]
+struct UmaskGuard {
+    previous: libc::mode_t,
+}
+
+#[cfg(unix)]
+impl UmaskGuard {
+    /// Holds the private umask only when a fresh vault database is about to
+    /// be created; existing-file opens leave the process umask untouched.
+    fn if_created(created: bool) -> Option<Self> {
+        if created {
+            // SAFETY: umask is process-global with no preconditions; the
+            // previous value is restored on drop.
+            Some(Self {
+                previous: unsafe { libc::umask(0o077) },
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: see if_created.
+        unsafe { libc::umask(self.previous) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_memory_path_bypasses_fs_guards() {
+        // Regression (WBS-412): ":memory:" must never be stat'd — Windows
+        // answers ERROR_INVALID_NAME, not NotFound — and must open freely.
+        assert!(Database::open(":memory:").is_ok());
+    }
+
+    #[test]
+    fn open_refuses_directory_at_vault_path() {
+        // Cross-platform (runs on the Windows CI leg): a directory at the
+        // sensitive path is not a regular file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let as_db = dir.path().join("as_db");
+        std::fs::create_dir_all(&as_db).unwrap();
+        let err = Database::open(&as_db).err().expect("expected refusal");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "expected NotRegularFile refusal, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_vault_database_and_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("vault.db");
+        {
+            // SQLite materializes the WAL/SHM sidecars lazily on the first
+            // write, so force one; they then exist for as long as the
+            // connection is held.
+            let _db = Database::open(&db_path).unwrap();
+            _db.conn()
+                .execute("CREATE TABLE sidecar_probe (x INTEGER)", [])
+                .unwrap();
+            for p in [
+                db_path.clone(),
+                sidecar_path(&db_path, "-wal"),
+                sidecar_path(&db_path, "-shm"),
+            ] {
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_group_or_world_readable_vault_database() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("vault.db");
+        drop(Database::open(&db_path).unwrap());
+
+        for loose in [0o644, 0o604, 0o640, 0o600 /* control: tight */] {
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(loose)).unwrap();
+            let result = Database::open(&db_path);
+            if loose & 0o077 == 0 {
+                assert!(result.is_ok(), "0{loose:o} is owner-only and must open");
+            } else {
+                let err = result.err().expect("expected mode refusal");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("permissive mode") && msg.contains("chmod 600"),
+                    "expected actionable refusal, got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_symlinked_vault_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real.db");
+        drop(Database::open(&real).unwrap());
+        let link = dir.path().join("link.db");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = Database::open(&link)
+            .err()
+            .expect("expected symlink refusal");
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zero_byte_file_is_adopted_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("touched.db");
+        // touch(1) leftover: born with umask mode (typically 0644 — but do
+        // NOT assert the initial mode: sibling tests run in parallel and the
+        // creation-time UmaskGuard in Database::open may pin it to 0600).
+        std::fs::write(&db_path, b"").unwrap();
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.validate_schema_version().unwrap_err(); // fresh empty db: no schema yet
+        }
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "adopted zero-byte file must be tightened to 0600"
+        );
+    }
 
     #[test]
     fn test_in_memory_database() {

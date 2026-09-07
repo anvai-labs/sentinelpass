@@ -101,12 +101,9 @@ function setupEventListeners() {
     const unlockBiometricBtn = document.getElementById('unlock-biometric-btn');
     const settingsBtn = document.getElementById('settings-btn');
 
-    console.log('Create vault button:', createBtn);
-    console.log('Unlock vault button:', unlockBtn);
 
     if (createBtn) {
         createBtn.addEventListener('click', (e) => {
-            console.log('Create vault button clicked!');
             showCreateVault();
         });
     } else {
@@ -115,7 +112,6 @@ function setupEventListeners() {
 
     if (unlockBtn) {
         unlockBtn.addEventListener('click', (e) => {
-            console.log('Unlock vault button clicked!');
             showUnlockVault();
         });
     }
@@ -401,7 +397,6 @@ function updateStrengthMeter(analysis) {
 async function handlePasswordSubmit(e) {
     e.preventDefault();
     const password = masterPasswordInput.value;
-    console.log('[SentinelPass UI] handlePasswordSubmit called', { isCreateVault });
 
     if (isCreateVault) {
         const confirmPassword = confirmPasswordInput.value;
@@ -422,9 +417,7 @@ async function handlePasswordSubmit(e) {
         }
     } else {
         try {
-            console.log('[SentinelPass UI] Attempting unlock_vault invoke...');
             const unlockMessage = await invoke('unlock_vault', { masterPassword: password });
-            console.log('[SentinelPass UI] unlock_vault response:', unlockMessage);
             const unlockType = typeof unlockMessage === 'string' && unlockMessage.includes('daemon unlock failed')
                 ? 'warning'
                 : 'success';
@@ -434,7 +427,6 @@ async function handlePasswordSubmit(e) {
             void loadRegistryBadgeCount();
             await refreshBiometricStatus();
             const status = await refreshDaemonStatus();
-            console.log('[SentinelPass UI] daemon_status after unlock:', status);
         } catch (error) {
             console.error('[SentinelPass UI] unlock_vault error:', error);
             showToast(error, 'error');
@@ -448,9 +440,7 @@ async function handlePasswordSubmit(e) {
  */
 async function unlockVaultWithBiometric() {
     try {
-        console.log('[SentinelPass UI] Attempting unlock_vault_biometric invoke...');
         const unlockMessage = await invoke('unlock_vault_biometric');
-        console.log('[SentinelPass UI] unlock_vault_biometric response:', unlockMessage);
         const unlockType = typeof unlockMessage === 'string' && unlockMessage.includes('daemon biometric unlock failed')
             ? 'warning'
             : 'success';
@@ -460,7 +450,6 @@ async function unlockVaultWithBiometric() {
         void loadRegistryBadgeCount();
         await refreshBiometricStatus();
         const status = await refreshDaemonStatus();
-        console.log('[SentinelPass UI] daemon_status after biometric unlock:', status);
     } catch (error) {
         console.error('[SentinelPass UI] unlock_vault_biometric error:', error);
         showToast(error, 'error');

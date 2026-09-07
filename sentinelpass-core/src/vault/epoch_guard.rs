@@ -186,10 +186,16 @@ fn write(path: &Path, vault_uuid: &str, epoch: i64, digest: &[u8; 32]) -> Result
         PathBuf::from(s)
     };
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            // Born owner-only (WBS-412): no umask-exposed window between
+            // creation and the post-write chmod below (kept as a backstop).
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
         writeln!(file, "{MAGIC}")?;
         writeln!(file, "{vault_uuid}")?;
         writeln!(file, "{epoch}")?;
@@ -245,6 +251,20 @@ pub fn check(
     db_epoch: i64,
     digest: &[u8; 32],
 ) -> Result<EpochCheck> {
+    // WBS-412: the sidecar must be owner-only. A loose mode is warned about
+    // and tightened (WarnAndRepair — the UUID+digest binding, not the mode,
+    // is the integrity control here); absence is fine (TOFU path below).
+    // Writes go through rename, so this never follows a symlink.
+    if let Err(crate::platform::SensitivePathError::LooseMode { .. }) =
+        crate::platform::verify_owner_only_mode(path)
+    {
+        warn!(
+            "epoch sidecar {} had group/world-readable mode; tightening to 0600",
+            path.display()
+        );
+        let _ = crate::platform::set_owner_only_mode(path, false);
+    }
+
     let existing = fs::read_to_string(path).ok().and_then(|c| parse(&c));
 
     let Some(sidecar) = existing else {

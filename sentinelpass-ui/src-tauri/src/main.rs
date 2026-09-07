@@ -6,11 +6,9 @@ use sentinelpass_core::{
     parse_otpauth_uri, Entity, Entry, EntrySummary, RegistryOverview, TotpAlgorithm, VaultManager,
 };
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 
 // Application state
@@ -268,7 +266,9 @@ async fn send_daemon_message(message: IpcMessage) -> std::result::Result<IpcMess
         .send(message)
         .await
         .map_err(|e| format!("Failed to communicate with daemon: {}", e))?;
-    unlock_debug_log(&format!("send_daemon_message: response={:?}", response));
+    // WBS-708: never serialize the full response — IpcMessage variants carry
+    // plaintext credentials, and this string went to a debug log file.
+    unlock_debug_log("send_daemon_message: response received");
     Ok(response)
 }
 
@@ -335,7 +335,20 @@ async fn fetch_daemon_status() -> DaemonStatus {
     }
 }
 
+/// Unlock-flow debug logger (WBS-708).
+///
+/// Debug builds only: gated by `SENTINELPASS_DEBUG_UNLOCK=1` it appends the
+/// unlock lifecycle (paths, PIDs, IPC status) to `ui_unlock_debug.log` in the
+/// config directory. Release builds compile this to a no-op — the log file is
+/// never created, the env var is never read, and no unlock-flow instrumentation
+/// ships (this file also has a redaction rule at the `send_daemon_message`
+/// call site: IPC responses are never serialized into the log, since
+/// `IpcMessage` variants can carry plaintext credentials).
+#[cfg(debug_assertions)]
 fn unlock_debug_log(message: &str) {
+    use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     if std::env::var("SENTINELPASS_DEBUG_UNLOCK").unwrap_or_default() != "1" {
         return;
     }
@@ -372,6 +385,10 @@ fn unlock_debug_log(message: &str) {
         }
     }
 }
+
+/// Release stub: unlock-flow debug instrumentation does not ship (WBS-708).
+#[cfg(not(debug_assertions))]
+fn unlock_debug_log(_message: &str) {}
 
 // Stable Chrome extension ID derived from the RSA public key in
 // browser-extension/chrome/manifest.json.  Keep these in sync.

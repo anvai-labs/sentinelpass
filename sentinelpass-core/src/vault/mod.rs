@@ -20,7 +20,7 @@ mod tests;
 mod totp_ops;
 
 use crate::{
-    audit::{get_audit_log_dir, AuditEventType, AuditLogger},
+    audit::{AuditEventType, AuditLogger},
     crypto::cipher::encrypt_string,
     crypto::{KdfParams, KeyHierarchy, WrappedKey},
     database::{
@@ -256,7 +256,9 @@ impl VaultManager {
         }
 
         // Initialize audit logger
-        let audit_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let audit_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
 
         let vault_manager = Self {
             key_hierarchy,
@@ -298,7 +300,9 @@ impl VaultManager {
         // Initialize the audit logger BEFORE the epoch guard: refusals are
         // security-relevant events and must leave a durable trace even though
         // the vault never opens (adversarial-review finding).
-        let early_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
+        let early_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
 
         // Epoch high-water enforcement (WBS-301 / ADR-004 rev 4): refuse a
         // vault whose on-disk epoch or key material disagrees with the
