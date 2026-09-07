@@ -20,7 +20,7 @@ mod tests;
 mod totp_ops;
 
 use crate::{
-    audit::{get_audit_log_dir, AuditEventType, AuditLogger},
+    audit::{get_audit_log_dir, AuditEventType, AuditLogger, AuditVerifyReport},
     crypto::cipher::encrypt_string,
     crypto::{KdfParams, KeyHierarchy, WrappedKey},
     database::{
@@ -258,6 +258,13 @@ impl VaultManager {
         // Initialize audit logger
         let audit_logger = AuditLogger::new(get_audit_log_dir()).map(Arc::new).ok();
 
+        // WBS-414/415: the DEK exists from `initialize_vault` — install the
+        // audit key context so `VaultCreated` and every subsequent record
+        // seals and carries opaque identifiers.
+        if let Ok(dek) = key_hierarchy.dek() {
+            let _ = AuditLogger::install_keys(dek);
+        }
+
         let vault_manager = Self {
             key_hierarchy,
             db: Arc::new(Mutex::new(db)),
@@ -334,6 +341,15 @@ impl VaultManager {
             }
 
             return Err(PasswordManagerError::Crypto(e));
+        }
+
+        // WBS-414/415: with the DEK unwrapped, install the audit key
+        // context — records from here on (heal outcomes, VaultUnlocked,
+        // backfills, CRUD) seal and carry opaque identifiers. Earlier
+        // records on this path (epoch-guard refusals) were correctly
+        // written unsealed: no key material existed.
+        if let Ok(dek) = key_hierarchy.dek() {
+            let _ = AuditLogger::install_keys(dek);
         }
 
         // A pending one-step heal is adopted ONLY now: the unlock above just
@@ -580,12 +596,31 @@ impl VaultManager {
 
     /// Lock the vault (clear keys from memory)
     pub fn lock(&mut self) {
-        self.key_hierarchy.lock_vault();
-
-        // Log vault lock event
+        // Log the lock event while the audit key context is still
+        // installed so the record seals (WBS-415); the context is
+        // process-global and independent of `key_hierarchy`.
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(AuditEventType::VaultLocked, "Vault locked");
         }
+
+        self.key_hierarchy.lock_vault();
+
+        // Zeroize the derived audit keys together with the DEK (WBS-414/415
+        // key discipline: no audit key material outlives the lock).
+        AuditLogger::clear_keys();
+    }
+
+    /// Verify the audit trail hash chain under this vault's DEK (WBS-415).
+    ///
+    /// Walks every retained audit file oldest-first and reports the first
+    /// broken record (tamper, deletion, or reorder). Legacy pre-0.10
+    /// records are grandfathered (exempt but flagged). Requires the vault
+    /// to be unlocked: sealed records verify only under the DEK-derived
+    /// chain key.
+    pub fn verify_audit_trail(&self) -> Result<AuditVerifyReport> {
+        let dek = self.key_hierarchy.dek()?;
+        let chain_key = crate::crypto::derive_audit_chain_key(dek)?;
+        crate::audit::verify_audit_chain(&get_audit_log_dir(), Some(chain_key.as_slice()))
     }
 
     /// Check if vault is unlocked
@@ -765,11 +800,13 @@ impl VaultManager {
         // here deadlocks the vault).
         drop(db);
 
-        // Log credential creation
+        // Log credential creation. Context is deliberately free of the
+        // title: the audit log is plaintext and outside vault.db (WBS-414
+        // — the opaqued entry id in the event payload identifies it).
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialCreated { entry_id },
-                &format!("Created credential: {}", entry.title),
+                "Credential created",
             );
         }
 
@@ -821,9 +858,10 @@ impl VaultManager {
         };
 
         if let Some(ref logger) = self.audit_logger {
+            // Context carries no title: plaintext log outside vault.db (WBS-414).
             let _ = logger.log(
                 AuditEventType::CredentialViewed { entry_id },
-                &format!("Viewed credential: {}", entry.title),
+                "Credential viewed",
             );
         }
 
@@ -994,11 +1032,12 @@ impl VaultManager {
 
         tx.commit().map_err(DatabaseError::Sqlite)?;
 
-        // Log credential deletion
+        // Log credential deletion (no raw id in context: the event payload
+        // carries the opaque token, WBS-414).
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialDeleted { entry_id },
-                &format!("Deleted credential: {}", entry_id),
+                "Credential deleted",
             );
         }
 
@@ -1181,11 +1220,11 @@ impl VaultManager {
         // — see add_entry).
         drop(db);
 
-        // Log credential modification
+        // Log credential modification (no title in context: WBS-414).
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialModified { entry_id },
-                &format!("Modified credential: {}", entry.title),
+                "Credential modified",
             );
         }
 

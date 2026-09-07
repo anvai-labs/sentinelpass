@@ -32,8 +32,11 @@ pub struct IpcServer {
     vault: Arc<DaemonVault>,
     auth_token: String,
     external_secret_allowlist_path: PathBuf,
-    /// Shared audit logger — initialised once at startup so every IPC request
-    /// reuses the open file handle instead of reopening it per-call.
+    /// Shared audit logger — one instance per process, created at startup.
+    /// Appends are stateless since the WBS-415 chain (chain head re-derived
+    /// from the file tail under the `audit.lock` advisory lock), so this
+    /// instance and the `VaultManager`'s instance — and CLI processes — all
+    /// append to ONE verifiable chain.
     audit_logger: Option<Arc<AuditLogger>>,
     /// Set by the `Shutdown` IPC message; the accept loops observe it and exit.
     shutdown: Arc<AtomicBool>,
@@ -533,10 +536,12 @@ impl IpcServer {
                                     Some(field.as_str()),
                                     Some(&purpose),
                                     value.is_some(),
-                                    &format!(
-                                        "External secret access granted for client '{}' purpose '{}'",
-                                        client_id, purpose
-                                    ),
+                                    // Static context (WBS-414): client id
+                                    // and purpose are user/external-tool
+                                    // free text — they ride in the event
+                                    // payload fields, not the plaintext
+                                    // context line.
+                                    "External secret access granted",
                                 );
                                 IpcMessage::GetExternalSecretResponse {
                                     value,
@@ -553,10 +558,8 @@ impl IpcServer {
                                     Some(field.as_str()),
                                     Some(&purpose),
                                     false,
-                                    &format!(
-                                        "External secret access found no credential for client '{}' purpose '{}'",
-                                        client_id, purpose
-                                    ),
+                                    // Static context (WBS-414, see above).
+                                    "External secret access found no credential",
                                 );
                                 IpcMessage::GetExternalSecretResponse {
                                     value: None,
@@ -574,10 +577,8 @@ impl IpcServer {
                                     Some(field.as_str()),
                                     Some(&purpose),
                                     false,
-                                    &format!(
-                                        "External secret access failed for client '{}' purpose '{}'",
-                                        client_id, purpose
-                                    ),
+                                    // Static context (WBS-414, see above).
+                                    "External secret access failed",
                                 );
                                 IpcMessage::GetExternalSecretResponse {
                                     value: None,
@@ -596,10 +597,8 @@ impl IpcServer {
                             Some(field.as_str()),
                             Some(&purpose),
                             false,
-                            &format!(
-                                "External secret access denied for client '{}' purpose '{}'",
-                                client_id, purpose
-                            ),
+                            // Static context (WBS-414, see above).
+                            "External secret access denied",
                         );
                         IpcMessage::GetExternalSecretResponse {
                             value: None,

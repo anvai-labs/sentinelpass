@@ -104,12 +104,14 @@ impl VaultManager {
         drop(db);
 
         if let Some(ref logger) = self.audit_logger {
-            // Context carries the id, not the name: the audit log is plaintext.
+            // Context is static prose: the event payload carries the
+            // opaque token for the id (WBS-414) — the plaintext log must
+            // carry neither the name nor the raw id.
             let _ = logger.log(
                 AuditEventType::RegistryEntityCreated {
                     entity_id: entity_id.clone(),
                 },
-                &format!("Registry entity created: {}", entity_id),
+                "Registry entity created",
             );
         }
 
@@ -154,7 +156,7 @@ impl VaultManager {
                 AuditEventType::RegistryEntityDeleted {
                     entity_id: entity_id.to_string(),
                 },
-                &format!("Registry entity deleted: {}", entity_id),
+                "Registry entity deleted",
             );
         }
         Ok(())
@@ -223,7 +225,7 @@ impl VaultManager {
                     entry_id,
                     entity_id: entity_id.to_string(),
                 },
-                &format!("Entry {} assigned to entity {}", entry_id, entity_id),
+                "Entry assigned to entity",
             );
         }
         Ok(())
@@ -251,7 +253,7 @@ impl VaultManager {
                         entry_id,
                         entity_id: String::new(),
                     },
-                    &format!("Entry {} unassigned from its entity", entry_id),
+                    "Entry unassigned from its entity",
                 );
             }
         }
@@ -336,7 +338,7 @@ impl VaultManager {
             if let Some(ref logger) = self.audit_logger {
                 let _ = logger.log(
                     AuditEventType::SecretRotated { entry_id },
-                    &format!("Secret value changed for entry {}", entry_id),
+                    "Secret value changed",
                 );
             }
         }

@@ -586,6 +586,12 @@ impl VaultManager {
             ))
         })?;
 
+        // WBS-414/415: the recovered DEK installs the audit key context so
+        // the RecoveryPerformed / refusal records below seal and carry
+        // opaque identifiers. (Best-effort: an install failure degrades to
+        // unsealed records, never to lost records.)
+        AuditLogger::install_keys(&dek).ok();
+
         // Build the new password wrap OUTSIDE the transaction (Argon2id is
         // expensive): derive the new master key, wrap the recovered DEK
         // with the new epoch as AAD, and verify the staged wrap round-trips
@@ -1157,10 +1163,15 @@ impl VaultManager {
         // Audit AFTER commit, BEFORE the anchor follow (review round 2:
         // committed privileged changes must leave a durable trace even if
         // the follow fails) — revocation is the core security control.
+        // The slot uuid rides as an opaque token (WBS-414): the plaintext
+        // log must not carry the raw identifier.
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::SlotRevoked,
-                &format!("key slot revoked: {slot_uuid}"),
+                &format!(
+                    "key slot revoked: {}",
+                    AuditLogger::opaque_value_or_raw(crate::audit::AUDIT_ID_LABEL_SLOT, slot_uuid)
+                ),
             );
         }
 

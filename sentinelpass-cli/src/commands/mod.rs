@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod credentials;
 pub mod exec;
 pub mod generate;

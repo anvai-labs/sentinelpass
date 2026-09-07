@@ -21,7 +21,13 @@ pub mod sync;
 pub mod totp;
 pub mod vault;
 
-pub use audit::{get_audit_log_dir, get_audit_log_path, AuditEntry, AuditEventType, AuditLogger};
+pub use audit::{
+    entry_token_for, find_entry_id_for, find_string_id_for, get_audit_log_dir, get_audit_log_path,
+    string_token_for, verify_audit_chain, AuditChain, AuditChainStart, AuditEntry, AuditEventType,
+    AuditLogger, AuditPolicy, AuditVerifyFailure, AuditVerifyOutcome, AuditVerifyReport,
+    AUDIT_CHAIN_FORMAT_VERSION, AUDIT_ID_LABEL_DOMAIN, AUDIT_ID_LABEL_ENTITY, AUDIT_ID_LABEL_ENTRY,
+    AUDIT_ID_LABEL_SLOT,
+};
 pub use biometric::{BiometricManager, BiometricResult};
 pub use crypto::cipher::{decrypt_to_string, encrypt_string};
 pub use crypto::{
