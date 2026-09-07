@@ -30,4 +30,4 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-007](ADR-007-daemon-authority-and-ipc-capabilities.md) | Daemon authority and IPC capabilities | Proposed |
 | [ADR-008](ADR-008-authenticated-backup-and-verified-restore.md) | Authenticated backup and verified restore | Proposed |
 | [ADR-009](ADR-009-mobile-abi-and-platform-keystore.md) | Mobile ABI and platform-keystore boundary | Proposed |
-| [ADR-010](ADR-010-release-assurance-and-provenance.md) | Release assurance and provenance | Proposed |
+

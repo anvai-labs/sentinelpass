@@ -584,4 +584,8 @@ jobs:
             echo "Configure the sentinelpass-release-bot GitHub App credentials to enable."
             exit 0
           fi
+          # GH_TOKEN authenticates gh API calls but NOT raw `git push` over
+          # https — register gh as the git credential helper or the script's
+          # push fails with "could not read Username" (v0.8.2 release).
+          gh auth setup-git
           bash scripts/bump-homebrew-formula.sh "$VERSION"
