@@ -123,6 +123,18 @@ impl Database {
             // the open is refused here; rusqlite exposes no O_NOFOLLOW open,
             // so the residual race is documented rather than eliminated).
             Self::validate_vault_file(path)?;
+            // Tighten stale WAL/SHM sidecars too (gate review, finding on
+            // the existing-file path): a pre-0.10 vault.db-wal born 0644
+            // keeps receiving page writes even after the main db is
+            // chmod'd 0600.
+            for ext in ["-wal", "-shm"] {
+                let sidecar = sidecar_path(path, ext);
+                if let Ok(meta) = std::fs::metadata(&sidecar) {
+                    if meta.len() > 0 {
+                        let _ = set_owner_only_mode(&sidecar, false);
+                    }
+                }
+            }
         }
 
         Ok(Self { conn })
@@ -136,7 +148,8 @@ impl Database {
                 PasswordManagerError::InvalidInput(format!(
                     "vault database {} has permissive mode {actual:#06o} \
                      (group/world-readable); refusing to open (SR-DATA-003). \
-                     If this is your own vault, repair with: chmod 600 {}",
+                     If this is your own vault, repair with: chmod 600 {} \
+                     (and the same for its -wal/-shm sidecars if present)",
                     path.display(),
                     path.display()
                 ))

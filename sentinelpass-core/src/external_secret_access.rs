@@ -124,11 +124,11 @@ impl ExternalSecretAllowlist {
 
         if let Some(parent) = path.parent() {
             // Created owner-only when we have to create it; a pre-existing
-            // parent (e.g. a user-chosen directory) is left untouched.
+            // parent is left untouched (chmod-ing shared dirs can fail or
+            // break other tools — the grants FILE itself is the fix, born
+            // 0600 below).
             if !parent.exists() {
                 crate::platform::create_private_dir(parent)?;
-            } else {
-                std::fs::create_dir_all(parent)?;
             }
         }
 
@@ -138,13 +138,23 @@ impl ExternalSecretAllowlist {
                 e
             )))
         })?;
-        std::fs::write(path, contents)?;
-
+        // Born-0600 (gate review, finding: the write-then-chmod form had a
+        // permissive window where the grants file — client ids + allowed
+        // domains/fields — was world-readable). On non-Unix the chmod
+        // fallback retains the old behavior (Windows ACLs are inherited).
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        std::fs::write(path, contents).map_err(|e| {
+            PasswordManagerError::from(DatabaseError::FileIo(format!(
+                "Failed to write external secret allowlist: {}",
+                e
+            )))
+        })?;
 
         Ok(())
     }

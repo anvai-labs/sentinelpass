@@ -266,6 +266,15 @@ pub fn create_owner_only_file(path: &Path) -> Result<std::fs::File, SensitivePat
                 path: path.to_path_buf(),
             });
         }
+        // Non-regular targets (FIFO, device) are refused: opening a
+        // planted FIFO with O_WRONLY blocks the exporting thread
+        // indefinitely, and a device node could route the plaintext
+        // export to attacker-chosen territory (gate review).
+        if !meta.file_type().is_file() {
+            return Err(SensitivePathError::NotRegularFile {
+                path: path.to_path_buf(),
+            });
+        }
     }
 
     let mut options = std::fs::OpenOptions::new();

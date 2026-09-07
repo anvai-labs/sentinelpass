@@ -368,6 +368,9 @@ pub enum AuditVerifyFailure {
     LinkMismatch,
     /// The record's content or `hash` field does not match (tampered).
     HashMismatch,
+    /// A chainless record appeared AFTER the chain started — a sealed
+    /// record's chain field was likely stripped (suspected splice).
+    SuspectedSplice { count: usize },
     /// `prev`/`hash` are not valid hex digests.
     MalformedChainFields,
 }
@@ -385,6 +388,10 @@ impl std::fmt::Display for AuditVerifyFailure {
             Self::LinkMismatch => write!(f, "prev-hash link does not match the chain"),
             Self::HashMismatch => write!(f, "record hash mismatch (content tampered)"),
             Self::MalformedChainFields => write!(f, "chain fields are not valid hex digests"),
+            Self::SuspectedSplice { count } => write!(
+                f,
+                "{count} chainless record(s) after the chain started (suspected splice)"
+            ),
         }
     }
 }
@@ -412,6 +419,10 @@ pub struct AuditVerifyReport {
     /// Pre-0.10 records without chain fields: exempt from verification,
     /// flagged here (legacy prefix is grandfathered, never rewritten).
     pub legacy_records: usize,
+    /// Chainless records found AFTER the chain started — suspected
+    /// splices (stripped-chain attacks), counted separately from the
+    /// grandfathered legacy prefix (gate review, finding 1).
+    pub suspected_splices: usize,
     /// Chained records written while the vault was locked (keyless SHA-256).
     pub unsealed_records: usize,
     /// Unparseable lines (e.g. a torn tail from a crash mid-write).
@@ -1295,10 +1306,19 @@ impl AuditLogger {
             if file == self.log_file {
                 continue;
             }
-            if let Ok(rotated) = std::fs::read_to_string(&file) {
-                text.push_str(&rotated);
-                if !rotated.ends_with('\n') {
-                    text.push('\n');
+            match std::fs::read_to_string(&file) {
+                Ok(rotated) => {
+                    text.push_str(&rotated);
+                    if !rotated.ends_with('\n') {
+                        text.push('\n');
+                    }
+                }
+                Err(e) => {
+                    // A rotated file becoming unreadable (permission
+                    // scrub, disk fault) must not silently truncate the
+                    // history the user is about to review.
+                    tracing::warn!(file = %file.display(), error = %e,
+                        "audit history: skipping unreadable rotated file");
                 }
             }
         }
@@ -1363,6 +1383,12 @@ impl AuditLogger {
 /// ([`crate::crypto::derive_audit_chain_key`] over the DEK).
 pub fn verify_audit_chain(log_dir: &Path, chain_key: Option<&[u8]>) -> Result<AuditVerifyReport> {
     let log_file = log_dir.join(AUDIT_LOG_FILE_NAME);
+    // Take the same directory flock the append path uses: without it, a
+    // concurrent rotation during the walk silently skipped the newest
+    // records while verify reported success (gate review, finding 3 —
+    // read-side, short-lived; append holders keep the lock for
+    // microseconds so contention is negligible).
+    let _verify_lock = crate::audit::lock_audit_dir(&log_file)?;
     let files = chain_files_oldest_first(&log_file);
 
     let mut report = AuditVerifyReport {
@@ -1370,6 +1396,7 @@ pub fn verify_audit_chain(log_dir: &Path, chain_key: Option<&[u8]>) -> Result<Au
         total_records: 0,
         chained_records: 0,
         legacy_records: 0,
+        suspected_splices: 0,
         unsealed_records: 0,
         malformed_lines: 0,
         chain_start: None,
@@ -1412,7 +1439,17 @@ pub fn verify_audit_chain(log_dir: &Path, chain_key: Option<&[u8]>) -> Result<Au
             report.newest_record = Some(entry.timestamp);
 
             let Some(ref chain) = entry.chain else {
-                report.legacy_records += 1;
+                // A chainless record BEFORE the first sealed record is a
+                // legitimate pre-0.10 legacy prefix. One AFTER the chain
+                // started is a suspected splice: a sealed record's chain
+                // field was likely stripped. Counted separately so it is
+                // never silently folded into the exempt bucket (gate
+                // review, finding 1).
+                if seen_first {
+                    report.suspected_splices += 1;
+                } else {
+                    report.legacy_records += 1;
+                }
                 continue;
             };
 
@@ -1515,6 +1552,25 @@ pub fn verify_audit_chain(log_dir: &Path, chain_key: Option<&[u8]>) -> Result<Au
                 report.unsealed_records += 1;
             }
         }
+    }
+
+    // Suspected splices (stripped-chain records after the chain started)
+    // fail the verification with the exact count — they are the
+    // stripped-chain attack surface the grandfathering exemption could
+    // otherwise hide in (gate review, finding 1).
+    if report.suspected_splices > 0 {
+        report.outcome = AuditVerifyOutcome::Failed {
+            file: report
+                .files
+                .last()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("unknown")),
+            line: 0,
+            seq: None,
+            reason: AuditVerifyFailure::SuspectedSplice {
+                count: report.suspected_splices,
+            },
+        };
     }
 
     Ok(report)
