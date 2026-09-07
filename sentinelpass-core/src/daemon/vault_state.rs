@@ -103,6 +103,9 @@ impl DaemonVault {
     /// Lock the vault
     pub async fn lock(&self) {
         *self.vault.lock().await = None;
+        // Dropping the manager zeroizes the DEK; clear the derived audit
+        // key context with it (WBS-414/415 key discipline).
+        crate::audit::AuditLogger::clear_keys();
         *self.state.lock().unwrap() = VaultState::Locked;
         info!("Vault locked");
     }
@@ -505,6 +508,8 @@ impl DaemonVault {
                 if unlocked && last_activity.lock().unwrap().elapsed() >= timeout {
                     warn!("Auto-locking vault due to inactivity");
                     *vault.lock().await = None;
+                    // Zeroize the derived audit keys with the lock (WBS-414/415).
+                    crate::audit::AuditLogger::clear_keys();
                     *state.lock().unwrap() = VaultState::Locked;
                 }
             }

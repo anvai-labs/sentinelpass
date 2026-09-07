@@ -203,6 +203,17 @@ fn migrate_ladder_to(conn: &rusqlite::Connection, target: i32) {
 fn build_fixture(dir: &std::path::Path, target: i32, material: &FixtureMaterial) -> SchemaFixture {
     let path = dir.join(format!("schema-v{target}.db"));
     let conn = rusqlite::Connection::open(&path).unwrap();
+    // Fixtures represent REAL vaults: owner-only mode, so the 0.10
+    // open-time permission enforcement (Supervisor C's stream) accepts
+    // them. chmod applies to the inode, so it persists after the
+    // fixture connection closes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = &conn;
     conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
     conn.execute_batch(V1_SCHEMA_SQL).unwrap();
 

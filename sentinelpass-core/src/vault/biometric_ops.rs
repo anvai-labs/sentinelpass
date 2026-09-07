@@ -58,6 +58,14 @@ impl VaultManager {
         )?;
         key_hierarchy.unlock_vault_with_dek(dek);
 
+        // WBS-414/415: the biometric-released DEK installs the audit key
+        // context — records from here on seal and carry opaque identifiers.
+        // Earlier records on this path (guard refusals) correctly stayed
+        // unsealed.
+        if let Ok(dek) = key_hierarchy.dek() {
+            let _ = AuditLogger::install_keys(dek);
+        }
+
         // Registry MAC verification/bootstrap with the DEK in hand — this
         // full unlock surface must not be the one that skips it (review
         // round 1, finding 2): without this check, a biometric-only user's
