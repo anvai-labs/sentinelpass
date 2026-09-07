@@ -265,9 +265,12 @@ impl VaultManager {
         // WBS-414/415: the DEK exists from `initialize_vault` — install the
         // audit key context so `VaultCreated` and every subsequent record
         // seals and carries opaque identifiers.
-        if let Ok(dek) = key_hierarchy.dek() {
-            let _ = AuditLogger::install_keys(dek);
-        }
+        // Lease is defused below (successful create): keys persist for the
+        // session. A panic/unwind between install and defuse clears them.
+        let audit_lease = key_hierarchy
+            .dek()
+            .ok()
+            .and_then(|dek| AuditLogger::key_lease(dek).ok());
 
         let vault_manager = Self {
             key_hierarchy,
@@ -278,6 +281,10 @@ impl VaultManager {
             vault_uuid: Some(vault_uuid),
             session_epoch: std::sync::atomic::AtomicI64::new(1),
         };
+
+        if let Some(lease) = audit_lease {
+            lease.defuse();
+        }
 
         // Log vault creation
         if let Some(ref logger) = vault_manager.audit_logger {
@@ -354,9 +361,15 @@ impl VaultManager {
         // backfills, CRUD) seal and carry opaque identifiers. Earlier
         // records on this path (epoch-guard refusals) were correctly
         // written unsealed: no key material existed.
-        if let Ok(dek) = key_hierarchy.dek() {
-            let _ = AuditLogger::install_keys(dek);
-        }
+        // Key-context lease (WBS-414/415 lifecycle review, finding 5):
+        // installed here (DEK unwrapped) and held for the rest of open();
+        // any fallible step between here and Ok clears the keys on drop so
+        // a failed open never leaves HKDF material in a failed/locked
+        // process. Defused at the Ok return — keys persist for the session.
+        let audit_lease = key_hierarchy
+            .dek()
+            .ok()
+            .and_then(|dek| AuditLogger::key_lease(dek).ok());
 
         // A pending one-step heal is adopted ONLY now: the unlock above just
         // proved the on-disk wrap under this epoch (epoch-bound wraps verify
@@ -504,6 +517,10 @@ impl VaultManager {
                     tracing::warn!(error = %e, "v2 format activation failed; will retry on next open");
                 }
             }
+        }
+
+        if let Some(lease) = audit_lease {
+            lease.defuse();
         }
 
         Ok(vault_manager)

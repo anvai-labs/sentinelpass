@@ -913,6 +913,16 @@ impl AuditLogger {
     }
 
     /// Whether the audit key context is currently installed.
+    /// Scope guard for the audit key context (WBS-308 audit-key lifecycle
+    /// review, finding 5): installs the keys on creation and CLEARS them
+    /// on drop unless [`defuse`](Self::defuse) is called on the success
+    /// path. Use at every open/create/recovery site so a failure after
+    /// install cannot leave HKDF key material in a locked/failed process.
+    pub fn key_lease(dek: &DataEncryptionKey) -> Result<AuditKeyLease> {
+        Self::install_keys(dek)?;
+        Ok(AuditKeyLease { armed: true })
+    }
+
     pub fn keys_installed() -> bool {
         Self::snapshot_keys().is_some()
     }
@@ -1577,6 +1587,27 @@ pub fn get_audit_log_dir() -> PathBuf {
 /// Get the default audit log file path
 pub fn get_audit_log_path() -> PathBuf {
     get_audit_log_dir().join(AUDIT_LOG_FILE_NAME)
+}
+
+/// Scope guard for the audit key context: installs on creation, clears on
+/// drop unless defused. See [`AuditLogger::key_lease`].
+pub struct AuditKeyLease {
+    armed: bool,
+}
+
+impl AuditKeyLease {
+    /// Keep the keys installed past this scope (successful open/session).
+    pub fn defuse(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AuditKeyLease {
+    fn drop(&mut self) {
+        if self.armed {
+            AuditLogger::clear_keys();
+        }
+    }
 }
 
 #[cfg(test)]

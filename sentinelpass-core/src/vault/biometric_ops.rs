@@ -61,10 +61,12 @@ impl VaultManager {
         // WBS-414/415: the biometric-released DEK installs the audit key
         // context — records from here on seal and carry opaque identifiers.
         // Earlier records on this path (guard refusals) correctly stayed
-        // unsealed.
-        if let Ok(dek) = key_hierarchy.dek() {
-            let _ = AuditLogger::install_keys(dek);
-        }
+        // unsealed. Lease-held (gate review, finding 5): any failure
+        // between here and Ok clears the keys on drop.
+        let audit_lease = key_hierarchy
+            .dek()
+            .ok()
+            .and_then(|dek| crate::audit::AuditLogger::key_lease(dek).ok());
 
         // Registry MAC verification/bootstrap with the DEK in hand — this
         // full unlock surface must not be the one that skips it (review
@@ -97,6 +99,10 @@ impl VaultManager {
         }
 
         Self::clear_failed_attempts(&db)?;
+
+        if let Some(lease) = audit_lease {
+            lease.defuse();
+        }
 
         let audit_logger = early_logger;
 

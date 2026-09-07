@@ -590,7 +590,11 @@ impl VaultManager {
         // the RecoveryPerformed / refusal records below seal and carry
         // opaque identifiers. (Best-effort: an install failure degrades to
         // unsealed records, never to lost records.)
-        AuditLogger::install_keys(&dek).ok();
+        // Lease (WBS-414/415 lifecycle review): recovery is a static
+        // path-based op with no session to hand the keys to — the lease
+        // clears them at scope end (success or failure), so HKDF audit
+        // material never outlives the operation.
+        let _audit_key_lease = crate::audit::AuditLogger::key_lease(&dek).ok();
 
         // Build the new password wrap OUTSIDE the transaction (Argon2id is
         // expensive): derive the new master key, wrap the recovered DEK
