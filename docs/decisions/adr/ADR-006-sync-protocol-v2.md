@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Proposed (rev 2, 2026-09-07 — folds adversarial review round 1; awaiting owner acceptance) |
+| Status | Accepted (rev 2, 2026-09-08 — owner decision after adversarial review round 1; amendments folded) |
 | Date | 2026-09-07 |
 | Owners | Core maintainer, relay maintainer, security lead |
 | Related | ADR-003; ADR-004; ADR-005; ADR-008 |

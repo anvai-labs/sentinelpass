@@ -278,13 +278,13 @@ ADR-003 through ADR-010.
 | ID | Gap | Evidence area | Required outcome | Target | Status |
 |----|-----|---------------|------------------|--------|--------|
 | TD-SEC-01 | Local encrypted fields lack semantic AAD | `crypto/cipher.rs`; `vault/mod.rs` | Envelope v2 binds vault/entry/purpose/type/epoch/version | 0.9 | Open; ADR-005 Proposed |
-| TD-SEC-02 | Sync identity/version/origin/tombstone metadata is not end-to-end authenticated | `sync/crypto.rs`; `sync/models.rs` | Authenticated v2 mutation envelope and version lineage | 0.11 | Open; ADR-006 Proposed |
+| TD-SEC-02 | Sync identity/version/origin/tombstone metadata is not end-to-end authenticated | `sync/crypto.rs`; `sync/models.rs` | Authenticated v2 mutation envelope and version lineage | 0.11 | Open; ADR-006 Accepted rev 2 (migration lands with WBS-600) |
 | TD-SEC-03 | No forgotten-password recovery | key hierarchy and UI | Verified recovery key slot; reset access, never recover old password | 0.9 | Done after adversarial review (2026-09-05): slot registry (WBS-302 Done) + 256-bit checksummed recovery key with exhaustive single-char-error rejection (310) + verified onboarding, raw-wrap + full AAD binding (311) + recover-without-old-password flow: verify-before-write, all-slots-revoked, epoch advance, single-use slot (312); CLI recovery setup/recover/status. Desktop-UI flows and the recovery drill remain (WBS-1001/905); ADR-004 Accepted rev 5 |
 | TD-SEC-04 | Password rotation adopts the in-memory key before persistence | `crypto/keyring.rs`; `vault/mod.rs` | Stage, verify, commit, then adopt | 0.9 | Done (WBS-309, 2026-09-04): staged+verified rotation, adopt-after-commit, stale-epoch UPDATE guard, commit-failure test with lock injector |
 | TD-SEC-05 | Key epoch does not revoke normal sync/device authority | pairing bootstrap vs normal sync | Epoch on every request/object; stale device/slot rejection | 0.11 | Open; ADR-004/006 Proposed |
 | TD-SEC-06 | Browser IPC authority relies on a self-asserted origin; originless remains allowed | `protocol/envelope.rs`; daemon IPC server | Native-host-specific capability; deny originless | 0.8.x/0.10 | Containment half done (0.8.x): originless browser-surface requests denied by default with `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS` escape hatch + unit tests; capability model open pending ADR-007 |
-| TD-SEC-07 | Six-digit HKDF pairing permits offline guessing | `sync/pairing.rs` | High-entropy QR bootstrap or reviewed PAKE | 0.11 | Open; ADR-006 Proposed |
-| TD-SEC-08 | Android/iOS security functions are incomplete but user-facing scaffolds exist | mobile bridge and native apps | Prototype labeling now; no release-reachable placeholders later | 0.8.x/0.12 | Open; ADR-009 Proposed |
+| TD-SEC-07 | Six-digit HKDF pairing permits offline guessing | `sync/pairing.rs` | High-entropy QR bootstrap or reviewed PAKE | 0.11 | Open; ADR-006 Accepted rev 2 (migration lands with WBS-600) |
+| TD-SEC-08 | Android/iOS security functions are incomplete but user-facing scaffolds exist | mobile bridge and native apps | Prototype labeling now; no release-reachable placeholders later | 0.8.x/0.12 | Open; ADR-009 Accepted rev 2 (placeholders removed by WBS-807) |
 
 ### P1 -- Data integrity, availability, and privacy
 
@@ -301,8 +301,8 @@ ADR-003 through ADR-010.
 | TD-ROB-09 | Security-sensitive files rely partly on ambient permissions | platform/database/audit/token/grant paths | Explicit modes/ACLs and owner/type/symlink checks | 0.10 | Open |
 | TD-ROB-10 | Domain, SSH/TOTP metadata and audit context leak plaintext identity | database schema and audit call sites | Encrypted originals, keyed indexes, opaque audit IDs | 0.9/0.10 | Open |
 | TD-ROB-11 | Audit has no integrity chain, retention, or rotation contract | `audit.rs` | Verifiable bounded audit subsystem | 0.10 | Open |
-| TD-ROB-12 | No authenticated portable backup and verified restore contract | import/export and platform backup paths | Atomic encrypted snapshot bundle and restore drills | 0.10 | Open; ADR-008 Proposed |
-| TD-ROB-13 | Desktop UI and daemon can both own unlocked vault state | Tauri commands and daemon | Daemon is sole key/database owner | 0.10 | Open; ADR-007 Proposed |
+| TD-ROB-12 | No authenticated portable backup and verified restore contract | import/export and platform backup paths | Atomic encrypted snapshot bundle and restore drills | 0.10 | Open; WBS-416/417 unblocked (ADR-008 Accepted rev 2) |
+| TD-ROB-13 | Desktop UI and daemon can both own unlocked vault state | Tauri commands and daemon | Daemon is sole key/database owner | 0.10 | Open; WBS-408+Phase 3 unblocked (ADR-007 Accepted rev 2) |
 | TD-ROB-14 | IPC serves one Unix connection at a time without comprehensive deadlines; Argon2 may block async work | daemon IPC server | Bounded concurrent connections and blocking pool | 0.10 | Open |
 | TD-ROB-15 | Windows named pipe lacks explicit current-user security descriptor | daemon Windows transport | User SID ACL and remote-client rejection | 0.10 | Open |
 | TD-ROB-16 | IPC session crypto lacks a derived directional/session context | protocol Windows frame | HKDF session keys, AAD, counters, replay/reflection tests | 0.10 | Open |
