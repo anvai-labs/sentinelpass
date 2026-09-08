@@ -6,10 +6,10 @@
  */
 
 import {
-    invoke, confirm, writeText,
+    invoke, confirm,
     currentEntry, currentTotpMetadata, setCurrentTotpMetadata
 } from './state.js';
-import { showToast } from './utils.js';
+import { appClipboard, showToast } from './utils.js';
 
 /**
  * Normalise raw TOTP metadata from the backend into a consistent shape.
@@ -139,7 +139,9 @@ export function closeTotpModal() {
 
 /**
  * Copy the current entry's TOTP code to the clipboard, showing the number
- * of seconds remaining before the code rotates.
+ * of seconds remaining before the code rotates. The copy is a WBS-709
+ * secret copy: sensitive-marked natively and auto-cleared after 30 seconds
+ * (or on app exit) like every other clipboard secret.
  */
 export async function copyTotpForEntry() {
     if (!currentEntry?.entry_id) {
@@ -151,7 +153,7 @@ export async function copyTotpForEntry() {
         const response = await invoke('get_totp_code', { entryId: currentEntry.entry_id });
         const code = response.code;
         const secondsRemaining = response.seconds_remaining ?? response.secondsRemaining;
-        await writeText(code);
+        await appClipboard.copySecret(code);
         showToast(`TOTP copied (${secondsRemaining}s remaining)`, 'success');
     } catch (error) {
         showToast(error, 'error');

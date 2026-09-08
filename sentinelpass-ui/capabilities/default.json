@@ -1,10 +1,8 @@
 {
   "identifier": "default",
-  "description": "Least-privilege grants for the main window (WBS-707). Every entry must have a usage anchor in the frontend sources; tests/web/tauri-capabilities.test.ts enforces exact-match against the audited allowlist.",
+  "description": "Least-privilege grants for the main window (WBS-707/WBS-709). Every entry must have a usage anchor in the frontend sources; tests/web/tauri-capabilities.test.ts enforces exact-match against the audited allowlist. Clipboard secrets bypass the plugin ACL entirely via the copy_secret_to_clipboard command.",
   "windows": ["main"],
   "permissions": [
-    "clipboard-manager:allow-write-text",
-    "clipboard-manager:allow-read-text",
     "dialog:allow-confirm"
   ]
 }

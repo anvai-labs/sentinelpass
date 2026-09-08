@@ -18,7 +18,9 @@ path = "src-tauri/src/main.rs"
 sentinelpass-core = { path = "../sentinelpass-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-clipboard-manager = "2"
+arboard = "3.6"
+sha2 = { workspace = true }
+subtle = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

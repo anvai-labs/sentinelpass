@@ -30,10 +30,12 @@ function readUiSources(): string {
  * for the grant to stay justified. Any permission added to
  * capabilities/default.json without an entry here fails the suite, and any
  * entry whose usage disappears from the sources fails too.
+ *
+ * WBS-709: clipboard secrets no longer go through the clipboard-manager
+ * plugin at all (no IPC surface — the backend writes via arboard), so the
+ * plugin grants are gone and the plugin must not be registered either.
  */
 const AUDITED_ALLOWLIST: Record<string, RegExp> = {
-  'clipboard-manager:allow-write-text': /clipboardManager\s*\.\s*writeText|__TAURI__\s*\.\s*clipboardManager/,
-  'clipboard-manager:allow-read-text': /clipboardManager\s*\.\s*readText/,
   'dialog:allow-confirm': /dialog\s*\.\s*confirm/
 };
 
@@ -118,8 +120,8 @@ describe('tauri CSP (WBS-707 / TD-CLIENT-03)', () => {
     expect(remote, `remote connect-src entries: ${remote.join(', ')}`).toEqual([]);
   });
 
-  it('every allow-listed directive source is local or the Tauri IPC/loopback dev set', () => {
-    const allowed = new Set(["'self'", "'none'", 'ipc:', 'http://ipc.localhost', 'ws://localhost:*', 'data:']);
+  it('every allow-listed directive source is local or the Tauri IPC origins', () => {
+    const allowed = new Set(["'self'", "'none'", 'ipc:', 'http://ipc.localhost', 'data:']);
     for (const directiveName of ['script-src', 'style-src', 'img-src', 'font-src', 'connect-src', 'default-src', 'frame-src', 'form-action', 'object-src', 'base-uri']) {
       for (const src of directive(directiveName)) {
         expect(allowed.has(src), `unexpected ${directiveSrcLabel(directiveName)} source: ${src}`).toBe(true);
@@ -127,16 +129,24 @@ describe('tauri CSP (WBS-707 / TD-CLIENT-03)', () => {
     }
   });
 
+  it('allows no blanket WebSocket escape hatch (no WS usage exists in the UI)', () => {
+    expect(csp.includes('ws://')).toBe(false);
+  });
+
   function directiveSrcLabel(name: string): string {
     return name;
   }
 });
 
-describe('tauri plugin registration matches the capability surface (WBS-707)', () => {
+describe('tauri plugin registration matches the capability surface (WBS-707/709)', () => {
   const mainRs = readFileSync(MAIN_RS_PATH, 'utf8');
 
   it('the unused shell plugin is not registered (URLs open via custom commands)', () => {
     expect(mainRs.includes('tauri_plugin_shell')).toBe(false);
+  });
+
+  it('the clipboard-manager plugin is not registered (WBS-709 native clipboard path)', () => {
+    expect(mainRs.includes('tauri_plugin_clipboard_manager')).toBe(false);
   });
 
   it('every registered plugin family still has at least one granted permission', () => {
@@ -146,5 +156,11 @@ describe('tauri plugin registration matches the capability surface (WBS-707)', (
       const prefixed = granted.some((p: string) => p.startsWith(`${family}:`) || p.startsWith(`${family.replace(/_/g, '-')}:`));
       expect(prefixed, `plugin "${family}" is registered but has no capability grants`).toBe(true);
     }
+  });
+
+  it('secret clipboard copies use the native backend path, not a plugin grant', () => {
+    const sources = readUiSources();
+    expect(/copy_secret_to_clipboard/.test(sources)).toBe(true);
+    expect(/clipboardManager/.test(sources)).toBe(false);
   });
 });

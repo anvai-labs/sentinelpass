@@ -33,6 +33,7 @@ for (const relativePath of emittedFiles) {
 
 const uiFilesToSync = [
   ['sentinelpass-ui/app.js', 'sentinelpass-ui/dist/app.js'],
+  ['sentinelpass-ui/clipboard.js', 'sentinelpass-ui/dist/clipboard.js'],
   ['sentinelpass-ui/credential-types.js', 'sentinelpass-ui/dist/credential-types.js'],
   ['sentinelpass-ui/url-utils.js', 'sentinelpass-ui/dist/url-utils.js'],
   ['sentinelpass-ui/state.js', 'sentinelpass-ui/dist/state.js'],
