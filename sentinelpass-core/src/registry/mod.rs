@@ -307,9 +307,12 @@ pub fn decrypt_tag_cipher(dek: &DataEncryptionKey, blob: &[u8]) -> Result<String
 ///   rotation);
 /// - ineligible entry → remove any row.
 ///
-/// Callers own transaction scope; on the vault write paths this runs in the
-/// same connection as the entry write (auto-commit), on the sync path inside
-/// the pull loop.
+/// Callers own transaction scope (WBS-411): on the local vault write paths
+/// (add/update entry) this runs REQUIRED inside the caller's unit-of-work
+/// transaction; on the sync apply path it runs BEST-EFFORT inside the blob
+/// transaction (a failure degrades the index to sweep repair rather than
+/// dropping the delivered change — see the REGISTRY-BOUNDARY note in
+/// `sync/engine.rs`).
 pub fn upsert_equality_tag(
     conn: &rusqlite::Connection,
     dek: &DataEncryptionKey,
