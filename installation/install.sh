@@ -124,6 +124,21 @@ elif [[ -f "$BINARY_DIR/sentinelpass.exe" ]]; then
     cp "$BINARY_DIR/sentinelpass.exe" "$INSTALL_DIR/"
 fi
 
+# Deploy the Chrome extension to a stable path inside the installation dir.
+# Chrome never auto-updates unpacked extensions, but it re-reads the folder
+# on reload/restart — so an in-place replacement here turns every future
+# upgrade into a single reload click (same folder = same entry = same ID,
+# which the native-host manifest's allowed_origins already pins).
+EXT_SRC="$PROJECT_ROOT/browser-extension/chrome"
+if [[ -f "$EXT_SRC/manifest.json" ]]; then
+    EXT_VERSION="$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$EXT_SRC/manifest.json" | head -1)"
+    echo "Deploying Chrome extension v${EXT_VERSION:-?} to: $INSTALL_DIR/chrome-extension"
+    rm -rf "$INSTALL_DIR/chrome-extension"
+    cp -R "$EXT_SRC" "$INSTALL_DIR/chrome-extension"
+else
+    echo "Chrome extension sources not found at $EXT_SRC — skipping extension deployment."
+fi
+
 # Generate native messaging host manifest
 echo "Installing native messaging host manifest..."
 
@@ -196,7 +211,13 @@ echo ""
 echo "Installation completed successfully!"
 echo ""
 echo "Next steps:"
-echo "1. Load the browser extension from browser-extension/chrome"
+if [[ -d "$INSTALL_DIR/chrome-extension" ]]; then
+    echo "1. Chrome extension deployed to: $INSTALL_DIR/chrome-extension"
+    echo "   - First install: chrome://extensions -> Load unpacked -> that folder"
+    echo "   - Upgrade: click the reload icon on the existing SentinelPass card"
+else
+    echo "1. Load the browser extension from browser-extension/chrome"
+fi
 echo "2. (Optional) Load Firefox extension from browser-extension/firefox/manifest.json"
 echo "3. Run 'sentinelpass init' to create a new vault"
 echo "4. Start the UI: sentinelpass-ui"
