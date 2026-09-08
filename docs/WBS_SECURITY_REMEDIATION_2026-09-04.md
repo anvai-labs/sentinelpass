@@ -861,6 +861,20 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
 - **WBS-418 — Crash/fault injection harness (migration/CRUD/backup/restore).**
   SR-DATA-001, TV-005. Est 4d. Gate for the phase: fault at any step → complete-old or
   complete-new, never partial.
+  **Status:** Done for the backup/restore scope (2026-09-08; migration/CRUD sweeps
+  already landed with #121). Restore: staged-write authorizer sweep (fail_at =
+  0..N over the staged connection's validation + sync-neutralization statements —
+  every denial leaves the live vault complete-old, clean run proves complete-new,
+  with a non-vacuity guard) plus swap-phase interruption tests (abort after the
+  pre-restore snapshot / sidecar removal / swap / re-baseline: pre-swap aborts
+  leave the prior state complete with no litter; a post-swap abort leaves the
+  documented refused-open rollback state with the safety net preserved and a
+  re-run completing it). Backup: failure injections prove no partial output and
+  no staging litter. SR-DATA-005 fixture acceptance: hand-sealed bundles of the
+  v6/v7/v8 released schemas restore through the migration ladder and fully
+  decrypt (v1–v5 have no durable vault identity, so no manifest can bind them —
+  inherent, not a gap).
+  complete-new, never partial.
 
 ## 6. Phase 3 — daemon authority & IPC (WBS-500, release 0.10)
 

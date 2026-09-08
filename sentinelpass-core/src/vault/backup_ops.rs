@@ -963,6 +963,20 @@ fn validate_staged_snapshot(
     }
 
     // Key-material blobs must byte-match what the manifest authenticated.
+    // The registry-MAC column only exists from schema v7 on; a v6-era
+    // bundle reads as NULL (pre-bootstrap semantics).
+    let has_registry_mac: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('db_metadata') WHERE name = 'slot_registry_mac'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    let registry_select = if has_registry_mac {
+        "slot_registry_mac"
+    } else {
+        "NULL"
+    };
     let (raw_kdf, raw_wrap, raw_nonce, raw_registry_mac): (
         Vec<u8>,
         Vec<u8>,
@@ -970,8 +984,10 @@ fn validate_staged_snapshot(
         Option<Vec<u8>>,
     ) = conn
         .query_row(
-            "SELECT kdf_params, wrapped_dek, dek_nonce, slot_registry_mac
-             FROM db_metadata WHERE id = 1",
+            &format!(
+                "SELECT kdf_params, wrapped_dek, dek_nonce, {registry_select}
+                 FROM db_metadata WHERE id = 1"
+            ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -1059,15 +1075,19 @@ fn validate_staged_snapshot(
     db.validate_schema_version()?;
 
     // Key-slot registry MAC under the DEK (fail closed) — only when the
-    // snapshot carries a registry (pre-bootstrap vaults re-bootstrap at
-    // open, exactly like a normal open of the same state).
-    let registry_present: Option<Vec<u8>> = conn
-        .query_row(
+    // snapshot carries a registry (older-schema or pre-bootstrap vaults
+    // re-bootstrap at open, exactly like a normal open of the same
+    // state).
+    let registry_present: Option<Vec<u8>> = if has_registry_mac {
+        conn.query_row(
             "SELECT slot_registry_mac FROM db_metadata WHERE id = 1",
             [],
             |r| r.get(0),
         )
-        .map_err(DatabaseError::Sqlite)?;
+        .map_err(DatabaseError::Sqlite)?
+    } else {
+        None
+    };
     if registry_present.is_some() {
         VaultManager::verify_slot_registry(&hierarchy, conn)?;
     }
@@ -1454,6 +1474,21 @@ impl VaultManager {
             opts,
             RestoreFaults::default(),
         )
+    }
+
+    /// WBS-418 test entry point: restore with the fault hooks. Test
+    /// builds only; private so the module-private `RestoreFaults` never
+    /// leaks through a wider-visibility item.
+    #[cfg(test)]
+    fn restore_bundle_with_faults(
+        vault_path: &Path,
+        bundle_path: &Path,
+        master_password: &[u8],
+        opts: &RestoreOptions,
+        faults: RestoreFaults,
+    ) -> Result<RestoreReport> {
+        let parsed = read_bundle(bundle_path)?;
+        Self::restore_from_parsed(vault_path, parsed, master_password, opts, faults)
     }
 
     fn restore_from_parsed(
@@ -2864,5 +2899,454 @@ mod tests {
         }
         assert!(found_created, "BackupCreated event must be audited");
         assert!(found_restored, "VaultRestored event must be audited");
+    }
+
+    // ------------------------------------------------------------------
+    // WBS-418: crash/fault injection (backup/restore scope)
+    // ------------------------------------------------------------------
+
+    const OTHER_PW: &[u8] = b"other-vault-password!";
+
+    /// Fixture: a live vault (password PW, entries live-a/live-b) plus a
+    /// bundle from a DIFFERENT vault (password OTHER_PW, entry
+    /// bundled-x). Restoring the bundle onto the live path is therefore a
+    /// cross-vault replacement, so complete-old and complete-new are
+    /// cleanly distinguishable states.
+    struct RestoreFixture {
+        dir: TempDir,
+        live_path: PathBuf,
+        bundle: PathBuf,
+    }
+
+    fn restore_fixture() -> RestoreFixture {
+        let dir = TempDir::new().unwrap();
+        let live_path = dir.path().join("vault.db");
+        let live = VaultManager::create(&live_path, PW).unwrap();
+        add_entry_titled(&live, "live-a", "la");
+        add_entry_titled(&live, "live-b", "lb");
+        drop(live);
+
+        let bundle = dir.path().join("other.spbackup");
+        let other_path = dir.path().join("other.db");
+        let other = VaultManager::create(&other_path, OTHER_PW).unwrap();
+        add_entry_titled(&other, "bundled-x", "bx");
+        other.create_backup(&bundle).unwrap();
+        drop(other);
+
+        RestoreFixture {
+            dir,
+            live_path,
+            bundle,
+        }
+    }
+
+    fn titles_of(vault: &VaultManager) -> Vec<String> {
+        vault
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.title)
+            .collect()
+    }
+
+    fn staging_dirs(parent: &Path, prefix: &str) -> Vec<PathBuf> {
+        fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with(prefix))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// WBS-418 gate: deny the Nth top-level write on the staged
+    /// connection (SQLite-authorizer harness) and sweep N = 0, 1, 2, …
+    /// until a clean run. Every injected denial must leave the live
+    /// vault complete-old; the clean run proves complete-new.
+    #[test]
+    fn restore_staged_write_fault_sweep_is_complete_old_or_complete_new() {
+        let fx = restore_fixture();
+        let opts = RestoreOptions {
+            allow_replace: true,
+            allow_epoch_rewind: true,
+            disable_sync: false,
+        };
+
+        let mut fail_at = 0usize;
+        let mut saw_denial = false;
+        let _report = loop {
+            let result = VaultManager::restore_bundle_with_faults(
+                &fx.live_path,
+                &fx.bundle,
+                OTHER_PW,
+                &opts,
+                RestoreFaults {
+                    staged_fail_at: Some(fail_at),
+                    abort_after: None,
+                },
+            );
+            match result {
+                Err(_) => {
+                    saw_denial = true;
+                    // Complete-old: the live vault is intact.
+                    let live = VaultManager::open(&fx.live_path, PW).unwrap();
+                    assert_eq!(
+                        titles_of(&live),
+                        vec!["live-a".to_string(), "live-b".to_string()],
+                        "an injected staged failure must leave the live vault complete-old"
+                    );
+                    drop(live);
+                    // No retained snapshot may be finalized pre-swap, and
+                    // staging must be cleaned.
+                    assert!(!pre_restore_snapshot_path(&fx.live_path).exists());
+                    assert!(staging_dirs(fx.dir.path(), ".sprestore").is_empty());
+                }
+                Ok(report) => break report,
+            }
+            fail_at += 1;
+            assert!(fail_at < 64, "the sweep must reach a clean run");
+        };
+        assert!(
+            saw_denial,
+            "the sweep must inject at least one denial (non-vacuity guard)"
+        );
+
+        // Clean run: complete-new, verified by a real open.
+        let restored = VaultManager::open(&fx.live_path, OTHER_PW).unwrap();
+        assert_eq!(titles_of(&restored), vec!["bundled-x".to_string()]);
+        drop(restored);
+        assert!(pre_restore_snapshot_path(&fx.live_path).exists());
+    }
+
+    #[test]
+    fn interrupted_restore_before_the_swap_leaves_the_prior_state_complete() {
+        for phase in [SwapPhase::PreRestoreSnapshot, SwapPhase::SidecarRemoval] {
+            let fx = restore_fixture();
+            let result = VaultManager::restore_bundle_with_faults(
+                &fx.live_path,
+                &fx.bundle,
+                OTHER_PW,
+                &RestoreOptions {
+                    allow_replace: true,
+                    allow_epoch_rewind: true,
+                    disable_sync: false,
+                },
+                RestoreFaults {
+                    staged_fail_at: None,
+                    abort_after: Some(phase),
+                },
+            );
+            assert!(result.is_err(), "{phase:?}: interruption must fail loudly");
+
+            // Complete-old: the live vault opens under its own password
+            // with both entries.
+            let live = VaultManager::open(&fx.live_path, PW).unwrap();
+            assert_eq!(
+                titles_of(&live),
+                vec!["live-a".to_string(), "live-b".to_string()],
+                "{phase:?}: prior state must be complete"
+            );
+            drop(live);
+            // No retained snapshot; staging cleaned (InProgress outcome).
+            assert!(!pre_restore_snapshot_path(&fx.live_path).exists());
+            assert!(
+                staging_dirs(fx.dir.path(), ".sprestore").is_empty(),
+                "{phase:?}: staging must be cleaned on a pre-swap interruption"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_restore_after_the_swap_leaves_refused_open_and_a_rerun_completes() {
+        let fx = restore_fixture();
+        let opts = RestoreOptions {
+            allow_replace: true,
+            allow_epoch_rewind: true,
+            disable_sync: false,
+        };
+        let result = VaultManager::restore_bundle_with_faults(
+            &fx.live_path,
+            &fx.bundle,
+            OTHER_PW,
+            &opts,
+            RestoreFaults {
+                staged_fail_at: None,
+                abort_after: Some(SwapPhase::Swap),
+            },
+        );
+        assert!(result.is_err());
+
+        // The swapped-in file is the bundle's DB, but the epoch sidecar
+        // still anchors the PRE-swap identity/material: the documented
+        // refused-open rollback state. Neither password opens it.
+        assert!(VaultManager::open(&fx.live_path, PW).is_err());
+        assert!(VaultManager::open(&fx.live_path, OTHER_PW).is_err());
+
+        // The safety net is preserved — the pre-swap state exists ONLY
+        // in the staging tmp now, and the retained slot was NOT touched.
+        let staging = staging_dirs(fx.dir.path(), ".sprestore");
+        assert_eq!(staging.len(), 1, "exactly one staging dir with the net");
+        assert!(staging[0].join("pre-restore.db").exists());
+        assert!(!pre_restore_snapshot_path(&fx.live_path).exists());
+
+        // Documented recovery: an acknowledged re-run completes the
+        // re-baseline and cleans up its OWN staging. The interrupted
+        // run's preserved safety net stays until removed by hand (its
+        // path was named in that run's error) — exactly one remains.
+        let report =
+            VaultManager::restore_bundle(&fx.live_path, &fx.bundle, OTHER_PW, &opts).unwrap();
+        let restored = VaultManager::open(&fx.live_path, OTHER_PW).unwrap();
+        assert_eq!(titles_of(&restored), vec!["bundled-x".to_string()]);
+        drop(restored);
+        assert!(report.pre_restore_snapshot.is_some());
+        let leftover = staging_dirs(fx.dir.path(), ".sprestore");
+        assert_eq!(leftover.len(), 1, "only the interrupted run's net remains");
+        assert!(leftover[0].join("pre-restore.db").exists());
+    }
+
+    #[test]
+    fn interrupted_restore_after_the_rebaseline_still_lands_complete_new() {
+        let fx = restore_fixture();
+        let result = VaultManager::restore_bundle_with_faults(
+            &fx.live_path,
+            &fx.bundle,
+            OTHER_PW,
+            &RestoreOptions {
+                allow_replace: true,
+                allow_epoch_rewind: true,
+                disable_sync: false,
+            },
+            RestoreFaults {
+                staged_fail_at: None,
+                abort_after: Some(SwapPhase::SidecarRebaseline),
+            },
+        );
+        assert!(result.is_err());
+
+        // The sidecar was already re-baselined: the restored state fully
+        // opens (complete-new), and the safety net remains because
+        // finalization never ran.
+        let restored = VaultManager::open(&fx.live_path, OTHER_PW).unwrap();
+        assert_eq!(titles_of(&restored), vec!["bundled-x".to_string()]);
+        drop(restored);
+        let staging = staging_dirs(fx.dir.path(), ".sprestore");
+        assert_eq!(staging.len(), 1);
+        assert!(staging[0].join("pre-restore.db").exists());
+    }
+
+    #[test]
+    fn backup_failure_leaves_no_partial_output_or_staging_litter() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "t", "p");
+
+        // Missing parent directory for the output.
+        let bad_output = dir.path().join("no-such-dir").join("out.spbackup");
+        let err = vault.create_backup(&bad_output).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "got: {err}");
+        assert!(!bad_output.exists());
+        assert!(staging_dirs(dir.path(), ".spbackup").is_empty());
+    }
+
+    /// SR-DATA-005 acceptance: a bundle of an OLDER released schema
+    /// restores successfully through the schema-migration path. The
+    /// manifest is hand-sealed under the shared fixture DEK because
+    /// `create_backup` always runs on a current binary (schema 9).
+    #[test]
+    fn older_schema_fixture_bundles_restore_through_the_migration_path() {
+        use crate::database::fixtures::build_fixture_set;
+
+        let set = build_fixture_set();
+        let mut restored_any = false;
+        // v6 is the first schema with a durable vault identity
+        // (v5→v6); a backup manifest requires it. v9 is current.
+        for fixture in set
+            .fixtures
+            .iter()
+            .filter(|f| f.version >= 6 && f.version < 9)
+        {
+            let dir = TempDir::new().unwrap();
+            let bundle = dir.path().join("legacy.spbackup");
+            seal_bundle_from_file(&fixture.path, fixture.version, &set.material, &bundle);
+
+            // The live vault is irrelevant here: restore onto a fresh
+            // path and prove the migrated state fully opens and every
+            // entry field decrypts.
+            let target = dir.path().join("restored.db");
+            VaultManager::restore_bundle(
+                &target,
+                &bundle,
+                &set.material.password,
+                &RestoreOptions::default(),
+            )
+            .unwrap_or_else(|e| panic!("fixture v{} restore failed: {e}", fixture.version));
+
+            let restored =
+                VaultManager::open(&target, &set.material.password).unwrap_or_else(|e| {
+                    panic!(
+                        "fixture v{} open after restore failed: {e}",
+                        fixture.version
+                    )
+                });
+            let entries = restored.list_entries().unwrap();
+            assert_eq!(entries.len(), 1, "fixture v{}", fixture.version);
+            let got = restored.get_entry(entries[0].entry_id).unwrap();
+            assert_eq!(
+                got.password.as_str(),
+                crate::database::fixtures::FIXTURE_CONTENT.entry_password,
+                "fixture v{} content must decrypt after restore",
+                fixture.version
+            );
+            restored_any = true;
+        }
+        assert!(restored_any, "at least one older fixture must be exercised");
+    }
+
+    /// Build an authenticated SPBACKUP bundle around an arbitrary vault
+    /// FILE (the fixture): read its authority row + slot inventory,
+    /// seal the manifest under the fixture DEK.
+    fn seal_bundle_from_file(
+        db_path: &Path,
+        schema_version: i32,
+        material: &crate::database::fixtures::FixtureMaterial,
+        output: &Path,
+    ) {
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        // The registry-MAC column only exists from v7 on; introspect
+        // instead of failing the read for older fixtures.
+        let has_registry_mac: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('db_metadata') WHERE name = 'slot_registry_mac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let registry_sql = if has_registry_mac {
+            "slot_registry_mac"
+        } else {
+            "NULL"
+        };
+        let sql = format!(
+            "SELECT kdf_params, wrapped_dek, dek_nonce, {registry_sql}, vault_uuid,
+                    COALESCE(key_epoch, 1), format_version
+             FROM db_metadata WHERE id = 1"
+        );
+        type FixtureAuthorityRow = (
+            Vec<u8>,
+            Vec<u8>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            Option<String>,
+            i64,
+            Option<i64>,
+        );
+        let (kdf, wrap, nonce, registry_mac, uuid, epoch, format): FixtureAuthorityRow = conn
+            .query_row(&sql, [], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap();
+        let snapshot = fs::read(db_path).unwrap();
+
+        // Slot inventory when the table exists (v7+).
+        let slots = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='key_slots')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap();
+        let mut manifest_slots = Vec::new();
+        if slots {
+            let mut stmt = conn
+                .prepare("SELECT slot_uuid, slot_type, key_epoch FROM key_slots WHERE revoked_at IS NULL")
+                .unwrap();
+            manifest_slots = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .unwrap()
+                .map(|r| r.unwrap())
+                .map(|(slot_uuid, slot_type, key_epoch)| ManifestSlot {
+                    slot_uuid,
+                    slot_type,
+                    key_epoch,
+                    revoked: false,
+                })
+                .collect();
+            manifest_slots.sort_by(|a, b| a.slot_uuid.cmp(&b.slot_uuid));
+        }
+
+        let entry_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+            .unwrap();
+        let tombstone_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE is_deleted = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(&snapshot);
+        let mut manifest = BackupManifest {
+            magic: "SPBACKUP".to_string(),
+            v: BACKUP_MANIFEST_VERSION,
+            backup_id: uuid::Uuid::new_v4().to_string(),
+            created_at: chrono::Utc::now().timestamp(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            vault_uuid: uuid.expect("fixture v5+ carries vault identity"),
+            epoch,
+            schema_version,
+            vault_format_version: format.unwrap_or(1),
+            entry_count,
+            tombstone_count,
+            kdf_params: data_encoding::BASE64.encode(&kdf),
+            wrapped_dek: data_encoding::BASE64.encode(&wrap),
+            dek_nonce: data_encoding::BASE64.encode(&nonce),
+            slot_registry_mac: registry_mac.map(|m| data_encoding::BASE64.encode(&m)),
+            slots: manifest_slots,
+            snapshot: ManifestSnapshot {
+                sha256: hex(&hasher.finalize()),
+                len: snapshot.len() as u64,
+            },
+            mac: String::new(),
+        };
+        let mac_key = derive_backup_mac_key(&material.dek).unwrap();
+        let mac = compute_manifest_mac(mac_key.as_slice(), &manifest).unwrap();
+        manifest.mac = data_encoding::BASE64.encode(&mac);
+
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let tmp = output.with_extension("tmp");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .unwrap();
+        file.write_all(format!("{BUNDLE_MAGIC_LINE}\n").as_bytes())
+            .unwrap();
+        file.write_all(&manifest_json).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.write_all(&snapshot).unwrap();
+        drop(file);
+        fs::rename(&tmp, output).unwrap();
     }
 }
