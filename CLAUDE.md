@@ -119,8 +119,8 @@ sentinelpass-daemon
 **sentinelpass-core/** - Core library (all other crates depend on this):
 - `crypto/` - `kdf.rs` (Argon2id), `cipher.rs` (AES-256-GCM), `keyring.rs` (KeyHierarchy/MasterKey/WrappedKey), `password.rs` (generation), `strength.rs` (analysis), zeroize discipline (SecureBuffer/`zero.rs` removed)
 - `daemon/` - `ipc.rs` (IPC server/client), `vault_state.rs` (DaemonVault with auto-lock), `native_messaging.rs` (browser protocol), `autolock.rs`
-- `database/` - `schema.rs` (SQLite ops), `models.rs` (Entry/DomainMapping/TotpSecret), `migrations.rs` (refinery runner)
-- `vault.rs` - VaultManager: central CRUD, encryption, lock/unlock, TOTP, SSH keys, biometric, import/export
+- `database/` - `schema.rs` (SQLite ops), `models.rs` (Entry/DomainMapping/TotpSecret), `migrations.rs` (hand-written versioned migration runner), `repository.rs` (row read/write cores), `fault_injection.rs` (test-only SQLite-authorizer harness)
+- `vault/` - `mod.rs` (VaultManager: central CRUD, encryption, lock/unlock, TOTP, SSH keys, biometric, import/export) plus `envelope_ops.rs`, `activation_ops.rs`, `migration_ops.rs`, `slot_ops.rs`, `recovery.rs`, `domain_ops.rs`, `epoch_guard.rs`, `registry_ops.rs`
 - `sync/` - `models.rs` (SyncEntryBlob/payloads), `crypto.rs` (encrypt/decrypt/pad), `auth.rs` (Ed25519 canonical signing), `device.rs` (DeviceIdentity), `pairing.rs` (HKDF pairing key), `conflict.rs` (LWW resolver), `change_tracker.rs` (pending collection), `config.rs` (SyncConfig), `client.rs` (HTTP client, feature-gated `sync`), `engine.rs` (push/pull orchestrator, feature-gated `sync`)
 - `audit.rs`, `lockout.rs`, `biometric.rs`, `ssh.rs`, `totp.rs`, `import_export.rs`, `platform.rs`
 
@@ -194,7 +194,7 @@ sentinelpass-daemon
 **Unix (Linux/macOS):** Unix domain socket at `/tmp/sentinelpass.sock` (or `$XDG_RUNTIME_DIR/sentinelpass.sock`)
 **Windows:** Named pipes at `\\.\pipe\SentinelPass-<username>` (per-user ACLs + AES-256-GCM encryption)
 **Legacy TCP:** Custom `tcp://...` paths use loopback TCP with AES-256-GCM encryption
-**Auth:** All IPC requests require a 32-byte hex token from `~/.config/sentinelpass/ipc.token` (mode 0600). Messages use length-prefixed JSON with an envelope containing the token.
+**Auth:** All IPC requests require a 32-byte hex token from `<config dir>/PasswordManager/ipc.token` (mode 0600; e.g. `~/Library/Application Support/PasswordManager/ipc.token` on macOS — `sentinelpass-protocol/src/paths.rs` is the source of truth). Messages use length-prefixed JSON with an envelope containing the token.
 
 **Origin gate (browser-surface containment):** browser-autofill IPC (`GetCredential`, `GetTotpCode`, `ListDomainCredentials`, `SaveCredential`) is denied for clients that present no origin marker (pre-0.8 hosts) — denied by default since 0.8.x containment. `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily restores the legacy path (removed in 1.0). CLI-tagged origins are denied; only `NativeHost` is allowed. External tools must use `GetExternalSecret`/`SaveSecret` grants.
 
@@ -423,7 +423,7 @@ sqlite3 ~/Library/Application\ Support/PasswordManager/vault.db ".schema"  # mac
   - Linux: `~/.local/share/PasswordManager/vault.db` (or `$XDG_DATA_HOME`)
   - Windows: `%LOCALAPPDATA%\PasswordManager\vault.db` (`get_data_dir()` tries `data_local_dir` first; the module's own doc comment saying `%APPDATA%` predates this and is also stale)
   - The epoch high-water sidecar (`vault.db.epoch`) and recovery-related state live next to this file; epoch-guard refusal messages that say "delete the sidecar file next to the vault database" mean this path, not `~/.sentinelpass/`.
-- **IPC token:** `~/.config/sentinelpass/ipc.token` (32-byte hex token for IPC auth)
+- **IPC token:** `<config dir>/PasswordManager/ipc.token` (32-byte hex token for IPC auth; same directory family as the vault data dir, NOT `~/.config/sentinelpass/`)
 - **Daemon logs:** Platform-specific (Windows: Event Viewer, Unix: syslog)
 - **Native messaging config:**
   - Windows: `C:\Program Files\PasswordManager\com.passwordmanager.host.json`
@@ -452,7 +452,7 @@ The project uses GitHub Actions (`.github/workflows/rust.yml`) with 6 jobs:
 - **web_tdd** - TypeScript typecheck + Vitest tests with coverage
 - **build** - `cargo build --release --workspace` (matrix: ubuntu/windows/macos)
 
-Additional workflows: `release.yml` (tagged builds), `security.yml` (cargo audit), `extension-e2e.yml`, `release-preflight.yml`.
+Additional workflows: `release.yml` (tagged builds + PR preflight runs; docs-only PRs skip packaging), `security.yml` (cargo audit), `extension-e2e.yml`, plus mobile (`android.yml`, `ios.yml`) and `build-all.yml` / `ci-gate.yml` (the Gate).
 
 All checks must pass before merging to main branch.
 
@@ -486,7 +486,7 @@ The workspace uses centralized dependency management in `Cargo.toml` [workspace.
 
 Changes touching these paths need extra care and explicit reasoning (see `CONTRIBUTING.md`):
 - `sentinelpass-core/src/crypto/`
-- `sentinelpass-core/src/vault.rs`
+- `sentinelpass-core/src/vault/` (incl. `mod.rs`)
 - `sentinelpass-core/src/daemon/`
 - `sentinelpass-host/`
 - `browser-extension/`

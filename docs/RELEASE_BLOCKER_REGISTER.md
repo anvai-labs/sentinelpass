@@ -1,7 +1,8 @@
 # Release-Blocker Register
 
 **Generated from:** `TECHNICAL_DEBT.md` (2026-09-04 reset section) and
-`docs/SECURITY_STATUS_MATRIX.md`.
+`docs/SECURITY_STATUS_MATRIX.md`. Evidence-refresh pass 2026-09-08 (0.10 cycle):
+TD-SEC-01/03/04 closed against merged PRs #100/#102/#104/#107.
 **Governance:** ADR-003 (release gates). A blocker is closed only when its WBS
 package reaches `Done` **and** the evidence links below point at merged tests or
 review artifacts. Do not hand-edit statuses without updating the TD table in the
@@ -14,11 +15,11 @@ same change.
 
 | Blocker | TD | WBS | Owner | Target | Status | Evidence |
 |---|---|---|---|---|---|---|
-| Local fields lack semantic AAD | TD-SEC-01 | 303/304/404 | CM | 0.9 | Open | ADR-005 Proposed |
+| Local fields lack semantic AAD | TD-SEC-01 | 303/304/404 | CM | 0.9 | Closed (evidence): typed AAD builder (`crypto/aad.rs`, golden vectors); SPENV v2 on all durable classes (`vault/envelope_ops.rs`); post-unlock sweep + `format_version=2` activation gate | PRs #102/#104/#107; ADR-005 Accepted rev 4 |
 | Sync metadata unauthenticated end to end | TD-SEC-02 | 612 | CM | 0.11 | Open | ADR-006 Accepted rev 2 |
-| No forgotten-password recovery | TD-SEC-03 | 302/310–312 | CM | 0.9 | Open | ADR-004 Proposed |
-| Rotation adopts key before commit | TD-SEC-04 | 309 | CM | 0.9 | Open | — |
-| Epoch does not revoke sync authority | TD-SEC-05 | 312/314/614 | CM | 0.11 | Open | ADR-004/006 Proposed |
+| No forgotten-password recovery | TD-SEC-03 | 302/310–312 | CM | 0.9 | Closed (evidence): slot registry with registry-MAC (WBS-302); 256-bit checksummed recovery key (310); verified onboarding/recovery, epoch advance, single-use slot (311/312); CLI `recovery setup/recover/status`. Desktop UI flows + recovery drill remain (WBS-1001/905) | PR #100; ADR-004 Accepted rev 5 |
+| Rotation adopts key before commit | TD-SEC-04 | 309 | CM | 0.9 | Closed (evidence): stage→verify→commit→adopt with stale-epoch UPDATE guard + commit-failure test (lock injector) | PR #100; `vault/mod.rs` rotation tests |
+| Epoch does not revoke sync authority | TD-SEC-05 | 312/314/614 | CM | 0.11 | Open | ADR-004 Accepted rev 5; ADR-006 Accepted rev 2 |
 | Browser IPC self-asserted origin | TD-SEC-06 | 101 (containment) / 504–505 | CM | 0.10 | In progress (containment closed: `browser_surface_allowed` + tests; see matrix row) | `ipc/server.rs`; unit tests |
 | Six-digit pairing offline-guessable | TD-SEC-07 | 615 | CM | 0.11 | Open | ADR-006 Accepted rev 2 |
 | Mobile placeholder security functions | TD-SEC-08 | 104 (labels) / 807 | ME | 0.8.x/0.12 | In progress (labels landed in docs; placeholders remain until 807) | mobile doc banners |
