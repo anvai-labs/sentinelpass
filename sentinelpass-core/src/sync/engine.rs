@@ -469,6 +469,11 @@ impl SyncEngine {
             let blobs = prepare_credential_blobs(conn, dek, &payload, &sync_id_str)?;
             let now = chrono::Utc::now().timestamp();
 
+            // Typed NULL preservation (WBS-410 / TD-ROB-03 / SR-DATA-002):
+            // payload None stores NULL; payload Some stores its envelope —
+            // including Some("") — with NO empty-blob coercion at either
+            // end. (The former `.filter(|b| !b.is_empty())` here was the
+            // TD-ROB-03 band-aid, silently losing Some("").)
             conn.execute(
                 "UPDATE entries SET
                     title = ?1, username = ?2, password = ?3, url = ?4, notes = ?5,
@@ -480,8 +485,8 @@ impl SyncEngine {
                     blobs.title,
                     blobs.username,
                     blobs.password,
-                    blobs.url.as_deref().filter(|b| !b.is_empty()),
-                    blobs.notes.as_deref().filter(|b| !b.is_empty()),
+                    blobs.url.as_deref(),
+                    blobs.notes.as_deref(),
                     payload.credential_type.as_str(),
                     blobs.nonce,
                     blobs.auth_tag,
@@ -544,8 +549,9 @@ impl SyncEngine {
                     blobs.title,
                     blobs.username,
                     blobs.password,
-                    blobs.url.as_deref().filter(|b| !b.is_empty()),
-                    blobs.notes.as_deref().filter(|b| !b.is_empty()),
+                    // Typed NULL preservation — see the UPDATE arm above.
+                    blobs.url.as_deref(),
+                    blobs.notes.as_deref(),
                     payload.credential_type.as_str(),
                     blobs.nonce,
                     blobs.auth_tag,
@@ -1433,5 +1439,224 @@ mod tests {
             injected_failures >= 1,
             "the sweep must inject at least one real failure to be meaningful"
         );
+    }
+
+    // --- WBS-410 / TD-ROB-03 / SR-DATA-002: typed NULL end to end ----------
+
+    /// A pending v1-shape credential row with configurable optional fields
+    /// (None -> NULL column; Some -> v1 bincode blob under `dek`).
+    fn insert_pending_with_optionals(
+        conn: &rusqlite::Connection,
+        dek: &DataEncryptionKey,
+        url: Option<&str>,
+        notes: Option<&str>,
+    ) -> Uuid {
+        use crate::crypto::cipher::encrypt_string;
+        let sync_id = Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp();
+        let t = encrypt_string(dek, "Opt Title").unwrap();
+        let u = encrypt_string(dek, "opt-user").unwrap();
+        let p = encrypt_string(dek, "opt-pass").unwrap();
+        let url_blob = url.map(|s| bincode::serialize(&encrypt_string(dek, s).unwrap()).unwrap());
+        let notes_blob =
+            notes.map(|s| bincode::serialize(&encrypt_string(dek, s).unwrap()).unwrap());
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, url, notes, credential_type,
+                entry_nonce, auth_tag, created_at, modified_at, favorite,
+                sync_id, sync_version, sync_state, is_deleted)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, 'password', ?6, ?7, ?8, ?9, 0, ?10, 1, 'pending', 0)",
+            rusqlite::params![
+                bincode::serialize(&t).unwrap(),
+                bincode::serialize(&u).unwrap(),
+                bincode::serialize(&p).unwrap(),
+                url_blob,
+                notes_blob,
+                bincode::serialize(&t.nonce).unwrap(),
+                bincode::serialize(&t.auth_tag).unwrap(),
+                now,
+                now,
+                sync_id.to_string(),
+            ],
+        )
+        .unwrap();
+        sync_id
+    }
+
+    fn decrypt_payload(dek: &DataEncryptionKey, blob: &SyncEntryBlob) -> CredentialPayload {
+        let json = decrypt_from_sync(dek, &blob.encrypted_payload).unwrap();
+        serde_json::from_slice(&json).unwrap()
+    }
+
+    /// THE positive NULL roundtrip: local NULL -> wire absence -> remote
+    /// NULL. The applied column IS NULL (never an empty blob, never a
+    /// sealed empty string).
+    #[test]
+    fn none_url_notes_roundtrip_stays_null_end_to_end() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let source = apply_test_db();
+        let target_db = apply_test_db();
+        {
+            let conn = source.conn();
+            insert_pending_with_optionals(conn, &dek, None, None);
+        }
+        let blobs = collect_pending_credential_blobs(source.conn(), &dek, Uuid::new_v4()).unwrap();
+        assert_eq!(blobs.len(), 1);
+        let payload = decrypt_payload(&dek, &blobs[0]);
+        assert_eq!(payload.url, None, "wire must carry absence");
+        assert_eq!(payload.notes, None, "wire must carry absence");
+
+        let (engine2, target) = apply_engine(target_db);
+        {
+            let conn = target.lock().unwrap();
+            engine2
+                .apply_remote_entry(conn.conn(), &dek, &blobs[0])
+                .unwrap();
+        }
+        let (url_null, notes_null): (bool, bool) = {
+            let conn = target.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT url IS NULL, notes IS NULL FROM entries WHERE sync_id = ?1",
+                    [&blobs[0].sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert!(
+            url_null && notes_null,
+            "remote columns must be NULL, not empty blobs"
+        );
+    }
+
+    /// THE positive Some roundtrip: local Some -> wire Some -> remote Some,
+    /// decrypted back byte-faithful under the TARGET identity.
+    #[test]
+    fn some_url_notes_roundtrip_preserved() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let source = apply_test_db();
+        let target_db = apply_test_db();
+        {
+            let conn = source.conn();
+            insert_pending_with_optionals(
+                conn,
+                &dek,
+                Some("https://roundtrip.example"),
+                Some("round the trip"),
+            );
+        }
+        let blobs = collect_pending_credential_blobs(source.conn(), &dek, Uuid::new_v4()).unwrap();
+        assert_eq!(blobs.len(), 1);
+        let payload = decrypt_payload(&dek, &blobs[0]);
+        assert_eq!(payload.url.as_deref(), Some("https://roundtrip.example"));
+        assert_eq!(payload.notes.as_deref(), Some("round the trip"));
+
+        let (engine2, target) = apply_engine(target_db);
+        {
+            let conn = target.lock().unwrap();
+            engine2
+                .apply_remote_entry(conn.conn(), &dek, &blobs[0])
+                .unwrap();
+        }
+        let (url_blob, notes_blob, vault_uuid): (Option<Vec<u8>>, Option<Vec<u8>>, String) = {
+            let conn = target.lock().unwrap();
+            let (u, n, v): (Option<Vec<u8>>, Option<Vec<u8>>, String) = conn
+                .conn()
+                .query_row(
+                    "SELECT url, notes, (SELECT vault_uuid FROM db_metadata WHERE id = 1) \
+                     FROM entries WHERE sync_id = ?1",
+                    [&blobs[0].sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            (u, n, v)
+        };
+        assert!(
+            url_blob.is_some() && notes_blob.is_some(),
+            "Some must store blobs, not NULL"
+        );
+        let opened_url = crate::vault::envelope_ops::open_object_field(
+            &dek,
+            Some(vault_uuid.as_str()),
+            Some(blobs[0].sync_id.to_string().as_str()),
+            crate::crypto::aad::ObjectType::Password,
+            crate::crypto::aad::EnvelopePurpose::Secret,
+            url_blob.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(opened_url.as_str(), "https://roundtrip.example");
+        let opened_notes = crate::vault::envelope_ops::open_object_field(
+            &dek,
+            Some(vault_uuid.as_str()),
+            Some(blobs[0].sync_id.to_string().as_str()),
+            crate::crypto::aad::ObjectType::Password,
+            crate::crypto::aad::EnvelopePurpose::Secret,
+            notes_blob.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(opened_notes.as_str(), "round the trip");
+    }
+
+    /// THE negative for the old band-aid: Some("") must NOT be coerced to
+    /// NULL/absence anywhere in the chain (no Some->None loss). The former
+    /// apply-side `.filter(|b| !b.is_empty())` fabricated exactly that loss.
+    #[test]
+    fn empty_string_url_roundtrip_not_coerced_to_null() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let source = apply_test_db();
+        let target_db = apply_test_db();
+        {
+            let conn = source.conn();
+            insert_pending_with_optionals(conn, &dek, Some(""), Some(""));
+        }
+        let blobs = collect_pending_credential_blobs(source.conn(), &dek, Uuid::new_v4()).unwrap();
+        assert_eq!(blobs.len(), 1);
+        let payload = decrypt_payload(&dek, &blobs[0]);
+        assert_eq!(
+            payload.url,
+            Some(String::new()),
+            "wire must keep Some(\"\")"
+        );
+        assert_eq!(payload.notes, Some(String::new()));
+
+        let (engine2, target) = apply_engine(target_db);
+        {
+            let conn = target.lock().unwrap();
+            engine2
+                .apply_remote_entry(conn.conn(), &dek, &blobs[0])
+                .unwrap();
+        }
+        let (url_null, notes_null): (bool, bool) = {
+            let conn = target.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT url IS NULL, notes IS NULL FROM entries WHERE sync_id = ?1",
+                    [&blobs[0].sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert!(
+            !url_null && !notes_null,
+            "Some(\"\") must survive as a stored value"
+        );
+    }
+
+    /// Legacy EMPTY blobs (X'', the pre-0.9 absence marker) decode to
+    /// absence on push — the collector never fabricates Some("") from them.
+    #[test]
+    fn legacy_empty_blob_url_collects_as_absent() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let source = apply_test_db();
+        {
+            let conn = source.conn();
+            insert_pending_with_optionals(conn, &dek, None, None);
+            conn.execute("UPDATE entries SET url = X'', notes = X''", [])
+                .unwrap();
+        }
+        let blobs = collect_pending_credential_blobs(source.conn(), &dek, Uuid::new_v4()).unwrap();
+        assert_eq!(blobs.len(), 1);
+        let payload = decrypt_payload(&dek, &blobs[0]);
+        assert_eq!(payload.url, None);
+        assert_eq!(payload.notes, None);
     }
 }

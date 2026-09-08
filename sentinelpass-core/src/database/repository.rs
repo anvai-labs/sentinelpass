@@ -54,6 +54,12 @@ pub struct NewEntryParams {
 }
 
 /// Parameters for updating an existing entry
+///
+/// Semantics (WBS-410 / TD-ROB-03): `url` and `notes` are FULL-REPLACE —
+/// `None` CLEARS the column to NULL (typed null preservation; the update is
+/// never a partial merge for optional fields). The remaining Option fields
+/// are set-if-Some; the sole caller ([`crate::vault::VaultManager::
+/// update_entry`]) always provides them.
 pub struct UpdateEntryParams {
     pub title: Option<Vec<u8>>,
     pub username: Option<Vec<u8>>,
@@ -131,9 +137,10 @@ pub fn insert_entry_row(
 
 /// Update one entry row on an ARBITRARY connection (or transaction handle —
 /// they deref). The shared core behind [`EntryRepository::update`]: writes
-/// only the fields that are `Some`, always stamps `modified_at`, and bumps
-/// `sync_version` / marks `'pending'` EXPLICITLY (WBS-409 removed the echo
-/// trigger — this statement IS the local-write bookkeeping).
+/// the fields that are `Some`, ALWAYS sets url/notes (None clears to NULL —
+/// full-replace, see [`UpdateEntryParams`]), stamps `modified_at`, and
+/// bumps `sync_version` / marks `'pending'` EXPLICITLY (WBS-409 removed the
+/// echo trigger — this statement IS the local-write bookkeeping).
 pub fn update_entry_row(
     conn: &rusqlite::Connection,
     id: i64,
@@ -155,14 +162,14 @@ pub fn update_entry_row(
         set_clauses.push(format!("password = ?{}", param_index));
         param_index += 1;
     }
-    if entry.url.is_some() {
-        set_clauses.push(format!("url = ?{}", param_index));
-        param_index += 1;
-    }
-    if entry.notes.is_some() {
-        set_clauses.push(format!("notes = ?{}", param_index));
-        param_index += 1;
-    }
+    // url/notes are UNCONDITIONAL SETs (WBS-410 / TD-ROB-03 / SR-DATA-002):
+    // the sole caller performs a FULL-REPLACE update, so None must clear
+    // the column to NULL — the old set-if-Some behavior silently kept the
+    // previous value and made "clear this field" impossible.
+    set_clauses.push(format!("url = ?{}", param_index));
+    param_index += 1;
+    set_clauses.push(format!("notes = ?{}", param_index));
+    param_index += 1;
     if entry.credential_type.is_some() {
         set_clauses.push(format!("credential_type = ?{}", param_index));
         param_index += 1;
@@ -193,7 +200,8 @@ pub fn update_entry_row(
         param_index
     );
 
-    // Build params in the correct order using Box to own the values
+    // Build params in the correct order using Box to own the values.
+    // url/notes ALWAYS bind (None -> NULL — see the SET clause above).
     if let Some(v) = &entry.title {
         params.push(Box::new(v.clone()));
     }
@@ -203,12 +211,8 @@ pub fn update_entry_row(
     if let Some(v) = &entry.password {
         params.push(Box::new(v.clone()));
     }
-    if let Some(v) = &entry.url {
-        params.push(Box::new(v.clone()));
-    }
-    if let Some(v) = &entry.notes {
-        params.push(Box::new(v.clone()));
-    }
+    params.push(Box::new(entry.url.clone()));
+    params.push(Box::new(entry.notes.clone()));
     if let Some(v) = &entry.credential_type {
         params.push(Box::new(v.clone()));
     }

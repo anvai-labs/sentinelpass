@@ -3941,3 +3941,88 @@ fn delete_entry_fault_injection_at_every_statement_is_all_or_nothing() {
         "the sweep must inject at least one real failure to be meaningful"
     );
 }
+
+// --- WBS-410 / TD-ROB-03 / SR-DATA-002: typed NULL end to end -----------
+
+fn raw_url_notes(vault: &VaultManager, entry_id: i64) -> (bool, bool) {
+    let db = vault.lock_db().unwrap();
+    db.conn()
+        .query_row(
+            "SELECT url IS NULL, notes IS NULL FROM entries WHERE entry_id = ?1",
+            [entry_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// THE local-write leg: update_entry is full-replace for optional fields —
+/// a None url/notes CLEARS the columns to NULL (the old set-if-Some behavior
+/// silently kept the previous value, making "clear this field" impossible
+/// and losing the None -> NULL leg of the SR-DATA-002 contract).
+#[test]
+fn update_entry_none_clears_url_and_notes_to_null() {
+    let vault = VaultManager::create(":memory:", b"wbs410-clear-pass").unwrap();
+    let mut entry = wbs411_entry("Nullable", "wbs410-pass");
+    entry.notes = Some("has notes".to_string());
+    let entry_id = vault.add_entry(&entry).unwrap();
+    assert_eq!(
+        raw_url_notes(&vault, entry_id),
+        (false, false),
+        "precondition: entry stored with url and notes"
+    );
+    assert!(vault.get_entry(entry_id).unwrap().url.is_some());
+
+    let mut cleared = vault.get_entry(entry_id).unwrap();
+    cleared.url = None;
+    cleared.notes = None;
+    vault.update_entry(entry_id, &cleared).unwrap();
+
+    assert_eq!(
+        raw_url_notes(&vault, entry_id),
+        (true, true),
+        "local None must store NULL (never keep the old value)"
+    );
+    let read_back = vault.get_entry(entry_id).unwrap();
+    assert_eq!(read_back.url, None);
+    assert_eq!(read_back.notes, None);
+
+    // And the reverse direction: Some applies again (no stuck-NULL).
+    let mut restored = read_back;
+    restored.url = Some("https://wbs410.example".to_string());
+    vault.update_entry(entry_id, &restored).unwrap();
+    assert_eq!(raw_url_notes(&vault, entry_id), (false, true));
+    assert_eq!(
+        vault.get_entry(entry_id).unwrap().url.as_deref(),
+        Some("https://wbs410.example")
+    );
+}
+
+/// A legacy row carrying the pre-0.9 absence marker (EMPTY blob X'') in an
+/// optional column: reads as None (previously this FAILED the whole row's
+/// dual-read, bricking the entry), and a full-replace edit rewrites the
+/// column to a real NULL.
+#[test]
+fn legacy_empty_blob_optional_columns_read_as_absent() {
+    let vault = VaultManager::create(":memory:", b"wbs410-legacy-pass").unwrap();
+    let entry_id = vault
+        .add_entry(&wbs411_entry("Legacy Empty", "wbs410-legacy-pass"))
+        .unwrap();
+    {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .execute(
+                "UPDATE entries SET url = X'', notes = X'' WHERE entry_id = ?1",
+                [entry_id],
+            )
+            .unwrap();
+    }
+
+    // Read leg: absence, not an error, not Some("").
+    let entry = vault.get_entry(entry_id).unwrap();
+    assert_eq!(entry.url, None);
+    assert_eq!(entry.notes, None);
+
+    // Edit leg: the rewrite lands a real NULL (full-replace).
+    vault.update_entry(entry_id, &entry).unwrap();
+    assert_eq!(raw_url_notes(&vault, entry_id), (true, true));
+}

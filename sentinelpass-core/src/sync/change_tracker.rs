@@ -133,9 +133,15 @@ pub fn collect_pending_credential_blobs(
                 continue;
             }
         };
-        // Optional fields: skip-and-warn per row (same containment as the
-        // required fields above) — a corrupt url/notes blob skips the
-        // WHOLE row (partial application would silently lose fields).
+        // Optional fields: TYPED NULL preservation (WBS-410 / TD-ROB-03 /
+        // SR-DATA-002). A NULL column decodes to None (absence on the wire);
+        // a legacy EMPTY blob (X'') is the pre-0.9 absence marker and also
+        // decodes to None — the collector never fabricates Some(""). A
+        // present, non-empty blob always yields Some(plaintext): no
+        // Some→None loss either way. Still skip-and-warn per row (same
+        // containment as the required fields above) — a corrupt url/notes
+        // blob skips the WHOLE row (partial application would silently
+        // lose fields).
         let url = url_blob
             .filter(|b| !b.is_empty())
             .map(|b| open(crate::crypto::aad::EnvelopePurpose::Secret, &b).map(|z| z.to_string()))

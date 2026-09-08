@@ -757,9 +757,15 @@ impl VaultManager {
             &row.password,
         )?;
 
+        // Typed NULL preservation (WBS-410 / TD-ROB-03 / SR-DATA-002): a
+        // legacy EMPTY blob (X'') in an optional column is the pre-0.9
+        // absence marker — it reads as None, consistent with the sync
+        // collector, instead of failing the whole row's dual-read. A
+        // present, non-empty blob always yields Some(plaintext).
         let url = row
             .url
             .as_ref()
+            .filter(|blob| !blob.is_empty())
             .map(|blob| {
                 self.open_entry_field(sid, cred, crate::crypto::aad::EnvelopePurpose::Secret, blob)
                     .map(|z| z.to_string())
@@ -769,6 +775,7 @@ impl VaultManager {
         let notes = row
             .notes
             .as_ref()
+            .filter(|blob| !blob.is_empty())
             .map(|blob| {
                 self.open_entry_field(sid, cred, crate::crypto::aad::EnvelopePurpose::Secret, blob)
                     .map(|z| z.to_string())
@@ -1161,7 +1168,18 @@ impl VaultManager {
             // optional column is format-NEUTRAL (absence is NULL — never
             // a v1 blob), so only Some columns are compared; counting
             // NULL as "v1" would flag every legitimate v2 row that has no
-            // url/notes (found by the registry rotation test).
+            // url/notes (found by the registry rotation test). WBS-410: a
+            // legacy EMPTY blob (X'') in an OPTIONAL column is likewise
+            // format-neutral — it is the pre-0.9 absence marker and cannot
+            // encode a v1 plaintext (so it is not a downgrade vehicle);
+            // treating it as tamper would leave every such row readable
+            // but permanently unfixable. Required-field blobs stay strict.
+            let optional_mismatch = |blob: Option<&Vec<u8>>| -> bool {
+                match blob {
+                    Some(b) => !b.is_empty() && is_v2(b) != password_v2,
+                    None => false,
+                }
+            };
             let mismatch = |blob: Option<&Vec<u8>>| -> bool {
                 match blob {
                     Some(b) => is_v2(b) != password_v2,
@@ -1170,8 +1188,8 @@ impl VaultManager {
             };
             let mixed = mismatch(Some(&row.2))
                 || mismatch(Some(&row.3))
-                || mismatch(row.4.as_ref())
-                || mismatch(row.5.as_ref());
+                || optional_mismatch(row.4.as_ref())
+                || optional_mismatch(row.5.as_ref());
             if mixed {
                 return Err(PasswordManagerError::InvalidInput(
                     "entry row has mixed v1/v2 field formats — refusing to update; \
