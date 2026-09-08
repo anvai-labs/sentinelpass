@@ -874,7 +874,6 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   v6/v7/v8 released schemas restore through the migration ladder and fully
   decrypt (v1–v5 have no durable vault identity, so no manifest can bind them —
   inherent, not a gap).
-  complete-new, never partial.
 
 ## 6. Phase 3 — daemon authority & IPC (WBS-500, release 0.10)
 

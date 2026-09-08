@@ -26,9 +26,9 @@
 //! MAC verification precedes any state mutation. The DEK needed for the
 //! MAC key comes from the manifest's own wrapped key material (the
 //! snapshot's `db_metadata` blobs are mirrored into the manifest), so the
-//! chain is: parse format → bounds → typed version gate → Argon2id +
-//! unwrap manifest wrap (the password check) → constant-time MAC verify →
-//! snapshot SHA-256 digest → ONLY THEN any staging/validation that
+//! chain is: parse format → bounds → typed version gate → snapshot
+//! SHA-256 digest → Argon2id + unwrap manifest wrap (the password check)
+//! → constant-time MAC verify → ONLY THEN any staging/validation that
 //! touches a database, and only AFTER full validation of a staged copy
 //! does the live vault get replaced (WBS-417).
 //!
@@ -52,8 +52,11 @@
 //!   `VaultManager` may hold the target while restoring. A concurrent
 //!   daemon/UI connection is not detectable portably: on Windows the
 //!   rename fails loudly (sharing violation, live state untouched); on
-//!   POSIX the caller MUST close other SentinelPass processes first (the
-//!   pre-swap TRUNCATE checkpoint refuses when it cannot complete).
+//!   POSIX the pre-swap TRUNCATE checkpoint REFUSES when it reports
+//!   busy, and a `BEGIN IMMEDIATE` writer probe refuses when another
+//!   writer holds the lock — still, close other SentinelPass processes
+//!   before restoring (a POSIX reader that stays open keeps serving the
+//!   renamed-away inode).
 //! - Restore refuses while the LIVE vault has sync enabled unless the
 //!   caller passes the explicit disable acknowledgment (ADR-008 branch 2:
 //!   disable sync and require re-pairing). The restored snapshot's own
@@ -545,6 +548,23 @@ impl VaultManager {
     /// consistent WAL-inclusive read snapshot. The output is written
     /// atomically (temp file + fsync + rename) and refuses to overwrite.
     pub fn create_backup(&self, output: &Path) -> Result<BackupSummary> {
+        self.create_backup_impl(output, false)
+    }
+
+    /// WBS-418 test entry point: `fail_after_staging` injects a failure
+    /// AFTER the snapshot is staged (post-`VACUUM INTO`, pre-bundle-
+    /// write) so the cleanup contract is exercised mid-flow. Test builds
+    /// only; the production wrapper always passes `false`.
+    #[cfg(test)]
+    fn create_backup_with_faults(
+        &self,
+        output: &Path,
+        fail_after_staging: bool,
+    ) -> Result<BackupSummary> {
+        self.create_backup_impl(output, fail_after_staging)
+    }
+
+    fn create_backup_impl(&self, output: &Path, fail_after_staging: bool) -> Result<BackupSummary> {
         if !self.is_unlocked() {
             return Err(PasswordManagerError::VaultLocked);
         }
@@ -626,6 +646,13 @@ impl VaultManager {
             }
             bytes
         };
+        // WBS-418 mid-flow injection point: the snapshot is staged, the
+        // bundle does not exist yet — cleanup must leave no litter.
+        if fail_after_staging {
+            return Err(PasswordManagerError::InvalidInput(
+                "backup interrupted after snapshot staging (test hook)".to_string(),
+            ));
+        }
 
         // Authority row + inventories are read from the SNAPSHOT copy
         // (never the live db) so the manifest cannot desync from the
@@ -1298,9 +1325,9 @@ fn classify_live_target(vault_path: &Path) -> Result<Option<LiveState>> {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         );
-    let sync_enabled: bool = crate::sync::config::SyncConfig::load(db.conn())
-        .map(|c| c.sync_enabled)
-        .unwrap_or(false);
+    // Fail closed: a config read error must not silently read as "sync
+    // disabled" (the gate below would skip its warning).
+    let sync_enabled = crate::sync::config::SyncConfig::load(db.conn())?.sync_enabled;
     Ok(Some(match authority {
         Ok((_, epoch)) => LiveState {
             key_epoch: Some(epoch),
@@ -1334,9 +1361,22 @@ fn take_pre_restore_snapshot(vault_path: &Path, pre_tmp: &Path, openable: bool) 
         conn.busy_timeout(std::time::Duration::from_millis(5000))
             .map_err(DatabaseError::Sqlite)?;
         // Complete the main file from the WAL first, so the sidecar
-        // removal during the swap cannot lose frames.
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        // removal during the swap cannot lose frames. The pragma returns
+        // (busy, log, checkpointed) — a nonzero busy flag means a
+        // concurrent connection prevented the TRUNCATE checkpoint, and
+        // deleting the sidecars later could lose frames: REFUSE.
+        let (busy, _, _): (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE);", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .map_err(DatabaseError::Sqlite)?;
+        if busy != 0 {
+            return Err(PasswordManagerError::InvalidInput(
+                "the live vault could not be checkpointed — another SentinelPass \
+                 process is using it; close the daemon/UI and retry the restore"
+                    .to_string(),
+            ));
+        }
         // Writer-exclusivity probe at THIS instant: another writer makes
         // the swap unsafe (a stale connection would keep writing to the
         // renamed-away inode).
@@ -1466,6 +1506,13 @@ impl VaultManager {
         master_password: &[u8],
         opts: &RestoreOptions,
     ) -> Result<RestoreReport> {
+        if vault_path == bundle_path {
+            return Err(PasswordManagerError::InvalidInput(
+                "the bundle path equals the vault path — restoring would overwrite \
+                 the bundle itself; restore onto a different path"
+                    .to_string(),
+            ));
+        }
         let parsed = read_bundle(bundle_path)?;
         Self::restore_from_parsed(
             vault_path,
@@ -1615,9 +1662,12 @@ impl VaultManager {
             .unwrap_or_else(|| Path::new("."));
         let staging_dir = parent.join(format!(".sprestore-{}", uuid::Uuid::new_v4().simple()));
         crate::platform::create_private_dir(&staging_dir).map_err(|e| {
-            PasswordManagerError::Io(std::io::Error::other(format!(
-                "cannot create the restore staging directory: {e}"
-            )))
+            refuse(
+                PasswordManagerError::Io(std::io::Error::other(format!(
+                    "cannot create the restore staging directory: {e}"
+                ))),
+                "restore refused: staging directory creation failed".to_string(),
+            )
         })?;
         let mut stg = RestoreStaging {
             dir: staging_dir,
@@ -1626,9 +1676,22 @@ impl VaultManager {
             outcome: StagingOutcome::InProgress,
         };
         stg.staged = stg.dir.join("snapshot.db");
-        write_staged_snapshot(&stg.staged, &parsed.snapshot)?;
+        if let Err(e) = write_staged_snapshot(&stg.staged, &parsed.snapshot) {
+            return Err(refuse(
+                e,
+                "restore refused: staging the snapshot failed".to_string(),
+            ));
+        }
 
-        let staged_db = crate::database::Database::open(&stg.staged)?;
+        let staged_db = match crate::database::Database::open(&stg.staged) {
+            Ok(db) => db,
+            Err(e) => {
+                return Err(refuse(
+                    e,
+                    "restore refused: staged snapshot could not be opened".to_string(),
+                ))
+            }
+        };
         // WBS-418: deny the Nth staged write (test builds only).
         #[cfg(test)]
         let fault_guard = faults
@@ -1649,18 +1712,15 @@ impl VaultManager {
         // 5. Post-validation staged mutations: best-effort keychain clear
         // for a stale machine-local biometric ref, then the sync-lineage
         // neutralization tx.
-        let neutralization = {
-            if let Some(bio_ref) = VaultManager::load_biometric_ref(&staged_db)? {
-                if let Err(e) = crate::biometric::BiometricManager::clear_vault_dek(&bio_ref) {
-                    tracing::warn!(
-                        "clearing the restored vault's stale biometric keychain entry \
-                         failed (continuing; the reference is cleared in the restored \
-                         database regardless): {e}"
-                    );
-                }
-            }
-            neutralize_snapshot_sync_and_biometric(&staged_db)
-        };
+        // The restored snapshot's biometric_ref points at a keychain
+        // entry — at best dead on a NEW machine, at worst the LIVE
+        // entry of the pre-swap vault on the SAME machine. The OS
+        // keychain entry is therefore cleared only AFTER the swap
+        // succeeds (every pre-swap failure must leave the live state
+        // fully intact, keychain included); the column itself is NULLed
+        // inside the staged transaction below.
+        let restored_biometric_ref = VaultManager::load_biometric_ref(&staged_db)?;
+        let neutralization = neutralize_snapshot_sync_and_biometric(&staged_db);
         let sync_disabled = match neutralization {
             Ok(had) => had || opts.disable_sync,
             Err(e) => {
@@ -1736,6 +1796,17 @@ impl VaultManager {
             ));
         }
         stg.outcome = StagingOutcome::Swapped;
+        // Post-swap: the pre-swap vault is replaced — now (and only now)
+        // may the keychain entry its biometric ref pointed at be cleared.
+        if let Some(bio_ref) = restored_biometric_ref {
+            if let Err(e) = crate::biometric::BiometricManager::clear_vault_dek(&bio_ref) {
+                tracing::warn!(
+                    "clearing the restored vault's stale biometric keychain entry \
+                     failed (continuing; the reference is NULL in the restored \
+                     database): {e}"
+                );
+            }
+        }
         if faults.abort_after == Some(SwapPhase::Swap) {
             return Err(refuse(
                 PasswordManagerError::InvalidInput(
@@ -3094,8 +3165,9 @@ mod tests {
 
         // Documented recovery: an acknowledged re-run completes the
         // re-baseline and cleans up its OWN staging. The interrupted
-        // run's preserved safety net stays until removed by hand (its
-        // path was named in that run's error) — exactly one remains.
+        // run's preserved safety net is intentionally NOT auto-removed —
+        // it holds the only copy of the pre-swap state and stays until
+        // removed by hand — so exactly one staging dir remains.
         let report =
             VaultManager::restore_bundle(&fx.live_path, &fx.bundle, OTHER_PW, &opts).unwrap();
         let restored = VaultManager::open(&fx.live_path, OTHER_PW).unwrap();
@@ -3148,6 +3220,81 @@ mod tests {
         assert!(err.to_string().contains("does not exist"), "got: {err}");
         assert!(!bad_output.exists());
         assert!(staging_dirs(dir.path(), ".spbackup").is_empty());
+
+        // Mid-flow injection: the snapshot is already staged (VACUUM
+        // INTO done), the bundle not yet written — the cleanup guard
+        // must still leave no output and no staging litter.
+        let output = dir.path().join("mid.spbackup");
+        let err = vault.create_backup_with_faults(&output, true).unwrap_err();
+        assert!(
+            err.to_string().contains("test hook"),
+            "expected the injected failure: {err}"
+        );
+        assert!(!output.exists(), "no partial bundle may remain");
+        assert!(staging_dirs(dir.path(), ".spbackup").is_empty());
+
+        // The vault itself is untouched and still produces a good
+        // bundle afterwards.
+        let good = dir.path().join("good.spbackup");
+        vault.create_backup(&good).unwrap();
+        let parsed = read_bundle(&good).unwrap();
+        verify_bundle_authenticity(&parsed, PW).unwrap();
+    }
+
+    /// The migration path is where the staged copy does its real writes:
+    /// sweep the authorizer across a v8-schema bundle's restore. Every
+    /// denial must leave the target absent (there is no live state to
+    /// lose); the clean run must produce a fully openable vault.
+    #[test]
+    fn restore_migration_path_fault_sweep_is_complete_old_or_complete_new() {
+        use crate::database::fixtures::build_fixture_set;
+
+        let set = build_fixture_set();
+        let v8 = set
+            .fixtures
+            .iter()
+            .find(|f| f.version == 8)
+            .expect("fixture ladder covers v8");
+        let dir = TempDir::new().unwrap();
+        let bundle = dir.path().join("v8.spbackup");
+        seal_bundle_from_file(&v8.path, 8, &set.material, &bundle);
+        let target = dir.path().join("restored.db");
+
+        let mut fail_at = 0usize;
+        let mut saw_denial = false;
+        loop {
+            let result = VaultManager::restore_bundle_with_faults(
+                &target,
+                &bundle,
+                &set.material.password,
+                &RestoreOptions::default(),
+                RestoreFaults {
+                    staged_fail_at: Some(fail_at),
+                    abort_after: None,
+                },
+            );
+            match result {
+                Err(_) => {
+                    saw_denial = true;
+                    // Complete-old for a fresh target: it must not exist.
+                    assert!(
+                        !target.exists(),
+                        "an injected failure must never leave a partial target"
+                    );
+                    assert!(staging_dirs(dir.path(), ".sprestore").is_empty());
+                }
+                Ok(_) => break,
+            }
+            fail_at += 1;
+            assert!(fail_at < 80, "the sweep must reach a clean run");
+        }
+        assert!(
+            saw_denial,
+            "the sweep must inject at least one denial (non-vacuity guard)"
+        );
+
+        let restored = VaultManager::open(&target, &set.material.password).unwrap();
+        assert_eq!(restored.list_entries().unwrap().len(), 1);
     }
 
     /// SR-DATA-005 acceptance: a bundle of an OLDER released schema

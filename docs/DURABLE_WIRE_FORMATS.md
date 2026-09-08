@@ -313,10 +313,25 @@ Key: `HKDF-SHA256(DEK, info="sentinelpass-backup-manifest-mac-v1")`,
 key-separated from every other HKDF consumer. Backup therefore requires
 the unlocked DEK.
 
-MAC input: every field 1–17 above, in declaration order, each
-length-prefixed (`u64` LE length + bytes); array fields feed a `u64`
-element count then each element's fields in order. The `mac` field is
-never an input. Comparisons are constant-time (`subtle`).
+MAC input: every field 1–17 above, in declaration order:
+- STRING and base64/blob fields (1 `magic`, 3 `backup_id`, 5
+  `app_version`, 6 `vault_uuid`, 12–15 `kdf_params`/`wrapped_dek`/
+  `dek_nonce`/`slot_registry_mac`, 17 `snapshot.sha256`) are fed
+  length-prefixed: `u64` LE length + raw UTF-8/base64 STRING bytes (the
+  base64 TEXT is fed, not the decoded bytes). A `null`
+  `slot_registry_mac` feeds the empty string (length 0).
+- INTEGER fields (2 `v`, 4 `created_at`, 7 `epoch`, 8
+  `schema_version`, 9 `vault_format_version`, 10 `entry_count`, 11
+  `tombstone_count`, 17 `snapshot.len`) are fed as raw 8-byte
+  little-endian values with NO length prefix.
+- BOOLEAN (slot `revoked`) feeds a single `0x00`/`0x01` byte; slot
+  `key_epoch` feeds 8-byte LE like the integer fields.
+- The `slots` array feeds a `u64` LE element count, then each element's
+  fields in order (`slot_uuid` length-prefixed, `slot_type`
+  length-prefixed, `key_epoch` LE, `revoked` byte).
+
+The `mac` field is never an input. Comparisons are constant-time
+(`subtle`).
 
 Verification order is normative (ADR-008, fail closed): parse/bounds →
 version gate → snapshot SHA-256 digest → Argon2id + unwrap of the
