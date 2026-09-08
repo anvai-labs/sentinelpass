@@ -436,9 +436,6 @@ pub fn stamp_rotation(conn: &rusqlite::Connection, entry_id: i64, now: i64) -> R
     Ok(())
 }
 
-/// Purge every registry row for an entry. Soft delete never fires the FK
-/// CASCADE, so delete paths call this explicitly (mirroring the
-/// `domain_mappings` cleanup) and sweeps prune orphans as belt-and-braces.
 /// Re-arm the registry backfill sweep (WBS-411 review): clears the
 /// `backfill_complete` flag so the next unlock re-runs the reconciliation
 /// sweep. Needed because the sweep is flag-gated and would otherwise never
@@ -455,6 +452,9 @@ pub fn mark_backfill_needed(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+/// Purge every registry row for an entry. Soft delete never fires the FK
+/// CASCADE, so delete paths call this explicitly (mirroring the
+/// `domain_mappings` cleanup) and sweeps prune orphans as belt-and-braces.
 pub fn purge_registry_rows(conn: &rusqlite::Connection, entry_id: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM secret_equality_index WHERE entry_id = ?1",

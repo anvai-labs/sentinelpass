@@ -292,8 +292,8 @@ ADR-003 through ADR-010.
 | ID | Gap | Evidence area | Required outcome | Target | Status |
 |----|-----|---------------|------------------|--------|--------|
 | TD-ROB-01 | Sync marks rejected entries synced and uses server cursor as device sequence | `sync/engine.rs`; relay sync handler | Per-object durable ack and distinct counter types | 0.11 | Open |
-| TD-ROB-02 | Remote updates are rewritten pending by local SQLite trigger | `database/schema.rs`; `sync/engine.rs` | Explicit local/remote repositories and transactional unit of work | 0.10/0.11 | Open |
-| TD-ROB-03 | Optional encrypted URL/notes become empty blobs instead of NULL | sync apply | Preserve typed null end to end | 0.10 | Open |
+| TD-ROB-02 | Remote updates are rewritten pending by local SQLite trigger | `database/schema.rs`; `sync/engine.rs` | Explicit local/remote repositories and transactional unit of work | 0.10/0.11 | Closed 2026-09-08 (write-path PR): trigger never created + `migrate_v8_to_v9` drops both historical shapes in-tx; every production `entries` write carries explicit bookkeeping (integration-review enumeration: no missed path); negative `remote_apply_does_not_remark_pending` pins synced state + stable version/modified_at |
+| TD-ROB-03 | Optional encrypted URL/notes become empty blobs instead of NULL | sync apply | Preserve typed null end to end | 0.10 | Closed 2026-09-08 (write-path PR): apply-side empty-blob→NULL coercion removed; url/notes are unconditional full-replace SETs (None→NULL); legacy `X''` optional blobs decode as absence on read and in the sweep; `Some("")` never collapses (pinned by `empty_string_url_roundtrip_not_coerced_to_null`) |
 | TD-ROB-04 | Sync page, mapping, registry, cursor, and relay writes are not atomic | sync engine/relay | Transactional client and relay mutations | 0.11 | Open |
 | TD-ROB-05 | Retry after lost push response is not idempotent | client/relay device sequence | Mutation idempotency record returning original result | 0.11 | Open |
 | TD-ROB-06 | Full sync sequencing/pagination paths diverge from normal sync | client/relay full push/pull | One bounded paginated state machine | 0.11 | Open |

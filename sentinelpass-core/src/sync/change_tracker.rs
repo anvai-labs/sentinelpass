@@ -540,8 +540,13 @@ pub fn collect_pending_totp_blobs(
 ///
 /// Atomic (SR-DATA-001 / WBS-411): the per-row UPDATEs across all three
 /// tables commit as ONE transaction — an interruption leaves every row
-/// pending (re-pushed next cycle; LWW makes that idempotent) instead of a
-/// partially-marked batch.
+/// pending (a partially-marked batch is never committed).
+///
+/// KNOWN LIMITATION (see `engine.rs` on `complete_push_checkpoint`, and
+/// WBS-605): an interrupted push whose checkpoint DID commit cannot simply
+/// be re-pushed — the relay enforces a strictly increasing
+/// `device_sequence`, so the retry derives a consumed sequence and is
+/// rejected until sync v2 (ADR-006). Do not treat re-push as idempotent.
 pub fn mark_entries_synced(conn: &Connection, sync_ids: &[Uuid]) -> Result<()> {
     let tx = conn
         .unchecked_transaction()

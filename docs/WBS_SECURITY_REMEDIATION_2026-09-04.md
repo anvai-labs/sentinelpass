@@ -767,10 +767,34 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   Deps — may start after ADR-007 direction. Est 4d.
 - **WBS-409 — Explicit local vs remote write paths (remove trigger echo).** TD-ROB-02.
   Tests: N remote apply cannot re-mark pending. Est 3d.
+  **Status:** Done (2026-09-08, write-path PR) — schema v9: `create_triggers` no
+  longer installs the echo trigger and `migrate_v8_to_v9` drops both historical
+  shapes (OF-list and legacy no-list) in one transaction with the version bump;
+  every production write to `entries` carries explicit sync bookkeeping
+  (integration-review enumeration found no missed path). Negative:
+  `remote_apply_does_not_remark_pending` (synced state + stable
+  version/modified_at); migrated-vault e2e test proves first-edit single bump.
 - **WBS-410 — NULL preserved end to end.** SR-DATA-002, TD-ROB-03. Tests: P NULL
   roundtrip through encrypt/sync/restore. Est 1.5d.
+  **Status:** Done (2026-09-08, write-path PR) — None url/notes stay NULL through
+  encrypt/collect/apply/restore; apply-side empty-blob coercion removed; url/notes
+  are unconditional full-replace SETs (local None clears to NULL); legacy `X''`
+  optional blobs decode as absence on read and convert (not dead-letter) in the
+  sweep; `Some("")` never collapses — pinned by
+  `empty_string_url_roundtrip_not_coerced_to_null`.
 - **WBS-411 — Transactional entry/mapping/registry/audit/sync-state.** SR-DATA-001.
   Est 3d.
+  **Status:** Done (2026-09-08, write-path PR) — add/update/delete (entry +
+  registry + rotation in one tx), per-blob sync apply tx (entry + domain
+  mappings required; derived registry index best-effort inside the tx with
+  `mark_backfill_needed` re-arming the repair sweep — the apply asymmetry is
+  deliberate: skipped blobs are never re-served), push checkpoint (batch
+  mark-synced + cursor in one tx). Acceptance via the SQLite-authorizer
+  fault-injection harness (`database/fault_injection.rs`): denial at every write
+  action → complete-old or complete-new, with non-vacuity guards. Audit records
+  remain file-appends outside vault.db by design (documented boundary).
+  Known limitation carried to WBS-605: interrupted push after a committed
+  checkpoint wedges on the relay's monotonic `device_sequence` (ADR-006).
 - **WBS-412 — Explicit Unix modes + Windows ACLs for sensitive files.** SR-DATA-003,
   TD-ROB-09. Est 2d.
   **Status:** Done (2026-09-07, PR #107) — born-0600 creation for vault db (+WAL/SHM
