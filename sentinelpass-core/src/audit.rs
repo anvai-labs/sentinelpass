@@ -240,6 +240,11 @@ pub enum AuditEventType {
         count: usize,
     },
 
+    /// A portable authenticated backup bundle was created (WBS-416 /
+    /// ADR-008). The context carries the bundle's random `backup_id` —
+    /// the audit trail's opaque reference; no vault content is recorded.
+    BackupCreated,
+
     /// Registry operations (ADR-001). Identifier fields are opaqued at
     /// record time (WBS-414); context strings stay free of raw ids.
     RegistryEntityCreated {
@@ -1264,7 +1269,8 @@ impl AuditLogger {
             | AuditEventType::ExternalSecretAccess { success: false, .. }
             | AuditEventType::ExternalSecretWrite { success: false, .. }
             | AuditEventType::MasterPasswordChanged { success: false, .. }
-            | AuditEventType::BiometricUnlockRequested { success: false } => 2,
+            | AuditEventType::BiometricUnlockRequested { success: false }
+            | AuditEventType::BackupCreated => 2,
 
             // Low severity (1)
             AuditEventType::CredentialsListed { .. }

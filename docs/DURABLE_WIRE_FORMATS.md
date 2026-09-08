@@ -251,3 +251,105 @@ Pinned in `sentinelpass-core/src/crypto/dbwire.rs` (`crypto::dbwire::tests`):
 End-to-end adoption evidence (which columns carry which format after each
 writer) lives in `sentinelpass-core/src/vault/tests.rs`, module
 `wbs305_durable_wire`.
+
+## 6. Portable backup bundle — `SPBACKUP` (WBS-416/417, ADR-008)
+
+**Rust source of truth:** `sentinelpass-core/src/vault/backup_ops.rs`
+(bundle container, manifest, MAC), snapshot produced by SQLite
+`VACUUM INTO` (a consistent WAL-inclusive read snapshot; standalone
+file, no sidecars).
+
+A `.spbackup` bundle is ONE file with THREE consecutive parts:
+
+| Offset | Size | Content |
+|---|---|---|
+| 0 | 22 | Fixed magic line `SENTINELPASS-BACKUP/1` + `\n` (byte-exact) |
+| 22 | variable | Manifest: compact UTF-8 JSON, exactly one line (no interior `\n`), ≤ **16384 bytes** (`MAX_MANIFEST_BYTES`), terminated by `\n` |
+| — | exact | Snapshot payload: exactly `manifest.snapshot.len` bytes; the file MUST end there (trailing bytes are rejected) |
+
+Reader bounds run BEFORE any parse/allocation: the manifest line is
+rejected past its cap, `snapshot.len` is rejected past **1 GiB**
+(`MAX_SNAPSHOT_BYTES`) before the buffer is allocated, and truncation
+and trailing bytes are both hard refusals.
+
+### 6.1 Manifest field table (wire order = declaration order)
+
+The manifest obeys the canonical JSON profile (section 0): compact
+UTF-8, integers only, standard padded base64 for binary fields, unknown
+keys AND duplicate keys rejected structurally, nesting depth ≤ 4, and
+the typed version gate — `v` other than `1` fails closed with
+`UnsupportedCryptoVersion`. Reader acceptance is structural (not
+byte-level); AUTHENTICATION is over field values (below), so a
+parse-preserving respelling is still fully authenticated.
+
+| # | JSON key | Type | Constraint |
+|---|---|---|---|
+| 1 | `magic` | string | exactly `"SPBACKUP"` |
+| 2 | `v` | int | exactly `1` (`BACKUP_MANIFEST_VERSION`) |
+| 3 | `backup_id` | string | random UUID minted per bundle; the audit trail's opaque reference |
+| 4 | `created_at` | int | Unix seconds (creation metadata) |
+| 5 | `app_version` | string | creating binary's package version (creation metadata) |
+| 6 | `vault_uuid` | string | stable vault identity (WBS-301) |
+| 7 | `epoch` | int | master-password key epoch at backup time |
+| 8 | `schema_version` | int | snapshot's SQLite schema version |
+| 9 | `vault_format_version` | int | snapshot's envelope format (`db_metadata.format_version`) |
+| 10 | `entry_count` | int | usable (non-deleted) entry count — visible operational metadata (ADR-008) |
+| 11 | `tombstone_count` | int | soft-deleted entry count |
+| 12 | `kdf_params` | base64 | EXACT `db_metadata.kdf_params` column bytes (SPKDF document or legacy bincode — decoded at restore through the bounded dual-read decoders of section 1) |
+| 13 | `wrapped_dek` | base64 | EXACT `db_metadata.wrapped_dek` column bytes |
+| 14 | `dek_nonce` | base64 | EXACT `db_metadata.dek_nonce` column bytes |
+| 15 | `slot_registry_mac` | base64 or `null` | EXACT `db_metadata.slot_registry_mac` column bytes; `null` = pre-bootstrap vault |
+| 16 | `slots` | array | usable key-slot inventory; each entry: `slot_uuid` (string), `slot_type` (string), `key_epoch` (int), `revoked` (boolean, always `false` in v1 — only usable slots are recorded) |
+| 17 | `snapshot` | object | `sha256` (hex, lowercase) and `len` (int bytes) of the payload that follows |
+| 18 | `mac` | base64 | HMAC-SHA256 (32 raw bytes) — see 6.2 |
+
+The manifest contains NO plaintext entry content (titles, usernames,
+URLs, notes, secrets) — pinned by test.
+
+### 6.2 Bundle MAC
+
+Key: `HKDF-SHA256(DEK, info="sentinelpass-backup-manifest-mac-v1")`,
+32 bytes — the key-slot registry MAC precedent (`SLOT_REGISTRY_MAC_INFO`),
+key-separated from every other HKDF consumer. Backup therefore requires
+the unlocked DEK.
+
+MAC input: every field 1–17 above, in declaration order, each
+length-prefixed (`u64` LE length + bytes); array fields feed a `u64`
+element count then each element's fields in order. The `mac` field is
+never an input. Comparisons are constant-time (`subtle`).
+
+Verification order is normative (ADR-008, fail closed): parse/bounds →
+version gate → snapshot SHA-256 digest → Argon2id + unwrap of the
+manifest `wrapped_dek` (the password check; `epoch` is the AEAD AAD for
+epoch-bound wraps) → MAC verify. NOTHING may touch any vault state
+before all of it passes; restore additionally validates a staged copy
+(identity, inventory, schema-migration path, registry MAC, full
+decryption) before the single-rename swap (WBS-417).
+
+### 6.3 Golden example (shape; `mac`/`snapshot` abbreviated)
+
+```json
+{"magic":"SPBACKUP","v":1,"backup_id":"0b9f…","created_at":1789000000,
+ "app_version":"0.11.0","vault_uuid":"…","epoch":3,"schema_version":9,
+ "vault_format_version":2,"entry_count":42,"tombstone_count":3,
+ "kdf_params":"eyJtYWdpYyI6IlNQS0RGI…","wrapped_dek":"eyJtYWdpYyI6IlNQV1JBUC…",
+ "dek_nonce":"eyJtYWdpYyI6IlNQTk9OQ0Ui…","slot_registry_mac":"…",
+ "slots":[{"slot_uuid":"…","slot_type":"password","key_epoch":3,"revoked":false}],
+ "snapshot":{"sha256":"…","len":123456},"mac":"…"}
+```
+
+(Shown pretty for readability; the wire form is one compact line.)
+
+### 6.4 Conformance tests
+
+Pinned in `sentinelpass-core/src/vault/backup_ops.rs` (`mod tests`):
+layout exactness and no-plaintext-content
+(`bundle_layout_is_exact_and_manifest_has_no_plaintext_entry_content`),
+MAC determinism + per-field sensitivity
+(`manifest_mac_is_deterministic_and_input_sensitive`), key purpose
+separation, and negatives: snapshot-byte tamper → digest refusal;
+manifest-field tamper → MAC refusal; cross-bundle splice → digest
+refusal; truncation; trailing bytes; hostile snapshot length refused
+pre-allocation; oversized manifest line; unknown/duplicate keys;
+unknown version (typed); wrong password; raw live-file copy rejected at
+the magic gate; depth bomb rejected pre-parse.

@@ -826,6 +826,16 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   TD-ROB-12, ADR-008. Bundle carries vault UUID + epoch but NOT the high-water
   sidecar (ADR-004 rev 4: restore re-baselines via TOFU-warning or override).
   Tests: N live-file copy rejected; bundle tamper fails. Est 4d.
+  **Status:** Done (2026-09-08) — `vault/backup_ops.rs`: `VACUUM INTO` snapshot
+  under the db lock, SPBACKUP bundle (format registered in
+  docs/DURABLE_WIRE_FORMATS.md §6) with HKDF-over-DEK manifest MAC (registry
+  precedent), digest+identity+slot-inventory binding, usable-slot-only manifest
+  inventory (bounded), no-plaintext-entry-content, atomic 0600 bundle write,
+  CLI `backup create`. Negatives: locked/in-memory refusal, overwrite+symlink
+  output refusal, snapshot-byte/manifest-field/cross-bundle-splice tamper,
+  truncation, trailing bytes, hostile lengths pre-allocation, unknown/dup
+  keys, unknown version (typed), wrong password, raw live-file copy rejected,
+  depth bomb.
 - **WBS-417 — Dry-run validation + atomic verified restore.** SR-DATA-005.
   Restoring an older-epoch bundle on a machine with a newer high-water requires
   reauthentication + acknowledgment, re-baselines the sidecar, and audit-logs
