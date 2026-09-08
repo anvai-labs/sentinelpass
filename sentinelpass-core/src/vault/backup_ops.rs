@@ -75,7 +75,7 @@ use crate::crypto::cipher::DataEncryptionKey;
 use crate::crypto::{dbwire, KeyHierarchy};
 use crate::{audit::AuditEventType, DatabaseError, PasswordManagerError, Result};
 
-use super::VaultManager;
+use super::{epoch_guard, VaultManager};
 
 /// Fixed first line of every bundle (magic + container format version).
 pub(crate) const BUNDLE_MAGIC_LINE: &str = "SENTINELPASS-BACKUP/1";
@@ -844,7 +844,9 @@ impl VaultManager {
             };
             let staged = staging.join("snapshot.db");
             write_staged_snapshot(&staged, &parsed.snapshot)?;
-            let report = validate_staged_snapshot(&staged, &manifest, master_password);
+            let staged_db = crate::database::Database::open(&staged)?;
+            let report = validate_staged_snapshot(&staged_db, &manifest, master_password);
+            drop(staged_db);
             drop(cleanup);
             report?;
         }
@@ -906,12 +908,17 @@ fn write_staged_snapshot(staged_path: &Path, snapshot: &[u8]) -> Result<()> {
 /// manifest authenticated, whatever the binary's era), schema-migration
 /// path (older migrates; newer refuses, typed), slot-registry MAC under
 /// the DEK, and the full functional/decryption pass.
+///
+/// Takes an already-open staged database so the caller controls the
+/// connection lifetime (the swap needs it closed) and so the WBS-418
+/// fault sweep covers every staged statement under one authorizer — the
+/// CALLER installs/clears the authorizer around validation plus any
+/// post-validation staged transaction.
 fn validate_staged_snapshot(
-    staged_path: &Path,
+    db: &crate::database::Database,
     manifest: &BackupManifest,
     master_password: &[u8],
 ) -> Result<()> {
-    let db = crate::database::Database::open(staged_path)?;
     let conn = db.conn();
 
     // One DEK unwrap for the whole chain (Argon2id is expensive).
@@ -1100,6 +1107,756 @@ fn validate_staged_snapshot(
         )));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Verified restore (WBS-417)
+// ---------------------------------------------------------------------------
+
+/// Retained pre-restore snapshot path: exactly ONE, `<vault>.pre-restore`,
+/// replaced only after the restored state verifies (ADR-008).
+pub(crate) fn pre_restore_snapshot_path(vault_path: &Path) -> PathBuf {
+    let mut s = vault_path.as_os_str().to_os_string();
+    s.push(".pre-restore");
+    PathBuf::from(s)
+}
+
+/// Caller acknowledgment flags (WBS-417 / ADR-008). Every flag is an
+/// EXPLICIT user confirmation; restore never destroys state without the
+/// ones the situation demands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoreOptions {
+    /// Acknowledge that the existing file/vault at the target path is
+    /// replaced. Required whenever ANY file exists at the path.
+    pub allow_replace: bool,
+    /// ADR-004 rev 4 supervised override: acknowledge that the epoch
+    /// high-water sidecar is re-baselined to a state the guard would
+    /// otherwise refuse (bundle older than the high-water, or an
+    /// equal-epoch bundle with different key material). Required in
+    /// exactly those cases; always audit-logged.
+    pub allow_epoch_rewind: bool,
+    /// ADR-008 branch 2: proceed while the LIVE vault has sync enabled.
+    /// The restored state always comes back with sync disabled and its
+    /// lineage cleared — re-pairing is required (never reused against the
+    /// old relay history).
+    pub disable_sync: bool,
+}
+
+/// Outcome of a successful verified restore.
+#[derive(Debug, Clone)]
+pub struct RestoreReport {
+    pub bundle_backup_id: String,
+    pub vault_uuid: String,
+    /// Live vault's epoch before the restore (`None`: no live vault).
+    pub from_epoch: Option<i64>,
+    pub to_epoch: i64,
+    /// The ADR-004 rev 4 supervised override was applied (sidecar moved
+    /// to a refused-open state under explicit acknowledgment).
+    pub epoch_rewound: bool,
+    /// Sync was disabled and its lineage cleared — re-pairing required.
+    pub sync_disabled: bool,
+    /// Finalized retained pre-restore snapshot (`None`: no live vault
+    /// existed, nothing was replaced).
+    pub pre_restore_snapshot: Option<PathBuf>,
+    pub entries: i64,
+}
+
+/// Swap-phase abort points for the WBS-418 interruption tests. Private to
+/// this module; production code never constructs one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwapPhase {
+    /// Immediately after the retained pre-restore snapshot was staged.
+    PreRestoreSnapshot,
+    /// Immediately after the live `-wal`/`-shm` sidecars were removed.
+    SidecarRemoval,
+    /// Immediately after the single-rename swap (sidecar NOT yet
+    /// re-baselined — the documented refused-open rollback state).
+    Swap,
+    /// Immediately after the sidecar re-baseline (final open pending).
+    SidecarRebaseline,
+}
+
+/// Test-only fault hooks (WBS-418). Fields are private to this module and
+/// only `cfg(test)` code sets them; production callers get the inert
+/// default through [`VaultManager::restore_bundle`].
+#[derive(Default)]
+struct RestoreFaults {
+    /// Deny the Nth top-level write action on the staged connection
+    /// (SQLite-authorizer harness, `database::fault_injection` — a
+    /// cfg(test)-only module, so the field exists only in test builds).
+    #[cfg(test)]
+    staged_fail_at: Option<usize>,
+    /// Return an error immediately after the named swap phase.
+    abort_after: Option<SwapPhase>,
+}
+
+/// What happened to the restore staging by the time it is dropped —
+/// decides what cleanup may still destroy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StagingOutcome {
+    /// Failure BEFORE the swap: staged copy and pre-restore tmp are both
+    /// disposable (the live state was never touched).
+    InProgress,
+    /// Failure AFTER the swap: the pre-restore tmp is the ONLY copy of
+    /// the replaced state — keep it (the error names the path); never
+    /// delete a safety net on a failure path.
+    Swapped,
+    /// Success: everything was renamed into place; only the dir remains.
+    Finalized,
+}
+
+/// Restore staging lifecycle. Drop implements the phase-dependent
+/// cleanup contract documented on [`StagingOutcome`].
+struct RestoreStaging {
+    dir: PathBuf,
+    staged: PathBuf,
+    pre_tmp: Option<PathBuf>,
+    outcome: StagingOutcome,
+}
+
+impl Drop for RestoreStaging {
+    fn drop(&mut self) {
+        match self.outcome {
+            StagingOutcome::InProgress => {
+                let _ = fs::remove_file(&self.staged);
+                if let Some(p) = &self.pre_tmp {
+                    let _ = fs::remove_file(p);
+                }
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+            StagingOutcome::Swapped => {
+                // Keep the staging dir + pre-restore tmp: the only copy
+                // of the replaced state. Remove just the staged copy.
+                let _ = fs::remove_file(&self.staged);
+            }
+            StagingOutcome::Finalized => {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+    }
+}
+
+/// What exists at the target path before a restore.
+struct LiveState {
+    key_epoch: Option<i64>,
+    sync_enabled: bool,
+    /// The file opened as a readable vault (db_metadata present).
+    openable: bool,
+}
+
+/// Classify the restore target WITHOUT mutating anything. Propagates the
+/// typed path guards (directory/symlink/non-regular refusals) from
+/// `Database::open` for existing paths.
+fn classify_live_target(vault_path: &Path) -> Result<Option<LiveState>> {
+    let meta = match fs::symlink_metadata(vault_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(PasswordManagerError::Io(std::io::Error::other(format!(
+                "cannot stat restore target {}: {e}",
+                vault_path.display()
+            ))))
+        }
+    };
+    if meta.file_type().is_symlink() {
+        return Err(PasswordManagerError::InvalidInput(format!(
+            "{} is a symlink — refusing to restore over a link",
+            vault_path.display()
+        )));
+    }
+    if meta.is_dir() {
+        return Err(PasswordManagerError::InvalidInput(format!(
+            "{} is a directory — a vault path must be a regular file",
+            vault_path.display()
+        )));
+    }
+
+    let db = crate::database::Database::open(vault_path)?;
+    let authority: std::result::Result<(Option<String>, i64), rusqlite::Error> =
+        db.conn().query_row(
+            "SELECT vault_uuid, COALESCE(key_epoch, 1) FROM db_metadata WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        );
+    let sync_enabled: bool = crate::sync::config::SyncConfig::load(db.conn())
+        .map(|c| c.sync_enabled)
+        .unwrap_or(false);
+    Ok(Some(match authority {
+        Ok((_, epoch)) => LiveState {
+            key_epoch: Some(epoch),
+            sync_enabled,
+            openable: true,
+        },
+        Err(_) => LiveState {
+            key_epoch: None,
+            sync_enabled,
+            openable: false,
+        },
+    }))
+}
+
+/// Preserve the LIVE state before the swap. Preferred: a WAL-consistent
+/// `VACUUM INTO` snapshot. The writer-exclusivity probe refuses when
+/// another process holds the write lock — a concurrent daemon/UI makes
+/// the swap unsafe. Fallback for an UNREADABLE live file (corrupt /
+/// foreign): a raw byte copy (documented residual: may miss
+/// un-checkpointed WAL frames; this is the recovery path where no better
+/// preservation exists).
+fn take_pre_restore_snapshot(vault_path: &Path, pre_tmp: &Path, openable: bool) -> Result<()> {
+    if openable {
+        let conn = rusqlite::Connection::open(vault_path)
+            .map_err(DatabaseError::Sqlite)
+            .map_err(|e| {
+                PasswordManagerError::InvalidInput(format!(
+                    "cannot open the live vault for its pre-restore snapshot: {e}"
+                ))
+            })?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))
+            .map_err(DatabaseError::Sqlite)?;
+        // Complete the main file from the WAL first, so the sidecar
+        // removal during the swap cannot lose frames.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(DatabaseError::Sqlite)?;
+        // Writer-exclusivity probe at THIS instant: another writer makes
+        // the swap unsafe (a stale connection would keep writing to the
+        // renamed-away inode).
+        conn.execute_batch("BEGIN IMMEDIATE; COMMIT;")
+            .map_err(|_| {
+                PasswordManagerError::InvalidInput(
+                    "vault appears to be in use by another SentinelPass process — close the \
+                 daemon/UI and retry the restore"
+                        .to_string(),
+                )
+            })?;
+        let pre_tmp_str = pre_tmp.to_string_lossy().to_string();
+        conn.execute("VACUUM INTO ?1", rusqlite::params![pre_tmp_str])
+            .map_err(DatabaseError::Sqlite)?;
+        drop(conn);
+    } else {
+        fs::copy(vault_path, pre_tmp).map_err(|e| {
+            PasswordManagerError::Io(std::io::Error::other(format!(
+                "cannot preserve the existing file before the restore: {e}"
+            )))
+        })?;
+    }
+    // The safety net is sensitive at rest and must survive crashes.
+    crate::platform::set_owner_only_mode(pre_tmp, false).map_err(|e| {
+        PasswordManagerError::Io(std::io::Error::other(format!(
+            "cannot tighten the pre-restore snapshot mode: {e}"
+        )))
+    })?;
+    let file = fs::OpenOptions::new()
+        .append(true)
+        .open(pre_tmp)
+        .map_err(|e| {
+            PasswordManagerError::Io(std::io::Error::other(format!(
+                "cannot reopen the pre-restore snapshot: {e}"
+            )))
+        })?;
+    file.sync_all().map_err(|e| {
+        PasswordManagerError::Io(std::io::Error::other(format!(
+            "cannot fsync the pre-restore snapshot: {e}"
+        )))
+    })?;
+    Ok(())
+}
+
+/// Reset the restored snapshot's sync lineage (ADR-008: "a restored
+/// device's sync lineage (pull cursor, device sequence) is re-baselined
+/// and never reused against the old relay history") and drop any
+/// machine-local biometric keychain reference, in ONE transaction on the
+/// staged copy. Returns `true` when the snapshot carried live sync state.
+fn neutralize_snapshot_sync_and_biometric(db: &crate::database::Database) -> Result<bool> {
+    let conn = db.conn();
+    let sync_tables: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_metadata')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    let had_sync_state = if sync_tables {
+        /// (sync_enabled, relay_url, device_signing_key_encrypted)
+        type SyncStateRow = (bool, Option<String>, Option<Vec<u8>>);
+        let row: std::result::Result<SyncStateRow, rusqlite::Error> = conn.query_row(
+            "SELECT sync_enabled, relay_url, device_signing_key_encrypted
+             FROM sync_metadata WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        match row {
+            Ok((enabled, relay, key)) => enabled || relay.is_some() || key.is_some(),
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(e) => return Err(DatabaseError::Sqlite(e).into()),
+        }
+    } else {
+        false
+    };
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    if sync_tables {
+        tx.execute(
+            "UPDATE sync_metadata SET
+                vault_id = NULL, device_id = NULL, device_name = NULL,
+                relay_url = NULL, device_signing_key_encrypted = NULL,
+                last_push_sequence = 0, last_pull_sequence = 0,
+                last_sync_at = NULL, sync_enabled = 0
+             WHERE id = 1",
+            [],
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    }
+    tx.execute("DELETE FROM sync_devices", [])
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute("DELETE FROM sync_tombstones", [])
+        .map_err(DatabaseError::Sqlite)?;
+    // A restored biometric_ref points at THIS machine's keychain — at
+    // best dead, at worst gating a foreign keychain entry. The caller
+    // already cleared the keychain entry best-effort; the column is the
+    // authoritative local state.
+    tx.execute(
+        "UPDATE db_metadata SET biometric_ref = NULL WHERE id = 1",
+        [],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
+    Ok(had_sync_state)
+}
+
+impl VaultManager {
+    /// Verified restore of an authenticated backup bundle (WBS-417).
+    ///
+    /// STATIC and path-based: the target vault must not be held open by
+    /// any `VaultManager` (close the daemon/UI; the pre-swap
+    /// writer-exclusivity probe refuses when another writer is live).
+    ///
+    /// Order is normative (ADR-008, fail closed): bundle parse + bounds →
+    /// MAC-first authenticity (the password reauthentication) → target
+    /// classification + acknowledgment gates → full staged validation
+    /// (identity, slot inventory, schema-migration path, registry MAC,
+    /// full decrypt) → sync-lineage neutralization → single-rename swap
+    /// with `-wal`/`-shm` removal → epoch sidecar re-baseline as the
+    /// SEQUENCED SECOND STEP → final functional open → only then is the
+    /// retained `<vault>.pre-restore` snapshot replaced.
+    pub fn restore_bundle(
+        vault_path: &Path,
+        bundle_path: &Path,
+        master_password: &[u8],
+        opts: &RestoreOptions,
+    ) -> Result<RestoreReport> {
+        let parsed = read_bundle(bundle_path)?;
+        Self::restore_from_parsed(
+            vault_path,
+            parsed,
+            master_password,
+            opts,
+            RestoreFaults::default(),
+        )
+    }
+
+    fn restore_from_parsed(
+        vault_path: &Path,
+        parsed: ParsedBundle,
+        master_password: &[u8],
+        opts: &RestoreOptions,
+        faults: RestoreFaults,
+    ) -> Result<RestoreReport> {
+        if vault_path.as_os_str() == std::path::Path::new(":memory:") {
+            return Err(PasswordManagerError::InvalidInput(
+                "restoring onto the in-memory path is not possible; choose a real \
+                 vault file path"
+                    .to_string(),
+            ));
+        }
+
+        // Audit logger BEFORE anything else: refusals are security
+        // signals and must leave a durable trace (recover_access
+        // precedent). Best-effort by design.
+        let audit_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| crate::audit::AuditLogger::new(dir).ok());
+        let refuse = |e: PasswordManagerError, context: String| -> PasswordManagerError {
+            if let Some(ref logger) = audit_logger {
+                let _ = logger.log(AuditEventType::VaultRestoreRefused, &context);
+            }
+            e
+        };
+
+        // 1. MAC-first authenticity — the password check and the tamper
+        // gate. Nothing else has happened yet.
+        let manifest = match verify_bundle_authenticity(&parsed, master_password) {
+            Ok(m) => m,
+            Err(e) => {
+                let context = format!("restore refused: bundle authentication failed: {e}");
+                return Err(refuse(e, context));
+            }
+        };
+
+        // 2. Target classification + acknowledgment gates.
+        let live = match classify_live_target(vault_path) {
+            Ok(l) => l,
+            Err(e) => {
+                return Err(refuse(
+                    e,
+                    "restore refused: unusable target path".to_string(),
+                ))
+            }
+        };
+        if let Some(state) = &live {
+            if !opts.allow_replace {
+                return Err(refuse(
+                    PasswordManagerError::InvalidInput(format!(
+                        "a file exists at {} — restoring replaces it; pass the \
+                         replace acknowledgment flag (allow_replace) to continue",
+                        vault_path.display()
+                    )),
+                    "restore refused: live target present without the replace \
+                     acknowledgment"
+                        .to_string(),
+                ));
+            }
+            if state.sync_enabled && !opts.disable_sync {
+                return Err(refuse(
+                    PasswordManagerError::InvalidInput(
+                        "the live vault has sync enabled — per ADR-008 a restore either \
+                         refuses or disables sync and requires re-pairing; disable sync \
+                         first or pass the disable-sync acknowledgment flag"
+                            .to_string(),
+                    ),
+                    "restore refused: live vault has sync configured".to_string(),
+                ));
+            }
+        }
+
+        // 3. Epoch high-water decision, BEFORE any mutation: compare the
+        // sidecar against what the restored state WILL say (the manifest
+        // carries every digest input: kdf/wrap/nonce blobs, registry MAC,
+        // epoch). An older epoch — or an equal epoch with different key
+        // material (e.g. a pre-slot-revocation backup) — is exactly the
+        // state open() refuses; it requires the ADR-004 rev 4 supervised
+        // override acknowledgment and is always audit-logged.
+        let registry_mac_bytes = match &manifest.slot_registry_mac {
+            Some(v) => b64_decode(v, "slot_registry_mac")?,
+            None => Vec::new(),
+        };
+        let manifest_digest = epoch_guard::digest_of(
+            &b64_decode(&manifest.kdf_params, "kdf_params")?,
+            &b64_decode(&manifest.wrapped_dek, "wrapped_dek")?,
+            &b64_decode(&manifest.dek_nonce, "dek_nonce")?,
+            &registry_mac_bytes,
+            manifest.epoch,
+        );
+        let manifest_digest_hex = hex(&manifest_digest);
+        let sidecar = epoch_guard::sidecar_path(vault_path);
+        let epoch_rewound = match epoch_guard::peek_full(&sidecar) {
+            Some((uuid, sc_epoch, sc_digest)) if uuid == manifest.vault_uuid => {
+                manifest.epoch < sc_epoch
+                    || (manifest.epoch == sc_epoch && sc_digest != manifest_digest_hex)
+            }
+            _ => false,
+        };
+        if epoch_rewound && !opts.allow_epoch_rewind {
+            return Err(refuse(
+                PasswordManagerError::InvalidInput(format!(
+                    "bundle epoch {} would re-base the epoch high-water record at {} — \
+                     an intentional rollback restore requires reauthentication plus the \
+                     epoch-rewind acknowledgment flag (ADR-004 rev 4)",
+                    manifest.epoch,
+                    sidecar.display()
+                )),
+                "restore refused: older-epoch bundle without the supervised-override \
+                 acknowledgment"
+                    .to_string(),
+            ));
+        }
+
+        // 4. Stage + full validation. Every failure from here through the
+        // swap leaves the live vault untouched (complete-old).
+        let parent = vault_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let staging_dir = parent.join(format!(".sprestore-{}", uuid::Uuid::new_v4().simple()));
+        crate::platform::create_private_dir(&staging_dir).map_err(|e| {
+            PasswordManagerError::Io(std::io::Error::other(format!(
+                "cannot create the restore staging directory: {e}"
+            )))
+        })?;
+        let mut stg = RestoreStaging {
+            dir: staging_dir,
+            staged: PathBuf::new(),
+            pre_tmp: None,
+            outcome: StagingOutcome::InProgress,
+        };
+        stg.staged = stg.dir.join("snapshot.db");
+        write_staged_snapshot(&stg.staged, &parsed.snapshot)?;
+
+        let staged_db = crate::database::Database::open(&stg.staged)?;
+        // WBS-418: deny the Nth staged write (test builds only).
+        #[cfg(test)]
+        let fault_guard = faults
+            .staged_fail_at
+            .map(|n| crate::database::fault_injection::install_write_fault(staged_db.conn(), n));
+        #[cfg(not(test))]
+        let _ = &faults;
+        if let Err(e) = validate_staged_snapshot(&staged_db, &manifest, master_password) {
+            #[cfg(test)]
+            drop(fault_guard);
+            drop(staged_db);
+            return Err(refuse(
+                e,
+                "restore refused: staged snapshot failed validation".to_string(),
+            ));
+        }
+
+        // 5. Post-validation staged mutations: best-effort keychain clear
+        // for a stale machine-local biometric ref, then the sync-lineage
+        // neutralization tx.
+        let neutralization = {
+            if let Some(bio_ref) = VaultManager::load_biometric_ref(&staged_db)? {
+                if let Err(e) = crate::biometric::BiometricManager::clear_vault_dek(&bio_ref) {
+                    tracing::warn!(
+                        "clearing the restored vault's stale biometric keychain entry \
+                         failed (continuing; the reference is cleared in the restored \
+                         database regardless): {e}"
+                    );
+                }
+            }
+            neutralize_snapshot_sync_and_biometric(&staged_db)
+        };
+        let sync_disabled = match neutralization {
+            Ok(had) => had || opts.disable_sync,
+            Err(e) => {
+                #[cfg(test)]
+                drop(fault_guard);
+                drop(staged_db);
+                return Err(refuse(
+                    e,
+                    "restore refused: sync-lineage neutralization failed".to_string(),
+                ));
+            }
+        };
+        // The WBS-418 sweep ends here: remove the authorizer so the
+        // staged connection is clean for its close.
+        #[cfg(test)]
+        {
+            crate::database::fault_injection::clear_write_fault(staged_db.conn());
+            drop(fault_guard);
+        }
+        drop(staged_db); // clean close: staged WAL checkpointed + removed
+
+        // 6. Preserve the live state (pre-restore snapshot, staged only —
+        // it replaces the retained one AFTER the restored state verifies).
+        if let Some(state) = &live {
+            let pre_tmp = stg.dir.join("pre-restore.db");
+            if let Err(e) = take_pre_restore_snapshot(vault_path, &pre_tmp, state.openable) {
+                return Err(refuse(
+                    e,
+                    "restore refused: could not preserve the live state before the swap"
+                        .to_string(),
+                ));
+            }
+            stg.pre_tmp = Some(pre_tmp);
+        }
+        if faults.abort_after == Some(SwapPhase::PreRestoreSnapshot) {
+            return Err(refuse(
+                PasswordManagerError::InvalidInput(
+                    "restore interrupted after the pre-restore snapshot (test hook)".to_string(),
+                ),
+                "restore interrupted (test hook): after the pre-restore snapshot".to_string(),
+            ));
+        }
+
+        // 7. The swap: remove the live sidecars (post-checkpoint, the
+        // main file is complete), then ONE rename. Crash windows land on
+        // complete-old (before the rename) or complete-new (after).
+        for suffix in ["-wal", "-shm"] {
+            let mut s = vault_path.as_os_str().to_os_string();
+            s.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(s)); // NotFound is fine
+        }
+        if faults.abort_after == Some(SwapPhase::SidecarRemoval) {
+            return Err(refuse(
+                PasswordManagerError::InvalidInput(
+                    "restore interrupted after the sidecar removal (test hook)".to_string(),
+                ),
+                "restore interrupted (test hook): after the sidecar removal".to_string(),
+            ));
+        }
+        for suffix in ["-wal", "-shm"] {
+            let mut s = stg.staged.as_os_str().to_os_string();
+            s.push(suffix);
+            let _ = fs::remove_file(PathBuf::from(s)); // lingering staged sidecars
+        }
+        if let Err(e) = fs::rename(&stg.staged, vault_path) {
+            return Err(refuse(
+                PasswordManagerError::Io(std::io::Error::other(format!(
+                    "the swap failed ({e}); the live vault file may still be held open \
+                     by another process (Windows sharing violation) — close the \
+                     daemon/UI and retry"
+                ))),
+                "restore refused: the rename swap failed".to_string(),
+            ));
+        }
+        stg.outcome = StagingOutcome::Swapped;
+        if faults.abort_after == Some(SwapPhase::Swap) {
+            return Err(refuse(
+                PasswordManagerError::InvalidInput(
+                    "restore interrupted after the swap (test hook): the next open \
+                     refuses until the epoch sidecar is re-baselined — re-run the \
+                     acknowledged restore to complete it"
+                        .to_string(),
+                ),
+                "restore interrupted (test hook): after the swap".to_string(),
+            ));
+        }
+
+        // 8. SEQUENCED SECOND STEP: re-baseline the epoch high-water
+        // sidecar from the restored state. Interruption here leaves the
+        // documented refused-open rollback state (the refusal names the
+        // sidecar; an acknowledged re-restore completes it).
+        let digest = {
+            let restored_db = crate::database::Database::open(vault_path)?;
+            let d = epoch_guard::material_digest(restored_db.conn())?;
+            drop(restored_db);
+            d
+        };
+        let mut rebased_note: Option<String> = None;
+        match epoch_guard::peek(&sidecar) {
+            None => {
+                rebased_note = Some(
+                    "bundle restore: epoch sidecar minted (TOFU) from the restored state; \
+                     revocations recorded before this point are unenforced"
+                        .to_string(),
+                );
+            }
+            Some((uuid, _sc_epoch)) if uuid != manifest.vault_uuid => {
+                rebased_note = Some(format!(
+                    "bundle restore: sidecar belonged to vault {uuid}; re-baselined to \
+                     the restored bundle under the replace acknowledgment"
+                ));
+            }
+            Some((_, sc_epoch)) if sc_epoch < manifest.epoch => {
+                rebased_note = Some(format!(
+                    "bundle restore: epoch high-water advanced {sc_epoch} -> {}",
+                    manifest.epoch
+                ));
+            }
+            // epoch_rewound is exactly "same vault, and the restored
+            // state is one open() would refuse": the high-water is
+            // AHEAD of the bundle epoch, or equal with different
+            // material. Both are the acknowledged supervised override.
+            Some((_, sc_epoch)) if epoch_rewound => {
+                rebased_note = Some(format!(
+                    "bundle restore: SUPERVISED OVERRIDE — sidecar re-baselined from \
+                     epoch {sc_epoch} to the acknowledged restored material at epoch {}",
+                    manifest.epoch
+                ));
+            }
+            _ => {}
+        }
+        if rebased_note.is_some() {
+            if let Err(e) =
+                epoch_guard::rebase(&sidecar, &manifest.vault_uuid, manifest.epoch, &digest)
+            {
+                return Err(refuse(
+                    PasswordManagerError::InvalidInput(format!(
+                        "the restore committed, but re-baselining the epoch sidecar \
+                         failed: {e}. The next open refuses (documented rollback \
+                         protection); re-run the acknowledged restore to complete the \
+                         re-baseline."
+                    )),
+                    "restore failed: sidecar re-baseline did not commit".to_string(),
+                ));
+            }
+            if let Some(note) = &rebased_note {
+                if let Some(ref logger) = audit_logger {
+                    let _ = logger.log(
+                        AuditEventType::EpochHighWaterRebased { refused: false },
+                        &format!("{note} (epoch {})", manifest.epoch),
+                    );
+                }
+            }
+        }
+        if faults.abort_after == Some(SwapPhase::SidecarRebaseline) {
+            return Err(refuse(
+                PasswordManagerError::InvalidInput(
+                    "restore interrupted after the sidecar re-baseline (test hook)".to_string(),
+                ),
+                "restore interrupted (test hook): after the sidecar re-baseline".to_string(),
+            ));
+        }
+
+        // 9. Final functional verification: a full open (epoch guard,
+        // unlock, registry verify, backfills) proves the restored state
+        // end to end under the bundle password.
+        let from_epoch = live.as_ref().and_then(|s| s.key_epoch);
+        if let Err(e) = VaultManager::open(vault_path, master_password) {
+            let preserved = stg
+                .pre_tmp
+                .clone()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "none (no live vault existed)".to_string());
+            return Err(refuse(
+                e,
+                format!(
+                    "restore committed but final verification failed; the retained \
+                     pre-restore snapshot is preserved: {preserved}"
+                ),
+            ));
+        }
+
+        // 10. Only now — the restored state having verified — may the
+        // retained pre-restore snapshot be replaced.
+        let mut finalized_snapshot = None;
+        if let Some(pre_tmp) = stg.pre_tmp.clone() {
+            let retained = pre_restore_snapshot_path(vault_path);
+            fs::rename(&pre_tmp, &retained).map_err(|e| {
+                PasswordManagerError::Io(std::io::Error::other(format!(
+                    "the restore verified, but finalizing the retained pre-restore \
+                     snapshot failed: {e} (the snapshot remains at {})",
+                    pre_tmp.display()
+                )))
+            })?;
+            stg.pre_tmp = None;
+            stg.outcome = StagingOutcome::Finalized;
+            finalized_snapshot = Some(retained);
+        }
+
+        // 11. Audit + report.
+        if let Some(ref logger) = audit_logger {
+            let _ = logger.log(
+                AuditEventType::VaultRestored {
+                    from_epoch,
+                    to_epoch: manifest.epoch,
+                    epoch_rewound,
+                    sync_disabled,
+                },
+                &format!(
+                    "vault restored from bundle backup_id={}{}",
+                    manifest.backup_id,
+                    if sync_disabled {
+                        " (sync disabled; re-pairing required)"
+                    } else {
+                        ""
+                    }
+                ),
+            );
+        }
+
+        Ok(RestoreReport {
+            bundle_backup_id: manifest.backup_id,
+            vault_uuid: manifest.vault_uuid,
+            from_epoch,
+            to_epoch: manifest.epoch,
+            epoch_rewound,
+            sync_disabled,
+            pre_restore_snapshot: finalized_snapshot,
+            entries: manifest.entry_count,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1633,5 +2390,479 @@ mod tests {
             err.to_string().contains("nesting depth"),
             "depth bomb must be rejected pre-parse: {err}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // WBS-417: verified restore
+    // ------------------------------------------------------------------
+
+    /// Persist a sync-enabled config straight into the vault db (the
+    /// config table needs no DEK).
+    fn enable_sync(vault_path: &Path) {
+        let db = crate::database::Database::open(vault_path).unwrap();
+        crate::sync::config::SyncConfig {
+            sync_enabled: true,
+            relay_url: Some("https://relay.example".to_string()),
+            ..Default::default()
+        }
+        .save(db.conn())
+        .unwrap();
+    }
+
+    fn entry_count_via_raw_conn(path: &Path) -> i64 {
+        let conn =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn add_entry_titled(vault: &VaultManager, title: &str, password: &str) {
+        vault
+            .add_entry(&Entry {
+                entry_id: None,
+                title: title.to_string(),
+                username: "u@example.com".to_string(),
+                password: password.to_string().into(),
+                url: None,
+                notes: None,
+                credential_type: CredentialType::Password,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn restore_to_a_fresh_path_round_trips_entries_and_mints_the_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "Bank", "roundtrip-secret");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let uuid = vault.vault_uuid().unwrap().to_string();
+        drop(vault);
+
+        let target = dir.path().join("restored.db");
+        let report =
+            VaultManager::restore_bundle(&target, &bundle, PW, &RestoreOptions::default()).unwrap();
+        assert_eq!(report.vault_uuid, uuid);
+        assert_eq!(report.to_epoch, 1);
+        assert_eq!(report.from_epoch, None);
+        assert!(!report.epoch_rewound);
+        assert!(report.pre_restore_snapshot.is_none());
+
+        let restored = VaultManager::open(&target, PW).unwrap();
+        let entries = restored.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Bank");
+        let got = restored.get_entry(entries[0].entry_id).unwrap();
+        assert_eq!(got.password.as_str(), "roundtrip-secret");
+        // Sidecar: TOFU-minted from the restored state.
+        let sidecar = epoch_guard::sidecar_path(&target);
+        assert_eq!(epoch_guard::peek(&sidecar), Some((uuid, 1)));
+    }
+
+    #[test]
+    fn restore_older_epoch_requires_ack_and_rebaselines_the_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let vault_path = dir.path().join("vault.db");
+        let vault = VaultManager::create(&vault_path, PW).unwrap();
+        add_entry_titled(&vault, "epoch1", "p1");
+        let old_bundle = dir.path().join("old.spbackup");
+        vault.create_backup(&old_bundle).unwrap();
+
+        // Rotate: epoch 2, new password; then grow the vault further.
+        let mut vault = vault;
+        const PW2: &[u8] = b"rotated-password-22!";
+        vault.change_master_password(PW, PW2).unwrap();
+        add_entry_titled(&vault, "epoch2", "p2");
+        drop(vault);
+
+        // The older-epoch bundle WITHOUT the acknowledgment: refused
+        // (the live epoch-2 state must be intact afterwards).
+        let err = VaultManager::restore_bundle(
+            &vault_path,
+            &old_bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("epoch-rewind acknowledgment"),
+            "got: {err}"
+        );
+        let still = VaultManager::open(&vault_path, PW2).unwrap();
+        assert_eq!(still.list_entries().unwrap().len(), 2);
+        drop(still);
+
+        // WITH the acknowledgment (reauthentication is the password
+        // check against the bundle's epoch-1 material): succeeds.
+        let report = VaultManager::restore_bundle(
+            &vault_path,
+            &old_bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                allow_epoch_rewind: true,
+                disable_sync: false,
+            },
+        )
+        .unwrap();
+        assert!(report.epoch_rewound);
+        assert_eq!(report.from_epoch, Some(2));
+        assert_eq!(report.to_epoch, 1);
+
+        // The restored state is the epoch-1 vault under the OLD password;
+        // the sidecar was re-baselined to epoch 1 (the supervised
+        // override), so opens work.
+        let restored = VaultManager::open(&vault_path, PW).unwrap();
+        assert_eq!(restored.list_entries().unwrap().len(), 1);
+        drop(restored);
+        let sidecar = epoch_guard::sidecar_path(&vault_path);
+        assert_eq!(
+            epoch_guard::peek(&sidecar),
+            Some((report.vault_uuid.clone(), 1))
+        );
+    }
+
+    #[test]
+    fn restore_without_replace_ack_on_live_vault_is_refused_and_state_untouched() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "live", "live-secret");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+        drop(vault);
+
+        let err = VaultManager::restore_bundle(&live_path, &bundle, PW, &RestoreOptions::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("replace acknowledgment"));
+
+        let live = VaultManager::open(&live_path, PW).unwrap();
+        assert_eq!(live.list_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restore_with_live_sync_enabled_refuses_then_neutralizes_with_the_flag() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "synced", "s");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+        drop(vault);
+
+        enable_sync(&live_path);
+
+        // Refusal without the flag (even with replace acknowledged).
+        let err = VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("sync enabled"), "got: {err}");
+
+        // With the flag: ADR-008 branch 2 — restore proceeds, restored
+        // state comes back with sync disabled (re-pairing required).
+        let report = VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                allow_epoch_rewind: false,
+                disable_sync: true,
+            },
+        )
+        .unwrap();
+        assert!(report.sync_disabled);
+
+        let restored = VaultManager::open(&live_path, PW).unwrap();
+        let status = restored.get_sync_status().unwrap();
+        assert!(!status.enabled);
+        assert!(status.relay_url.is_none());
+    }
+
+    #[test]
+    fn restored_snapshot_sync_lineage_is_neutralized_even_from_a_synced_backup() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "synced-backup", "s");
+        enable_sync(vault.vault_path());
+        // The backup is taken WHILE sync is configured: the snapshot
+        // carries the enabled config + cursors.
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        drop(vault);
+
+        let target = dir.path().join("fresh.db");
+        let report =
+            VaultManager::restore_bundle(&target, &bundle, PW, &RestoreOptions::default()).unwrap();
+        assert!(report.sync_disabled, "carried sync lineage must be reset");
+
+        let restored = VaultManager::open(&target, PW).unwrap();
+        let status = restored.get_sync_status().unwrap();
+        assert!(!status.enabled, "restored sync must be disabled");
+        assert!(status.relay_url.is_none(), "relay lineage must be cleared");
+        assert!(
+            restored.load_sync_device_identity().unwrap().is_none(),
+            "the old device identity must not survive the restore"
+        );
+    }
+
+    #[test]
+    fn restore_of_a_different_vault_requires_the_replace_ack() {
+        let dir = TempDir::new().unwrap();
+        let vault_a = make_vault(&dir, "vault-a", "secret-a");
+        let bundle_a = dir.path().join("a.spbackup");
+        vault_a.create_backup(&bundle_a).unwrap();
+        let uuid_a = vault_a.vault_uuid().unwrap().to_string();
+        drop(vault_a);
+
+        // A different live vault at the target.
+        let vault_b_path = dir.path().join("vault-b.db");
+        let vault_b = VaultManager::create(&vault_b_path, b"vault-b-password-1!").unwrap();
+        drop(vault_b);
+
+        let err =
+            VaultManager::restore_bundle(&vault_b_path, &bundle_a, PW, &RestoreOptions::default())
+                .unwrap_err();
+        assert!(err.to_string().contains("replace acknowledgment"));
+
+        let report = VaultManager::restore_bundle(
+            &vault_b_path,
+            &bundle_a,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.vault_uuid, uuid_a);
+        let restored = VaultManager::open(&vault_b_path, PW).unwrap();
+        assert_eq!(restored.vault_uuid().unwrap(), uuid_a);
+    }
+
+    #[test]
+    fn tampered_bundle_restore_fails_closed_and_leaves_live_state_complete() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "live", "intact-secret");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+        drop(vault);
+
+        // Flip one snapshot byte in the bundle.
+        let mut raw = fs::read(&bundle).unwrap();
+        let last = raw.len() - 1;
+        raw[last] ^= 0x01;
+        fs::write(&bundle, &raw).unwrap();
+
+        let err = VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                allow_epoch_rewind: true,
+                disable_sync: true,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("digest"),
+            "must refuse at the digest/MAC gate: {err}"
+        );
+
+        // The live vault is complete-old and untouched.
+        let live = VaultManager::open(&live_path, PW).unwrap();
+        assert_eq!(live.list_entries().unwrap().len(), 1);
+        let got = live
+            .get_entry(live.list_entries().unwrap()[0].entry_id)
+            .unwrap();
+        assert_eq!(got.password.as_str(), "intact-secret");
+        // No retained snapshot exists (the swap never happened).
+        assert!(!pre_restore_snapshot_path(&live_path).exists());
+    }
+
+    #[test]
+    fn wrong_password_restore_is_refused_and_state_untouched() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "live", "s");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+        drop(vault);
+
+        let err = VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            b"definitely-not-it-1!",
+            &RestoreOptions {
+                allow_replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("did not unlock"));
+
+        let live = VaultManager::open(&live_path, PW).unwrap();
+        assert_eq!(live.list_entries().unwrap().len(), 1);
+    }
+
+    /// Grow the live vault by one entry (fresh open, no manager kept).
+    fn grow_live_vault(vault_path: &Path, title: &str) {
+        let v = VaultManager::open(vault_path, PW).unwrap();
+        add_entry_titled(&v, title, "grown-secret");
+    }
+
+    #[test]
+    fn pre_restore_snapshot_is_retained_and_replaced_only_after_verification() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "first", "s1");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+
+        // Grow the live vault AFTER the backup: 1 (bundled) + 1 (live).
+        add_entry_titled(&vault, "second", "p2");
+        drop(vault);
+
+        let retained = pre_restore_snapshot_path(&live_path);
+        assert!(!retained.exists());
+
+        let opts = RestoreOptions {
+            allow_replace: true,
+            ..Default::default()
+        };
+        let report = VaultManager::restore_bundle(&live_path, &bundle, PW, &opts).unwrap();
+        let first_retained = report.pre_restore_snapshot.expect("retained path");
+        assert_eq!(first_retained, retained);
+        assert!(retained.exists());
+        // The retained snapshot holds the PRE-restore state (2 entries).
+        assert_eq!(entry_count_via_raw_conn(&retained), 2);
+
+        // The restored live vault has the bundled state.
+        let live = VaultManager::open(&live_path, PW).unwrap();
+        assert_eq!(live.list_entries().unwrap().len(), 1);
+        drop(live);
+
+        // A SECOND restore replaces the retained snapshot — again only
+        // with the pre-restore state of THAT restore (live grew by two
+        // entries: 1 bundled + 2 grown = 3).
+        grow_live_vault(&live_path, "third");
+        grow_live_vault(&live_path, "fourth");
+        let report2 = VaultManager::restore_bundle(&live_path, &bundle, PW, &opts).unwrap();
+        assert_eq!(report2.pre_restore_snapshot, Some(retained.clone()));
+        assert_eq!(entry_count_via_raw_conn(&retained), 3);
+    }
+
+    #[test]
+    fn equal_epoch_different_key_material_requires_the_epoch_rewind_ack() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "t", "p");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+
+        // A constant-epoch registry change: the sidecar digest now
+        // differs from the bundle's, at the SAME epoch — the material-
+        // rewind signature. Restoring the older bundle is legitimate
+        // but must be acknowledged (it rewrites the anchor).
+        use crate::vault::recovery::RecoveryKey;
+        let key = RecoveryKey::generate().unwrap();
+        vault.create_recovery_slot(&key).unwrap();
+        drop(vault);
+
+        let err = VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("epoch-rewind acknowledgment"),
+            "equal-epoch material rewrite must be gated: {err}"
+        );
+
+        VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                allow_epoch_rewind: true,
+                disable_sync: false,
+            },
+        )
+        .unwrap();
+
+        // The restored vault opens (sidecar re-baselined) and the
+        // recovery slot minted AFTER the backup is GONE (pre-backup
+        // state restored).
+        let restored = VaultManager::open(&live_path, PW).unwrap();
+        let slots = restored.list_key_slots().unwrap();
+        assert!(
+            slots
+                .iter()
+                .all(|s| s.slot_type != slot_ops::SlotType::Recovery),
+            "the post-backup recovery slot must not survive the restore"
+        );
+    }
+
+    #[test]
+    fn audit_trail_records_the_restore_with_the_bundle_reference() {
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "audited", "s");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let live_path = vault.vault_path().to_path_buf();
+        drop(vault);
+
+        let report = VaultManager::restore_bundle(
+            &live_path,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // The audit trail is a plaintext file (outside vault.db by
+        // design, WBS-414 boundary): the restore must appear with the
+        // bundle's opaque backup_id.
+        let audit_dir = crate::audit::get_audit_log_dir();
+        let mut found_created = false;
+        let mut found_restored = false;
+        if let Ok(entries) = fs::read_dir(&audit_dir) {
+            for file in entries.filter_map(|e| e.ok()) {
+                if let Ok(text) = fs::read_to_string(file.path()) {
+                    if text.contains(&report.bundle_backup_id) {
+                        if text.contains("portable backup created") {
+                            found_created = true;
+                        }
+                        if text.contains("vault restored from bundle") {
+                            found_restored = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found_created, "BackupCreated event must be audited");
+        assert!(found_restored, "VaultRestored event must be audited");
     }
 }

@@ -841,6 +841,23 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   reauthentication + acknowledgment, re-baselines the sidecar, and audit-logs
   (ADR-004 rev 4). Tests: N interrupted restore leaves prior state complete;
   restore-older-epoch override flow + abuse negative. Est 3d.
+  **Status:** Done (2026-09-08) — `backup_ops::restore_bundle` (static,
+  path-based): MAC-first authenticity → target classification + gates
+  (allow_replace / allow_epoch_rewind / disable_sync flags; live-sync
+  refusal per ADR-008) → full staged validation (identity, slot inventory,
+  schema-migration path, registry MAC, WBS-405 full decrypt) → sync-lineage
+  neutralization + biometric-ref clearing on the staged copy → single-rename
+  swap with checkpoint-then-remove `-wal`/`-shm` → epoch sidecar re-baseline
+  as the sequenced second step (TOFU / forward / acknowledged supervised
+  override, all audited) → final functional `open()` → only then is the
+  retained `<vault>.pre-restore` snapshot replaced (exactly one, replaced
+  on the next restore; preserved untouched on any post-swap failure).
+  CLI `backup verify --deep` exposes the dry-run; `backup restore` carries
+  the three acknowledgment flags. Negatives: older-epoch + equal-epoch-
+  different-material restores refused without the ack; live-sync restore
+  refused without disable-sync; replace refusal leaves live state complete;
+  tampered bundle + wrong password refuse pre-mutation with live state
+  complete; pre-restore snapshot retention/replacement verified.
 - **WBS-418 — Crash/fault injection harness (migration/CRUD/backup/restore).**
   SR-DATA-001, TV-005. Est 4d. Gate for the phase: fault at any step → complete-old or
   complete-new, never partial.

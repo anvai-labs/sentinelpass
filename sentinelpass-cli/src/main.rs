@@ -462,6 +462,10 @@ enum Commands {
         command: commands::recovery::RecoveryCommands,
     },
 
+    /// Portable authenticated backup (create, verify, restore)
+    #[command(subcommand)]
+    Backup(commands::backup::BackupCommands),
+
     /// Sync subcommands for encrypted cloud sync
     #[command(subcommand)]
     Sync(SyncCommands),
@@ -915,6 +919,30 @@ fn main() -> Result<()> {
 
         Commands::Lock => {
             commands::vault::handle_lock()?;
+        }
+
+        Commands::Backup(ref command) => {
+            let vault_path = get_vault_path(&cli, false);
+            match command {
+                commands::backup::BackupCommands::Create { output } => {
+                    commands::backup::handle_backup_create(vault_path, output.clone())?
+                }
+                commands::backup::BackupCommands::Verify { bundle, deep } => {
+                    commands::backup::handle_backup_verify(bundle.clone(), *deep)?
+                }
+                commands::backup::BackupCommands::Restore {
+                    ref bundle,
+                    allow_replace,
+                    allow_epoch_rewind,
+                    disable_sync,
+                } => commands::backup::handle_backup_restore(
+                    vault_path,
+                    bundle.clone(),
+                    *allow_replace,
+                    *allow_epoch_rewind,
+                    *disable_sync,
+                )?,
+            }
         }
 
         Commands::BiometricStatus => {
