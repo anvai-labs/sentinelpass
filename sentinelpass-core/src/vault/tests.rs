@@ -4026,3 +4026,138 @@ fn legacy_empty_blob_optional_columns_read_as_absent() {
     vault.update_entry(entry_id, &entry).unwrap();
     assert_eq!(raw_url_notes(&vault, entry_id), (true, true));
 }
+
+/// WBS-411 review fix (F1): the REGISTRY-BOUNDARY degraded outcome must
+/// actually self-heal. A remote apply whose equality-index write is denied
+/// commits the delivered change with a stale index; the best-effort branch
+/// re-arms the backfill flag, and the next sweep repairs the index. Pins
+/// the full repair loop end to end.
+#[cfg(feature = "sync")]
+#[test]
+fn degraded_sync_apply_index_is_repaired_by_sweep() {
+    use crate::database::fault_injection;
+    use crate::sync::client::SyncClient;
+    use crate::sync::crypto::encrypt_for_sync;
+    use crate::sync::engine::SyncEngine;
+    use crate::sync::models::{CredentialPayload, SyncEntryBlob};
+    use zeroize::Zeroizing;
+
+    let vault = VaultManager::create(":memory:", b"wbs411-repair-pass").unwrap();
+    let entry_id = vault
+        .add_entry(&wbs411_entry("Repair", "wbs411-repair-old"))
+        .unwrap();
+    let dek = vault.key_hierarchy.dek().unwrap();
+
+    // (0) Sweep once so the backfill flag is SET — this is the state where
+    // a degraded write would otherwise persist forever.
+    vault.sweep_registry_index().unwrap();
+    let flag: String = {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT value FROM registry_state WHERE key = 'backfill_complete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(flag, "1", "precondition: sweep completion flag set");
+
+    let sync_id: String = {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT sync_id FROM entries WHERE entry_id = ?1",
+                [entry_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let old_tag = index_tag(&vault, entry_id);
+    assert!(old_tag.is_some(), "precondition: entry is indexed");
+
+    // (1) Degraded apply: deny the index write; the change must still land.
+    let payload = CredentialPayload {
+        title: "Repair".to_string(),
+        username: "wbs411@example.com".to_string(),
+        password: Zeroizing::new("wbs411-repair-new".to_string()),
+        credential_type: CredentialType::Password,
+        url: None,
+        notes: None,
+        favorite: false,
+        domains: vec![],
+        created_at: 1_700_000_000,
+        modified_at: 1_700_000_200,
+    };
+    let plaintext = Zeroizing::new(serde_json::to_vec(&payload).unwrap());
+    let encrypted = encrypt_for_sync(dek, &plaintext).unwrap();
+    let blob = SyncEntryBlob {
+        sync_id: uuid::Uuid::parse_str(&sync_id).unwrap(),
+        entry_type: crate::sync::models::SyncEntryType::Credential,
+        sync_version: 2,
+        modified_at: payload.modified_at,
+        encrypted_payload: encrypted,
+        is_tombstone: false,
+        origin_device_id: uuid::Uuid::new_v4(),
+    };
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[11u8; 32]);
+    let client =
+        SyncClient::new("https://relay.invalid", uuid::Uuid::new_v4(), signing_key).unwrap();
+    let engine = SyncEngine::new(client, vault.db.clone(), uuid::Uuid::new_v4());
+
+    {
+        let conn = vault.lock_db().unwrap();
+        fault_injection::install_write_fault_on_table(conn.conn(), 0, "secret_equality_index");
+    }
+    let result = {
+        let conn = vault.lock_db().unwrap();
+        engine.apply_remote_entry(conn.conn(), dek, &blob)
+    };
+    {
+        let conn = vault.lock_db().unwrap();
+        fault_injection::clear_write_fault(conn.conn());
+    }
+    assert!(result.is_ok(), "the delivered change must not be dropped");
+
+    // The entry applied; the index is STALE (denial prevented the update);
+    // the best-effort branch RE-ARMED the sweep flag.
+    let (state, version): (String, i64) = entry_sync_bookkeeping(&vault, entry_id);
+    assert_eq!(state, "synced");
+    assert_eq!(version, 2);
+    assert_eq!(
+        index_tag(&vault, entry_id),
+        old_tag,
+        "the index write was degraded (tag unchanged)"
+    );
+    let flag: String = {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT value FROM registry_state WHERE key = 'backfill_complete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(flag, "0", "the degraded write must re-arm the sweep");
+
+    // (2) THE repair claim: the next sweep reconciles the degraded index.
+    let report = vault.sweep_registry_index().unwrap();
+    assert!(report.rotated >= 1, "the sweep must repair the stale tag");
+    assert_ne!(
+        index_tag(&vault, entry_id),
+        old_tag,
+        "the index must be repaired to the rotated tag"
+    );
+    let flag: String = {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT value FROM registry_state WHERE key = 'backfill_complete'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(flag, "1", "the repair pass re-completes the sweep flag");
+}

@@ -439,6 +439,22 @@ pub fn stamp_rotation(conn: &rusqlite::Connection, entry_id: i64, now: i64) -> R
 /// Purge every registry row for an entry. Soft delete never fires the FK
 /// CASCADE, so delete paths call this explicitly (mirroring the
 /// `domain_mappings` cleanup) and sweeps prune orphans as belt-and-braces.
+/// Re-arm the registry backfill sweep (WBS-411 review): clears the
+/// `backfill_complete` flag so the next unlock re-runs the reconciliation
+/// sweep. Needed because the sweep is flag-gated and would otherwise never
+/// revisit a completed vault — a degraded best-effort write on the sync
+/// apply path (see the REGISTRY-BOUNDARY note in `sync/engine.rs`) must
+/// re-arm it to actually be repaired.
+pub fn mark_backfill_needed(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO registry_state (key, value) VALUES ('backfill_complete', '0')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
 pub fn purge_registry_rows(conn: &rusqlite::Connection, entry_id: i64) -> Result<()> {
     conn.execute(
         "DELETE FROM secret_equality_index WHERE entry_id = ?1",

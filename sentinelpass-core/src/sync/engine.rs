@@ -471,6 +471,9 @@ impl SyncEngine {
                 if is_deleted == 1 {
                     if let Err(e) = crate::registry::purge_registry_rows(conn, entry_id) {
                         tracing::warn!(entry_id, error = %e, "registry purge failed");
+                        if let Err(flag_err) = crate::registry::mark_backfill_needed(conn) {
+                            tracing::warn!(entry_id, error = %flag_err, "could not re-arm the registry sweep");
+                        }
                     }
                 }
                 return Ok(());
@@ -482,9 +485,12 @@ impl SyncEngine {
 
             // Typed NULL preservation (WBS-410 / TD-ROB-03 / SR-DATA-002):
             // payload None stores NULL; payload Some stores its envelope —
-            // including Some("") — with NO empty-blob coercion at either
-            // end. (The former `.filter(|b| !b.is_empty())` here was the
-            // TD-ROB-03 band-aid, silently losing Some("").)
+            // including Some("") — with NO empty-blob coercion. (The former
+            // `.filter(|b| !b.is_empty())` here has been INERT since v2
+            // envelope sealing — sealed blobs are never empty; it is
+            // removed as the explicit typed contract. The historical
+            // TD-ROB-03 fabrication was the 0.8.x era's
+            // `unwrap_or(&[])`, which turned None into an empty blob.)
             conn.execute(
                 "UPDATE entries SET
                     title = ?1, username = ?2, password = ?3, url = ?4, notes = ?5,
@@ -534,14 +540,16 @@ impl SyncEngine {
             // REGISTRY-BOUNDARY NOTE (WBS-411 review): this write is
             // BEST-EFFORT inside the blob transaction, deliberately. The
             // atomic unit of an apply is entry + domain mappings; the
-            // equality index is DERIVED data with its own sweep-based self-
-            // healing. Making it required would widen the documented
-            // permanent-loss class: a skipped blob's cursor moves past it
-            // and the relay never re-serves that sequence (docs/SYNC.md),
-            // so a repairable index failure would drop the peer's whole
-            // change. A degraded index, by contrast, is repaired by the
-            // next sweep (and on local add/update/delete, where the USER
-            // can retry, the registry write IS required).
+            // equality index is DERIVED data with its own repair loop.
+            // Making it required would widen the documented permanent-loss
+            // class: a skipped blob's cursor moves past it and the relay
+            // never re-serves that sequence (docs/SYNC.md), so a
+            // repairable index failure would drop the peer's whole change.
+            // A degraded index, by contrast, is repairable — the branch
+            // below RE-ARMS the sweep's completion flag, because the sweep
+            // is flag-gated and would otherwise never revisit a completed
+            // vault (and on local add/update/delete, where the USER can
+            // retry, the registry write IS required).
             if let Err(e) = crate::registry::upsert_equality_tag(
                 conn,
                 dek,
@@ -551,6 +559,9 @@ impl SyncEngine {
                 now,
             ) {
                 tracing::warn!(entry_id, error = %e, "registry index update failed");
+                if let Err(flag_err) = crate::registry::mark_backfill_needed(conn) {
+                    tracing::warn!(entry_id, error = %flag_err, "could not re-arm the registry sweep");
+                }
             }
         } else {
             if skip_new_entry(blob) {
@@ -609,6 +620,9 @@ impl SyncEngine {
                 now,
             ) {
                 tracing::warn!(entry_id, error = %e, "registry index update failed");
+                if let Err(flag_err) = crate::registry::mark_backfill_needed(conn) {
+                    tracing::warn!(entry_id, error = %flag_err, "could not re-arm the registry sweep");
+                }
             }
         }
 
@@ -1239,10 +1253,13 @@ mod tests {
     /// + mapping rewrite REQUIRED inside one tx; the registry index write
     /// is best-effort by the REGISTRY-BOUNDARY contract. Phase 1 injects a
     /// denial at every write action: each failure must leave complete-old,
-    /// and the FIRST Ok is the documented degraded outcome (denial hit the
-    /// index write — the change is applied, the index degrades to sweep
-    /// repair). Phase 2 runs clean and proves complete-new including the
-    /// index.
+    /// and the first Ok — which, with this fixture's single index INSERT as
+    /// the trailing registry write, is the degraded outcome — must have the
+    /// change fully applied with a stale index. Phase 2 runs clean and
+    /// proves complete-new including the index. (The degraded contract
+    /// itself is pinned deterministically by
+    /// `remote_apply_registry_failure_degrades_not_skips`, which is the
+    /// test that fails if someone re-requires the upsert.)
     #[tokio::test]
     async fn remote_apply_update_arm_fault_injection_is_all_or_nothing() {
         let dek = DataEncryptionKey::new().unwrap();
@@ -1706,9 +1723,10 @@ mod tests {
         assert_eq!(opened_notes.as_str(), "round the trip");
     }
 
-    /// THE negative for the old band-aid: Some("") must NOT be coerced to
-    /// NULL/absence anywhere in the chain (no Some->None loss). The former
-    /// apply-side `.filter(|b| !b.is_empty())` fabricated exactly that loss.
+    /// The typed-contract pin: Some("") must NOT be coerced to NULL or
+    /// absence anywhere in the chain (no Some->None loss). The removed
+    /// apply-side `.filter` was inert against today's sealed blobs, but
+    /// this test keeps the contract honest if coercion ever returns.
     #[test]
     fn empty_string_url_roundtrip_not_coerced_to_null() {
         let dek = DataEncryptionKey::new().unwrap();

@@ -376,8 +376,12 @@ fn sweep_entry_rows(
             title: &title,
             username: &username,
             password: &password,
-            url: url.as_deref(),
-            notes: notes.as_deref(),
+            // WBS-410: a legacy EMPTY optional blob (X'') is the pre-0.9
+            // absence marker — decode it as absent so the row CONVERTS
+            // (the columns land as NULL) instead of failing the open and
+            // dead-lettering the sweep as an unreadable row.
+            url: url.as_deref().filter(|b| !b.is_empty()),
+            notes: notes.as_deref().filter(|b| !b.is_empty()),
         };
         let opened = match decrypt_entry_fields(dek, identity, &blobs) {
             Ok(opened) => opened,
@@ -1387,5 +1391,53 @@ mod tests {
         let (version, state, _) = entry_row_flags(&vault, entry_id);
         assert_eq!(version, 8, "the control update must bump sync_version");
         assert_eq!(state, "pending", "the control update must re-mark pending");
+    }
+
+    /// WBS-410 review fix (F3): a legacy row carrying EMPTY optional blobs
+    /// (X'', the 0.8.x absence marker) must CONVERT — url/notes landing as
+    /// NULL — not dead-letter the sweep as an unreadable row.
+    #[test]
+    fn sweep_converts_legacy_empty_optional_blobs_instead_of_dead_lettering() {
+        let vault = test_vault();
+        let entry_id = insert_v1_entry(
+            &vault,
+            Some(&uuid::Uuid::new_v4().to_string()),
+            "Empty Opts",
+            "u",
+            "empty-opts-pass",
+            Some("https://placeholder.example"),
+            None,
+        );
+        {
+            let db = vault.lock_db().unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE entries SET url = X'', notes = X'' WHERE entry_id = ?1",
+                    [entry_id],
+                )
+                .unwrap();
+        }
+
+        let report = vault.sweep_v1_blobs_to_v2().unwrap();
+
+        assert_eq!(
+            report.skipped_unreadable, 0,
+            "an empty optional blob is absence, not an unreadable row"
+        );
+        assert_eq!(report.converted, 1, "the row must convert");
+        let (url_null, notes_null): (bool, bool) = {
+            let db = vault.lock_db().unwrap();
+            db.conn()
+                .query_row(
+                    "SELECT url IS NULL, notes IS NULL FROM entries WHERE entry_id = ?1",
+                    [entry_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert!(url_null && notes_null, "absence must land as NULL");
+        let entry = vault.get_entry(entry_id).unwrap();
+        assert_eq!(entry.url, None);
+        assert_eq!(entry.notes, None);
     }
 }
