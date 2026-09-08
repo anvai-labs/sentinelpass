@@ -177,7 +177,10 @@ async function handleAddSubmit(e) {
             },
         });
         if (response?.success) {
-            showNotification('Credential saved');
+            // WBS-706: warn when the saved credential's origin is plain HTTP.
+            showNotification(response?.insecure_http
+                ? 'Credential saved, but this site used unencrypted HTTP'
+                : 'Credential saved');
             document.getElementById('addForm').reset();
             showUnlockedView();
             await loadCredentials();

@@ -1,6 +1,11 @@
 // Content script for password field detection and autofill
 
 import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger';
+import {
+  classifyCredentialUrlSecurity,
+  domainMatchesPolicy,
+  normalizeDomainForPolicy
+} from './save-heuristics';
 
 function escapeHtml(str: string): string {
   const div = document.createElement('div');
@@ -107,35 +112,10 @@ function redactForLog(value) {
   return redacted;
 }
 
-function normalizeDomainForPolicy(value) {
-  if (!value || typeof value !== 'string') {
-    return null;
-  }
-
-  let normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-
-  if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
-    try {
-      normalized = new URL(normalized).hostname.toLowerCase();
-    } catch (_error) {
-      // Keep original value if URL parsing fails.
-    }
-  }
-
-  normalized = normalized.replace(/^\.+|\.+$/g, '');
-  if (normalized.startsWith('www.')) {
-    normalized = normalized.slice(4);
-  }
-
-  return normalized || null;
-}
-
-function domainMatchesPolicy(domain, policyDomain) {
-  return domain === policyDomain || domain.endsWith(`.${policyDomain}`);
-}
+// Domain policy normalization (normalizeDomainForPolicy / domainMatchesPolicy)
+// is shared with the background worker via ./save-heuristics (WBS-706): both
+// surfaces must classify hosts identically, so this module no longer carries
+// its own string-based copy.
 
 function getNeverSaveDomains() {
   return new Promise((resolve) => {
@@ -582,6 +562,15 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     debugLog('[SentinelPass] Password length:', password.length);
 
   const promptId = `inline-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+
+  // WBS-706 (HTTP warn half): plain-HTTP credential pages must warn before
+  // the user consents to saving. Classification is structured — the live
+  // page protocol (browser-provided) plus a URL-API parse of the submission
+  // URL; never string matching on scheme substrings.
+  const insecurePage =
+    window.location.protocol === 'http:' ||
+    classifyCredentialUrlSecurity(sourceUrl) === 'insecure';
+
   let outcomeReported = false;
   const reportOnce = (outcome, extra = {}) => {
     if (outcomeReported) {
@@ -654,13 +643,21 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     body.appendChild(userP);
   }
 
+  if (insecurePage) {
+    const warnP = document.createElement('p');
+    warnP.className = 'pm-prompt-warning';
+    warnP.textContent = 'This page uses an unencrypted connection (HTTP). '
+      + 'The password could be visible to network attackers.';
+    body.appendChild(warnP);
+  }
+
   const actions = document.createElement('div');
   actions.className = 'pm-prompt-actions';
 
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
   saveBtn.className = 'pm-prompt-btn pm-prompt-btn-save';
-  saveBtn.textContent = 'Save';
+  saveBtn.textContent = insecurePage ? 'Save anyway' : 'Save';
 
   const neverBtn = document.createElement('button');
   neverBtn.type = 'button';
@@ -730,6 +727,14 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
       margin: 0 0 8px 0;
       font-size: 14px;
       color: #333;
+    }
+    .pm-prompt-warning {
+      padding: 8px 10px;
+      border-radius: 4px;
+      background: #fef7e0;
+      border: 1px solid #f9ab00;
+      color: #8a5a00 !important;
+      font-weight: 500;
     }
     .pm-prompt-actions {
       display: flex;
@@ -858,6 +863,10 @@ async function saveCredentials(username, password, domain, sourceUrl = window.lo
       if (response.unchanged) {
         debugLog('[SentinelPass] Credential unchanged, skipping duplicate save');
         showNotification('Password already up to date', 'info');
+      } else if (response.insecure_http) {
+        // WBS-706: the save went through, but the origin was plain HTTP.
+        debugLog('[SentinelPass] Password saved for a plain-HTTP origin');
+        showNotification('Password saved, but this site used unencrypted HTTP', 'warning');
       } else {
         debugLog('[SentinelPass] Password saved successfully!');
         showNotification('Password saved successfully!', 'success');

@@ -1,5 +1,6 @@
 // Background service worker for Password Manager Extension
 import {
+  classifyCredentialUrlSecurity,
   domainMatchesPolicy,
   normalizeCredentialUrl,
   normalizeDomainForPolicy,
@@ -65,6 +66,10 @@ function generateRequestId() {
   return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
+// Returns true when the message was sent from this extension's own popup or options
+// page rather than from a content script embedded in a web page. Popup messages are
+// already authenticated (same extension ID) and have no meaningful "sender domain"
+// to validate against, so domain-context checks must be skipped for them.
 function isPopupSender(sender): boolean {
   // Content scripts always have sender.tab; extension pages (popup, options) do not.
   // sender.id === chrome.runtime.id is already enforced above, so !sender.tab is
@@ -561,7 +566,13 @@ async function handleSaveCredential(data) {
     if (response && response.success) {
       debugLog('[SentinelPass Background] Credential saved successfully');
       await sessionRemove([PENDING_UNLOCK_RETRY_KEY]);
-      return { success: true };
+      // WBS-706: let callers warn when the saved credential's canonical URL
+      // is plain HTTP (content script toasts, popup notification).
+      const savedInsecureHttp = classifyCredentialUrlSecurity(canonicalUrl) === 'insecure';
+      if (savedInsecureHttp) {
+        warnLog('[SentinelPass Background] Credential saved for a plain-HTTP origin:', canonicalUrl);
+      }
+      return { success: true, insecure_http: savedInsecureHttp };
     } else {
       console.error('[SentinelPass Background] Failed to save credential:', redactForLog(response));
       const errorMessage = response?.error
@@ -694,6 +705,14 @@ async function handleSaveNotification(data, sender) {
       return true;
     }
 
+    // WBS-706 (HTTP warn half): flag plain-HTTP submissions so both the
+    // notification and the inline prompt warn before the user consents to a
+    // save. Classification is a structured URL-API parse, not string matching.
+    const insecureHttp = classifyCredentialUrlSecurity(data?.submitted_url || data?.url || '') === 'insecure';
+    if (insecureHttp) {
+      warnLog('[SentinelPass Background] Save request originates from a plain-HTTP page:', data?.domain || data?.url);
+    }
+
     if (await isCredentialUnchanged(data)) {
       debugLog('[SentinelPass Background] Skipping save notification because credential is unchanged');
       return true;
@@ -723,8 +742,10 @@ async function handleSaveNotification(data, sender) {
 
     // Store credential data keyed to notification ID for button click handling.
     // Do this before creating the notification to avoid races on very fast clicks.
+    // The insecure-HTTP flag rides along so the save prompt / toast can warn.
     const pendingData = {
       ...data,
+      insecure_http: insecureHttp,
       _sender_tab_id: sender?.tab?.id ?? null
     };
     chrome.storage.session.set({ [storageKey]: pendingData }, () => {
@@ -739,9 +760,11 @@ async function handleSaveNotification(data, sender) {
     try {
       createdId = await createNotification(notificationId, {
         title: 'SentinelPass - Save Password?',
-        message: `Do you want to save the password for ${data.domain}?`,
+        message: insecureHttp
+          ? `Save the password for ${data.domain}? WARNING: this page used an unencrypted (HTTP) connection.`
+          : `Do you want to save the password for ${data.domain}?`,
         buttons: [
-          { title: 'Save' },
+          { title: insecureHttp ? 'Save anyway' : 'Save' },
           { title: 'Never for this site' }
         ],
         requireInteraction: true,
