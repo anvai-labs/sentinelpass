@@ -307,9 +307,12 @@ pub fn decrypt_tag_cipher(dek: &DataEncryptionKey, blob: &[u8]) -> Result<String
 ///   rotation);
 /// - ineligible entry → remove any row.
 ///
-/// Callers own transaction scope; on the vault write paths this runs in the
-/// same connection as the entry write (auto-commit), on the sync path inside
-/// the pull loop.
+/// Callers own transaction scope (WBS-411): on the local vault write paths
+/// (add/update entry) this runs REQUIRED inside the caller's unit-of-work
+/// transaction; on the sync apply path it runs BEST-EFFORT inside the blob
+/// transaction (a failure degrades the index to sweep repair rather than
+/// dropping the delivered change — see the REGISTRY-BOUNDARY note in
+/// `sync/engine.rs`).
 pub fn upsert_equality_tag(
     conn: &rusqlite::Connection,
     dek: &DataEncryptionKey,
@@ -428,6 +431,22 @@ pub fn stamp_rotation(conn: &rusqlite::Connection, entry_id: i64, now: i64) -> R
          VALUES (?1, ?2, 'manual')
          ON CONFLICT(entry_id) DO UPDATE SET password_rotated_at = excluded.password_rotated_at",
         rusqlite::params![entry_id, now],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
+/// Re-arm the registry backfill sweep (WBS-411 review): clears the
+/// `backfill_complete` flag so the next unlock re-runs the reconciliation
+/// sweep. Needed because the sweep is flag-gated and would otherwise never
+/// revisit a completed vault — a degraded best-effort write on the sync
+/// apply path (see the REGISTRY-BOUNDARY note in `sync/engine.rs`) must
+/// re-arm it to actually be repaired.
+pub fn mark_backfill_needed(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO registry_state (key, value) VALUES ('backfill_complete', '0')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
     )
     .map_err(DatabaseError::Sqlite)?;
     Ok(())

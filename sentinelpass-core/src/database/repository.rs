@@ -54,6 +54,12 @@ pub struct NewEntryParams {
 }
 
 /// Parameters for updating an existing entry
+///
+/// Semantics (WBS-410 / TD-ROB-03): `url` and `notes` are FULL-REPLACE —
+/// `None` CLEARS the column to NULL (typed null preservation; the update is
+/// never a partial merge for optional fields). The remaining Option fields
+/// are set-if-Some; the sole caller ([`crate::vault::VaultManager::
+/// update_entry`]) always provides them.
 pub struct UpdateEntryParams {
     pub title: Option<Vec<u8>>,
     pub username: Option<Vec<u8>>,
@@ -94,6 +100,143 @@ pub trait EntryRepository {
     fn find_by_domain(&self, domain: &str) -> Result<Vec<RawEntryRow>, DatabaseError>;
 }
 
+/// Insert one entry row on an ARBITRARY connection (or transaction handle —
+/// they deref). The shared core behind [`EntryRepository::create`]; the
+/// unit-of-work paths (WBS-411 / SR-DATA-001) call this inside their
+/// transaction so the entry write and its registry hook commit atomically.
+/// Bookkeeping is explicit: version 1, `'pending'`.
+pub fn insert_entry_row(
+    conn: &rusqlite::Connection,
+    entry: &NewEntryParams,
+) -> Result<i64, DatabaseError> {
+    conn.execute(
+        "INSERT INTO entries (
+                vault_id, title, username, password, url, notes, credential_type,
+                entry_nonce, auth_tag, created_at, modified_at, favorite,
+                sync_id, sync_version, sync_state
+            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, 'pending')",
+        rusqlite::params![
+            entry.title,
+            entry.username,
+            entry.password,
+            entry.url,
+            entry.notes,
+            entry.credential_type,
+            entry.entry_nonce,
+            entry.auth_tag,
+            entry.created_at,
+            entry.modified_at,
+            entry.favorite,
+            entry.sync_id,
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+/// Update one entry row on an ARBITRARY connection (or transaction handle —
+/// they deref). The shared core behind [`EntryRepository::update`]: writes
+/// the fields that are `Some`, ALWAYS sets url/notes (None clears to NULL —
+/// full-replace, see [`UpdateEntryParams`]), stamps `modified_at`, and
+/// bumps `sync_version` / marks `'pending'` EXPLICITLY (WBS-409 removed the
+/// echo trigger — this statement IS the local-write bookkeeping).
+pub fn update_entry_row(
+    conn: &rusqlite::Connection,
+    id: i64,
+    entry: &UpdateEntryParams,
+) -> Result<(), DatabaseError> {
+    let mut set_clauses = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut param_index = 1;
+
+    if entry.title.is_some() {
+        set_clauses.push(format!("title = ?{}", param_index));
+        param_index += 1;
+    }
+    if entry.username.is_some() {
+        set_clauses.push(format!("username = ?{}", param_index));
+        param_index += 1;
+    }
+    if entry.password.is_some() {
+        set_clauses.push(format!("password = ?{}", param_index));
+        param_index += 1;
+    }
+    // url/notes are UNCONDITIONAL SETs (WBS-410 / TD-ROB-03 / SR-DATA-002):
+    // the sole caller performs a FULL-REPLACE update, so None must clear
+    // the column to NULL — the old set-if-Some behavior silently kept the
+    // previous value and made "clear this field" impossible.
+    set_clauses.push(format!("url = ?{}", param_index));
+    param_index += 1;
+    set_clauses.push(format!("notes = ?{}", param_index));
+    param_index += 1;
+    if entry.credential_type.is_some() {
+        set_clauses.push(format!("credential_type = ?{}", param_index));
+        param_index += 1;
+    }
+    if entry.entry_nonce.is_some() {
+        set_clauses.push(format!("entry_nonce = ?{}", param_index));
+        param_index += 1;
+    }
+    if entry.auth_tag.is_some() {
+        set_clauses.push(format!("auth_tag = ?{}", param_index));
+        param_index += 1;
+    }
+    if entry.favorite.is_some() {
+        set_clauses.push(format!("favorite = ?{}", param_index));
+        param_index += 1;
+    }
+
+    set_clauses.push(format!("modified_at = ?{}", param_index));
+    param_index += 1;
+
+    // Always increment sync_version on update
+    set_clauses.push("sync_version = sync_version + 1".to_string());
+    set_clauses.push("sync_state = 'pending'".to_string());
+
+    let query = format!(
+        "UPDATE entries SET {} WHERE entry_id = ?{}",
+        set_clauses.join(", "),
+        param_index
+    );
+
+    // Build params in the correct order using Box to own the values.
+    // url/notes ALWAYS bind (None -> NULL — see the SET clause above).
+    if let Some(v) = &entry.title {
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &entry.username {
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &entry.password {
+        params.push(Box::new(v.clone()));
+    }
+    params.push(Box::new(entry.url.clone()));
+    params.push(Box::new(entry.notes.clone()));
+    if let Some(v) = &entry.credential_type {
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &entry.entry_nonce {
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &entry.auth_tag {
+        params.push(Box::new(v.clone()));
+    }
+    if let Some(v) = entry.favorite {
+        params.push(Box::new(if v { 1i32 } else { 0 }));
+    }
+    params.push(Box::new(entry.modified_at));
+    params.push(Box::new(id));
+
+    // Convert Box<dyn ToSql> to &dyn ToSql
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    conn.execute(&query, param_refs.as_slice())
+        .map_err(DatabaseError::Sqlite)?;
+
+    Ok(())
+}
+
 /// SQLite implementation of EntryRepository
 pub struct SqliteEntryRepository<'a> {
     db: &'a Database,
@@ -127,32 +270,7 @@ impl<'a> SqliteEntryRepository<'a> {
 
 impl<'a> EntryRepository for SqliteEntryRepository<'a> {
     fn create(&self, entry: NewEntryParams) -> Result<i64, DatabaseError> {
-        let conn = self.db.conn();
-
-        conn.execute(
-            "INSERT INTO entries (
-                vault_id, title, username, password, url, notes, credential_type,
-                entry_nonce, auth_tag, created_at, modified_at, favorite,
-                sync_id, sync_version, sync_state
-            ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, 'pending')",
-            rusqlite::params![
-                entry.title,
-                entry.username,
-                entry.password,
-                entry.url,
-                entry.notes,
-                entry.credential_type,
-                entry.entry_nonce,
-                entry.auth_tag,
-                entry.created_at,
-                entry.modified_at,
-                entry.favorite,
-                entry.sync_id,
-            ],
-        )
-        .map_err(DatabaseError::Sqlite)?;
-
-        Ok(conn.last_insert_rowid())
+        insert_entry_row(self.db.conn(), &entry)
     }
 
     fn get_raw(&self, id: i64) -> Result<Option<RawEntryRow>, DatabaseError> {
@@ -218,100 +336,7 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
     }
 
     fn update(&self, id: i64, entry: UpdateEntryParams) -> Result<(), DatabaseError> {
-        let conn = self.db.conn();
-
-        let mut set_clauses = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        let mut param_index = 1;
-
-        if entry.title.is_some() {
-            set_clauses.push(format!("title = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.username.is_some() {
-            set_clauses.push(format!("username = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.password.is_some() {
-            set_clauses.push(format!("password = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.url.is_some() {
-            set_clauses.push(format!("url = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.notes.is_some() {
-            set_clauses.push(format!("notes = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.credential_type.is_some() {
-            set_clauses.push(format!("credential_type = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.entry_nonce.is_some() {
-            set_clauses.push(format!("entry_nonce = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.auth_tag.is_some() {
-            set_clauses.push(format!("auth_tag = ?{}", param_index));
-            param_index += 1;
-        }
-        if entry.favorite.is_some() {
-            set_clauses.push(format!("favorite = ?{}", param_index));
-            param_index += 1;
-        }
-
-        set_clauses.push(format!("modified_at = ?{}", param_index));
-        param_index += 1;
-
-        // Always increment sync_version on update
-        set_clauses.push("sync_version = sync_version + 1".to_string());
-        set_clauses.push("sync_state = 'pending'".to_string());
-
-        let query = format!(
-            "UPDATE entries SET {} WHERE entry_id = ?{}",
-            set_clauses.join(", "),
-            param_index
-        );
-
-        // Build params in the correct order using Box to own the values
-        if let Some(v) = entry.title {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.username {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.password {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.url {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.notes {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.credential_type {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.entry_nonce {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.auth_tag {
-            params.push(Box::new(v));
-        }
-        if let Some(v) = entry.favorite {
-            params.push(Box::new(if v { 1i32 } else { 0 }));
-        }
-        params.push(Box::new(entry.modified_at));
-        params.push(Box::new(id));
-
-        // Convert Box<dyn ToSql> to &dyn ToSql
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-
-        conn.execute(&query, param_refs.as_slice())
-            .map_err(DatabaseError::Sqlite)?;
-
-        Ok(())
+        update_entry_row(self.db.conn(), id, &entry)
     }
 
     fn delete(&self, id: i64) -> Result<(), DatabaseError> {

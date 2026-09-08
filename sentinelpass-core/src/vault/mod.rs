@@ -757,9 +757,15 @@ impl VaultManager {
             &row.password,
         )?;
 
+        // Typed NULL preservation (WBS-410 / TD-ROB-03 / SR-DATA-002): a
+        // legacy EMPTY blob (X'') in an optional column is the pre-0.9
+        // absence marker — it reads as None, consistent with the sync
+        // collector, instead of failing the whole row's dual-read. A
+        // present, non-empty blob always yields Some(plaintext).
         let url = row
             .url
             .as_ref()
+            .filter(|blob| !blob.is_empty())
             .map(|blob| {
                 self.open_entry_field(sid, cred, crate::crypto::aad::EnvelopePurpose::Secret, blob)
                     .map(|z| z.to_string())
@@ -769,6 +775,7 @@ impl VaultManager {
         let notes = row
             .notes
             .as_ref()
+            .filter(|blob| !blob.is_empty())
             .map(|blob| {
                 self.open_entry_field(sid, cred, crate::crypto::aad::EnvelopePurpose::Secret, blob)
                     .map(|z| z.to_string())
@@ -827,9 +834,21 @@ impl VaultManager {
 
         let now = Utc::now().timestamp();
 
-        // Use repository to insert the entry
+        // ONE transaction (SR-DATA-001 / WBS-411): the entry INSERT and its
+        // registry equality-index write (ADR-001) commit atomically — a
+        // failure at any statement rolls back to the complete-old state
+        // (no entry, no index row), never a credential without its index.
+        // (The prior shape committed the entry first and ran the index
+        // hook post-commit best-effort, relying on the sweep to repair.)
+        // The audit append below is a FILE write outside vault.db and is
+        // deliberately not part of this transaction (audit.rs boundary).
+        let dek = self.key_hierarchy.dek()?;
         let db = self.lock_db()?;
-        let repo = SqliteEntryRepository::new(&db);
+        let tx = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+
         let params = NewEntryParams {
             title: title_blob,
             username: username_blob,
@@ -845,11 +864,18 @@ impl VaultManager {
             sync_id: Some(sync_id),
         };
 
-        let entry_id = repo.create(params)?;
+        let entry_id = crate::database::insert_entry_row(&tx, &params)?;
 
-        // Release the db lock before the registry hook: registry_on_add
-        // re-acquires it, and Mutex is not reentrant (a nested lock_db()
-        // here deadlocks the vault).
+        crate::registry::upsert_equality_tag(
+            &tx,
+            dek,
+            entry_id,
+            entry.credential_type,
+            entry.password.as_str(),
+            now,
+        )?;
+
+        tx.commit().map_err(DatabaseError::Sqlite)?;
         drop(db);
 
         // Log credential creation. Context is deliberately free of the
@@ -860,12 +886,6 @@ impl VaultManager {
                 AuditEventType::CredentialCreated { entry_id },
                 "Credential created",
             );
-        }
-
-        // Registry equality index (ADR-001). Best-effort: a failed index
-        // write is repaired by the next sweep; the entry write stands.
-        if let Err(e) = self.registry_on_add(entry_id, entry) {
-            tracing::warn!(entry_id, error = %e, "registry index update failed");
         }
 
         Ok(entry_id)
@@ -1097,10 +1117,21 @@ impl VaultManager {
     }
 
     /// Update an existing entry
+    ///
+    /// Unit of work (SR-DATA-001 / WBS-411): the format-classification
+    /// read, the entry UPDATE, and the registry equality-index write run
+    /// under ONE db-lock acquisition inside ONE transaction — a failure at
+    /// any statement rolls back to the complete-old row, and a rotation is
+    /// never half-recorded (entry rewritten but its index tag stale, or
+    /// vice versa). The audit appends below are FILE writes outside
+    /// vault.db and follow the commit (audit.rs boundary).
     pub fn update_entry(&self, entry_id: i64, entry: &Entry) -> Result<()> {
         if !self.is_unlocked() {
             return Err(PasswordManagerError::VaultLocked);
         }
+
+        let dek = self.key_hierarchy.dek()?;
+        let db = self.lock_db()?;
 
         // Row-level format policy (WBS-304): the row's stable sync_id is
         // required to seal v2 (it is the AAD's object identity); v1 rows —
@@ -1112,7 +1143,6 @@ impl VaultManager {
         // row's password column to launder a downgrade through this very
         // update path) and refuses (gate review, finding 4).
         let (sync_id, row_is_v2) = {
-            let db = self.lock_db()?;
             // (sync_id, password, title, username, url, notes)
             #[allow(clippy::type_complexity)]
             let row: (Option<String>, Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) = db
@@ -1138,7 +1168,18 @@ impl VaultManager {
             // optional column is format-NEUTRAL (absence is NULL — never
             // a v1 blob), so only Some columns are compared; counting
             // NULL as "v1" would flag every legitimate v2 row that has no
-            // url/notes (found by the registry rotation test).
+            // url/notes (found by the registry rotation test). WBS-410: a
+            // legacy EMPTY blob (X'') in an OPTIONAL column is likewise
+            // format-neutral — it is the pre-0.9 absence marker and cannot
+            // encode a v1 plaintext (so it is not a downgrade vehicle);
+            // treating it as tamper would leave every such row readable
+            // but permanently unfixable. Required-field blobs stay strict.
+            let optional_mismatch = |blob: Option<&Vec<u8>>| -> bool {
+                match blob {
+                    Some(b) => !b.is_empty() && is_v2(b) != password_v2,
+                    None => false,
+                }
+            };
             let mismatch = |blob: Option<&Vec<u8>>| -> bool {
                 match blob {
                     Some(b) => is_v2(b) != password_v2,
@@ -1147,8 +1188,8 @@ impl VaultManager {
             };
             let mixed = mismatch(Some(&row.2))
                 || mismatch(Some(&row.3))
-                || mismatch(row.4.as_ref())
-                || mismatch(row.5.as_ref());
+                || optional_mismatch(row.4.as_ref())
+                || optional_mismatch(row.5.as_ref());
             if mixed {
                 return Err(PasswordManagerError::InvalidInput(
                     "entry row has mixed v1/v2 field formats — refusing to update; \
@@ -1204,7 +1245,6 @@ impl VaultManager {
                 zero_tag,
             )
         } else {
-            let dek = self.key_hierarchy.dek()?;
             let title_encrypted = encrypt_string(dek, &entry.title)?;
             let username_encrypted = encrypt_string(dek, &entry.username)?;
             let password_encrypted = encrypt_string(dek, &entry.password)?;
@@ -1248,9 +1288,14 @@ impl VaultManager {
 
         let now = Utc::now().timestamp();
 
-        // Use repository pattern to update
-        let db = self.lock_db()?;
-        let repo = SqliteEntryRepository::new(&db);
+        // ONE transaction (see the unit-of-work doc above): entry UPDATE +
+        // registry equality-index upsert (a changed tag stamps the rotation
+        // in entry_lifecycle). Title-only edits leave the tag unchanged and
+        // stamp nothing.
+        let tx = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
 
         let params = UpdateEntryParams {
             title: Some(title_blob),
@@ -1265,27 +1310,37 @@ impl VaultManager {
             favorite: Some(entry.favorite),
         };
 
-        repo.update(entry_id, params)
+        crate::database::update_entry_row(&tx, entry_id, &params)
             .map_err(PasswordManagerError::from)?;
 
-        // Release the db lock before the registry hook (non-reentrant Mutex
-        // — see add_entry).
+        let outcome = crate::registry::upsert_equality_tag(
+            &tx,
+            dek,
+            entry_id,
+            entry.credential_type,
+            entry.password.as_str(),
+            now,
+        )?;
+
+        tx.commit().map_err(DatabaseError::Sqlite)?;
         drop(db);
 
         // Log credential modification (no title in context: WBS-414).
+        // Post-commit by design — the DB mutation is already atomic.
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::CredentialModified { entry_id },
                 "Credential modified",
             );
-        }
 
-        // Registry equality index (ADR-001): a changed tag against a prior
-        // row is a password rotation — stamped in entry_lifecycle and
-        // audited. Title-only edits leave the tag unchanged and stamp
-        // nothing. Best-effort on failure; the sweep repairs.
-        if let Err(e) = self.registry_on_update(entry_id, entry) {
-            tracing::warn!(entry_id, error = %e, "registry index update failed");
+            // Registry rotation audit (ADR-001): a changed tag against a
+            // prior row is a password rotation.
+            if outcome == crate::registry::TagUpsert::Rotated {
+                let _ = logger.log(
+                    AuditEventType::SecretRotated { entry_id },
+                    "Secret value changed",
+                );
+            }
         }
 
         Ok(())
