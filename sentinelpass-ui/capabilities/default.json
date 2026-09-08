@@ -1,16 +1,10 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for the main window",
+  "description": "Least-privilege grants for the main window (WBS-707). Every entry must have a usage anchor in the frontend sources; tests/web/tauri-capabilities.test.ts enforces exact-match against the audited allowlist.",
   "windows": ["main"],
   "permissions": [
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text",
-    "clipboard-manager:allow-clear",
-    "shell:allow-open",
-    "dialog:allow-ask",
-    "dialog:allow-confirm",
-    "dialog:allow-message",
-    "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-confirm"
   ]
 }

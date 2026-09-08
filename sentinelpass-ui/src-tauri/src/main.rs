@@ -1289,7 +1289,6 @@ fn main() {
     unlock_debug_log("startup: sentinelpass-ui main() entered");
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             vault_manager: Arc::new(Mutex::new(None)),
