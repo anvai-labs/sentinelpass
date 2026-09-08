@@ -421,6 +421,9 @@ enum Commands {
         command: RegistryCommands,
     },
 
+    /// Verify the audit trail hash chain (detects tampering, deletions, reordering)
+    AuditVerify,
+
     /// Export vault to file
     Export {
         /// Output file path
@@ -1222,6 +1225,11 @@ fn main() -> Result<()> {
             commands::registry::handle_registry_command(vault_path, command)?;
         }
 
+        Commands::AuditVerify => {
+            let vault_path = get_vault_path(&cli, false);
+            commands::audit::handle_audit_verify(vault_path)?;
+        }
+
         Commands::Export {
             ref output,
             ref format,
@@ -1491,6 +1499,7 @@ mod tests {
                 context: "granted".to_string(),
                 pid: None,
                 tid: None,
+                chain: None,
             },
             sentinelpass_core::AuditEntry {
                 timestamp: chrono::Utc::now(),
@@ -1505,6 +1514,7 @@ mod tests {
                 context: "denied".to_string(),
                 pid: None,
                 tid: None,
+                chain: None,
             },
         ];
 

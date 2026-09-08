@@ -67,6 +67,53 @@ pub fn derive_domain_tag_key(dek: &DataEncryptionKey) -> Result<Zeroizing<Vec<u8
     Ok(okm)
 }
 
+/// HKDF `info` label binding the audit opaque-identifier key to its purpose
+/// (WBS-414 / SR-DATA-004).
+///
+/// Same derivation discipline as [`EQUALITY_KEY_INFO`]: HKDF-SHA256 over the
+/// DEK, empty salt, 32-byte output, purpose-bound label. This key HMACs
+/// identifiers (entry ids, entity ids, domains, slot uuids) into opaque
+/// audit-log tokens. It is deliberately a SEPARATE label from the registry
+/// equality/domain-tag keys so audit tokens and vault-internal tags are
+/// unlinkable from each other: a leak of one surface must not correlate
+/// records on the other.
+pub const AUDIT_ID_KEY_INFO: &[u8] = b"sentinelpass-audit-id-v1";
+
+/// HKDF `info` label binding the audit tamper-evidence chain key to its
+/// purpose (WBS-415 / SR-DATA-004).
+///
+/// This key HMACs audit records into a hash chain (each record commits to
+/// its predecessor). Deliberately a SEPARATE label from [`AUDIT_ID_KEY_INFO`]:
+/// one PRF key per input domain.
+pub const AUDIT_CHAIN_KEY_INFO: &[u8] = b"sentinelpass-audit-chain-v1";
+
+/// Derive the audit opaque-identifier key from a DEK (WBS-414).
+///
+/// Deterministic for a given DEK — which is what makes the owner-side
+/// re-identification procedure a local recomputation. The returned buffer
+/// is zeroized on drop, is never persisted, and must not be cached across
+/// lock.
+pub fn derive_audit_id_key(dek: &DataEncryptionKey) -> Result<Zeroizing<Vec<u8>>> {
+    let hk = Hkdf::<Sha256>::new(None, dek.as_bytes());
+    let mut okm = Zeroizing::new(vec![0u8; 32]);
+    hk.expand(AUDIT_ID_KEY_INFO, okm.as_mut_slice())
+        .map_err(|e| CryptoError::KdfFailed(format!("audit id key derivation failed: {}", e)))?;
+    Ok(okm)
+}
+
+/// Derive the audit chain key from a DEK (WBS-415).
+///
+/// Deterministic for a given DEK so every unlock path (password, biometric,
+/// recovery) seals the audit chain identically. The returned buffer is
+/// zeroized on drop, is never persisted, and must not be cached across lock.
+pub fn derive_audit_chain_key(dek: &DataEncryptionKey) -> Result<Zeroizing<Vec<u8>>> {
+    let hk = Hkdf::<Sha256>::new(None, dek.as_bytes());
+    let mut okm = Zeroizing::new(vec![0u8; 32]);
+    hk.expand(AUDIT_CHAIN_KEY_INFO, okm.as_mut_slice())
+        .map_err(|e| CryptoError::KdfFailed(format!("audit chain key derivation failed: {}", e)))?;
+    Ok(okm)
+}
+
 /// The master key derived from the master password
 ///
 /// This key is used to wrap/unwrap the data encryption key (DEK).
@@ -636,6 +683,31 @@ mod tests {
         // Locked vaults derive nothing
         hierarchy.lock_vault();
         assert!(hierarchy.equality_key().is_err());
+    }
+
+    #[test]
+    fn audit_keys_deterministic_dek_bound_and_label_separated() {
+        // WBS-414/415 derivations: deterministic per DEK, distinct across
+        // DEKs, and the two purpose labels must never share key material.
+        let mut first = KeyHierarchy::new();
+        first.initialize_vault(b"audit-key-password").unwrap();
+        let id_a = derive_audit_id_key(first.dek().unwrap()).unwrap();
+        let id_b = derive_audit_id_key(first.dek().unwrap()).unwrap();
+        let chain_a = derive_audit_chain_key(first.dek().unwrap()).unwrap();
+        assert_eq!(id_a.as_slice(), id_b.as_slice());
+
+        let mut second = KeyHierarchy::new();
+        second.initialize_vault(b"other-audit-password").unwrap();
+        assert_ne!(
+            id_a.as_slice(),
+            derive_audit_id_key(second.dek().unwrap())
+                .unwrap()
+                .as_slice()
+        );
+
+        // Purpose separation: id key and chain key derive from the same DEK
+        // but must be different keys.
+        assert_ne!(id_a.as_slice(), chain_a.as_slice());
     }
 
     #[test]

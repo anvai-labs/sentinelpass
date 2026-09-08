@@ -1,8 +1,12 @@
 //! Database schema and connection management.
 
+use crate::platform::{
+    set_owner_only_mode, validate_sensitive_path, warn_on_loose_parent_dir, OwnerOnlyPolicy,
+    SensitivePathError,
+};
 use crate::{DatabaseError, PasswordManagerError, Result};
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Current schema version. Incremented when the schema changes.
@@ -11,7 +15,30 @@ use tracing::warn;
 /// domain) + the `domain_mapping_tags` keyed-lookup table; the plaintext
 /// domain INDEX is dropped (lookups move to tags). The legacy plaintext
 /// `domain` COLUMN remains until the WBS-404 bulk migration clears it.
-pub const CURRENT_SCHEMA_VERSION: i32 = 8;
+/// v9 (WBS-409 / TD-ROB-02): the `update_entry_modified_timestamp` echo
+/// trigger is DROPPED — remote sync applies wrote `sync_state = 'synced'`
+/// explicitly, and this trigger rewrote it back to `'pending'` (the applied
+/// change re-pushed forever). Every local mutation path writes sync
+/// bookkeeping explicitly (repository insert/update, delete, sweeps), so
+/// the trigger is load-bearing for nothing; see `migrate_v8_to_v9`.
+pub const CURRENT_SCHEMA_VERSION: i32 = 9;
+
+/// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
+/// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
+/// table/column layout): this tracks the CONTENT format —
+/// `1` = legacy context-free field encryption (v1 blobs, dual-read),
+/// `2` = the ACTIVATED v2 envelope state: every stored blob is an
+/// identity-bound SPENV envelope AND the full WBS-405 verification pass
+/// proved every one of them (plus every domain-mapping relation) opens.
+///
+/// The value is stamped ONLY by the post-unlock activation step
+/// (`vault/activation_ops.rs`) — migrations run before the DEK exists and
+/// cannot verify content, so they never touch it. An open refuses a
+/// `format_version` GREATER than this constant with the same fail-closed
+/// discipline as the schema gate (SR-CRYPTO-005 / TD-ROB-07): a newer
+/// content format's rows must never be interpreted by an older binary.
+/// Absent column (pre-v6 schemas) and NULL both read as legacy `1`.
+pub const CURRENT_VAULT_FORMAT_VERSION: i64 = 2;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -19,11 +46,132 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open a database at the specified path
+    /// Open a database at the specified path.
+    ///
+    /// The vault database is sensitive at rest, so the open path enforces its
+    /// on-disk file protections (WBS-412/413, SR-DATA-003):
+    ///
+    /// - **New file**: created with an explicit owner-only mode. On Unix a
+    ///   private umask (0o077) is held across the open and the PRAGMA setup
+    ///   so the database AND the `-wal`/`-shm` sidecars SQLite creates are
+    ///   born 0600 — no umask-exposed window — with an explicit chmod as a
+    ///   belt-and-braces backstop.
+    /// - **Existing file**: validated (not a symlink, regular file, owned by
+    ///   the current user) and its mode verified owner-only under the Refuse
+    ///   policy: a vault database with group/world read is REFUSED with a
+    ///   remediation hint. Silent tightening was deliberately rejected — it
+    ///   would launder an attacker-loosened state without the user ever
+    ///   learning about it. Chosen policy, documented in
+    ///   docs/SECURITY_STATUS_MATRIX.md.
+    ///
+    /// `:memory:` (in-memory/dev vaults) skips all FS guards: Windows stats
+    /// the reserved colon as ERROR_INVALID_NAME, not NotFound (WBS-306
+    /// lesson), and there is no file to protect.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let fs_guarded = path != std::path::Path::new(":memory:");
+
+        let mut created = false;
+        if fs_guarded {
+            warn_on_loose_parent_dir(path);
+            match std::fs::symlink_metadata(path) {
+                // Regular file only: a directory (Windows reports len() 0
+                // for directories — the Unix assumption that zero length
+                // implies a touch(1)-leftover file does NOT hold there) or
+                // a FIFO/device node falls through to the full validation,
+                // which refuses non-regular targets.
+                Ok(meta) if meta.len() == 0 && meta.is_file() => {
+                    // Zero-byte file (e.g. a touch(1) leftover — the
+                    // documented create-path allowance: there is no data to
+                    // destroy). ADOPT it: pin the mode owner-only and take
+                    // the creation path so WAL/SHM are born private too.
+                    set_owner_only_mode(path, false)?;
+                    created = true;
+                }
+                Ok(meta) if meta.is_dir() => {
+                    return Err(PasswordManagerError::InvalidInput(format!(
+                        "{} is a directory, not a regular file — a vault database path \
+                         must be a regular file; remove the directory and retry",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {
+                    Self::validate_vault_file(path)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => created = true,
+                // A stat error on a real path is allowed through (matching
+                // the create-path precedent): Connection::open below
+                // surfaces any genuine problem.
+                Err(_) => {}
+            }
+        }
+
+        // Hold a private umask across open + PRAGMAs so a freshly created
+        // database and its WAL/SHM sidecars are born owner-only (same
+        // technique as the daemon's Unix-socket bind). Unix-only: the
+        // umask swap is a libc operation; on non-Unix the guard (and its
+        // drop) never existed, so the restore is cfg-gated to match
+        // (Windows CI compile failure, gate-review fix cycle).
+        // The guard restores at the end of the cfg block; the connection
+        // outlives it (umask only needs to cover the CREATE).
+        #[cfg(unix)]
+        let conn = {
+            let _umask_guard = UmaskGuard::if_created(created);
+            let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
+            Self::apply_pragmas(&conn)?;
+            conn
+        };
+        #[cfg(not(unix))]
         let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
-        Self::apply_pragmas(&conn)?;
+
+        if created && fs_guarded {
+            // Belt-and-braces: explicit owner-only mode even if another
+            // thread raced the umask or the filesystem ignored it.
+            set_owner_only_mode(path, false)?;
+            for ext in ["-wal", "-shm"] {
+                // Sidecars are transient (SQLite removes them on clean
+                // close); best-effort is sufficient here.
+                let _ = set_owner_only_mode(&sidecar_path(path, ext), false);
+            }
+        } else if fs_guarded {
+            // Post-open re-check: narrows the check-then-open TOCTOU window
+            // (a symlink or mode swap landing between the pre-open stat and
+            // the open is refused here; rusqlite exposes no O_NOFOLLOW open,
+            // so the residual race is documented rather than eliminated).
+            Self::validate_vault_file(path)?;
+            // Tighten stale WAL/SHM sidecars too (gate review, finding on
+            // the existing-file path): a pre-0.10 vault.db-wal born 0644
+            // keeps receiving page writes even after the main db is
+            // chmod'd 0600.
+            for ext in ["-wal", "-shm"] {
+                let sidecar = sidecar_path(path, ext);
+                if let Ok(meta) = std::fs::metadata(&sidecar) {
+                    if meta.len() > 0 {
+                        let _ = set_owner_only_mode(&sidecar, false);
+                    }
+                }
+            }
+        }
+
         Ok(Self { conn })
+    }
+
+    /// Validate an existing vault database file under the Refuse policy,
+    /// with an actionable error for the loose-mode case.
+    fn validate_vault_file(path: &Path) -> Result<()> {
+        validate_sensitive_path(path, OwnerOnlyPolicy::Refuse).map_err(|e| match e {
+            SensitivePathError::LooseMode { path, actual } => {
+                PasswordManagerError::InvalidInput(format!(
+                    "vault database {} has permissive mode {actual:#06o} \
+                     (group/world-readable); refusing to open (SR-DATA-003). \
+                     If this is your own vault, repair with: chmod 600 {} \
+                     (and the same for its -wal/-shm sidecars if present)",
+                    path.display(),
+                    path.display()
+                ))
+            }
+            other => other.into(),
+        })
     }
 
     /// Create a new in-memory database for testing
@@ -339,9 +487,10 @@ impl Database {
     /// DEK-encrypted blobs (same field-encryption pattern as entry fields);
     /// kind/criticality/policy columns are declared policy and stay
     /// plaintext. `entry_lifecycle` is deliberately a sibling table rather
-    /// than columns on `entries`: the `update_entry_modified_timestamp`
-    /// trigger bumps `sync_version` on entry-field UPDATEs, so rotation
-    /// stamps must not live there (they would fabricate sync churn).
+    /// than columns on `entries`: rotation stamps must not fabricate sync
+    /// churn there. (Historically this also kept them out of the reach of
+    /// the `update_entry_modified_timestamp` echo trigger, removed in
+    /// schema v9 / WBS-409.)
     fn create_registry_tables(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -427,6 +576,30 @@ impl Database {
         Ok(())
     }
 
+    /// Create the database triggers.
+    ///
+    /// Only the `db_metadata` timestamp trigger remains here as of schema
+    /// v9 (WBS-409 / TD-ROB-02): the former `update_entry_modified_timestamp`
+    /// echo trigger on `entries` was removed. On a remote sync apply it
+    /// rewrote the applied row behind the apply's back: `sync_state` back
+    /// to `'pending'` (the applied change re-pushed; with `modified_at`
+    /// stamped to apply-time the rewritten row also won the peer's LWW
+    /// tie-break, see-sawing the entry between devices), and
+    /// `sync_version = OLD.sync_version + 1` — which silently CORRUPTED the
+    /// applied version whenever the local row was more than one version
+    /// behind (remote v5 over a local v2 landed as v3). Every local
+    /// mutation writes sync bookkeeping explicitly, so the trigger was
+    /// load-bearing for nothing:
+    /// - insert: `repository::create` (version 1, `'pending'`)
+    /// - update: `repository::update` (version + 1, `'pending'`)
+    /// - delete: `VaultManager::delete_entry` (version + 1, `'pending'`,
+    ///   inside one transaction)
+    /// - v1→v2 blob sweep: `vault::migration_ops` (preserves scanned
+    ///   bookkeeping)
+    ///
+    /// Vaults that predate v9 have the trigger dropped by
+    /// `migrate_v8_to_v9` (both the OF-list shape created here and the
+    /// legacy no-list shape from v1 binaries).
     fn create_triggers(&self) -> Result<()> {
         self.conn
             .execute_batch(
@@ -435,25 +608,47 @@ impl Database {
                  FOR EACH ROW
                  BEGIN
                      UPDATE db_metadata SET last_modified = (strftime('%s', 'now')) WHERE id = 1;
-                 END;
-
-                 CREATE TRIGGER IF NOT EXISTS update_entry_modified_timestamp
-                 AFTER UPDATE OF title, username, password, url, notes, favorite ON entries
-                 FOR EACH ROW
-                 BEGIN
-                     UPDATE entries SET
-                         modified_at = (strftime('%s', 'now')),
-                         sync_version = OLD.sync_version + 1,
-                         sync_state = 'pending'
-                     WHERE entry_id = NEW.entry_id;
                  END;",
             )
             .map_err(DatabaseError::Sqlite)?;
         Ok(())
     }
 
+    /// The stored vault envelope format version (WBS-406 activation
+    /// marker), tolerant of pre-v6 schemas whose `db_metadata` predates the
+    /// column: an absent column or a NULL value is the legacy format `1`.
+    /// Never fails on legacy vaults — only on genuine SQLite errors.
+    pub fn stored_format_version(&self) -> Result<i64> {
+        let has_column: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('db_metadata') \
+                 WHERE name = 'format_version')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        if !has_column {
+            return Ok(1);
+        }
+        let value: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT format_version FROM db_metadata WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(DatabaseError::Sqlite)?;
+        Ok(value.unwrap_or(1))
+    }
+
     /// Validate the database schema version, running migrations if needed.
     ///
+    /// - The envelope FORMAT gate (WBS-406) runs FIRST: a vault activated
+    ///   by a newer binary (`format_version` > [`CURRENT_VAULT_FORMAT_VERSION`])
+    ///   is refused with the typed [`DatabaseError::UnsupportedFutureFormat`]
+    ///   before the schema version is even read — there is no downgrade
+    ///   path into a content format this build cannot interpret.
     /// - Older databases are auto-migrated forward (v1 → v2 → … → current).
     /// - Newer databases (created by a newer binary) fail CLOSED with the
     ///   typed [`DatabaseError::UnsupportedFutureSchema`] error (WBS-315 /
@@ -462,6 +657,21 @@ impl Database {
     ///   or modified, so a future schema's rows are never interpreted by an
     ///   older binary that cannot know their shape.
     pub fn validate_schema_version(&self) -> Result<()> {
+        let format_version = self.stored_format_version()?;
+        if format_version > CURRENT_VAULT_FORMAT_VERSION {
+            warn!(
+                format_version = format_version,
+                supported = CURRENT_VAULT_FORMAT_VERSION,
+                "vault envelope format is newer than this binary supports; refusing to open"
+            );
+            return Err(PasswordManagerError::from(
+                DatabaseError::UnsupportedFutureFormat {
+                    found: format_version,
+                    supported: CURRENT_VAULT_FORMAT_VERSION,
+                },
+            ));
+        }
+
         let version: i32 = self
             .conn
             .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |row| {
@@ -518,9 +728,161 @@ impl Database {
     }
 }
 
+/// Path of a SQLite sidecar file (`-wal` / `-shm`) for a database path.
+fn sidecar_path(db_path: &Path, ext: &str) -> PathBuf {
+    let mut s = db_path.as_os_str().to_os_string();
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+/// (Unix) RAII guard holding a private umask (0o077) so files created while
+/// it is held are born owner-only; the previous umask is restored on drop.
+#[cfg(unix)]
+struct UmaskGuard {
+    previous: libc::mode_t,
+}
+
+#[cfg(unix)]
+impl UmaskGuard {
+    /// Holds the private umask only when a fresh vault database is about to
+    /// be created; existing-file opens leave the process umask untouched.
+    fn if_created(created: bool) -> Option<Self> {
+        if created {
+            // SAFETY: umask is process-global with no preconditions; the
+            // previous value is restored on drop.
+            Some(Self {
+                previous: unsafe { libc::umask(0o077) },
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: see if_created.
+        unsafe { libc::umask(self.previous) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_memory_path_bypasses_fs_guards() {
+        // Regression (WBS-412): ":memory:" must never be stat'd — Windows
+        // answers ERROR_INVALID_NAME, not NotFound — and must open freely.
+        assert!(Database::open(":memory:").is_ok());
+    }
+
+    #[test]
+    fn open_refuses_directory_at_vault_path() {
+        // Cross-platform (runs on the Windows CI leg): a directory at the
+        // sensitive path is not a regular file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let as_db = dir.path().join("as_db");
+        std::fs::create_dir_all(&as_db).unwrap();
+        let err = Database::open(&as_db).err().expect("expected refusal");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "expected NotRegularFile refusal, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_vault_database_and_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("vault.db");
+        {
+            // SQLite materializes the WAL/SHM sidecars lazily on the first
+            // write, so force one; they then exist for as long as the
+            // connection is held.
+            let _db = Database::open(&db_path).unwrap();
+            _db.conn()
+                .execute("CREATE TABLE sidecar_probe (x INTEGER)", [])
+                .unwrap();
+            for p in [
+                db_path.clone(),
+                sidecar_path(&db_path, "-wal"),
+                sidecar_path(&db_path, "-shm"),
+            ] {
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_group_or_world_readable_vault_database() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("vault.db");
+        drop(Database::open(&db_path).unwrap());
+
+        for loose in [0o644, 0o604, 0o640, 0o600 /* control: tight */] {
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(loose)).unwrap();
+            let result = Database::open(&db_path);
+            if loose & 0o077 == 0 {
+                assert!(result.is_ok(), "0{loose:o} is owner-only and must open");
+            } else {
+                let err = result.err().expect("expected mode refusal");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("permissive mode") && msg.contains("chmod 600"),
+                    "expected actionable refusal, got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_symlinked_vault_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real.db");
+        drop(Database::open(&real).unwrap());
+        let link = dir.path().join("link.db");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = Database::open(&link)
+            .err()
+            .expect("expected symlink refusal");
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zero_byte_file_is_adopted_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("touched.db");
+        // touch(1) leftover: born with umask mode (typically 0644 — but do
+        // NOT assert the initial mode: sibling tests run in parallel and the
+        // creation-time UmaskGuard in Database::open may pin it to 0600).
+        std::fs::write(&db_path, b"").unwrap();
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            db.validate_schema_version().unwrap_err(); // fresh empty db: no schema yet
+        }
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "adopted zero-byte file must be tightened to 0600"
+        );
+    }
 
     #[test]
     fn test_in_memory_database() {
@@ -590,7 +952,12 @@ mod tests {
             .unwrap();
 
         assert!(trigger_names.contains(&"update_db_metadata_timestamp".to_string()));
-        assert!(trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
+        // WBS-409 (TD-ROB-02): the entries echo trigger must NEVER come
+        // back — it rewrote remote applies behind the apply's back
+        // ('synced' -> 'pending', modified_at clobbered to apply-time
+        // feeding an LWW see-saw, and the applied sync_version corrupted
+        // to OLD+1 whenever the local row was >1 version behind).
+        assert!(!trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
     }
 
     #[test]
@@ -654,6 +1021,115 @@ mod tests {
             })) => {}
             other => panic!("version gate must fire before any other table access, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn newer_format_version_fails_closed() {
+        // WBS-406 / SR-CRYPTO-005: a vault whose envelope format version is
+        // NEWER than this build's activated format must be refused with the
+        // specific typed compatibility error — the downgrade-block twin of
+        // `newer_db_version_fails_closed`. Expressed RELATIVE to
+        // CURRENT_VAULT_FORMAT_VERSION so an activation-level bump by
+        // another workstream does not require edits here.
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+
+        let future = CURRENT_VAULT_FORMAT_VERSION + 1;
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, format_version)
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0, ?2)",
+                rusqlite::params![CURRENT_SCHEMA_VERSION, future],
+            )
+            .unwrap();
+
+        match db.validate_schema_version() {
+            Err(PasswordManagerError::Database(DatabaseError::UnsupportedFutureFormat {
+                found,
+                supported,
+            })) => {
+                assert_eq!(found, future);
+                assert_eq!(supported, CURRENT_VAULT_FORMAT_VERSION);
+            }
+            other => panic!(
+                "future-format vault must fail closed with UnsupportedFutureFormat, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn format_gate_runs_before_the_schema_version_read() {
+        // Ordering proof for WBS-406: the format gate precedes even the
+        // schema version read. With the entries table ABSENT (renamed away)
+        // and a future format_version, the open must surface the TYPED
+        // FORMAT error — a Sqlite error of any other kind would mean the
+        // open proceeded past the format gate.
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+        db.conn().execute("DROP TABLE entries", []).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, format_version)
+                 VALUES (1, ?1, X'00', X'00', X'00', 0, 0, ?2)",
+                rusqlite::params![CURRENT_SCHEMA_VERSION, CURRENT_VAULT_FORMAT_VERSION + 1],
+            )
+            .unwrap();
+
+        match db.validate_schema_version() {
+            Err(PasswordManagerError::Database(DatabaseError::UnsupportedFutureFormat {
+                ..
+            })) => {}
+            other => panic!("format gate must fire before any other access, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_and_activated_format_versions_validate_cleanly() {
+        // Positive control for the downgrade-block flip: DEFAULT-omitted
+        // (legacy write path), explicit 1 (migrated, not yet activated),
+        // and explicit 2 (activated) must ALL keep validating — the gate
+        // refuses only genuinely newer formats and never locks out vaults
+        // this build understands.
+        for format_version in [
+            Option::<i64>::None,
+            Some(1),
+            Some(CURRENT_VAULT_FORMAT_VERSION),
+        ] {
+            let db = Database::in_memory().unwrap();
+            db.initialize_schema().unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified, format_version)
+                     VALUES (1, ?1, X'00', X'00', X'00', 0, 0, COALESCE(?2, 1))",
+                    rusqlite::params![CURRENT_SCHEMA_VERSION, format_version],
+                )
+                .unwrap();
+            db.validate_schema_version()
+                .unwrap_or_else(|e| panic!("format {format_version:?} must validate, got {e}"));
+        }
+    }
+
+    #[test]
+    fn absent_format_version_column_reads_as_legacy() {
+        // A raw pre-v6 schema has no format_version column at all; the
+        // gate must treat that as legacy format 1 (never a Sqlite error,
+        // which would brick every v1-v5 vault at open). The full v1
+        // schema is shared with the WBS-407 fixture builder.
+        let db = Database::in_memory().unwrap();
+        db.conn()
+            .execute_batch(crate::database::fixtures::V1_SCHEMA_SQL)
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
+                 VALUES (1, 1, X'00', X'00', X'00', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.stored_format_version().unwrap(), 1);
+        // The full validate path migrates and still succeeds.
+        db.validate_schema_version().unwrap();
     }
 
     #[test]

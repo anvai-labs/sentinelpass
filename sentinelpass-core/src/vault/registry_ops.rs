@@ -15,9 +15,9 @@ use crate::crypto::{analyze_password, PasswordStrength};
 use crate::database::{EntryFilter, EntryRepository, SqliteEntryRepository};
 use crate::registry::policy::{self, RecommendationInput};
 use crate::registry::{
-    decrypt_tag_cipher, purge_registry_rows, stamp_rotation, upsert_equality_tag,
-    upsert_equality_tag_with_key, Criticality, Entity, EntityKind, EntitySummary, EntryPosture,
-    LifecycleSource, RegistryOverview, ReuseCluster, SweepReport, TagUpsert, EQUALITY_KEY_ID,
+    decrypt_tag_cipher, purge_registry_rows, stamp_rotation, upsert_equality_tag_with_key,
+    Criticality, Entity, EntityKind, EntitySummary, EntryPosture, LifecycleSource,
+    RegistryOverview, ReuseCluster, SweepReport, TagUpsert, EQUALITY_KEY_ID,
 };
 use crate::{audit::AuditEventType, DatabaseError, PasswordManagerError, Result};
 
@@ -104,12 +104,14 @@ impl VaultManager {
         drop(db);
 
         if let Some(ref logger) = self.audit_logger {
-            // Context carries the id, not the name: the audit log is plaintext.
+            // Context is static prose: the event payload carries the
+            // opaque token for the id (WBS-414) — the plaintext log must
+            // carry neither the name nor the raw id.
             let _ = logger.log(
                 AuditEventType::RegistryEntityCreated {
                     entity_id: entity_id.clone(),
                 },
-                &format!("Registry entity created: {}", entity_id),
+                "Registry entity created",
             );
         }
 
@@ -154,7 +156,7 @@ impl VaultManager {
                 AuditEventType::RegistryEntityDeleted {
                     entity_id: entity_id.to_string(),
                 },
-                &format!("Registry entity deleted: {}", entity_id),
+                "Registry entity deleted",
             );
         }
         Ok(())
@@ -223,7 +225,7 @@ impl VaultManager {
                     entry_id,
                     entity_id: entity_id.to_string(),
                 },
-                &format!("Entry {} assigned to entity {}", entry_id, entity_id),
+                "Entry assigned to entity",
             );
         }
         Ok(())
@@ -251,7 +253,7 @@ impl VaultManager {
                         entry_id,
                         entity_id: String::new(),
                     },
-                    &format!("Entry {} unassigned from its entity", entry_id),
+                    "Entry unassigned from its entity",
                 );
             }
         }
@@ -296,52 +298,12 @@ impl VaultManager {
     // -----------------------------------------------------------------------
     // Write hooks (called from add_entry / update_entry / delete_entry)
     // -----------------------------------------------------------------------
-
-    /// Index a freshly created entry. Best-effort by contract: the caller
-    /// logs failures and the sweep repairs missing rows.
-    pub(super) fn registry_on_add(&self, entry_id: i64, entry: &super::Entry) -> Result<()> {
-        let dek = self.key_hierarchy.dek()?;
-        let now = Utc::now().timestamp();
-        let db = self.lock_db()?;
-        upsert_equality_tag(
-            db.conn(),
-            dek,
-            entry_id,
-            entry.credential_type,
-            entry.password.as_str(),
-            now,
-        )?;
-        Ok(())
-    }
-
-    /// Re-index an updated entry. A changed tag against a prior row stamps
-    /// `password_rotated_at` (in [`crate::registry`]) and emits `SecretRotated`.
-    pub(super) fn registry_on_update(&self, entry_id: i64, entry: &super::Entry) -> Result<()> {
-        let dek = self.key_hierarchy.dek()?;
-        let now = Utc::now().timestamp();
-
-        let outcome = {
-            let db = self.lock_db()?;
-            upsert_equality_tag(
-                db.conn(),
-                dek,
-                entry_id,
-                entry.credential_type,
-                entry.password.as_str(),
-                now,
-            )?
-        };
-
-        if outcome == TagUpsert::Rotated {
-            if let Some(ref logger) = self.audit_logger {
-                let _ = logger.log(
-                    AuditEventType::SecretRotated { entry_id },
-                    &format!("Secret value changed for entry {}", entry_id),
-                );
-            }
-        }
-        Ok(())
-    }
+    //
+    // SR-DATA-001 / WBS-411: the add/update hooks were folded INTO the
+    // callers' transactions (vault/mod.rs) — the entry write and its
+    // equality-index upsert are one unit of work now. The delete hook
+    // (`registry_purge_in_tx`) remains: delete_entry has always been
+    // transactional and keeps the purge inside its transaction.
 
     /// Purge registry rows for a deleted entry inside the delete
     /// transaction. Soft delete never fires FK CASCADE.

@@ -2,32 +2,26 @@
 
 use crate::{CredentialType, DatabaseError, Entry, PasswordManagerError, Result, VaultManager};
 use serde::{Deserialize, Serialize};
-use std::fs::Permissions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 const PLAINTEXT_EXPORT_WARNING: &str = "WARNING: This file contains UNENCRYPTED passwords. \
      Treat it like a master password. Delete it immediately after use.";
 
-/// Restrict an export file to owner-read/write only (mode 0600 on Unix).
-/// On non-Unix platforms this is a no-op; the caller's OS-level protections apply.
-fn set_export_permissions(file: &std::fs::File) -> Result<()> {
-    #[cfg(unix)]
-    {
-        file.set_permissions(Permissions::from_mode(0o600))
-            .map_err(|e| {
-                PasswordManagerError::from(DatabaseError::FileIo(format!(
-                    "Failed to restrict export file permissions: {}",
-                    e
-                )))
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = file;
-    Ok(())
+/// Create an export file owner-only from birth (WBS-412).
+///
+/// Exports contain UNENCRYPTED credentials, so the file is created with mode
+/// 0600 on Unix with no umask-exposed window, pre-existing files are
+/// tightened, and a symlink at the target path is refused rather than
+/// written through (WBS-413). On non-Unix, files inherit the user-profile
+/// DACL (documented Windows story).
+fn create_export_file(output: &Path) -> Result<std::fs::File> {
+    crate::platform::create_owner_only_file(output).map_err(|e| {
+        PasswordManagerError::from(DatabaseError::FileIo(format!(
+            "Failed to create export file: {}",
+            e
+        )))
+    })
 }
 
 /// Export format for vault data
@@ -87,14 +81,7 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(&export_entries)
         .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
 
-    let mut file = std::fs::File::create(output).map_err(|e| {
-        PasswordManagerError::from(DatabaseError::FileIo(format!(
-            "Failed to create export file: {}",
-            e
-        )))
-    })?;
-
-    set_export_permissions(&file)?;
+    let mut file = create_export_file(output)?;
 
     // Prepend a plaintext warning so the file is obviously sensitive.
     writeln!(file, "// {}", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
@@ -121,14 +108,7 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
     }
 
     let entries = vault.list_entries()?;
-    let mut file = std::fs::File::create(output).map_err(|e| {
-        PasswordManagerError::from(DatabaseError::FileIo(format!(
-            "Failed to create export file: {}",
-            e
-        )))
-    })?;
-
-    set_export_permissions(&file)?;
+    let mut file = create_export_file(output)?;
 
     // Write CSV header with plaintext warning prepended.
     writeln!(file, "# {}", PLAINTEXT_EXPORT_WARNING).map_err(|e| {
@@ -499,5 +479,55 @@ mod tests {
         assert!(exported.contains("Example Password"));
         assert!(!exported.contains("Example Passkey"));
         assert!(!exported.contains("passkey-ref:example.com:user@example.com"));
+    }
+
+    // --- WBS-412/413: exports are owner-only from birth, symlink-refused ----
+
+    #[cfg(unix)]
+    #[test]
+    fn export_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry("Site", "secret", CredentialType::Password))
+            .unwrap();
+
+        for name in ["export.json", "export.csv"] {
+            let out = tmp.path().join(name);
+            if name.ends_with(".json") {
+                export_to_json(&vault, &out).unwrap();
+            } else {
+                export_to_csv(&vault, &out).unwrap();
+            }
+            let mode = std::fs::metadata(&out).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} contains plaintext credentials", name);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_refuses_symlinked_output_path() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        vault
+            .add_entry(&test_entry("Site", "secret", CredentialType::Password))
+            .unwrap();
+
+        let target = tmp.path().join("target.txt");
+        std::fs::write(&target, b"innocent").unwrap();
+        let link = tmp.path().join("export.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = export_to_json(&vault, &link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got: {err}"
+        );
+        // The link target is untouched.
+        assert_eq!(std::fs::read(&target).unwrap(), b"innocent");
     }
 }

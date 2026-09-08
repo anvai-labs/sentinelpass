@@ -13,7 +13,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 authors = ["VJ Singh <vijay@anvaiops.com>"]
 license = "Apache-2.0"
@@ -33,7 +33,7 @@ subtle = "2.5"
 hex = "0.4"
 
 # Database
-rusqlite = { version = "0.30", features = ["bundled"] }
+rusqlite = { version = "0.30", features = ["bundled", "hooks"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

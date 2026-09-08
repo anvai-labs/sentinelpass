@@ -510,9 +510,9 @@ impl VaultManager {
         // Audit logger BEFORE the guard (review round 2, finding 2): the
         // highest-severity attack signal on this feature — an epoch-guard
         // refusal on the recovery path — must leave a durable trace.
-        let audit_logger = AuditLogger::new(crate::get_audit_log_dir())
-            .map(Arc::new)
-            .ok();
+        let audit_logger = crate::platform::ensure_audit_log_dir()
+            .ok()
+            .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
 
         // Epoch high-water enforcement BEFORE anything else (review round 1,
         // critical finding): recovery is a vault-opening path and must refuse
@@ -585,6 +585,16 @@ impl VaultManager {
                 "recovery key did not open this vault's recovery slot: {e}"
             ))
         })?;
+
+        // WBS-414/415: the recovered DEK installs the audit key context so
+        // the RecoveryPerformed / refusal records below seal and carry
+        // opaque identifiers. (Best-effort: an install failure degrades to
+        // unsealed records, never to lost records.)
+        // Lease (WBS-414/415 lifecycle review): recovery is a static
+        // path-based op with no session to hand the keys to — the lease
+        // clears them at scope end (success or failure), so HKDF audit
+        // material never outlives the operation.
+        let _audit_key_lease = crate::audit::AuditLogger::key_lease(&dek).ok();
 
         // Build the new password wrap OUTSIDE the transaction (Argon2id is
         // expensive): derive the new master key, wrap the recovered DEK
@@ -1157,10 +1167,15 @@ impl VaultManager {
         // Audit AFTER commit, BEFORE the anchor follow (review round 2:
         // committed privileged changes must leave a durable trace even if
         // the follow fails) — revocation is the core security control.
+        // The slot uuid rides as an opaque token (WBS-414): the plaintext
+        // log must not carry the raw identifier.
         if let Some(ref logger) = self.audit_logger {
             let _ = logger.log(
                 AuditEventType::SlotRevoked,
-                &format!("key slot revoked: {slot_uuid}"),
+                &format!(
+                    "key slot revoked: {}",
+                    AuditLogger::opaque_value_or_raw(crate::audit::AUDIT_ID_LABEL_SLOT, slot_uuid)
+                ),
             );
         }
 

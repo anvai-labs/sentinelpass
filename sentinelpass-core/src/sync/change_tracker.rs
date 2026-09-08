@@ -133,9 +133,15 @@ pub fn collect_pending_credential_blobs(
                 continue;
             }
         };
-        // Optional fields: skip-and-warn per row (same containment as the
-        // required fields above) — a corrupt url/notes blob skips the
-        // WHOLE row (partial application would silently lose fields).
+        // Optional fields: TYPED NULL preservation (WBS-410 / TD-ROB-03 /
+        // SR-DATA-002). A NULL column decodes to None (absence on the wire);
+        // a legacy EMPTY blob (X'') is the pre-0.9 absence marker and also
+        // decodes to None — the collector never fabricates Some(""). A
+        // present, non-empty blob always yields Some(plaintext): no
+        // Some→None loss either way. Still skip-and-warn per row (same
+        // containment as the required fields above) — a corrupt url/notes
+        // blob skips the WHOLE row (partial application would silently
+        // lose fields).
         let url = url_blob
             .filter(|b| !b.is_empty())
             .map(|b| open(crate::crypto::aad::EnvelopePurpose::Secret, &b).map(|z| z.to_string()))
@@ -531,7 +537,29 @@ pub fn collect_pending_totp_blobs(
 }
 
 /// Mark entries as synced after successful push.
+///
+/// Atomic (SR-DATA-001 / WBS-411): the per-row UPDATEs across all three
+/// tables commit as ONE transaction — an interruption leaves every row
+/// pending (a partially-marked batch is never committed).
+///
+/// KNOWN LIMITATION (see `engine.rs` on `complete_push_checkpoint`, and
+/// WBS-605): an interrupted push whose checkpoint DID commit cannot simply
+/// be re-pushed — the relay enforces a strictly increasing
+/// `device_sequence`, so the retry derives a consumed sequence and is
+/// rejected until sync v2 (ADR-006). Do not treat re-push as idempotent.
 pub fn mark_entries_synced(conn: &Connection, sync_ids: &[Uuid]) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    mark_entries_synced_in(&tx, sync_ids)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
+/// The statement body of [`mark_entries_synced`] WITHOUT its own
+/// transaction — for callers that fold the marks into a larger unit of work
+/// (the push loop commits the marks and the cursor checkpoint together).
+pub(crate) fn mark_entries_synced_in(conn: &Connection, sync_ids: &[Uuid]) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     for sync_id in sync_ids {
         let id_str = sync_id.to_string();
@@ -1168,5 +1196,58 @@ mod tests {
         insert_pending_totp(conn, &dek, entry_id, false);
 
         assert_eq!(count_pending_changes(conn).unwrap(), 4);
+    }
+
+    /// WBS-411 / SR-DATA-001: mark_entries_synced is ONE transaction — an
+    /// injected failure mid-batch leaves every row pending (complete-old);
+    /// the first clean pass marks all rows synced (complete-new).
+    #[test]
+    fn mark_entries_synced_fault_injection_is_all_or_nothing() {
+        let db = setup_db_with_sync_schema();
+        let conn = db.conn();
+        let dek = DataEncryptionKey::new().unwrap();
+
+        let ids: Vec<Uuid> = (0..2)
+            .map(|_| insert_pending_credential(conn, &dek, "Batch", "u", "p", false))
+            .collect();
+
+        use crate::database::fault_injection;
+        let mut fail_at = 0usize;
+        let mut injected_failures = 0usize;
+        loop {
+            fault_injection::install_write_fault(conn, fail_at);
+            let result = mark_entries_synced(conn, &ids);
+            fault_injection::clear_write_fault(conn);
+
+            let pending: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM entries WHERE sync_state = 'pending'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            match result {
+                Err(_) => {
+                    injected_failures += 1;
+                    assert_eq!(
+                        pending, 2,
+                        "complete-old: every row stays pending at write {fail_at}"
+                    );
+                }
+                Ok(()) => {
+                    assert_eq!(pending, 0, "complete-new at write {fail_at}");
+                    break;
+                }
+            }
+            fail_at += 1;
+            assert!(
+                fail_at < 32,
+                "mark_entries_synced never succeeded within the sweep bound"
+            );
+        }
+        assert!(
+            injected_failures >= 1,
+            "the sweep must inject at least one real failure to be meaningful"
+        );
     }
 }
