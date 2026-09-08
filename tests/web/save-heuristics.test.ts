@@ -71,6 +71,14 @@ describe('save heuristics', () => {
       )).toBe(true);
     });
 
+    it('keeps legacy bracketed-IPv6 never-save keys matching (upgrade compat)', () => {
+      // Pre-WBS-706 entries stored window.location.hostname verbatim, i.e.
+      // with brackets; the structured normalizer now stores '::1'.
+      expect(normalizeDomainForPolicy('https://[::1]:8080/')).toBe('::1');
+      expect(domainMatchesPolicy('::1', '[::1]')).toBe(true);
+      expect(domainMatchesPolicy('[::1]', '::1')).toBe(true);
+    });
+
     it('rescues host:port strings the URL parser misreads as scheme:path', () => {
       // `example.com:8443` parses as scheme "example.com" with no host; the
       // normalizer must re-read it as a host, not refuse or store it raw.

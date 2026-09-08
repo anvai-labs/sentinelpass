@@ -1,11 +1,11 @@
 // Content script for password field detection and autofill
 
-import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger';
+import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger.js';
 import {
   classifyCredentialUrlSecurity,
   domainMatchesPolicy,
   normalizeDomainForPolicy
-} from './save-heuristics';
+} from './save-heuristics.js';
 
 function escapeHtml(str: string): string {
   const div = document.createElement('div');
@@ -1256,7 +1256,7 @@ function showNotification(message, type = 'info') {
     top: 20px;
     right: 20px;
     padding: 12px 20px;
-    background: ${type === 'success' ? '#34a853' : type === 'error' ? '#ea4335' : '#1a73e8'};
+    background: ${type === 'success' ? '#34a853' : type === 'error' ? '#ea4335' : type === 'warning' ? '#f9ab00' : '#1a73e8'};
     color: white;
     border-radius: 4px;
     box-shadow: 0 4px 6px rgba(0,0,0,0.2);

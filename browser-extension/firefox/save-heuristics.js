@@ -82,7 +82,8 @@ export function normalizeDomainForPolicy(value) {
         }
         if (HOST_PORT_ONLY.test(trimmed)) {
             try {
-                return stripPolicyWwwSuffix(hostFromParsedUrl(new URL(`https://${trimmed}`)));
+                const host = hostFromParsedUrl(new URL(`https://${trimmed}`));
+                return host ? stripPolicyWwwSuffix(host) : null;
             }
             catch {
                 return null;
@@ -127,7 +128,13 @@ export function classifyCredentialUrlSecurity(rawUrl) {
     }
 }
 export function domainMatchesPolicy(domain, policyDomain) {
-    return domain === policyDomain || domain.endsWith(`.${policyDomain}`);
+    // Bracket-insensitive so legacy never-save keys recorded before WBS-706
+    // (which stored `window.location.hostname` verbatim, i.e. `[::1]`) keep
+    // matching the bracket-stripped hosts the structured normalizer produces.
+    const normalizedDomain = domain.replace(/^\[|\]$/g, '');
+    const normalizedPolicy = policyDomain.replace(/^\[|\]$/g, '');
+    return (normalizedDomain === normalizedPolicy ||
+        normalizedDomain.endsWith(`.${normalizedPolicy}`));
 }
 export function normalizeCredentialUrl(rawUrl, fallbackDomain) {
     const domain = normalizeDomainForPolicy(fallbackDomain || '');
