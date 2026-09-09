@@ -691,6 +691,21 @@ Origin labels are provenance, never authorization.
   flips the daemon to live mode. Creation against an existing vault is
   refused (`vault_exists` / `invalid_input` depending on mode).
 
+### Protocol upgrade and credential rotation (WBS-515)
+
+- IPC session versioning: the session handshake carries a protocol version;
+  both endpoints refuse unknown versions (fail-closed) so a future v2 can
+  negotiate against installed bases.
+- IPC token rotation: quit the daemon (releasing the maintenance lock),
+  regenerate the token file, restart — clients load the token per
+  connection, so no client-side state carries over. Rotation requires the
+  exclusive lock, exactly like other maintenance.
+- Capability rotation: mint a replacement capability and delete the old
+  entry in the store; the old presentation stops verifying immediately
+  (store re-read per request). The native-host secret file is replaced by
+  re-running the daemon's provisioning after deleting it.
+- WBS-514 (lock-poisoning unwraps) remains deferred as tracked (TD-#9).
+
 ### Interim compatibility window (flagged, temporary)
 
 WBS-502 rerouted every UI/CLI vault command through the application-service
