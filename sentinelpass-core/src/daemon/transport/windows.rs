@@ -89,19 +89,19 @@ fn create_pipe_with_user_dacl(
 ) -> TransportResult<*mut std::ffi::c_void> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_SUCCESS, GENERIC_READ,
-        GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE,
+        HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows::Win32::Security::Authorization::{
-        BuildTrusteeWithSidW, EXPLICIT_ACCESS_W, SetEntriesInAclW, TRUSTEE_W,
+        BuildTrusteeWithSidW, SetEntriesInAclW, EXPLICIT_ACCESS_W, TRUSTEE_W,
     };
     use windows::Win32::Security::{
         GetTokenInformation, InitializeSecurityDescriptor, SetSecurityDescriptorDacl,
-        SetSecurityDescriptorOwner, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        SetSecurityDescriptorOwner, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     };
     use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
     use windows::Win32::System::Pipes::{
-        CreateNamedPipeW, PIPE_REJECT_REMOTE_CLIENTS, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -166,8 +166,7 @@ fn create_pipe_with_user_dacl(
         let mut security_descriptor: windows::Win32::Security::SECURITY_DESCRIPTOR =
             std::mem::zeroed();
         let sd_ptr = windows::Win32::Security::PSECURITY_DESCRIPTOR(
-            (&mut security_descriptor as *mut windows::Win32::Security::SECURITY_DESCRIPTOR)
-                .cast(),
+            (&mut security_descriptor as *mut windows::Win32::Security::SECURITY_DESCRIPTOR).cast(),
         );
         if InitializeSecurityDescriptor(sd_ptr, SD_REVISION).is_err() {
             let _ = CloseHandle(token_handle);
@@ -226,9 +225,9 @@ fn create_pipe_with_user_dacl(
         }
 
         // Free the ACL the helper API allocated for us.
-        let _ = windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(new_acl.cast()),
-        ));
+        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            new_acl.cast(),
+        )));
 
         Ok(created.0)
     }
