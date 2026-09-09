@@ -1534,6 +1534,13 @@ impl VaultManager {
         opts: &RestoreOptions,
         faults: RestoreFaults,
     ) -> Result<RestoreReport> {
+        if vault_path == bundle_path {
+            return Err(PasswordManagerError::InvalidInput(
+                "the bundle path equals the vault path — restoring would overwrite \
+                 the bundle itself; restore onto a different path"
+                    .to_string(),
+            ));
+        }
         let parsed = read_bundle(bundle_path)?;
         Self::restore_from_parsed(vault_path, parsed, master_password, opts, faults)
     }
@@ -1719,7 +1726,15 @@ impl VaultManager {
         // succeeds (every pre-swap failure must leave the live state
         // fully intact, keychain included); the column itself is NULLed
         // inside the staged transaction below.
-        let restored_biometric_ref = VaultManager::load_biometric_ref(&staged_db)?;
+        let restored_biometric_ref = match VaultManager::load_biometric_ref(&staged_db) {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(refuse(
+                    e,
+                    "restore refused: reading the staged biometric reference failed".to_string(),
+                ))
+            }
+        };
         let neutralization = neutralize_snapshot_sync_and_biometric(&staged_db);
         let sync_disabled = match neutralization {
             Ok(had) => had || opts.disable_sync,

@@ -324,11 +324,12 @@ MAC input: every field 1–17 above, in declaration order:
   `schema_version`, 9 `vault_format_version`, 10 `entry_count`, 11
   `tombstone_count`, 17 `snapshot.len`) are fed as raw 8-byte
   little-endian values with NO length prefix.
-- BOOLEAN (slot `revoked`) feeds a single `0x00`/`0x01` byte; slot
-  `key_epoch` feeds 8-byte LE like the integer fields.
+- BOOLEAN (slot `revoked`) feeds a LENGTH-PREFIXED single byte (`u64` LE
+  length = 1, then `0x00`/`0x01`); slot `key_epoch` feeds 8-byte LE like
+  the integer fields.
 - The `slots` array feeds a `u64` LE element count, then each element's
   fields in order (`slot_uuid` length-prefixed, `slot_type`
-  length-prefixed, `key_epoch` LE, `revoked` byte).
+  length-prefixed, `key_epoch` LE, `revoked` length-prefixed byte).
 
 The `mac` field is never an input. Comparisons are constant-time
 (`subtle`).
