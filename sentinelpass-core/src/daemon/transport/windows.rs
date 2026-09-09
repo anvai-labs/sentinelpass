@@ -197,7 +197,12 @@ fn create_pipe_with_user_dacl(
         };
 
         // --- 4. CreateNamedPipeW with first-instance + remote rejection ----
+        // FILE_FLAG_OVERLAPPED is REQUIRED: tokio's NamedPipeServer
+        // associates the raw handle with the runtime's IOCP, which rejects
+        // a non-overlapped handle with ERROR_INVALID_PARAMETER (os error
+        // 87 at from_raw_handle).
         let open_mode = PIPE_ACCESS_DUPLEX
+            | windows::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED
             | if first_instance {
                 FILE_FLAG_FIRST_PIPE_INSTANCE
             } else {
