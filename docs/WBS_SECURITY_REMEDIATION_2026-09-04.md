@@ -765,6 +765,12 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   migration/compat tests incl. the Windows directory-refusal regression.
 - **WBS-408 — Application services / unit-of-work boundary.** SR-DATA-001, TD-ROB-02.
   Deps — may start after ADR-007 direction. Est 4d.
+  **Status:** Done (2026-09-09) — `sentinelpass-protocol/src/service.rs`: `VaultOp`/
+  `VaultOpResult`/`ServiceError` (stable codes) + serde-defaulted wire DTOs;
+  `IpcMessage::ServiceCall`/`ServiceResult` + `IpcClient::call_service`;
+  `sentinelpass-core/src/daemon/service.rs`: `VaultApplicationService` trait +
+  `LiveVaultService` executor + wire-core conversions; redacting Debug on
+  secret-bearing wire types; review round 1 findings fixed.
 - **WBS-409 — Explicit local vs remote write paths (remove trigger echo).** TD-ROB-02.
   Tests: N remote apply cannot re-mark pending. Est 3d.
   **Status:** Done (2026-09-08, write-path PR) — schema v9: `create_triggers` no
@@ -880,24 +886,86 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
 Gate: ADR-007 accepted + WBS-408 contracts. **Owner** CM.
 
 - **WBS-501 — Daemon sole DEK owner/writer.** SR-IPC-004, TD-ROB-13. Est 4d.
+  **Status:** Done (2026-09-09) — lifetime advisory lock `<vault>.maint-lock`
+  (0600/0700, File::try_lock, never unlinked) with coexistence refusal
+  (MaintenanceLockHeld, non-zero exit); no-vault startup is a maintenance
+  mode serving only status/bootstrap (`VaultCreate` on the blocking pool,
+  audited, transitions to live); full `ServiceCall` dispatch. Tests: lock
+  mutual exclusion, bootstrap e2e, live refusal negatives.
 - **WBS-502 — Desktop+CLI CRUD via daemon services.** SR-IPC-004, TD-ROB-13, deferred
   TD-#10. Est 4d.
+  **Status:** Done (2026-09-09) — every UI/CLI vault command routes through
+  `VaultOp` (CLI backend: daemon default, FLAGGED
+  `SENTINELPASS_ALLOW_DIRECT_VAULT=1` compat lock-guarded + announced; custom
+  `--vault` never daemon-served; UI `service_call` same ops, Tauri command
+  signatures unchanged). Dual-writer ratchet test pins the direct-open
+  allowlist to the offline-maintenance set. Residual: compat env removed at
+  1.0 (TD-ROB-13 Partial until then).
 - **WBS-503 — Exclusive offline maintenance mode.** SR-IPC-004. Est 2d.
+  **Status:** Done (2026-09-09) — `with_maintenance_lock` wired into init,
+  passwd, backup create/restore, recovery setup/recover, sync
+  pair-start/pair-join; refuses while held (typed error names owner+lock);
+  audit ownership during maintenance rides the multi-process-append-safe
+  WBS-415 chain.
 - **WBS-504 — Scoped capabilities (audience/op/resource/expiry/nonce).** SR-IPC-003,
   TD-SEC-06. Est 4d.
+  **Status:** Done for the browser/native-host audience (2026-09-09) —
+  hashed-at-rest store (0600), constant-time verify, expiry + revocation
+  (restart does not resurrect), fail-closed on unreadable store; negative
+  suite (wrong audience/secret/expired/revoked) unit + e2e. General-purpose
+  grant-minting CLI surface deferred with the 1.0 protocol hardening.
 - **WBS-505 — Native-host installation capability.** SR-IPC-003. Tests: N general
   client claiming NativeHost denied. Est 2d.
+  **Status:** Done (2026-09-09) — daemon provisions `native_host.capability`
+  (0600) on start; host presents it on every envelope; browser-surface gate
+  verifies audience `native-host`; e2e negative (claim without material
+  denied, with material served, wrong material denied); legacy windows are
+  explicit announced env opt-outs removed in 1.0. Honest scope sentence per
+  ADR-003 rev 2 in `capabilities.rs` + SECURITY_ARCHITECTURE §10.
 - **WBS-506 — Retain least-privilege external grants.** (extends existing
   `external_secret_access.rs`). Est 1d.
+  **Status:** Done (2026-09-09) — external-secret grants (audience-bound,
+  token-enforced, write-gated, expiry) retained unchanged beside the
+  capability store; existing daemon tests cover grant/token
+  enforcement/rotation/revocation; documented in SECURITY_ARCHITECTURE
+  §10/§11.
 - **WBS-507 — Unix peer UID + owner-only socket.** SR-IPC-005. Est 1.5d.
+  **Status:** Done (2026-09-09) — default socket `$XDG_RUNTIME_DIR/SentinelPass/`
+  (config runtime fallback), /tmp fallback removed; bind creates 0700 or
+  refuses non-private/symlinked/not-owned dirs; clients refuse before
+  connect; SO_PEERCRED/getpeereid peer-UID check rejects foreign or
+  unverifiable peers; legacy tcp:// branch removed from server and client.
 - **WBS-508 — Windows SID ACL + remote rejection.** TD-ROB-15, SR-IPC-005. Est 2d.
+  **Status:** Done (2026-09-09) — raw CreateNamedPipeW with explicit
+  current-user SID DACL (GENERIC_READ|WRITE), FILE_FLAG_FIRST_PIPE_INSTANCE
+  on the first instance (squatting refusal), PIPE_REJECT_REMOTE_CLIENTS;
+  FFI type-checked against windows 0.61 for x86_64-pc-windows-msvc; runtime
+  verification rides the Windows CI matrix.
 - **WBS-509 — HKDF directional session keys.** TD-ROB-16. Est 2.5d.
+  **Status:** Done (2026-09-09) — `protocol::session`: HKDF-SHA256 over the
+  token with session-random salt derives directional c2s/s2c keys; clients
+  negotiate SessionHello/SessionAccept; `IpcConnection` negotiates on both
+  endpoints (legacy plaintext accepted only server-side, announced,
+  removed 1.0).
 - **WBS-510 — AAD-bound session context (proto/direction/type/counter).** TD-ROB-16.
   Est 2d.
+  **Status:** Done (2026-09-09) — AAD binds SPIS magic + protocol version +
+  sender direction + counter; reflection and cross-direction replay fail
+  authentication (tested).
 - **WBS-511 — Replay protection, frame bounds, deadlines.** TD-ROB-14, SR-IPC-005.
   Est 3d.
+  **Status:** Done (2026-09-09) — strictly-increasing per-direction counters
+  (duplicates/reorder refused pre-delivery); 64KiB frame bounds unchanged +
+  sealed-frame bound check; 30s deadline bounds every frame read/write
+  (negotiation and per-frame).
 - **WBS-512 — Bounded concurrent clients.** TD-ROB-14. Est 2d.
+  **Status:** Done (2026-09-09) — one bounded task per connection gated by a
+  16-client semaphore; a stalled client no longer wedges others (negative
+  test proves a second client completes during a stall).
 - **WBS-513 — Blocking pool for Argon2/IO.** TD-ROB-14. Est 1.5d.
+  **Status:** Done (2026-09-09) — all service ops execute on
+  `spawn_blocking`; KDF-heavy paths (unlock, bootstrap VaultCreate) hold a
+  per-vault 1-permit gate (ADR-004 rev 5: one Argon2id per vault).
 - **WBS-514 — Remove lock-poisoning unwraps.** deferred TD-#9. Est 1.5d.
 - **WBS-515 — Protocol upgrade/credential rotation path.** Est 2d.
 - **Phase negative suite (gate):** general-client-claims-NativeHost; originless;
