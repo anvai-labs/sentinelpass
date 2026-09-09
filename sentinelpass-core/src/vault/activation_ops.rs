@@ -658,7 +658,54 @@ impl VaultManager {
         verify_domain_rows(conn, dek, &vault_uuid, &tag_key, &mut report)?;
         Ok(report)
     }
+}
 
+/// Staged-snapshot full-decrypt pass (WBS-417, used by
+/// `vault/backup_ops.rs`): the SAME per-row verification scan
+/// [`VaultManager::verify_vault_envelopes`] performs, parameterized over
+/// an arbitrary connection + DEK so a restore's staged copy can be
+/// validated BEFORE any live mutation. Deliberately a separate additive
+/// entry point — the method above keeps its own lock/session semantics
+/// untouched (worktree contract: no refactors of existing methods).
+pub(crate) fn verify_snapshot_envelopes(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    vault_uuid: &str,
+) -> Result<VaultVerificationReport> {
+    let tag_key = derive_domain_tag_key(dek)?;
+    let mut report = VaultVerificationReport::default();
+    verify_entry_rows(conn, dek, vault_uuid, &mut report)?;
+    let (ssh_scanned, ssh_verified) = verify_three_part_rows(
+        conn,
+        dek,
+        vault_uuid,
+        &mut report,
+        "ssh_keys",
+        "key_id",
+        "private_key_encrypted",
+        ObjectType::SshKey,
+        &|dek, blob, nonce, tag| crate::ssh::SshKey::decrypt_private_key(dek, blob, nonce, tag),
+    )?;
+    report.ssh_keys_scanned += ssh_scanned;
+    report.ssh_keys_verified += ssh_verified;
+    let (totp_scanned, totp_verified) = verify_three_part_rows(
+        conn,
+        dek,
+        vault_uuid,
+        &mut report,
+        "totp_secrets",
+        "totp_id",
+        "secret_encrypted",
+        ObjectType::TotpSecret,
+        &|dek, blob, nonce, tag| crate::totp::decrypt_totp_secret(dek, blob, nonce, tag),
+    )?;
+    report.totp_secrets_scanned += totp_scanned;
+    report.totp_secrets_verified += totp_verified;
+    verify_domain_rows(conn, dek, vault_uuid, &tag_key, &mut report)?;
+    Ok(report)
+}
+
+impl VaultManager {
     /// Attempt the atomic v2-format activation (WBS-406): a clean
     /// full-vault verification stamps `db_metadata.format_version =
     /// CURRENT_VAULT_FORMAT_VERSION` and the `v2_format_activated`

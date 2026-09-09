@@ -239,6 +239,16 @@ pub fn peek(path: &Path) -> Option<(String, i64)> {
     Some((sidecar.vault_uuid, sidecar.epoch))
 }
 
+/// Read-only peek at a parseable sidecar's full record:
+/// (vault_uuid, epoch, digest hex). Used by the WBS-417 restore flow to
+/// decide — BEFORE any mutation — whether the restore would move the
+/// high-water mark to a state the guard would refuse (the ADR-004 rev 4
+/// supervised-override acknowledgment). Additive; no behavior change.
+pub(crate) fn peek_full(path: &Path) -> Option<(String, i64, String)> {
+    let sidecar = fs::read_to_string(path).ok().and_then(|c| parse(&c))?;
+    Some((sidecar.vault_uuid, sidecar.epoch, sidecar.digest_hex))
+}
+
 /// Check the vault's on-disk epoch and key material against the sidecar.
 /// Fails closed on rollback, unexplained jumps, material rewind, and vault
 /// mismatch. The ONLY write this performs pre-authentication is the TOFU

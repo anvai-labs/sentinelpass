@@ -24,25 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ws://localhost:*; script-src 'self'; style-src 'self'; object-src 'none';",
-      "capabilities": [
-        {
-          "identifier": "default",
-          "description": "Default capabilities for the main window",
-          "windows": ["main"],
-          "permissions": [
-            "clipboard-manager:allow-write-text",
-            "clipboard-manager:allow-read-text",
-            "clipboard-manager:allow-clear",
-            "shell:allow-open",
-            "dialog:allow-ask",
-            "dialog:allow-confirm",
-            "dialog:allow-message",
-            "dialog:allow-open",
-            "dialog:allow-save"
-          ]
-        }
-      ]
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src 'none';"
     },
     "withGlobalTauri": true
   },
@@ -64,10 +46,5 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
-  },
-  "plugins": {
-    "shell": {
-      "open": true
-    }
   }
 }

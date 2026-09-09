@@ -826,14 +826,54 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   TD-ROB-12, ADR-008. Bundle carries vault UUID + epoch but NOT the high-water
   sidecar (ADR-004 rev 4: restore re-baselines via TOFU-warning or override).
   Tests: N live-file copy rejected; bundle tamper fails. Est 4d.
+  **Status:** Done (2026-09-08) — `vault/backup_ops.rs`: `VACUUM INTO` snapshot
+  under the db lock, SPBACKUP bundle (format registered in
+  docs/DURABLE_WIRE_FORMATS.md §6) with HKDF-over-DEK manifest MAC (registry
+  precedent), digest+identity+slot-inventory binding, usable-slot-only manifest
+  inventory (bounded), no-plaintext-entry-content, atomic 0600 bundle write,
+  CLI `backup create`. Negatives: locked/in-memory refusal, overwrite+symlink
+  output refusal, snapshot-byte/manifest-field/cross-bundle-splice tamper,
+  truncation, trailing bytes, hostile lengths pre-allocation, unknown/dup
+  keys, unknown version (typed), wrong password, raw live-file copy rejected,
+  depth bomb.
 - **WBS-417 — Dry-run validation + atomic verified restore.** SR-DATA-005.
   Restoring an older-epoch bundle on a machine with a newer high-water requires
   reauthentication + acknowledgment, re-baselines the sidecar, and audit-logs
   (ADR-004 rev 4). Tests: N interrupted restore leaves prior state complete;
   restore-older-epoch override flow + abuse negative. Est 3d.
+  **Status:** Done (2026-09-08) — `backup_ops::restore_bundle` (static,
+  path-based): MAC-first authenticity → target classification + gates
+  (allow_replace / allow_epoch_rewind / disable_sync flags; live-sync
+  refusal per ADR-008) → full staged validation (identity, slot inventory,
+  schema-migration path, registry MAC, WBS-405 full decrypt) → sync-lineage
+  neutralization + biometric-ref clearing on the staged copy → single-rename
+  swap with checkpoint-then-remove `-wal`/`-shm` → epoch sidecar re-baseline
+  as the sequenced second step (TOFU / forward / acknowledged supervised
+  override, all audited) → final functional `open()` → only then is the
+  retained `<vault>.pre-restore` snapshot replaced (exactly one, replaced
+  on the next restore; preserved untouched on any post-swap failure).
+  CLI `backup verify --deep` exposes the dry-run; `backup restore` carries
+  the three acknowledgment flags. Negatives: older-epoch + equal-epoch-
+  different-material restores refused without the ack; live-sync restore
+  refused without disable-sync; replace refusal leaves live state complete;
+  tampered bundle + wrong password refuse pre-mutation with live state
+  complete; pre-restore snapshot retention/replacement verified.
 - **WBS-418 — Crash/fault injection harness (migration/CRUD/backup/restore).**
   SR-DATA-001, TV-005. Est 4d. Gate for the phase: fault at any step → complete-old or
   complete-new, never partial.
+  **Status:** Done for the backup/restore scope (2026-09-08; migration/CRUD sweeps
+  already landed with #121). Restore: staged-write authorizer sweep (fail_at =
+  0..N over the staged connection's validation + sync-neutralization statements —
+  every denial leaves the live vault complete-old, clean run proves complete-new,
+  with a non-vacuity guard) plus swap-phase interruption tests (abort after the
+  pre-restore snapshot / sidecar removal / swap / re-baseline: pre-swap aborts
+  leave the prior state complete with no litter; a post-swap abort leaves the
+  documented refused-open rollback state with the safety net preserved and a
+  re-run completing it). Backup: failure injections prove no partial output and
+  no staging litter. SR-DATA-005 fixture acceptance: hand-sealed bundles of the
+  v6/v7/v8 released schemas restore through the migration ladder and fully
+  decrypt (v1–v5 have no durable vault identity, so no manifest can bind them —
+  inherent, not a gap).
 
 ## 6. Phase 3 — daemon authority & IPC (WBS-500, release 0.10)
 

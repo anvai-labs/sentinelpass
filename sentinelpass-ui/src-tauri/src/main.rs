@@ -11,10 +11,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Manager, State};
 
+mod clipboard_secret;
+
 // Application state
 struct AppState {
     vault_manager: Arc<Mutex<Option<VaultManager>>>,
     daemon_process: Arc<Mutex<Option<Child>>>,
+    clipboard_tracker: Arc<Mutex<clipboard_secret::ClipboardSecretTracker>>,
 }
 
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -1248,6 +1251,55 @@ async fn open_entry_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// Command: Copy a secret to the native clipboard (WBS-709).
+//
+// The write goes through arboard with platform sensitive-markers so
+// clipboard history / cloud sync skip the value where the OS supports it.
+// Only the SHA-256 digest is retained (never the plaintext) so expiry and
+// app-exit can clear the clipboard only if it still holds this secret.
+#[tauri::command]
+fn copy_secret_to_clipboard(secret: String, state: State<'_, AppState>) -> Result<(), String> {
+    if secret.is_empty() {
+        return Err("Nothing to copy".to_string());
+    }
+
+    clipboard_secret::write_secret_to_clipboard(&secret)?;
+    state
+        .clipboard_tracker
+        .lock()
+        .unwrap()
+        .register(secret.as_bytes());
+
+    // Best-effort zeroization of the deserialized command argument.
+    let mut secret = secret;
+    use zeroize::Zeroize as _;
+    secret.zeroize();
+
+    Ok(())
+}
+
+/// Clear the clipboard iff it still holds the registered secret; drop the
+/// registration either way. Returns whether the clipboard was cleared.
+fn expire_registered_clipboard(state: &AppState) -> bool {
+    let current = clipboard_secret::read_clipboard_text();
+    let mut tracker = state.clipboard_tracker.lock().unwrap();
+    let ours = tracker.matches_clipboard(current.as_deref());
+    tracker.clear_registration();
+    if ours {
+        // The secret belongs to us and its expiry elapsed (or the app is
+        // exiting): remove it from the native clipboard.
+        return clipboard_secret::clear_clipboard().is_ok();
+    }
+    false
+}
+
+// Command: expiry tick from the UI timer (WBS-709). Clears the clipboard
+// when it still holds the most recent secret copied by this app.
+#[tauri::command]
+fn expire_clipboard_secret(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(expire_registered_clipboard(&state))
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PasswordAnalysis {
     strength: String,
@@ -1288,12 +1340,13 @@ pub struct TotpMetadataResponse {
 fn main() {
     unlock_debug_log("startup: sentinelpass-ui main() entered");
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             vault_manager: Arc::new(Mutex::new(None)),
             daemon_process: Arc::new(Mutex::new(None)),
+            clipboard_tracker: Arc::new(
+                Mutex::new(clipboard_secret::ClipboardSecretTracker::new()),
+            ),
         })
         .setup(|app| {
             if let Ok(resource_dir) = app.path().resource_dir() {
@@ -1348,6 +1401,8 @@ fn main() {
             open_entry_url,
             register_native_host,
             open_browser_extensions_page,
+            copy_secret_to_clipboard,
+            expire_clipboard_secret,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -1355,6 +1410,9 @@ fn main() {
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             let state = app_handle.state::<AppState>();
+            // WBS-709 clear-on-exit: if a copied secret is still pending on
+            // the system clipboard, remove it before the process goes away.
+            expire_registered_clipboard(&state);
             stop_managed_daemon(&state);
         }
     });

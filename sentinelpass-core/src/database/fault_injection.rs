@@ -54,6 +54,9 @@ pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -
 /// As [`install_write_fault`], but only write actions against `table` are
 /// counted (and denied at `fail_at`) — for pinning degraded-outcome
 /// contracts where a specific statement's failure must be isolatable.
+/// Its only caller lives in the sync-feature test suite; gating the
+/// helper keeps the default-features build warning-free (`-D warnings`).
+#[cfg(feature = "sync")]
 pub(crate) fn install_write_fault_on_table(
     conn: &rusqlite::Connection,
     fail_at: usize,
