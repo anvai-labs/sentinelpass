@@ -47,19 +47,23 @@ pub enum BackupCommands {
 
 /// `sentinelpass backup create <OUTPUT>`
 pub fn handle_backup_create(vault_path: PathBuf, output: PathBuf) -> Result<()> {
-    let master_password = crate::prompt_master_password(false)?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+    // WBS-503: snapshotting the live database file is an exclusive offline
+    // operation — refuse while a live daemon owns the vault.
+    crate::with_maintenance_lock(&vault_path, || {
+        let master_password = crate::prompt_master_password(false)?;
+        let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
 
-    let summary = vault
-        .create_backup(&output)
-        .context("backup creation failed")?;
-    println!("Backup created: {}", summary.output.display());
-    println!("  backup_id:    {}", summary.backup_id);
-    println!("  vault_uuid:   {}", summary.vault_uuid);
-    println!("  key epoch:    {}", summary.epoch);
-    println!("  snapshot:     {} bytes", summary.snapshot_bytes);
-    println!("Keep this bundle somewhere safe and separate from this machine.");
-    Ok(())
+        let summary = vault
+            .create_backup(&output)
+            .context("backup creation failed")?;
+        println!("Backup created: {}", summary.output.display());
+        println!("  backup_id:    {}", summary.backup_id);
+        println!("  vault_uuid:   {}", summary.vault_uuid);
+        println!("  key epoch:    {}", summary.epoch);
+        println!("  snapshot:     {} bytes", summary.snapshot_bytes);
+        println!("Keep this bundle somewhere safe and separate from this machine.");
+        Ok(())
+    })
 }
 
 /// `sentinelpass backup verify [--deep] <BUNDLE>`
@@ -116,36 +120,41 @@ pub fn handle_backup_restore(
         println!("  (no --allow-epoch-rewind: older-epoch bundles will be refused)");
     }
 
-    let report = VaultManager::restore_bundle(&vault_path, &bundle, master_password.as_bytes(), &opts)
-        .context("restore FAILED (fail closed — the live vault was not modified unless a post-swap step is named in the error)")?;
+    // WBS-503: restore REPLACES the vault database — it must hold the
+    // exclusive maintenance lock so a live daemon cannot own (or race) the
+    // vault while it is swapped underneath it.
+    crate::with_maintenance_lock(&vault_path, || {
+        let report = VaultManager::restore_bundle(&vault_path, &bundle, master_password.as_bytes(), &opts)
+            .context("restore FAILED (fail closed — the live vault was not modified unless a post-swap step is named in the error)")?;
 
-    println!("Restore verified and complete.");
-    println!("  backup_id:            {}", report.bundle_backup_id);
-    println!("  vault_uuid:           {}", report.vault_uuid);
-    println!(
-        "  key epoch:            {} -> {}",
-        report
-            .from_epoch
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "none".into()),
-        report.to_epoch
-    );
-    println!("  entries:              {}", report.entries);
-    if report.epoch_rewound {
-        println!("  epoch high-water:     re-baselined (acknowledged rollback restore)");
-    }
-    if report.sync_disabled {
-        println!("  sync:                 DISABLED — re-pairing required (restored lineage is never reused)");
-    }
-    match &report.pre_restore_snapshot {
-        Some(path) => {
-            println!("  pre-restore snapshot: retained at {}", path.display());
-            println!("  Keep it until you are satisfied with the restored vault.");
+        println!("Restore verified and complete.");
+        println!("  backup_id:            {}", report.bundle_backup_id);
+        println!("  vault_uuid:           {}", report.vault_uuid);
+        println!(
+            "  key epoch:            {} -> {}",
+            report
+                .from_epoch
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "none".into()),
+            report.to_epoch
+        );
+        println!("  entries:              {}", report.entries);
+        if report.epoch_rewound {
+            println!("  epoch high-water:     re-baselined (acknowledged rollback restore)");
         }
-        None => println!("  pre-restore snapshot: none (the target was empty)"),
-    }
-    println!("Restart the daemon/desktop app before continuing to use this vault.");
-    Ok(())
+        if report.sync_disabled {
+            println!("  sync:                 DISABLED — re-pairing required (restored lineage is never reused)");
+        }
+        match &report.pre_restore_snapshot {
+            Some(path) => {
+                println!("  pre-restore snapshot: retained at {}", path.display());
+                println!("  Keep it until you are satisfied with the restored vault.");
+            }
+            None => println!("  pre-restore snapshot: none (the target was empty)"),
+        }
+        println!("Start the daemon/desktop app to continue using this vault.");
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ pub mod envelope;
 pub mod error;
 pub mod message;
 pub mod paths;
+pub mod service;
 pub mod token;
 pub mod transport;
 #[cfg(windows)]
@@ -28,6 +29,11 @@ pub use envelope::{IpcEnvelope, Origin};
 pub use error::ProtocolError;
 pub use message::{CredentialSummary, ExternalSecretField, IpcMessage};
 pub use paths::{default_ipc_socket_path, default_ipc_token_path, get_config_dir};
+pub use service::{
+    ServiceBiometricStatus, ServiceEntity, ServiceEntry, ServiceEntrySummary, ServiceError,
+    ServiceOutcome, ServiceSyncDeviceInfo, ServiceSyncStatus, ServiceTotpMetadata,
+    ServiceVaultStatus, VaultOp, VaultOpResult,
+};
 pub use token::{load_ipc_token, load_or_create_ipc_token};
 #[cfg(unix)]
 pub use transport::unix::UnixSocketConnection;

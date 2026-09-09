@@ -1,5 +1,6 @@
 //! IPC message types — the daemon request/response vocabulary.
 
+use crate::service::{ServiceOutcome, VaultOp};
 use serde::{Deserialize, Serialize};
 
 /// Secret field that a local tool may request.
@@ -147,6 +148,17 @@ pub enum IpcMessage {
         relay_url: Option<String>,
         last_sync_at: Option<i64>,
         pending_changes: u64,
+    },
+
+    // --- application-service surface (WBS-408, ADR-007) ----------------------
+    /// One vault application-service call — the single shape UI, CLI, and
+    /// the native host use for vault operations (see `crate::service`).
+    ServiceCall {
+        op: VaultOp,
+    },
+    /// Outcome of a [`IpcMessage::ServiceCall`].
+    ServiceResult {
+        outcome: ServiceOutcome,
     },
 }
 

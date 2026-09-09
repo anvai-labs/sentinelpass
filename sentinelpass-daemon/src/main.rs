@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rpassword::prompt_password;
 use sentinelpass_core::daemon::{
-    default_ipc_socket_path, load_or_create_ipc_token, DaemonVault, IpcServer,
+    default_ipc_socket_path, load_or_create_ipc_token, try_acquire, DaemonVault, IpcServer,
 };
 use sentinelpass_core::VaultManager;
 use std::sync::Arc;
@@ -44,20 +44,39 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // Check if vault exists
+    // WBS-501/503: the daemon is the sole live DEK owner. It takes the
+    // exclusive advisory lock beside the vault and holds it for its entire
+    // lifetime — a second daemon, or any offline maintenance process, refuses
+    // coexistence instead of racing this one on the vault files.
     let vault_path = sentinelpass_core::get_default_vault_path();
-    if !vault_path.exists() {
-        error!(
-            "No vault found at {:?}. Please create one with: sentinelpass init",
-            vault_path
-        );
-        return Ok(());
+    if let Some(parent) = vault_path.parent() {
+        if !parent.exists() {
+            sentinelpass_core::platform::create_private_dir(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create data directory: {}", e))?;
+        }
     }
+    let _maintenance_lock = match try_acquire(&vault_path) {
+        Ok(guard) => guard,
+        Err(e) => {
+            error!("Refusing to start: {}", e);
+            return Ok(());
+        }
+    };
 
-    // Create DaemonVault
+    let maintenance_mode = !vault_path.exists();
+
+    // Create DaemonVault (works for the bootstrap case: the path is only
+    // touched once a vault exists — maintenance mode serves creation).
     let vault = DaemonVault::new(Some(vault_path.clone()), DEFAULT_INACTIVITY_TIMEOUT)?;
 
-    let master_password_bytes = if start_locked {
+    let master_password_bytes = if maintenance_mode {
+        info!(
+            "No vault found at {:?} — entering maintenance mode; \
+             create a vault through the application-service IPC (VaultCreate)",
+            vault_path
+        );
+        Vec::new()
+    } else if start_locked {
         info!("Starting daemon in locked mode; waiting for IPC unlock");
         Vec::new()
     } else if use_biometric {
@@ -92,6 +111,9 @@ async fn main() -> Result<()> {
     let ipc_token = load_or_create_ipc_token()
         .map_err(|e| anyhow::anyhow!("Failed to load/create IPC token: {}", e))?;
     let ipc_server = IpcServer::new(ipc_socket_path.clone(), vault_arc, ipc_token);
+    if maintenance_mode {
+        ipc_server.enter_maintenance_mode();
+    }
 
     // Spawn IPC server in background
     let ipc_handle = tokio::spawn(async move {
@@ -101,11 +123,15 @@ async fn main() -> Result<()> {
         }
     });
 
-    info!("Daemon ready. Press Ctrl+C to exit.");
-    info!(
-        "Auto-lock enabled after {} seconds of inactivity",
-        DEFAULT_INACTIVITY_TIMEOUT
-    );
+    if maintenance_mode {
+        info!("Daemon ready in maintenance mode (no vault). Press Ctrl+C to exit.");
+    } else {
+        info!("Daemon ready. Press Ctrl+C to exit.");
+        info!(
+            "Auto-lock enabled after {} seconds of inactivity",
+            DEFAULT_INACTIVITY_TIMEOUT
+        );
+    }
 
     // Wait for shutdown signal
     signal::ctrl_c().await?;
@@ -118,7 +144,9 @@ async fn main() -> Result<()> {
     info!("Locking vault...");
     global_vault.vault.lock().await;
 
-    // Vault and master_password are dropped here, which zeros the password
+    // Vault and master_password are dropped here, which zeros the password.
+    // Dropping the maintenance lock releases the advisory lock last, after
+    // the vault state is gone.
 
     Ok(())
 }

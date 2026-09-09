@@ -38,20 +38,24 @@ pub fn handle_init(vault_path: PathBuf, dev: bool) -> Result<()> {
 
     let password = crate::prompt_master_password(true)?;
 
-    // Create vault
-    let vault = VaultManager::create(&vault_path, password.as_bytes())
-        .map_err(|e| anyhow::anyhow!("Failed to create vault: {}", e))?;
+    // WBS-503: creation is an exclusive offline operation — refuse while a
+    // live daemon (or any maintenance process) owns the vault location.
+    crate::with_maintenance_lock(&vault_path, || {
+        // Create vault
+        let vault = VaultManager::create(&vault_path, password.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to create vault: {}", e))?;
 
-    println!("✓ Vault created successfully at: {:?}", vault_path);
-    println!("✓ Your vault is now unlocked and ready to use");
-    println!();
-    println!("Next steps:");
-    println!("  sentinelpass add --title 'GitHub' --username 'user@example.com'");
-    println!("  sentinelpass list");
+        println!("✓ Vault created successfully at: {:?}", vault_path);
+        println!("✓ Your vault is now unlocked and ready to use");
+        println!();
+        println!("Next steps:");
+        println!("  sentinelpass add --title 'GitHub' --username 'user@example.com'");
+        println!("  sentinelpass list");
 
-    // Vault is dropped here, which locks it
-    drop(vault);
-    Ok(())
+        // Vault is dropped here, which locks it
+        drop(vault);
+        Ok(())
+    })
 }
 
 pub fn handle_unlock(vault_path: PathBuf) -> Result<()> {
@@ -150,40 +154,38 @@ pub fn handle_unlock_biometric(vault_path: PathBuf) -> Result<()> {
 }
 
 /// Rotate the vault master password (ADR-002). Re-wraps the DEK under a new
-/// master key; entry ciphertexts are untouched. Refuses while a daemon may
-/// hold an unlocked copy of the vault.
+/// master key; entry ciphertexts are untouched. WBS-503: rotation is an
+/// exclusive offline operation — it takes the maintenance lock, refusing
+/// while a live daemon owns the vault (stronger and race-free versus the
+/// old reachability probe).
 pub fn handle_passwd(vault_path: PathBuf) -> Result<()> {
-    if crate::run_async(probe_daemon()).ok().flatten().is_some() {
-        anyhow::bail!(
-            "A SentinelPass daemon appears to be running and reachable. Quit it first — \
-             rotation while a daemon holds the vault is rejected in this release."
+    crate::with_maintenance_lock(&vault_path, || {
+        let current = prompt_password("Current master password: ")?;
+        let new_password = prompt_password("New master password (min 12 characters): ")?;
+        let confirm = prompt_password("Confirm new master password: ")?;
+        if new_password != confirm {
+            anyhow::bail!("New passwords do not match");
+        }
+        if new_password.len() < 12 {
+            anyhow::bail!("New master password must be at least 12 characters");
+        }
+
+        let mut vault = VaultManager::open(&vault_path, current.as_bytes()).map_err(|e| {
+            anyhow::anyhow!("Current password incorrect or vault unavailable: {}", e)
+        })?;
+
+        let new_epoch = vault
+            .change_master_password(current.as_bytes(), new_password.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Rotation failed: {}", e))?;
+
+        println!(
+            "✓ Master password rotated (key epoch {}). Entry data was not re-encrypted — \
+             the data encryption key is unchanged; only its wrapper was re-keyed.",
+            new_epoch
         );
-    }
-
-    let current = prompt_password("Current master password: ")?;
-    let new_password = prompt_password("New master password (min 12 characters): ")?;
-    let confirm = prompt_password("Confirm new master password: ")?;
-    if new_password != confirm {
-        anyhow::bail!("New passwords do not match");
-    }
-    if new_password.len() < 12 {
-        anyhow::bail!("New master password must be at least 12 characters");
-    }
-
-    let mut vault = VaultManager::open(&vault_path, current.as_bytes())
-        .map_err(|e| anyhow::anyhow!("Current password incorrect or vault unavailable: {}", e))?;
-
-    let new_epoch = vault
-        .change_master_password(current.as_bytes(), new_password.as_bytes())
-        .map_err(|e| anyhow::anyhow!("Rotation failed: {}", e))?;
-
-    println!(
-        "✓ Master password rotated (key epoch {}). Entry data was not re-encrypted — \
-         the data encryption key is unchanged; only its wrapper was re-keyed.",
-        new_epoch
-    );
-    println!("Note: biometric unlock keeps working; paired sync devices must re-pair.");
-    Ok(())
+        println!("Note: biometric unlock keeps working; paired sync devices must re-pair.");
+        Ok(())
+    })
 }
 
 /// Show vault metadata without requiring a master password: schema

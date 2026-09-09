@@ -3,9 +3,11 @@
 use crate::envelope::{IpcEnvelope, Origin};
 use crate::error::ProtocolError;
 use crate::message::IpcMessage;
+use crate::service::{ServiceOutcome, VaultOp, VaultOpResult};
 use crate::token::load_ipc_token;
 use crate::Result;
 use std::path::PathBuf;
+
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
@@ -104,7 +106,6 @@ impl IpcClient {
             serde_json::from_slice::<IpcMessage>(&buffer)
                 .map_err(|e| ProtocolError::Ipc(format!("Failed to parse response: {}", e)))
         }
-
         #[cfg(windows)]
         {
             // Determine if using named pipes or legacy TCP
@@ -235,5 +236,43 @@ impl IpcClient {
                     .map_err(|e| ProtocolError::Ipc(format!("Failed to parse response: {}", e)))
             }
         }
+    }
+
+    /// One application-service call (WBS-408): send `ServiceCall { op }` and
+    /// unwrap the `ServiceResult` outcome. Typed service errors surface as
+    /// [`ProtocolError::Service`].
+    pub async fn call_service(&self, op: VaultOp) -> Result<VaultOpResult> {
+        let response = self.send(IpcMessage::ServiceCall { op }).await?;
+        match response {
+            IpcMessage::ServiceResult { outcome } => match outcome {
+                ServiceOutcome::Ok { result } => Ok(result),
+                ServiceOutcome::Err { error } => {
+                    Err(ProtocolError::Service(error.code, error.message))
+                }
+            },
+            other => Err(ProtocolError::Ipc(format!(
+                "unexpected daemon response to service call: {}",
+                message_kind(&other)
+            ))),
+        }
+    }
+}
+
+/// Best-effort variant label for an unexpected response (diagnostics only;
+/// never message payloads).
+fn message_kind(msg: &IpcMessage) -> &'static str {
+    match msg {
+        IpcMessage::GetCredentialResponse { .. }
+        | IpcMessage::GetExternalSecretResponse { .. }
+        | IpcMessage::ListDomainCredentialsResponse { .. }
+        | IpcMessage::GetTotpCodeResponse { .. }
+        | IpcMessage::SaveCredentialResponse { .. }
+        | IpcMessage::SaveSecretResponse { .. }
+        | IpcMessage::DeleteSecretResponse { .. } => "browser-surface response",
+        IpcMessage::UnlockVaultResponse { .. } => "unlock response",
+        IpcMessage::VaultStatusResponse { .. } => "vault status",
+        IpcMessage::SyncNowResponse { .. } => "sync-now response",
+        IpcMessage::SyncStatusResponse { .. } => "sync status",
+        _ => "other",
     }
 }
