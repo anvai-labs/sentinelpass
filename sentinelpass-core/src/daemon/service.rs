@@ -598,6 +598,20 @@ pub fn entity_to_wire(entity: crate::registry::Entity) -> ServiceEntity {
     }
 }
 
+/// Convert a wire entity back into the core type (client side).
+pub fn entity_from_wire(entity: &ServiceEntity) -> Result<crate::registry::Entity> {
+    Ok(crate::registry::Entity {
+        entity_id: entity.entity_id.clone(),
+        name: entity.name.clone(),
+        kind: EntityKind::parse(&entity.kind)?,
+        criticality: Criticality::parse(&entity.criticality)?,
+        notes: entity.notes.clone(),
+        rotation_interval_days_override: entity.rotation_interval_days_override,
+        created_at: entity.created_at,
+        modified_at: entity.modified_at,
+    })
+}
+
 /// Wrap a [`ServiceOutcome`] result branch for the daemon's response.
 pub fn outcome(result: Result<VaultOpResult>) -> ServiceOutcome {
     match result {

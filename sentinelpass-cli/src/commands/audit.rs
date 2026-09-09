@@ -1,25 +1,28 @@
 //! Audit trail verification CLI (WBS-415).
 
+use crate::commands::service_client as sc;
 use anyhow::Result;
-use rpassword::prompt_password;
+use sentinelpass_protocol::service::VaultOp;
 use std::path::PathBuf;
 
-/// `sentinelpass audit-verify`: unlock the vault, derive the audit chain
-/// key from the DEK, walk every retained audit file, and report the first
-/// broken record (tamper / deletion / reorder). Exits non-zero on a failed
-/// verification.
+/// `sentinelpass audit-verify`: verify the audit hash chain through the
+/// daemon service boundary (the chain keys are DEK-derived, so the daemon
+/// derives them while unlocked). Exits non-zero on a failed verification.
 pub fn handle_audit_verify(vault_path: PathBuf) -> Result<()> {
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-    let report = vault.verify_audit_trail()?;
-    println!("{}", report);
+    let value = sc::expect_report(backend.call(VaultOp::AuditVerify)?)?;
+    let ok = value["ok"].as_bool().unwrap_or(false);
+    let report_text = value["report"]
+        .as_str()
+        .unwrap_or("audit verification report unavailable");
+    println!("{report_text}");
 
-    if report.is_ok() {
+    if ok {
         println!("✓ Audit chain verified");
         Ok(())
     } else {

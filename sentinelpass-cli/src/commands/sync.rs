@@ -1,6 +1,9 @@
+use crate::commands::service_client as sc;
 use anyhow::Result;
 use base64::Engine;
 use sentinelpass_core::VaultManager;
+use sentinelpass_protocol::service::VaultOp;
+use sentinelpass_protocol::service::VaultOpResult;
 use std::path::PathBuf;
 
 pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
@@ -30,40 +33,27 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             ref relay_url,
             ref device_name,
         } => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-            // Check if sync is already initialized
-            let status = vault.get_sync_status()?;
-            if status.enabled {
-                anyhow::bail!(
-                    "Sync is already initialized for this vault.\n\
-                     Device: {} ({})\n\
-                     Relay: {}",
-                    status.device_name.unwrap_or_default(),
-                    status.device_id.map(|d| d.to_string()).unwrap_or_default(),
-                    status.relay_url.unwrap_or_default()
-                );
-            }
+            let result = backend.call(VaultOp::SyncInit {
+                relay_url: relay_url.clone(),
+                device_name: device_name.clone(),
+            })?;
 
-            let device_name = device_name.clone().unwrap_or_else(|| {
-                hostname::get()
-                    .map(|h| h.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| "unknown".to_string())
-            });
-
-            // Generate device identity
-            let identity = sentinelpass_core::sync::device::DeviceIdentity::generate(&device_name);
-            let device_id = identity.device_id;
-            let vault_id = uuid::Uuid::new_v4();
-
-            // Save config and device identity
-            vault.init_sync(relay_url, &device_name, vault_id, &identity)?;
-
+            let value = sc::expect_report(result)?;
             println!("Sync initialized successfully!");
-            println!("  Device name: {}", device_name);
-            println!("  Device ID:   {}", device_id);
-            println!("  Vault ID:    {}", vault_id);
+            println!(
+                "  Device name: {}",
+                device_name.clone().unwrap_or_else(hostname_of)
+            );
+            println!(
+                "  Device ID:   {}",
+                value["device_id"].as_str().unwrap_or("?")
+            );
+            println!(
+                "  Vault ID:    {}",
+                value["vault_id"].as_str().unwrap_or("?")
+            );
             println!("  Relay URL:   {}", relay_url);
             println!();
             println!("WARNING: sync is EXPERIMENTAL and not approved for production");
@@ -75,15 +65,14 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
         }
 
         crate::SyncCommands::Now => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-            let status = vault.get_sync_status()?;
-            if !status.enabled {
-                anyhow::bail!("Sync is not initialized. Use 'sentinelpass sync init' first.");
-            }
-
-            let status = crate::run_async(vault.sync_now())??;
+            // SyncNow is daemon-async (relay HTTP); the result is the
+            // post-sync status.
+            let status = match backend.call(VaultOp::SyncNow)? {
+                VaultOpResult::SyncStatus(status) => status,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
             println!("Sync completed.");
             if let Some(ts) = status.last_sync_at {
                 let dt = chrono::DateTime::from_timestamp(ts, 0)
@@ -95,10 +84,12 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
         }
 
         crate::SyncCommands::Status => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-            let status = vault.get_sync_status()?;
+            let status = match backend.call(VaultOp::SyncStatus)? {
+                VaultOpResult::SyncStatus(status) => status,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
 
             println!();
             println!("Sync Status");
@@ -107,7 +98,7 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
                 "  Enabled:         {}",
                 if status.enabled { "yes" } else { "no" }
             );
-            if let Some(device_id) = status.device_id {
+            if let Some(ref device_id) = status.device_id {
                 println!("  Device ID:       {}", device_id);
             }
             if let Some(ref name) = status.device_name {
@@ -129,23 +120,15 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
         }
 
         crate::SyncCommands::DeviceList => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-            let status = vault.get_sync_status()?;
-            if !status.enabled {
-                anyhow::bail!("Sync is not initialized. Use 'sentinelpass sync init' first.");
-            }
-
-            let devices = vault.list_sync_devices()?;
+            let devices = match backend.call(VaultOp::SyncDeviceList)? {
+                VaultOpResult::SyncDevices(devices) => devices,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
 
             if devices.is_empty() {
                 println!("No devices registered yet.");
-                println!(
-                    "This device: {} ({})",
-                    status.device_name.unwrap_or_default(),
-                    status.device_id.map(|d| d.to_string()).unwrap_or_default()
-                );
             } else {
                 println!();
                 println!("{:<38} {:<20} {:<10} Status", "Device ID", "Name", "Type");
@@ -162,13 +145,7 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
         }
 
         crate::SyncCommands::DeviceRevoke { ref device_id } => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-
-            let status = vault.get_sync_status()?;
-            if !status.enabled {
-                anyhow::bail!("Sync is not initialized.");
-            }
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
             // Confirm
             print!("Revoke device {}? [y/N]: ", device_id);
@@ -181,22 +158,16 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
                 return Ok(());
             }
 
-            // Mark locally as revoked
-            vault.revoke_sync_device(device_id)?;
+            backend.call(VaultOp::SyncDeviceRevoke {
+                device_id: device_id.clone(),
+            })?;
 
             println!("Device {} marked as revoked locally.", device_id);
             println!("Run 'sentinelpass sync now' to propagate to the relay server.");
         }
 
         crate::SyncCommands::Disable => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-
-            let status = vault.get_sync_status()?;
-            if !status.enabled {
-                println!("Sync is already disabled.");
-                return Ok(());
-            }
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
             print!("Disable sync? This will not delete remote data. [y/N]: ");
             use std::io::Write;
@@ -208,7 +179,7 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
                 return Ok(());
             }
 
-            vault.disable_sync()?;
+            backend.call(VaultOp::SyncDisable)?;
 
             println!("Sync disabled. Device identity and vault ID are preserved.");
             println!("Use 'sentinelpass sync init' to re-enable.");
@@ -224,7 +195,17 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
     Ok(())
 }
 
-/// Pairing flows, run while HOLDING the exclusive maintenance lock.
+fn hostname_of() -> String {
+    hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Pairing flows, run while HOLDING the exclusive maintenance lock. These
+/// are the only sync flows still executed in-process: pair-join CREATES a
+/// local vault (onboarding — daemon-async dispatch cannot create vaults on
+/// the live surface), and both require relay network plus vault access that
+/// must be exclusive.
 fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
     match cmd {
         crate::SyncCommands::PairStart => {
@@ -355,9 +336,7 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
 
             vault.import_pairing_bootstrap(master_password.as_bytes(), &bootstrap)?;
 
-            let device_name = hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
+            let device_name = hostname_of();
             let identity = sentinelpass_core::sync::device::DeviceIdentity::generate(&device_name);
             let public_key = identity.public_key_bytes();
             let register_client = sentinelpass_core::sync::client::SyncClient::new(

@@ -1372,6 +1372,184 @@ fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod reroute_tests {
+    use std::path::{Path, PathBuf};
+
+    /// WBS-502 dual-writer ratchet: vault-opening calls are allowed ONLY in
+    /// the maintenance/offline set (init, passwd, backup create/restore,
+    /// recovery, pairing, compat backend, status) and the backend module
+    /// itself. A direct `open_vault_with_password`/`VaultManager::open`
+    /// appearing in any other command module is a silent dual-writer
+    /// regression and fails this test.
+    #[test]
+    fn direct_vault_opens_are_confined_to_the_allowlist() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src = manifest.join("src");
+        let allowlist = [
+            Path::new("main.rs"),                    // helper definitions
+            Path::new("commands/service_client.rs"), // FLAGGED compat backend
+            Path::new("commands/vault.rs"),          // init + passwd + status (offline)
+            Path::new("commands/backup.rs"),         // offline maintenance
+            Path::new("commands/recovery.rs"),       // offline maintenance
+            Path::new("commands/sync.rs"),           // pairing only (offline exclusive)
+        ];
+
+        let markers = ["open_vault_with_password(", "VaultManager::open("];
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("cli src dir") {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                for sub in std::fs::read_dir(&path).expect("command dir") {
+                    let sub = sub.unwrap();
+                    let p = sub.path();
+                    check_file(&p, &allowlist, &markers, &mut offenders);
+                }
+            } else {
+                check_file(&path, &allowlist, &markers, &mut offenders);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "direct vault-open calls outside the maintenance allowlist (dual-writer              regression, ADR-007): {:?}",
+            offenders
+        );
+    }
+
+    fn check_file(path: &Path, allowlist: &[&Path], markers: &[&str], offenders: &mut Vec<String>) {
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            return;
+        }
+        let rel = path
+            .strip_prefix(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"))
+            .unwrap_or(path);
+        if allowlist.contains(&rel) {
+            return;
+        }
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        for marker in markers {
+            if contents.contains(marker) {
+                offenders.push(format!("{} contains {}", rel.display(), marker));
+            }
+        }
+    }
+
+    /// WBS-502 positive evidence: the daemon backend executes the
+    /// application-service contract end-to-end over a real socket. The
+    /// backend calls are SYNC in production (they spin their own runtime),
+    /// so they run on `spawn_blocking` here — same shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn daemon_backend_executes_service_ops_over_ipc() {
+        use crate::commands::service_client::Backend;
+        use sentinelpass_core::daemon::{DaemonVault, IpcServer};
+        use sentinelpass_core::VaultManager;
+        use sentinelpass_protocol::service::VaultOp;
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let socket_path = tmp.path().join("test.sock");
+        let password = b"test_password_123!";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        drop(vault);
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        daemon_vault.unlock(password).await.unwrap();
+        let server = Arc::new(IpcServer::new(
+            socket_path.clone(),
+            daemon_vault,
+            "reroute-token".to_string(),
+        ));
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(!server_task.is_finished());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Per-call fresh clients: IpcClient connects per call, so this is
+        // the same wire behavior as the CLI's long-lived Backend.
+        let socket_for_factory = Arc::new(socket_path.clone());
+        let make_backend = Arc::new(move || -> Backend {
+            Backend::Daemon(sentinelpass_core::daemon::IpcClient::new_with_token(
+                (*socket_for_factory).clone(),
+                "reroute-token".to_string(),
+            ))
+        });
+
+        let entry_id = match tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || {
+                make_backend().call(VaultOp::EntryAdd {
+                    entry: sentinelpass_protocol::service::ServiceEntry {
+                        entry_id: None,
+                        title: "Rerouted".to_string(),
+                        username: "user@example.com".to_string(),
+                        password: "via-daemon".to_string().into(),
+                        url: Some("https://example.com".to_string()),
+                        notes: None,
+                        credential_type: "password".to_string(),
+                        created_at: 1_700_000_000,
+                        modified_at: 1_700_000_000,
+                        favorite: false,
+                    },
+                })
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            sentinelpass_protocol::service::VaultOpResult::EntryId(id) => id,
+            other => panic!("expected EntryId, got {other:?}"),
+        };
+
+        let listed = match tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || make_backend().call(VaultOp::EntryList)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            sentinelpass_protocol::service::VaultOpResult::EntryList(list) => list,
+            other => panic!("expected EntryList, got {other:?}"),
+        };
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].entry_id, entry_id);
+
+        tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || make_backend().call(VaultOp::EntryDelete { entry_id })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let listed = match tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || make_backend().call(VaultOp::EntryList)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            sentinelpass_protocol::service::VaultOpResult::EntryList(list) => list,
+            other => panic!("expected EntryList, got {other:?}"),
+        };
+        assert!(listed.is_empty());
+
+        server_task.abort();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;

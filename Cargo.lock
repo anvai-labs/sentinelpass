@@ -4904,6 +4904,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5050,6 +5051,7 @@ dependencies = [
  "arboard",
  "dirs 5.0.1",
  "sentinelpass-core",
+ "sentinelpass-protocol",
  "serde",
  "serde_json",
  "sha2",

@@ -693,8 +693,22 @@ Origin labels are provenance, never authorization.
 
 ### Interim compatibility window (flagged, temporary)
 
-Until UI/CLI direct-write paths are gone from shipped binaries (WBS-502),
-the open-time epoch guard plus stale-epoch UPDATE guards remain the interim
-cross-process invariant (ADR-007 migration). The daemon does not claim
-sole-writer authority until then; the daemon-owned summary index (ADR-005)
-tolerates no legacy writers, which bounds the window.
+WBS-502 rerouted every UI/CLI vault command through the application-service
+IPC boundary. The remaining direct-access paths are:
+
+- CLI: `commands/service_client.rs` `Backend::Direct` — only reachable with
+  `SENTINELPASS_ALLOW_DIRECT_VAULT=1`, announced on stderr at every use,
+  and guarded by the exclusive maintenance lock (refuses while a daemon
+  owns the vault, so it can never race one). Custom `--vault` paths are
+  never daemon-served for the same reason.
+- UI: the same env var gates the pre-502 local-manager behavior for the
+  unlock/entry/registry/TOTP commands; IPC-only is the default.
+- Offline maintenance (CLI `init`, `passwd`, `backup create/restore`,
+  `recovery setup/recover`, `sync pair-start/pair-join`): in-process by
+  design, always under the exclusive maintenance lock.
+
+The open-time epoch guard plus stale-epoch UPDATE guards remain the interim
+cross-process invariant for the flagged window (ADR-007 migration). The
+daemon does not claim sole-writer authority until the compat env path is
+removed from shipped binaries (1.0); the daemon-owned summary index
+(ADR-005) tolerates no legacy writers, which bounds the window.

@@ -137,11 +137,6 @@ impl Backend {
         }
     }
 
-    /// True when the backend is the daemon.
-    pub fn is_daemon(&self) -> bool {
-        matches!(self, Backend::Daemon(_))
-    }
-
     /// Whether the daemon currently reports the vault unlocked. Direct
     /// backends are always unlocked (they were opened with the password).
     pub fn is_unlocked(&self) -> Result<bool> {

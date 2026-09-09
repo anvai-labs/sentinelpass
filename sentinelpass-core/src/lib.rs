@@ -40,7 +40,8 @@ pub use external_secret_access::{
     ExternalSecretGrant,
 };
 pub use import_export::{
-    export_to_csv, export_to_json, import_from_csv, import_from_json, ExportEntry,
+    export_to_csv, export_to_json, import_from_csv, import_from_json, parse_csv_import,
+    parse_json_import, render_csv_export, render_json_export, ExportEntry,
 };
 pub use keepass::{export_to_keepass_xml, import_from_keepass_xml, KeePassEntry};
 pub use lockout::{LockoutConfig, LockoutManager, DEFAULT_MAX_ATTEMPTS};

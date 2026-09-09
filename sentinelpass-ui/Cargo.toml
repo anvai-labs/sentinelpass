@@ -16,6 +16,7 @@ path = "src-tauri/src/main.rs"
 
 [dependencies]
 sentinelpass-core = { path = "../sentinelpass-core" }
+sentinelpass-protocol = { path = "../sentinelpass-protocol" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
