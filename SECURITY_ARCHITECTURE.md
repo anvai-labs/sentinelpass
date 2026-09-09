@@ -625,7 +625,7 @@ they were granted — no more.
 | Process → daemon | 32-byte IPC token file (`<config>/ipc.token`, 0600), constant-time compared | Same-OS-user trust root. Any process running as the user can read the token. |
 | Tool → secret scope | `ExternalSecretGrant` (client_id × domain × field [+ expires_at]) in `<config>/external-secret-access.json` (0600) | Exact scope match, no wildcards. |
 | Tool identity | Per-client token (`spt_…`, 32 random bytes, SHA-256 at rest, shown once at mint) | A client with a `client_tokens` entry is token-enforced on **all** its grants; revocation is fail-closed. Legacy (tokenless) clients keep working during the migration window but are warned about. |
-| Browser autofill | Native-messaging origin label on every envelope | **Provenance labeling, not authentication.** Originless requests are **denied by default** (with a warning naming the upgrade path); `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily **re-allows** the legacy pre-0.8-host path (removed in 1.0). |
+| Browser autofill | Installation capability (audience `native-host`) presented on every envelope | **The capability is the authority; the origin label is provenance only.** The daemon provisions `native_host.capability` (0600) on first start; presentation is verified against the hashed capability store (`ipc-capabilities.json`). Legacy windows, both announced and removed in 1.0: `SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN=1` (pre-capability hosts) and `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` (originless pre-0.8 hosts). Honest scope: same-user readable, effectively all-domains (ADR-003 rev 2 damage limitation). |
 
 ### Rules enforced by the daemon
 
