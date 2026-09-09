@@ -9,7 +9,7 @@ use crate::daemon::service::{codes, LiveVaultService, VaultApplicationService};
 #[cfg(unix)]
 use crate::daemon::transport::unix::UnixSocketTransport;
 #[cfg(windows)]
-use crate::daemon::transport::windows::{WindowsNamedPipeConnection, WindowsNamedPipeTransport};
+use crate::daemon::transport::windows::WindowsNamedPipeTransport;
 use crate::daemon::transport::{TransportConfig, TransportError};
 use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
@@ -239,8 +239,16 @@ impl IpcServer {
                 debug!("Named pipe created, waiting for connection");
 
                 match pipe_server.connect().await {
-                    Ok(pipe_conn) => {
+                    // tokio's NamedPipeServer::connect resolves when a
+                    // client has attached — the value is (), the connected
+                    // pipe IS the server handle. Wrap it via the protocol
+                    // connection's server-side constructor.
+                    Ok(()) => {
                         debug!("IPC client connected (named pipe)");
+                        let pipe_conn =
+                            sentinelpass_protocol::WindowsNamedPipeConnection::from_server(
+                                pipe_server,
+                            );
                         match self.client_limiter.clone().acquire_owned().await {
                             Ok(permit) => {
                                 let server = Arc::clone(&self);
