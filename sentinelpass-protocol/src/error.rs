@@ -11,4 +11,9 @@ pub enum ProtocolError {
 
     #[error("IPC error: {0}")]
     Ipc(String),
+
+    /// The daemon rejected an application-service call with a typed error
+    /// (WBS-408): (code, message).
+    #[error("service error [{0}]: {1}")]
+    Service(String, String),
 }
