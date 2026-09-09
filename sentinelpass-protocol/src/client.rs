@@ -110,8 +110,15 @@ impl IpcClient {
         #[cfg(windows)]
         let transport_conn = {
             // Named pipes only: the legacy tcp:// loopback branch was
-            // removed in Phase 3 (ADR-007 migration).
-            let pipe_name = crate::windows_frame::windows_named_pipe_path();
+            // removed in Phase 3 (ADR-007 migration). Honor an explicit
+            // \\\\.\\pipe\\ path (tests, custom deploys); default to the
+            // per-user pipe name otherwise — mirroring the server arm.
+            let stored = self.socket_path.to_string_lossy().to_string();
+            let pipe_name = if stored.starts_with(r"\\.\pipe\") {
+                stored
+            } else {
+                crate::windows_frame::windows_named_pipe_path()
+            };
             debug!("Connecting to named pipe: {}", pipe_name);
             crate::transport::windows::connect_named_pipe(&pipe_name, 3000)
                 .await
