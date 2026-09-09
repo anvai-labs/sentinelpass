@@ -18,7 +18,7 @@ use crate::vault::Entry;
 use crate::{PasswordManagerError, Result, VaultManager};
 use sentinelpass_protocol::service::{
     ServiceBiometricStatus, ServiceEntity, ServiceEntry, ServiceEntrySummary, ServiceError,
-    ServiceOutcome, ServiceSshKey, ServiceSshKeySummary, ServiceSyncDeviceInfo,
+    ServiceOutcome, ServiceSshKey, ServiceSshKeySummary, ServiceSyncDeviceInfo, ServiceSyncStatus,
     ServiceTotpMetadata, ServiceVaultStatus, VaultOp, VaultOpResult,
 };
 use zeroize::Zeroizing;
@@ -36,6 +36,10 @@ pub mod codes {
     pub const DATABASE: &str = "database";
     pub const IO: &str = "io";
     pub const INTERNAL: &str = "internal";
+    /// Daemon has no vault yet: only bootstrap/status ops are served.
+    pub const MAINTENANCE_MODE: &str = "maintenance_mode";
+    /// Bootstrap create refused because a vault already exists.
+    pub const VAULT_EXISTS: &str = "vault_exists";
 }
 
 impl From<PasswordManagerError> for ServiceError {
@@ -94,11 +98,16 @@ impl LiveVaultService<'_> {
                  a live unlocked vault"
                     .to_string(),
             )),
-            VaultOp::VaultStatus => Ok(VaultOpResult::Status(ServiceVaultStatus {
-                unlocked: vault.is_unlocked(),
-                key_epoch: vault.key_epoch().unwrap_or(0),
-                maintenance: false,
-            })),
+            VaultOp::VaultStatus => {
+                // Metadata read: a real DB failure must NOT masquerade as
+                // "0 = unknown" (review finding) — propagate it.
+                let key_epoch = vault.key_epoch()?;
+                Ok(VaultOpResult::Status(ServiceVaultStatus {
+                    unlocked: vault.is_unlocked(),
+                    key_epoch,
+                    maintenance: false,
+                }))
+            }
 
             VaultOp::EntryAdd { entry } => {
                 let id = vault.add_entry(&entry_from_wire(entry)?)?;
@@ -331,16 +340,23 @@ impl LiveVaultService<'_> {
                 Ok(VaultOpResult::Ok)
             }
 
-            VaultOp::ExportAll => Ok(VaultOpResult::Entries(
-                vault
+            VaultOp::ExportAll => {
+                // Export parity (review finding): every built-in export path
+                // (JSON/CSV/KeePass) skips non-exportable types
+                // (`passkey_reference`); the wire op encodes the same policy
+                // instead of leaking it to every client.
+                let entries = vault
                     .list_entries()?
                     .into_iter()
+                    .filter(|summary| summary.credential_type.is_generic_password_exportable())
                     .map(|summary| vault.get_entry(summary.entry_id))
-                    .collect::<std::result::Result<Vec<Entry>, _>>()?
-                    .iter()
-                    .map(entry_to_wire)
-                    .collect::<Result<Vec<_>>>()?,
-            )),
+                    .collect::<std::result::Result<Vec<Entry>, _>>()?;
+                let mut wire = Vec::with_capacity(entries.len());
+                for entry in &entries {
+                    wire.push(entry_to_wire(entry)?);
+                }
+                Ok(VaultOpResult::Entries(wire))
+            },
             VaultOp::ImportEntries { entries } => {
                 let mut ids = Vec::with_capacity(entries.len());
                 for entry in entries {
@@ -359,9 +375,13 @@ impl LiveVaultService<'_> {
                         "sync is already initialized for this vault".to_string(),
                     ));
                 }
-                let device_name = device_name
-                    .clone()
-                    .unwrap_or_else(|| format!("device-{}", chrono::Utc::now().timestamp()));
+                // CLI parity: default to the machine hostname, not a
+                // timestamp (review finding).
+                let device_name = device_name.clone().unwrap_or_else(|| {
+                    hostname::get()
+                        .map(|h| h.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| "unknown".to_string())
+                });
                 let identity = crate::sync::device::DeviceIdentity::generate(&device_name);
                 let device_id = identity.device_id.to_string();
                 let vault_id = uuid::Uuid::new_v4();
@@ -377,7 +397,7 @@ impl LiveVaultService<'_> {
                 Ok(VaultOpResult::Ok)
             }
             VaultOp::SyncDeviceList => {
-                let _ = vault.get_sync_status()?;
+                ensure_sync_enabled(vault)?;
                 Ok(VaultOpResult::SyncDevices(
                     vault
                         .list_sync_devices()?
@@ -392,16 +412,29 @@ impl LiveVaultService<'_> {
                 ))
             }
             VaultOp::SyncDeviceRevoke { device_id } => {
+                ensure_sync_enabled(vault)?;
                 vault.revoke_sync_device(device_id)?;
                 Ok(VaultOpResult::Ok)
             }
+            VaultOp::SyncStatus => {
+                let status = vault.get_sync_status()?;
+                Ok(VaultOpResult::SyncStatus(ServiceSyncStatus {
+                    enabled: status.enabled,
+                    device_id: status.device_id.map(|d| d.to_string()),
+                    device_name: status.device_name,
+                    relay_url: status.relay_url,
+                    last_sync_at: status.last_sync_at,
+                    pending_changes: status.pending_changes,
+                }))
+            }
 
-            VaultOp::SyncPairStart | VaultOp::SyncPairJoin { .. } => {
-                // Relay network I/O — the daemon's async dispatcher owns
-                // these variants (see `daemon/ipc/server.rs`); the blocking
-                // executor never runs them.
+            // Relay network I/O — the daemon's async dispatcher owns these
+            // variants (see `daemon/ipc/server.rs`); the blocking executor
+            // never runs them.
+            VaultOp::SyncNow | VaultOp::SyncPairStart | VaultOp::SyncPairJoin { .. } => {
                 Err(PasswordManagerError::NotImplemented(
-                    "pairing is executed by the daemon's async dispatcher".to_string(),
+                    "this op awaits relay HTTP and is executed by the daemon's async dispatcher"
+                        .to_string(),
                 ))
             }
         }
@@ -409,10 +442,28 @@ impl LiveVaultService<'_> {
 }
 
 fn report(value: serde_json::Result<serde_json::Value>) -> Result<VaultOpResult> {
+    // Serialization of core-owned serde types is an internal concern; a
+    // failure surfaces as an IPC/database transport error, not invalid_input
+    // (review finding).
     let value = value.map_err(|e| {
-        PasswordManagerError::InvalidInput(format!("failed to serialize report: {}", e))
+        PasswordManagerError::Database(crate::DatabaseError::Ipc(format!(
+            "failed to serialize report: {}",
+            e
+        )))
     })?;
     Ok(VaultOpResult::Report(value))
+}
+
+/// CLI parity (review finding): device ops refuse when sync is not
+/// initialized instead of silently reading empty tables.
+fn ensure_sync_enabled(vault: &VaultManager) -> Result<()> {
+    let status = vault.get_sync_status()?;
+    if !status.enabled {
+        return Err(PasswordManagerError::InvalidInput(
+            "sync is not initialized. Use 'sentinelpass sync init' first.".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve an entity by unique name (CLI parity; encrypted names cannot

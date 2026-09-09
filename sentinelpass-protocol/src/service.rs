@@ -22,8 +22,8 @@ use zeroize::Zeroizing;
 
 /// Wire DTO for one vault entry. `password` is plaintext on the IPC surface
 /// — the same trust level as the pre-existing `GetCredential` response — and
-/// is `Zeroizing` on both ends.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// is `Zeroizing` on both ends. `Debug` redacts the password.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceEntry {
     #[serde(default)]
     pub entry_id: Option<i64>,
@@ -46,6 +46,23 @@ pub struct ServiceEntry {
     pub modified_at: i64,
     #[serde(default)]
     pub favorite: bool,
+}
+
+impl std::fmt::Debug for ServiceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceEntry")
+            .field("entry_id", &self.entry_id)
+            .field("title", &self.title)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("url", &self.url)
+            .field("notes", &self.notes)
+            .field("credential_type", &self.credential_type)
+            .field("created_at", &self.created_at)
+            .field("modified_at", &self.modified_at)
+            .field("favorite", &self.favorite)
+            .finish()
+    }
 }
 
 fn default_credential_type() -> String {
@@ -73,8 +90,8 @@ pub struct ServiceTotpMetadata {
 }
 
 /// Wire DTO for an SSH key (decrypted view; `private_key` present only when
-/// explicitly requested and authorized).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// explicitly requested and authorized). `Debug` redacts the private key.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceSshKey {
     pub key_id: i64,
     pub name: String,
@@ -85,6 +102,24 @@ pub struct ServiceSshKey {
     pub private_key: Option<Zeroizing<String>>,
     pub fingerprint: String,
     pub created_at: i64,
+}
+
+impl std::fmt::Debug for ServiceSshKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceSshKey")
+            .field("key_id", &self.key_id)
+            .field("name", &self.name)
+            .field("comment", &self.comment)
+            .field("key_type", &self.key_type)
+            .field("public_key", &self.public_key)
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("fingerprint", &self.fingerprint)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 /// Wire DTO for an SSH key listing row.
@@ -133,27 +168,46 @@ pub struct ServiceVaultStatus {
     pub maintenance: bool,
 }
 
+/// Wire DTO for sync status (`VaultOp::SyncStatus`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSyncStatus {
+    pub enabled: bool,
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub relay_url: Option<String>,
+    pub last_sync_at: Option<i64>,
+    pub pending_changes: u64,
+}
+
 /// Wire DTO for biometric unlock status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceBiometricStatus {
     pub method_name: String,
     pub available: bool,
     pub enrolled: bool,
+    /// Valid on a LOCKED vault too (metadata read — the UI asks this before
+    /// offering the biometric unlock button).
     pub configured: bool,
 }
 
 /// One application-service request.
 ///
-/// Ops the DAEMON executes asynchronously by design (relay network I/O:
-/// `SyncPairStart`, `SyncPairJoin`) are dispatched by the daemon's async
-/// handler; everything else executes against the live vault on the blocking
-/// pool via `sentinelpass_core::daemon::service::LiveVaultService`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// This is the single call shape for vault operations. Most ops execute
+/// against the live vault on the blocking pool via
+/// `sentinelpass_core::daemon::service::LiveVaultService`; the daemon's
+/// async dispatcher owns the relay-network ops (`SyncNow`, `SyncPairStart`,
+/// `SyncPairJoin`) because they await HTTP.
+///
+/// `Debug` is hand-written and redacts every field: this enum carries
+/// master passwords, TOTP seeds, and private keys, and derived Debug would
+/// print them into logs or panic payloads (core sets the same redaction
+/// convention).
+#[derive(Clone, Serialize, Deserialize)]
 pub enum VaultOp {
     // --- lifecycle -------------------------------------------------------
     /// Create a vault. Valid only while the daemon is in maintenance mode
-    /// (no vault exists) or in offline maintenance; the caller must hold the
-    /// exclusive maintenance lock (WBS-501/503).
+    /// (no vault exists); the daemon holds the exclusive maintenance lock
+    /// (WBS-501/503).
     VaultCreate {
         master_password: Zeroizing<String>,
     },
@@ -176,6 +230,9 @@ pub enum VaultOp {
     },
 
     // --- TOTP ------------------------------------------------------------
+    /// The secret is RAW BASE32 only: `otpauth://` URI parsing stays
+    /// client-side (both the CLI and the UI parse the URI themselves and
+    /// send the derived fields).
     TotpAdd {
         entry_id: i64,
         secret: Zeroizing<String>,
@@ -259,7 +316,9 @@ pub enum VaultOp {
     BiometricDisable,
 
     // --- import/export -------------------------------------------------------
-    /// Full decrypted dump (client renders JSON/CSV/KeePass locally).
+    /// Decrypted dump of every EXPORTABLE entry (generic passwords and API
+    /// keys — `passkey_reference` entries are excluded, matching every
+    /// built-in export path). The client renders JSON/CSV/KeePass locally.
     ExportAll,
     /// Bulk insert from an import file parse. Returns created ids.
     ImportEntries {
@@ -276,6 +335,11 @@ pub enum VaultOp {
     SyncDeviceRevoke {
         device_id: String,
     },
+    /// Sync status (local metadata read).
+    SyncStatus,
+    /// Run a full push+pull cycle. Daemon-async: the sync engine awaits
+    /// relay HTTP, so the daemon's async dispatcher executes this op.
+    SyncNow,
 
     // --- sync pairing (daemon-async: relay network I/O) -----------------------
     /// Upload this vault's bootstrap under a fresh pairing code.
@@ -287,6 +351,15 @@ pub enum VaultOp {
         code: String,
         salt: String,
     },
+}
+
+impl std::fmt::Debug for VaultOp {
+    /// Redacts every field: VaultOp carries master passwords, TOTP seeds,
+    /// and SSH private keys, and derived Debug would print them into any
+    /// future `tracing` call or panic payload.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VaultOp::")
+    }
 }
 
 /// Successful outcome of one [`VaultOp`].
@@ -315,6 +388,7 @@ pub enum VaultOpResult {
     Status(ServiceVaultStatus),
     Biometric(ServiceBiometricStatus),
     SyncDevices(Vec<ServiceSyncDeviceInfo>),
+    SyncStatus(ServiceSyncStatus),
 }
 
 /// Typed service error. `code` is a stable machine-readable label; `message`
@@ -454,5 +528,45 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    /// Debug must never leak secret material (review finding: derived Debug
+    /// on a surface carrying master passwords / TOTP seeds / private keys).
+    #[test]
+    fn debug_of_secret_bearing_types_redacts() {
+        let entry = ServiceEntry {
+            entry_id: None,
+            title: "T".to_string(),
+            username: "u".to_string(),
+            password: Zeroizing::new("plain-secret-value".to_string()),
+            url: None,
+            notes: None,
+            credential_type: "password".to_string(),
+            created_at: 0,
+            modified_at: 0,
+            favorite: false,
+        };
+        let rendered = format!("{:?}", entry);
+        assert!(!rendered.contains("plain-secret-value"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+
+        let op = VaultOp::VaultCreate {
+            master_password: Zeroizing::new("master-secret-value".to_string()),
+        };
+        let rendered = format!("{op:?}");
+        assert!(!rendered.contains("master-secret-value"), "{rendered}");
+
+        let key = ServiceSshKey {
+            key_id: 1,
+            name: "k".to_string(),
+            comment: None,
+            key_type: "ed25519".to_string(),
+            public_key: "ssh-ed25519 AAA".to_string(),
+            private_key: Some(Zeroizing::new("private-material".to_string())),
+            fingerprint: "SHA256:xyz".to_string(),
+            created_at: 0,
+        };
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("private-material"), "{rendered}");
     }
 }

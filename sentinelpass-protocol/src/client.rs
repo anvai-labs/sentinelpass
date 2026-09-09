@@ -273,7 +273,6 @@ fn message_kind(msg: &IpcMessage) -> &'static str {
         IpcMessage::VaultStatusResponse { .. } => "vault status",
         IpcMessage::SyncNowResponse { .. } => "sync-now response",
         IpcMessage::SyncStatusResponse { .. } => "sync status",
-        IpcMessage::ServiceResult { .. } => "service result",
         _ => "other",
     }
 }

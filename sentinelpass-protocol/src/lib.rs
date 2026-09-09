@@ -31,8 +31,8 @@ pub use message::{CredentialSummary, ExternalSecretField, IpcMessage};
 pub use paths::{default_ipc_socket_path, default_ipc_token_path, get_config_dir};
 pub use service::{
     ServiceBiometricStatus, ServiceEntity, ServiceEntry, ServiceEntrySummary, ServiceError,
-    ServiceOutcome, ServiceSyncDeviceInfo, ServiceTotpMetadata, ServiceVaultStatus, VaultOp,
-    VaultOpResult,
+    ServiceOutcome, ServiceSyncDeviceInfo, ServiceSyncStatus, ServiceTotpMetadata,
+    ServiceVaultStatus, VaultOp, VaultOpResult,
 };
 pub use token::{load_ipc_token, load_or_create_ipc_token};
 #[cfg(unix)]
