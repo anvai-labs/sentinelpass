@@ -1366,8 +1366,22 @@ fn classify_live_target(vault_path: &Path) -> Result<Option<LiveState>> {
             |r| Ok((r.get(0)?, r.get(1)?)),
         );
     // Fail closed: a config read error must not silently read as "sync
-    // disabled" (the gate below would skip its warning).
-    let sync_enabled = crate::sync::config::SyncConfig::load(db.conn())?.sync_enabled;
+    // disabled" (the gate below would skip its warning). Platform note:
+    // SQLite opens a corrupt file lazily — on some platforms the header
+    // is only read at the FIRST query, so a Database::open success does
+    // not prove readability. Any read failure here means live facts are
+    // unknowable → the raw-copy fallback with sync conservatively
+    // enabled (forcing the ADR-008 acknowledgment).
+    let sync_enabled = match crate::sync::config::SyncConfig::load(db.conn()) {
+        Ok(c) => c.sync_enabled,
+        Err(_) => {
+            return Ok(Some(LiveState {
+                key_epoch: None,
+                sync_enabled: true,
+                openable: false,
+            }))
+        }
+    };
     Ok(Some(match authority {
         Ok((_, epoch)) => LiveState {
             key_epoch: Some(epoch),
