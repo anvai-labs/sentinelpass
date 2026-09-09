@@ -26,14 +26,42 @@ struct AppState {
     vault_manager: Arc<Mutex<Option<VaultManager>>>,
     daemon_process: Arc<Mutex<Option<Child>>>,
     clipboard_tracker: Arc<Mutex<clipboard_secret::ClipboardSecretTracker>>,
+    /// Held while the compat direct manager is live (stage-3 review F1):
+    /// the UI's direct mode is lock-guarded exactly like the CLI's — a live
+    /// daemon owns the vault and direct mode refuses.
+    direct_lock: Arc<Mutex<Option<sentinelpass_core::daemon::MaintenanceLockGuard>>>,
 }
 
 /// FLAGGED direct-vault compatibility mode (ADR-007 migration window;
-/// removed in 1.0). Not silent: announced wherever it takes effect.
+/// removed in 1.0). Not silent: announced wherever it takes effect, and the
+/// exclusive maintenance lock is held for the direct manager's lifetime.
 fn direct_vault_mode() -> bool {
     std::env::var("SENTINELPASS_ALLOW_DIRECT_VAULT")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// Announce compat direct mode (stage-3 review F1: never silent).
+fn announce_direct_mode() {
+    eprintln!(
+        "WARNING: SENTINELPASS_ALLOW_DIRECT_VAULT=1 — DIRECT vault access \
+         (compatibility window): this app opens and writes the vault itself, \
+         bypassing daemon authority (ADR-007). Temporary and announced on every use."
+    );
+}
+
+/// Take and hold the exclusive maintenance lock for the direct manager's
+/// lifetime; refuses (fail-closed) while a daemon owns the vault.
+fn acquire_ui_direct_lock(state: &AppState) -> Result<(), String> {
+    let mut slot = state.direct_lock.lock().unwrap();
+    if slot.is_some() {
+        return Ok(());
+    }
+    let guard =
+        sentinelpass_core::daemon::try_acquire(&sentinelpass_core::get_default_vault_path())
+            .map_err(|e| format!("Direct mode refused: {} (a daemon owns the vault)", e))?;
+    *slot = Some(guard);
+    Ok(())
 }
 
 /// Execute one application-service op (WBS-502): through the daemon by
@@ -680,8 +708,8 @@ async fn create_vault(
 
     if direct_vault_mode() {
         // Compatibility window: exclusive, lock-guarded local creation.
-        let _lock = sentinelpass_core::daemon::try_acquire(&vault_path)
-            .map_err(|e| format!("Cannot create vault: {}", e))?;
+        announce_direct_mode();
+        acquire_ui_direct_lock(&state)?;
         let vault = VaultManager::create(&vault_path, master_password.as_bytes())
             .map_err(|e| format!("Failed to create vault: {}", e))?;
         *state.vault_manager.lock().unwrap() = Some(vault);
@@ -728,6 +756,8 @@ async fn unlock_vault(
 
     if direct_vault_mode() {
         // Compatibility window: old local-open behavior + best-effort daemon.
+        announce_direct_mode();
+        acquire_ui_direct_lock(&state)?;
         return match VaultManager::open(&vault_path, master_password.as_bytes()) {
             Ok(vault) => {
                 *state.vault_manager.lock().unwrap() = Some(vault);
@@ -760,6 +790,13 @@ async fn unlock_vault(
     // Daemon authority: ensure the daemon is up (it may be locked), then ask
     // it to unlock. The daemon's open() enforces the lockout policy.
     ensure_daemon_running(&state).await?;
+    // Stage-3 review F4: an already-unlocked daemon accepts any password —
+    // surface that honestly instead of a false validation success.
+    if let Ok(IpcMessage::VaultStatusResponse { unlocked: true, .. }) =
+        send_daemon_message(IpcMessage::CheckVault).await
+    {
+        return Ok("Daemon was already unlocked; the password was not verified.".to_string());
+    }
     match unlock_daemon_with_password(&master_password).await {
         Ok(_) => {
             unlock_debug_log("unlock_vault: daemon unlock success");
@@ -788,6 +825,8 @@ async fn unlock_vault_biometric(state: State<'_, AppState>) -> Result<String, St
 
     if direct_vault_mode() {
         // Compatibility window: local biometric open + best-effort daemon.
+        announce_direct_mode();
+        acquire_ui_direct_lock(&state)?;
         return match VaultManager::open_with_biometric(&vault_path, "Unlock SentinelPass vault") {
             Ok(vault) => {
                 *state.vault_manager.lock().unwrap() = Some(vault);
@@ -899,6 +938,8 @@ async fn lock_vault(state: State<'_, AppState>) -> Result<(), String> {
         }
         *vault_manager = None;
     }
+    // Release the compat direct-mode lock with the manager (stage-3 F1).
+    *state.direct_lock.lock().unwrap() = None;
 
     if let Err(error) = send_daemon_message(IpcMessage::LockVault).await {
         eprintln!("SentinelPass UI: failed to lock daemon via IPC: {}", error);
@@ -1429,6 +1470,7 @@ fn main() {
             clipboard_tracker: Arc::new(
                 Mutex::new(clipboard_secret::ClipboardSecretTracker::new()),
             ),
+            direct_lock: Arc::new(Mutex::new(None)),
         })
         .setup(|app| {
             if let Ok(resource_dir) = app.path().resource_dir() {

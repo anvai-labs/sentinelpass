@@ -5,6 +5,7 @@ use sentinelpass_core::{SshAgentClient, SshKeyImporter};
 use sentinelpass_protocol::service::{VaultOp, VaultOpResult};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 pub fn default_public_key_path(
     private_key_path: &Path,
@@ -76,7 +77,8 @@ pub fn handle_ssh_agent_add_stored(vault_path: PathBuf, id: i64) -> Result<()> {
     let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
     // The agent protocol needs the PEM in THIS process; fetch it over the
-    // service boundary (typed SshKey with private material), then clear it.
+    // service boundary (typed SshKey with private material), zeroized on
+    // drop (stage-3 review F8).
     let private_key = match backend.call(VaultOp::SshKeyGet {
         key_id: id,
         include_private: true,
@@ -87,14 +89,12 @@ pub fn handle_ssh_agent_add_stored(vault_path: PathBuf, id: i64) -> Result<()> {
         },
         other => anyhow::bail!("unexpected response: {other:?}"),
     };
-    let mut private_key = private_key.to_string();
+    let private_key = Zeroizing::new(private_key.to_string());
 
     let client = SshAgentClient::new()?;
-    let add_result = client
-        .add_identity_from_pem(&private_key)
-        .map_err(|e| anyhow::anyhow!("Failed to add stored SSH key to agent: {}", e));
-    private_key.clear();
-    add_result?;
+    client
+        .add_identity_from_pem(private_key.as_str())
+        .map_err(|e| anyhow::anyhow!("Failed to add stored SSH key to agent: {}", e))?;
 
     println!("Added stored SSH key {} to agent.", id);
     Ok(())

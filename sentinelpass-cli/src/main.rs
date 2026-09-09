@@ -1388,13 +1388,28 @@ mod reroute_tests {
         let allowlist = [
             Path::new("main.rs"),                    // helper definitions
             Path::new("commands/service_client.rs"), // FLAGGED compat backend
-            Path::new("commands/vault.rs"),          // init + passwd + status (offline)
-            Path::new("commands/backup.rs"),         // offline maintenance
-            Path::new("commands/recovery.rs"),       // offline maintenance
-            Path::new("commands/sync.rs"),           // pairing only (offline exclusive)
+            // Whole-file trust (stage-3 review F6): these files hold ONLY
+            // offline-maintenance commands. Splitting a mixed-purpose file
+            // requires tightening this list in the same change.
+            Path::new("commands/vault.rs"), // init/passwd/status/biometric
+            Path::new("commands/backup.rs"), // offline maintenance
+            Path::new("commands/recovery.rs"), // offline maintenance
+            Path::new("commands/sync.rs"),  // sync + pairing (offline exclusive)
         ];
 
-        let markers = ["open_vault_with_password(", "VaultManager::open("];
+        let markers = [
+            "open_vault_with_password(",
+            "VaultManager::open(",
+            "VaultManager::create(",
+            "VaultManager::open_default(",
+            "VaultManager::create_default(",
+            "open_with_biometric(",
+            "recover_access(",
+            "restore_bundle(",
+            "import_from_json(",
+            "import_from_csv(",
+            "import_from_keepass_xml(",
+        ];
         let mut offenders = Vec::new();
         for entry in std::fs::read_dir(&src).expect("cli src dir") {
             let entry = entry.unwrap();

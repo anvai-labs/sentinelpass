@@ -83,7 +83,9 @@ impl TransportConfig {
         {
             Self {
                 unix_socket_path: Some(
-                    crate::paths::default_ipc_socket_path().to_string_lossy().to_string(),
+                    crate::paths::default_ipc_socket_path()
+                        .to_string_lossy()
+                        .to_string(),
                 ),
                 ..Default::default()
             }
