@@ -779,6 +779,21 @@ impl VaultManager {
         };
 
         let dek = self.key_hierarchy.dek()?.clone();
+        // Seal/verify structural symmetry guard: the MAC key derives from
+        // the LIVE in-memory DEK, while the manifest's key material comes
+        // from the snapshot. A cross-process rotation committing between
+        // unlock and VACUUM INTO would otherwise mint a bundle that
+        // verifies under NEITHER password (fail-closed at verify, but
+        // availability lost). Refuse instead — re-unlock and retry.
+        if row.5 != self.session_epoch() {
+            return Err(PasswordManagerError::InvalidInput(format!(
+                "snapshot epoch ({}) differs from the session key epoch ({}) — \
+                 a concurrent rotation is likely; re-unlock the vault and retry \
+                 the backup",
+                row.5,
+                self.session_epoch()
+            )));
+        }
         let mac_key = derive_backup_mac_key(&dek)?;
         let mac = compute_manifest_mac(mac_key.as_slice(), &manifest)?;
         let mut manifest = manifest;
@@ -859,8 +874,13 @@ impl VaultManager {
         let parsed = read_bundle(bundle_path)?;
         let manifest = verify_bundle_authenticity(&parsed, master_password)?;
         if deep {
-            let staging =
-                std::env::temp_dir().join(format!("sp-verify-{}", uuid::Uuid::new_v4().simple()));
+            // Stage under the platform data dir, not the system temp dir:
+            // a crash mid-verify leaves a 0600 vault copy behind either
+            // way, but the data dir is owner-only by construction and on
+            // the same private-dir family as the vault itself.
+            let staging = crate::platform::get_data_dir()
+                .join("verify-staging")
+                .join(format!("sp-verify-{}", uuid::Uuid::new_v4().simple()));
             crate::platform::create_private_dir(&staging).map_err(|e| {
                 PasswordManagerError::Io(std::io::Error::other(format!(
                     "cannot create verify staging directory: {e}"
@@ -1229,8 +1249,9 @@ enum SwapPhase {
 #[derive(Default)]
 struct RestoreFaults {
     /// Deny the Nth top-level write action on the staged connection
-    /// (SQLite-authorizer harness, `database::fault_injection` — a
-    /// cfg(test)-only module, so the field exists only in test builds).
+    /// (SQLite-authorizer harness, `database::fault_injection` — the
+    /// `install_write_fault_on_table` entry point is cfg(test)-gated, so
+    /// this field is only populated in test builds).
     #[cfg(test)]
     staged_fail_at: Option<usize>,
     /// Return an error immediately after the named swap phase.
@@ -1318,7 +1339,26 @@ fn classify_live_target(vault_path: &Path) -> Result<Option<LiveState>> {
         )));
     }
 
-    let db = crate::database::Database::open(vault_path)?;
+    let db = match crate::database::Database::open(vault_path) {
+        Ok(db) => db,
+        // Header-level corruption or a foreign file format: the classic
+        // "vault overwritten with garbage" recovery scenario. Live facts
+        // (epoch, sync state) are unknowable — take the raw-copy
+        // pre-restore fallback the module doc promises, and force the
+        // sync gate (unknowable ⇒ assume enabled). Policy refusals
+        // (InvalidInput: loose mode, non-regular file) still propagate —
+        // restore must not launder a permission violation.
+        Err(PasswordManagerError::InvalidInput(msg)) => {
+            return Err(PasswordManagerError::InvalidInput(msg));
+        }
+        Err(_) => {
+            return Ok(Some(LiveState {
+                key_epoch: None,
+                sync_enabled: true,
+                openable: false,
+            }))
+        }
+    };
     let authority: std::result::Result<(Option<String>, i64), rusqlite::Error> =
         db.conn().query_row(
             "SELECT vault_uuid, COALESCE(key_epoch, 1) FROM db_metadata WHERE id = 1",
@@ -1839,8 +1879,31 @@ impl VaultManager {
         // documented refused-open rollback state (the refusal names the
         // sidecar; an acknowledged re-restore completes it).
         let digest = {
-            let restored_db = crate::database::Database::open(vault_path)?;
-            let d = epoch_guard::material_digest(restored_db.conn())?;
+            let restored_db = match crate::database::Database::open(vault_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    return Err(refuse(
+                        e,
+                        "restore failed: post-swap functional open for the sidecar \
+                         re-baseline did not succeed — re-run the acknowledged \
+                         restore to complete it"
+                            .to_string(),
+                    ));
+                }
+            };
+            let d = match epoch_guard::material_digest(restored_db.conn()) {
+                Ok(d) => d,
+                Err(e) => {
+                    drop(restored_db);
+                    return Err(refuse(
+                        e,
+                        "restore failed: post-swap material digest for the sidecar \
+                         re-baseline did not succeed — re-run the acknowledged \
+                         restore to complete it"
+                            .to_string(),
+                    ));
+                }
+            };
             drop(restored_db);
             d
         };
@@ -2582,6 +2645,57 @@ mod tests {
         // Sidecar: TOFU-minted from the restored state.
         let sidecar = epoch_guard::sidecar_path(&target);
         assert_eq!(epoch_guard::peek(&sidecar), Some((uuid, 1)));
+    }
+
+    #[test]
+    fn restore_over_a_header_corrupt_live_file_uses_the_raw_copy_fallback() {
+        // M1 (integration review): header-level corruption previously died
+        // at classification with "unusable target path" — the raw-copy
+        // fallback the module doc promises was unreachable for exactly the
+        // recovery scenario restore exists for.
+        let dir = TempDir::new().unwrap();
+        let vault = make_vault(&dir, "Bank", "corrupt-live-secret");
+        let bundle = dir.path().join("b.spbackup");
+        vault.create_backup(&bundle).unwrap();
+        let uuid = vault.vault_uuid().unwrap().to_string();
+        drop(vault);
+
+        let target = dir.path().join("corrupted.db");
+        std::fs::write(&target, b"NOT A SQLITE FILE - garbage header bytes").unwrap();
+        // The SR-DATA-003 Refuse policy still applies to a corrupt live
+        // file (InvalidInput propagates — restore must not launder a
+        // permission violation), so the user repairs the mode first, as
+        // the refusal instructs.
+        std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        let report = VaultManager::restore_bundle(
+            &target,
+            &bundle,
+            PW,
+            &RestoreOptions {
+                allow_replace: true,
+                // Live sync state is unknowable for an un-openable file, so
+                // classification conservatively reports sync-enabled: the
+                // ADR-008 interlock demands this acknowledgment.
+                disable_sync: true,
+                ..RestoreOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.vault_uuid, uuid);
+        assert!(!report.epoch_rewound);
+
+        let restored = VaultManager::open(&target, PW).unwrap();
+        let entries = restored.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Bank");
+        // Pre-restore safety net: the corrupt live bytes are preserved.
+        let snapshot = report.pre_restore_snapshot.expect("raw-copy net retained");
+        assert_eq!(
+            std::fs::read(&snapshot).unwrap(),
+            b"NOT A SQLITE FILE - garbage header bytes"
+        );
     }
 
     #[test]

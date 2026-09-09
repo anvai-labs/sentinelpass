@@ -359,7 +359,9 @@ async function retryPendingSaveAfterUnlock() {
     await sessionRemove([PENDING_UNLOCK_RETRY_KEY]);
     await createNotification(`save-success-${Date.now()}`, {
       title: 'SentinelPass',
-      message: 'Password saved successfully!',
+      message: retryResult.insecure_http
+        ? 'Password saved, but this site used unencrypted HTTP'
+        : 'Password saved successfully!',
       requireInteraction: false
     });
     return;
@@ -1079,7 +1081,11 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
           }
           await createNotification('save-success-' + Date.now(), {
             title: 'SentinelPass',
-            message: saveResult.unchanged ? 'Password already up to date.' : 'Password saved successfully!',
+            message: saveResult.insecure_http
+              ? 'Password saved, but this site used unencrypted HTTP'
+              : saveResult.unchanged
+                ? 'Password already up to date.'
+                : 'Password saved successfully!',
             requireInteraction: false
           });
         } else {

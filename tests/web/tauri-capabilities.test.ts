@@ -18,7 +18,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const CAPABILITIES_PATH = path.join(repoRoot, 'sentinelpass-ui', 'capabilities', 'default.json');
 const TAURI_CONF_PATH = path.join(repoRoot, 'sentinelpass-ui', 'tauri.conf.json');
 const MAIN_RS_PATH = path.join(repoRoot, 'sentinelpass-ui', 'src-tauri', 'src', 'main.rs');
-const UI_SOURCES = ['app.ts', 'entries.ts', 'registry.ts', 'state.ts', 'totp.ts', 'utils.ts', 'credential-types.ts', 'url-utils.ts']
+const UI_SOURCES = ['app.ts', 'entries.ts', 'registry.ts', 'state.ts', 'totp.ts', 'utils.ts', 'clipboard.ts', 'credential-types.ts', 'url-utils.ts']
   .map((f) => path.join(repoRoot, 'sentinelpass-ui', f));
 
 function readUiSources(): string {
@@ -160,7 +160,7 @@ describe('tauri plugin registration matches the capability surface (WBS-707/709)
 
   it('secret clipboard copies use the native backend path, not a plugin grant', () => {
     const sources = readUiSources();
-    expect(/copy_secret_to_clipboard/.test(sources)).toBe(true);
+    expect(/invoke\(\s*['"]copy_secret_to_clipboard/.test(sources.replace(/\/\/[^\n]*/g, ''))).toBe(true);
     expect(/clipboardManager/.test(sources)).toBe(false);
   });
 });
