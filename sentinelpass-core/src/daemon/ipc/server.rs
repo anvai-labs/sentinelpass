@@ -5,6 +5,7 @@ use super::{decrypt_windows_ipc_frame, encrypt_windows_ipc_frame, windows_named_
 use super::{
     log_daemon_audit, log_external_secret_audit, CredentialSummary, IpcEnvelope, IpcMessage,
 };
+use crate::daemon::service::{codes, LiveVaultService, VaultApplicationService};
 #[cfg(unix)]
 use crate::daemon::transport::unix::UnixSocketTransport;
 #[cfg(windows)]
@@ -12,11 +13,12 @@ use crate::daemon::transport::windows::{WindowsNamedPipeConnection, WindowsNamed
 use crate::daemon::transport::{TransportConfig, TransportError};
 use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
-use crate::{AuditEventType, AuditLogger};
+use crate::{AuditEventType, AuditLogger, VaultManager};
 use crate::{DatabaseError, PasswordManagerError, Result};
-use sentinelpass_protocol::Origin;
+use sentinelpass_protocol::service::{ServiceError, ServiceOutcome, VaultOp, VaultOpResult};
+use sentinelpass_protocol::{Origin, ServiceVaultStatus};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
@@ -25,6 +27,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
+
+/// Daemon serving the full surface against an existing vault.
+const MODE_LIVE: u8 = 0;
+/// Daemon started with no vault on disk: only bootstrap/status/shutdown are
+/// served until `VaultCreate` transitions to live (WBS-501/503).
+const MODE_MAINTENANCE: u8 = 1;
 
 #[allow(dead_code)]
 pub struct IpcServer {
@@ -40,6 +48,8 @@ pub struct IpcServer {
     audit_logger: Option<Arc<AuditLogger>>,
     /// Set by the `Shutdown` IPC message; the accept loops observe it and exit.
     shutdown: Arc<AtomicBool>,
+    /// Live vs maintenance bootstrap mode (WBS-501/503).
+    mode: Arc<AtomicU8>,
 }
 
 impl IpcServer {
@@ -86,12 +96,30 @@ impl IpcServer {
             external_secret_allowlist_path,
             audit_logger,
             shutdown: Arc::new(AtomicBool::new(false)),
+            mode: Arc::new(AtomicU8::new(MODE_LIVE)),
         }
     }
 
     /// Handle to observe (or trigger) server shutdown from outside the accept loop.
     pub fn shutdown_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown)
+    }
+
+    /// Put the server into maintenance/bootstrap mode: only `CheckVault`,
+    /// `Shutdown`, `ServiceCall(VaultStatus)` and `ServiceCall(VaultCreate)`
+    /// are served until creation succeeds and the mode flips back to live
+    /// (WBS-501/503).
+    pub fn enter_maintenance_mode(&self) {
+        self.mode.store(MODE_MAINTENANCE, Ordering::Release);
+    }
+
+    /// Whether the server is currently in maintenance/bootstrap mode.
+    pub fn is_maintenance_mode(&self) -> bool {
+        self.mode.load(Ordering::Acquire) == MODE_MAINTENANCE
+    }
+
+    fn set_live_mode(&self) {
+        self.mode.store(MODE_LIVE, Ordering::Release);
     }
 
     /// Start the IPC server
@@ -491,6 +519,12 @@ impl IpcServer {
     /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
     async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+        // Maintenance/bootstrap gate (WBS-501/503): a daemon started with no
+        // vault serves only status, bootstrap creation, and shutdown.
+        if self.is_maintenance_mode() {
+            return self.handle_maintenance_message(envelope).await;
+        }
+
         let client_token = envelope.client_token.clone();
         // Origin is provenance labeling for the browser-surface gate below —
         // NOT authentication. The security boundary for external tools is the
@@ -1116,10 +1150,216 @@ impl IpcServer {
                     }
                 }
             }
+            IpcMessage::ServiceCall { op } => self.dispatch_service_call(op).await,
             _ => IpcMessage::VaultStatusResponse {
                 unlocked: false,
                 key_epoch: 0,
             },
+        }
+    }
+
+    /// Application-service dispatch (WBS-408/501): every vault operation
+    /// reaches the [`VaultManager`] through the single `VaultOp` boundary.
+    /// The blocking work (SQLite + crypto) runs on the blocking pool, never
+    /// on the async executor; the relay-network ops (`SyncNow`) are awaited
+    /// here instead because the sync engine needs an async context.
+    async fn dispatch_service_call(&self, op: VaultOp) -> IpcMessage {
+        // Metadata ops that are valid while LOCKED — served without a
+        // manager (review finding: the UI asks biometric status before
+        // unlock to decide whether to offer the button).
+        if let VaultOp::BiometricStatusGet = op {
+            let configured = VaultManager::is_biometric_unlock_enabled(self.vault.vault_path())
+                .unwrap_or(false);
+            return IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::from(VaultOpResult::Biometric(
+                    sentinelpass_protocol::service::ServiceBiometricStatus {
+                        method_name: crate::BiometricManager::get_method_name().to_string(),
+                        available: crate::BiometricManager::is_available(),
+                        enrolled: crate::BiometricManager::is_enrolled(),
+                        configured,
+                    },
+                )),
+            };
+        }
+
+        let outcome = match op {
+            VaultOp::SyncNow => {
+                #[cfg(feature = "sync")]
+                {
+                    match self.vault.sync_now().await {
+                        Ok(status) => ServiceOutcome::from(VaultOpResult::SyncStatus(
+                            sentinelpass_protocol::service::ServiceSyncStatus {
+                                enabled: status.enabled,
+                                device_id: status.device_id.map(|d| d.to_string()),
+                                device_name: status.device_name,
+                                relay_url: status.relay_url,
+                                last_sync_at: status.last_sync_at,
+                                pending_changes: status.pending_changes,
+                            },
+                        )),
+                        Err(e) => ServiceOutcome::from(ServiceError::from(e)),
+                    }
+                }
+                #[cfg(not(feature = "sync"))]
+                {
+                    ServiceOutcome::from(ServiceError::new(
+                        codes::INTERNAL,
+                        "sync support is not compiled into this daemon",
+                    ))
+                }
+            }
+            op => match self.vault.manager().await {
+                None => ServiceOutcome::from(ServiceError::new(
+                    codes::VAULT_LOCKED,
+                    "vault is locked; unlock it first",
+                )),
+                Some(vault) => {
+                    // `spawn_blocking` needs 'static: DaemonVault hands out an
+                    // Arc'd manager (and holding the async-mutex slot for the
+                    // duration serializes vault ops — one blocking op at a time
+                    // per vault, the ADR-004 rev 5 property).
+                    let joined = tokio::task::spawn_blocking(move || {
+                        LiveVaultService::new(&vault).execute(&op)
+                    })
+                    .await;
+                    match joined {
+                        Ok(Ok(result)) => ServiceOutcome::from(result),
+                        Ok(Err(service_error)) => ServiceOutcome::from(service_error),
+                        Err(e) => ServiceOutcome::from(ServiceError::new(
+                            codes::INTERNAL,
+                            format!("service task failed: {}", e),
+                        )),
+                    }
+                }
+            },
+        };
+        IpcMessage::ServiceResult { outcome }
+    }
+
+    /// Maintenance/bootstrap surface (WBS-501/503): no vault exists yet.
+    async fn handle_maintenance_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+        match envelope.message {
+            IpcMessage::CheckVault => IpcMessage::VaultStatusResponse {
+                unlocked: false,
+                key_epoch: 0,
+            },
+            IpcMessage::Shutdown => {
+                info!("IPC: Shutdown requested (maintenance mode)");
+                self.shutdown.store(true, Ordering::Release);
+                IpcMessage::VaultStatusResponse {
+                    unlocked: false,
+                    key_epoch: 0,
+                }
+            }
+            IpcMessage::ServiceCall { op } => self.dispatch_maintenance_op(op).await,
+            IpcMessage::UnlockVault {
+                mut master_password,
+            } => {
+                // No vault exists; unlocking cannot succeed. Still zeroize
+                // the presented password before answering.
+                master_password.zeroize();
+                warn!("IPC: unlock refused — daemon is in maintenance mode (no vault)");
+                IpcMessage::UnlockVaultResponse {
+                    success: false,
+                    error: Some(
+                        "daemon is in maintenance mode: no vault exists yet; create one first"
+                            .to_string(),
+                    ),
+                }
+            }
+            IpcMessage::UnlockVaultBiometric { .. } => {
+                warn!("IPC: biometric unlock refused — maintenance mode (no vault)");
+                IpcMessage::UnlockVaultResponse {
+                    success: false,
+                    error: Some(
+                        "daemon is in maintenance mode: no vault exists yet; create one first"
+                            .to_string(),
+                    ),
+                }
+            }
+            other => {
+                debug!("IPC: message refused in maintenance mode");
+                let _ = other;
+                IpcMessage::VaultStatusResponse {
+                    unlocked: false,
+                    key_epoch: 0,
+                }
+            }
+        }
+    }
+
+    /// Bootstrap op dispatch: only `VaultStatus` and `VaultCreate`.
+    async fn dispatch_maintenance_op(&self, op: VaultOp) -> IpcMessage {
+        match op {
+            VaultOp::VaultStatus => IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::from(VaultOpResult::Status(ServiceVaultStatus {
+                    unlocked: false,
+                    key_epoch: 0,
+                    maintenance: true,
+                })),
+            },
+            VaultOp::VaultCreate { master_password } => {
+                let vault_path = self.vault.vault_path().to_path_buf();
+                if vault_path.exists() {
+                    return IpcMessage::ServiceResult {
+                        outcome: ServiceOutcome::from(ServiceError::new(
+                            codes::VAULT_EXISTS,
+                            "a vault already exists at the daemon's vault path",
+                        )),
+                    };
+                }
+                info!("IPC: creating vault through maintenance bootstrap");
+                // Argon2id KDF + schema creation on the blocking pool
+                // (ADR-004 rev 5: KDF work never runs on the async executor).
+                let created = tokio::task::spawn_blocking(move || {
+                    VaultManager::create(&vault_path, master_password.as_bytes())
+                })
+                .await;
+                match created {
+                    Ok(Ok(vault)) => {
+                        let key_epoch = vault.key_epoch().unwrap_or(1);
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            AuditEventType::VaultCreated,
+                            "vault created through daemon maintenance bootstrap",
+                        );
+                        self.vault.unlock_with_manager(vault).await;
+                        self.set_live_mode();
+                        info!("IPC: vault created — daemon leaving maintenance mode");
+                        IpcMessage::ServiceResult {
+                            outcome: ServiceOutcome::from(VaultOpResult::Status(
+                                ServiceVaultStatus {
+                                    unlocked: true,
+                                    key_epoch,
+                                    maintenance: false,
+                                },
+                            )),
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!("IPC: vault creation refused: {}", e);
+                        IpcMessage::ServiceResult {
+                            outcome: ServiceOutcome::from(ServiceError::from(e)),
+                        }
+                    }
+                    Err(e) => IpcMessage::ServiceResult {
+                        outcome: ServiceOutcome::from(ServiceError::new(
+                            codes::INTERNAL,
+                            format!("vault creation task failed: {}", e),
+                        )),
+                    },
+                }
+            }
+            other => {
+                let _ = &other;
+                IpcMessage::ServiceResult {
+                    outcome: ServiceOutcome::from(ServiceError::new(
+                        codes::MAINTENANCE_MODE,
+                        "daemon is in maintenance mode (no vault): only status and \
+                         vault creation are served",
+                    )),
+                }
+            }
         }
     }
 }

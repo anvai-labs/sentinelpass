@@ -8,7 +8,7 @@ use crate::{
     get_default_vault_path, CredentialType, DatabaseError, LifecycleSource, PasswordManagerError,
     Result, VaultManager,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -24,7 +24,10 @@ pub enum VaultState {
 
 /// Daemon vault manager with auto-lock functionality
 pub struct DaemonVault {
-    vault: Arc<Mutex<Option<VaultManager>>>,
+    /// `Arc`-wrapped so service dispatch can hand a `'static` manager to
+    /// the blocking pool (WBS-501) while the auto-lock task swaps `None`
+    /// in on lock.
+    vault: Arc<Mutex<Option<Arc<VaultManager>>>>,
     state: Arc<SyncMutex<VaultState>>,
     last_activity: Arc<SyncMutex<Instant>>,
     vault_path: PathBuf,
@@ -41,16 +44,15 @@ fn usernames_match(lhs: &str, rhs: &str) -> bool {
 }
 
 impl DaemonVault {
-    /// Create a new daemon vault manager
+    /// Create a new daemon vault manager.
+    ///
+    /// The path does NOT have to exist yet: when no vault is on disk the
+    /// daemon starts in maintenance mode (WBS-501/503) and the missing file
+    /// is only hit by [`VaultManager::open`] at unlock time, which fails
+    /// closed with `NotFound`. (The old construction-time refusal is the
+    /// daemon binary's no-vault branch, now a maintenance-mode entry.)
     pub fn new(vault_path: Option<PathBuf>, inactivity_timeout_sec: u64) -> Result<Self> {
         let vault_path = vault_path.unwrap_or_else(get_default_vault_path);
-
-        if !vault_path.exists() {
-            return Err(PasswordManagerError::NotFound(format!(
-                "No vault found at {:?}",
-                vault_path
-            )));
-        }
 
         Ok(Self {
             vault: Arc::new(Mutex::new(None)),
@@ -59,6 +61,17 @@ impl DaemonVault {
             vault_path,
             inactivity_timeout: Duration::from_secs(inactivity_timeout_sec),
         })
+    }
+
+    /// The vault path this daemon state is bound to.
+    pub fn vault_path(&self) -> &Path {
+        &self.vault_path
+    }
+
+    /// Snapshot of the unlocked manager, if any (service dispatch hands
+    /// this to the blocking pool). `None` while locked.
+    pub async fn manager(&self) -> Option<Arc<VaultManager>> {
+        self.vault.lock().await.clone()
     }
 
     /// Unlock the vault with master password
@@ -76,7 +89,7 @@ impl DaemonVault {
 
     /// Unlock the daemon with an already opened vault manager.
     pub async fn unlock_with_manager(&self, vault: VaultManager) {
-        *self.vault.lock().await = Some(vault);
+        *self.vault.lock().await = Some(Arc::new(vault));
         *self.state.lock().unwrap() = VaultState::Unlocked;
         *self.last_activity.lock().unwrap() = Instant::now();
 

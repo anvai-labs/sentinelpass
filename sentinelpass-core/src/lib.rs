@@ -153,6 +153,13 @@ pub enum PasswordManagerError {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
 
+    #[error(
+        "the vault is owned by a running daemon or an exclusive maintenance process \
+         (lock: {lock_path}). Quit the daemon first (or wait for maintenance to finish), \
+         then retry"
+    )]
+    MaintenanceLockHeld { lock_path: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

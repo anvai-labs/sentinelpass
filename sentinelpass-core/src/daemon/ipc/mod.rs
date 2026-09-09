@@ -555,4 +555,224 @@ mod tests {
         let _ = std::fs::remove_file(vault_path);
         let _ = ClientTokenStatus::Legacy;
     }
+
+    /// WBS-501/503 bootstrap path: a daemon started with NO vault enters
+    /// maintenance mode, refuses every non-bootstrap op, and transitions to
+    /// live after a successful `VaultCreate` — all through the single
+    /// application-service boundary.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn daemon_maintenance_bootstrap_creates_vault_and_goes_live() {
+        use crate::daemon::{try_acquire, DaemonVault, IpcServer};
+        use sentinelpass_protocol::service::{ServiceOutcome, VaultOp, VaultOpResult};
+        use std::sync::Arc;
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let short_suffix = &suffix[..12];
+        let vault_dir = std::env::temp_dir().join(format!("sentinelpass_boot_{short_suffix}"));
+        std::fs::create_dir_all(&vault_dir).unwrap();
+        let vault_path = vault_dir.join("vault.db");
+        let socket_path = vault_dir.join("bootstrap.sock");
+        let password = b"bootstrap_password_123!";
+
+        assert!(!vault_path.exists(), "precondition: no vault on disk");
+
+        // The daemon holds this lock for its lifetime; the test mimics the
+        // binary's startup sequence.
+        let lock = try_acquire(&vault_path).unwrap();
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        let server = Arc::new(IpcServer::new(
+            socket_path.clone(),
+            daemon_vault,
+            "bootstrap-token".to_string(),
+        ));
+        server.enter_maintenance_mode();
+        assert!(server.is_maintenance_mode());
+
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(!server_task.is_finished());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let client = IpcClient::new_with_token(socket_path.clone(), "bootstrap-token".to_string());
+
+        async fn service(
+            client: &IpcClient,
+            op: VaultOp,
+        ) -> std::result::Result<VaultOpResult, sentinelpass_protocol::service::ServiceError>
+        {
+            match client.send(IpcMessage::ServiceCall { op }).await.unwrap() {
+                IpcMessage::ServiceResult { outcome } => match outcome {
+                    ServiceOutcome::Ok { result } => Ok(result),
+                    ServiceOutcome::Err { error } => Err(error),
+                },
+                other => panic!("unexpected non-service response: {:?}", other),
+            }
+        }
+
+        // Negative: in maintenance mode every non-bootstrap op is refused
+        // with the typed maintenance_mode code.
+        let err = service(&client, VaultOp::EntryList)
+            .await
+            .expect_err("maintenance daemon must refuse CRUD");
+        assert_eq!(err.code, "maintenance_mode");
+
+        // Legacy unlock is refused too (no vault to unlock).
+        match client
+            .send(IpcMessage::UnlockVault {
+                master_password: "whatever".to_string(),
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::UnlockVaultResponse {
+                success: false,
+                error: Some(err),
+            } => assert!(err.contains("maintenance mode")),
+            other => panic!("expected maintenance unlock refusal: {:?}", other),
+        }
+
+        // Bootstrap: create → daemon transitions to live, vault unlocked.
+        let status = service(
+            &client,
+            VaultOp::VaultCreate {
+                master_password: zeroize::Zeroizing::new(
+                    String::from_utf8(password.to_vec()).unwrap(),
+                ),
+            },
+        )
+        .await
+        .expect("bootstrap create must succeed");
+        match status {
+            VaultOpResult::Status(status) => {
+                assert!(status.unlocked);
+                assert!(!status.maintenance);
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+        assert!(!server.is_maintenance_mode(), "mode flipped to live");
+        assert!(vault_path.exists(), "vault file now exists");
+
+        // Live CRUD now flows through the same boundary.
+        let result = service(&client, VaultOp::EntryList).await.unwrap();
+        match result {
+            VaultOpResult::EntryList(list) => assert!(list.is_empty()),
+            other => panic!("expected EntryList, got {other:?}"),
+        }
+
+        server_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+        drop(lock);
+        let _ = std::fs::remove_file(crate::daemon::maintenance_lock_path(&vault_path));
+        let _ = std::fs::remove_dir_all(&vault_dir);
+    }
+
+    /// Negative: a LIVE daemon refuses bootstrap creation (the vault already
+    /// exists; creation is a maintenance-only op).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_daemon_refuses_vault_create_and_locked_ops_fail_closed() {
+        use crate::daemon::{DaemonVault, IpcServer};
+        use crate::VaultManager;
+        use sentinelpass_protocol::service::{ServiceOutcome, VaultOp};
+        use std::sync::Arc;
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let short_suffix = &suffix[..12];
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_live_{short_suffix}.db"));
+        let socket_path = PathBuf::from(format!("/tmp/sp-live-{short_suffix}.sock"));
+        let password = b"test_password_123!";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        drop(vault);
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        let server = Arc::new(IpcServer::new(
+            socket_path.clone(),
+            daemon_vault.clone(),
+            "live-token".to_string(),
+        ));
+        assert!(!server.is_maintenance_mode());
+
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(!server_task.is_finished());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let client = IpcClient::new_with_token(socket_path.clone(), "live-token".to_string());
+
+        // A locked live daemon fails closed with the typed code (not a
+        // silent empty result) — including bootstrap creation.
+        let outcome = match client
+            .send(IpcMessage::ServiceCall {
+                op: VaultOp::EntryList,
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::ServiceResult { outcome } => outcome,
+            other => panic!("unexpected non-service response: {:?}", other),
+        };
+        match outcome {
+            ServiceOutcome::Err { error } => assert_eq!(error.code, "vault_locked"),
+            ServiceOutcome::Ok { .. } => panic!("locked daemon must refuse CRUD"),
+        }
+        let outcome = match client
+            .send(IpcMessage::ServiceCall {
+                op: VaultOp::VaultCreate {
+                    master_password: zeroize::Zeroizing::new("another-password-123!".to_string()),
+                },
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::ServiceResult { outcome } => outcome,
+            other => panic!("unexpected non-service response: {:?}", other),
+        };
+        match outcome {
+            ServiceOutcome::Err { error } => assert_eq!(error.code, "vault_locked"),
+            ServiceOutcome::Ok { .. } => panic!("locked daemon must refuse VaultCreate"),
+        }
+
+        // Unlock: now the live daemon refuses bootstrap creation (a vault
+        // already exists; creation is maintenance-only).
+        daemon_vault.unlock(password).await.unwrap();
+        let outcome = match client
+            .send(IpcMessage::ServiceCall {
+                op: VaultOp::VaultCreate {
+                    master_password: zeroize::Zeroizing::new("another-password-123!".to_string()),
+                },
+            })
+            .await
+            .unwrap()
+        {
+            IpcMessage::ServiceResult { outcome } => outcome,
+            other => panic!("unexpected non-service response: {:?}", other),
+        };
+        match outcome {
+            ServiceOutcome::Err { error } => {
+                assert_eq!(error.code, "invalid_input");
+            }
+            ServiceOutcome::Ok { .. } => panic!("live daemon must refuse VaultCreate"),
+        }
+
+        server_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_file(&vault_path);
+    }
 }
