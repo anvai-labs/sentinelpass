@@ -5006,7 +5006,6 @@ dependencies = [
  "dirs 5.0.1",
  "hex",
  "hkdf",
- "hmac",
  "libc",
  "rand 0.8.5",
  "serde",

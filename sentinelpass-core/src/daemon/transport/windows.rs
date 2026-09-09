@@ -169,12 +169,18 @@ fn create_pipe_with_user_dacl(
             (&mut security_descriptor as *mut windows::Win32::Security::SECURITY_DESCRIPTOR).cast(),
         );
         if InitializeSecurityDescriptor(sd_ptr, SD_REVISION).is_err() {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(new_acl.cast()),
+            ));
             let _ = CloseHandle(token_handle);
             return Err(TransportError::ConnectionFailed(
                 "WBS-508: InitializeSecurityDescriptor failed".to_string(),
             ));
         }
         if SetSecurityDescriptorDacl(sd_ptr, true, Some(new_acl), false).is_err() {
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(new_acl.cast()),
+            ));
             let _ = CloseHandle(token_handle);
             return Err(TransportError::ConnectionFailed(
                 "WBS-508: SetSecurityDescriptorDacl failed".to_string(),
@@ -208,11 +214,17 @@ fn create_pipe_with_user_dacl(
             Some(&security_attributes),
         );
 
+        // Capture the error BEFORE touching other handles (stage-6 F3).
+        let last_error = if created == INVALID_HANDLE_VALUE {
+            Some(GetLastError())
+        } else {
+            None
+        };
+
         // Kernel copied the SD/ACL during the call; release our copies.
         let _ = CloseHandle(token_handle);
 
-        if created == INVALID_HANDLE_VALUE {
-            let err = GetLastError();
+        if let Some(err) = last_error {
             let hint = if err == ERROR_ACCESS_DENIED {
                 " — the pipe name already exists (name squatting or another daemon); \
                  refusing to serve on a pipe we did not create"
@@ -224,7 +236,7 @@ fn create_pipe_with_user_dacl(
             )));
         }
 
-        // Free the ACL the helper API allocated for us.
+        // Free the ACL the helper API allocated for us on success too.
         let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
             new_acl.cast(),
         )));

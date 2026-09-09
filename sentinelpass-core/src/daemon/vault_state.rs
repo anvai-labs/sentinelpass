@@ -90,16 +90,26 @@ impl DaemonVault {
 
     /// Unlock the vault with master password
     pub async fn unlock(&self, master_password: &[u8]) -> Result<()> {
-        // WBS-513: Argon2id runs on the blocking pool with the per-vault
-        // KDF gate held — parallel wrong-key attempts cannot multiply the
-        // 256 MB allocation.
+        // WBS-513: Argon2id runs on the BLOCKING pool (never the async
+        // executor) with the per-vault KDF gate held — parallel wrong-key
+        // attempts cannot multiply the 256 MB allocation (stage-6 F1).
         let _permit = self.kdf_permit().await;
-        let vault = VaultManager::open(&self.vault_path, master_password).map_err(|e| {
-            PasswordManagerError::from(DatabaseError::Other(format!(
-                "Failed to unlock vault: {}",
-                e
-            )))
-        })?;
+        let vault_path = self.vault_path.clone();
+        let password = master_password.to_vec();
+        let vault = tokio::task::spawn_blocking(move || VaultManager::open(&vault_path, &password))
+            .await
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Other(format!(
+                    "unlock task failed: {}",
+                    e
+                )))
+            })?
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Other(format!(
+                    "Failed to unlock vault: {}",
+                    e
+                )))
+            })?;
 
         self.unlock_with_manager(vault).await;
         Ok(())
@@ -119,13 +129,27 @@ impl DaemonVault {
 
     /// Unlock the vault with biometric authentication.
     pub async fn unlock_with_biometric(&self, prompt_reason: &str) -> Result<()> {
-        let vault =
-            VaultManager::open_with_biometric(&self.vault_path, prompt_reason).map_err(|e| {
-                PasswordManagerError::from(DatabaseError::Other(format!(
-                    "Failed biometric unlock: {}",
-                    e
-                )))
-            })?;
+        // WBS-513: same blocking-pool + KDF-gate discipline as password
+        // unlock (stage-6 review F1).
+        let _permit = self.kdf_permit().await;
+        let vault_path = self.vault_path.clone();
+        let reason = prompt_reason.to_string();
+        let vault = tokio::task::spawn_blocking(move || {
+            VaultManager::open_with_biometric(&vault_path, &reason)
+        })
+        .await
+        .map_err(|e| {
+            PasswordManagerError::from(DatabaseError::Other(format!(
+                "biometric unlock task failed: {}",
+                e
+            )))
+        })?
+        .map_err(|e| {
+            PasswordManagerError::from(DatabaseError::Other(format!(
+                "Failed biometric unlock: {}",
+                e
+            )))
+        })?;
 
         self.unlock_with_manager(vault).await;
         Ok(())

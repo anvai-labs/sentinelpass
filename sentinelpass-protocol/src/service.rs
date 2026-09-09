@@ -275,6 +275,9 @@ pub enum VaultOp {
     },
 
     // --- credential registry (ADR-001) ------------------------------------
+    /// `include_strength: true` decrypts and scores every eligible secret —
+    /// bounded by the 30s session deadline on very large vaults (stage-6
+    /// review F5: documented cap).
     RegistryOverview {
         include_strength: bool,
     },
@@ -307,7 +310,10 @@ pub enum VaultOp {
     },
 
     // --- health / audit ----------------------------------------------------
-    /// Vault password health report (summary + per-entry findings), as JSON.
+    /// Vault password health report (summary + per-entry findings), as
+    /// JSON. DECRYPTS EVERY ENTRY server-side — the 30s session deadline
+    /// bounds the response on very large vaults (stage-6 review F5:
+    /// documented cap).
     HealthReport,
     /// Verify the audit hash chain (WBS-415), as JSON.
     AuditVerify,

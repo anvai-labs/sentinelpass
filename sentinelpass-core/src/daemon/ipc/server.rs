@@ -1,7 +1,7 @@
 //! IPC server — handles daemon-side message dispatch.
 
 #[cfg(windows)]
-use super::{decrypt_windows_ipc_frame, encrypt_windows_ipc_frame, windows_named_pipe_path};
+use super::windows_named_pipe_path;
 use super::{
     log_daemon_audit, log_external_secret_audit, CredentialSummary, IpcEnvelope, IpcMessage,
 };
@@ -23,8 +23,6 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
 

@@ -92,7 +92,10 @@ impl InstallationCapabilities {
     }
 
     /// Mint a capability for `audience` and return the PRESENTED SECRET
-    /// (shown/stored once; only its hash is persisted).
+    /// (shown/stored once; only its hash is persisted). Rotation semantics
+    /// (stage-6 review F4): minting for an audience REPLACES all prior
+    /// entries for that audience, so stale secrets lose authority instead
+    /// of accumulating.
     pub fn mint(
         &mut self,
         path: &Path,
@@ -105,6 +108,8 @@ impl InstallationCapabilities {
         let mut nonce = [0u8; 16];
         OsRng.fill_bytes(&mut nonce);
 
+        self.capabilities
+            .retain(|capability| capability.audience != audience);
         self.capabilities.push(Capability {
             audience: audience.to_string(),
             secret_hash: hex::encode(Sha256::digest(secret.as_bytes())),

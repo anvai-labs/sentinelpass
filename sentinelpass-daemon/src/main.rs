@@ -72,7 +72,9 @@ async fn main() -> Result<()> {
     // daemon verifies it for browser-surface operations).
     if let Err(e) = sentinelpass_core::daemon::ensure_native_host_capability() {
         error!("Native-host capability provisioning failed: {}", e);
-        return Ok(());
+        // Non-zero exit: a refusal must never look like a clean start
+        // (stage-6 review F2, matching the lock-refusal rule).
+        std::process::exit(1);
     }
 
     // Create DaemonVault (works for the bootstrap case: the path is only
