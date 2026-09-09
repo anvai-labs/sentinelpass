@@ -1466,7 +1466,9 @@ mod reroute_tests {
         let vault_path = tmp.path().join("vault.db");
         let socket_path = tmp.path().join("test.sock");
         // The socket must live in a private (0700) dir (WBS-507); tempfile
-        // dirs can be 0755 on some platforms.
+        // dirs can be 0755 on some platforms. Unix-only: on Windows the
+        // private-dir check is a no-op (pipe security comes from the DACL).
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
