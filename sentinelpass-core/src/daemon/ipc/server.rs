@@ -1168,8 +1168,8 @@ impl IpcServer {
         // manager (review finding: the UI asks biometric status before
         // unlock to decide whether to offer the button).
         if let VaultOp::BiometricStatusGet = op {
-            let configured = VaultManager::is_biometric_unlock_enabled(self.vault.vault_path())
-                .unwrap_or(false);
+            let configured =
+                VaultManager::is_biometric_unlock_enabled(self.vault.vault_path()).unwrap_or(false);
             return IpcMessage::ServiceResult {
                 outcome: ServiceOutcome::from(VaultOpResult::Biometric(
                     sentinelpass_protocol::service::ServiceBiometricStatus {

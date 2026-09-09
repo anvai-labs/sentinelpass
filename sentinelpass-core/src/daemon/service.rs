@@ -356,7 +356,7 @@ impl LiveVaultService<'_> {
                     wire.push(entry_to_wire(entry)?);
                 }
                 Ok(VaultOpResult::Entries(wire))
-            },
+            }
             VaultOp::ImportEntries { entries } => {
                 let mut ids = Vec::with_capacity(entries.len());
                 for entry in entries {
