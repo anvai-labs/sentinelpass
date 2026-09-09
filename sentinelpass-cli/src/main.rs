@@ -1450,6 +1450,12 @@ mod reroute_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let vault_path = tmp.path().join("vault.db");
         let socket_path = tmp.path().join("test.sock");
+        // The socket must live in a private (0700) dir (WBS-507); tempfile
+        // dirs can be 0755 on some platforms.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let password = b"test_password_123!";
 
         let vault = VaultManager::create(&vault_path, password).unwrap();

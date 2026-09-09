@@ -215,255 +215,117 @@ impl IpcServer {
 
         #[cfg(windows)]
         {
-            // Determine if using named pipes or legacy TCP
-            let path_str = self.socket_path.to_string_lossy().to_string();
-            let use_tcp = path_str.starts_with("tcp://");
+            // Named pipes only: the legacy tcp:// loopback branch was
+            // removed in Phase 3 (ADR-007 migration).
+            let transport = WindowsNamedPipeTransport::new(TransportConfig {
+                windows_pipe_path: Some(windows_named_pipe_path()),
+                ..Default::default()
+            })
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Ipc(format!(
+                    "Failed to create transport: {}",
+                    e
+                )))
+            })?;
 
-            if use_tcp {
-                // Legacy TCP fallback for custom tcp://... paths
-                use tokio::net::TcpListener;
+            let pipe_name = transport.pipe_name();
+            info!("IPC server listening on named pipe: {}", pipe_name);
 
-                let addr_str = path_str.strip_prefix("tcp://").unwrap_or("127.0.0.1:35873");
-                info!("IPC server listening on legacy TCP: {}", addr_str);
-
-                let listener = TcpListener::bind(addr_str).await.map_err(|e| {
+            loop {
+                // Create the named pipe server
+                let pipe_server = transport.create_server().map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
-                        "Failed to bind TCP socket: {}",
+                        "Failed to create named pipe: {}",
                         e
                     )))
                 })?;
 
-                loop {
-                    match listener.accept().await {
-                        Ok((mut stream, _addr)) => {
-                            debug!("IPC client connected (TCP)");
+                debug!("Named pipe created, waiting for connection");
 
-                            let mut length_buf = [0u8; 4];
-                            match stream.read_exact(&mut length_buf).await {
-                                Ok(_) => {
-                                    let length = u32::from_be_bytes(length_buf) as usize;
-                                    if length > 0 && length <= 65536 {
-                                        let mut buffer = vec![0u8; length];
-                                        match stream.read_exact(&mut buffer).await {
-                                            Ok(_) => {
-                                                match decrypt_windows_ipc_frame(
-                                                    &self.auth_token,
-                                                    &buffer,
+                // Wait for a client to connect
+                match pipe_server.connect().await {
+                    Ok(_) => {
+                        debug!("IPC client connected (named pipe)");
+
+                        let mut conn = WindowsNamedPipeConnection::from_server(pipe_server);
+
+                        // Read encrypted message
+                        match conn.read_message().await {
+                            Ok(buffer) => {
+                                // Decrypt the frame
+                                match decrypt_windows_ipc_frame(&self.auth_token, &buffer) {
+                                    Ok(decrypted) => {
+                                        match serde_json::from_slice::<IpcEnvelope>(&decrypted) {
+                                            Ok(envelope) => {
+                                                if !bool::from(
+                                                    envelope
+                                                        .token
+                                                        .as_bytes()
+                                                        .ct_eq(self.auth_token.as_bytes()),
                                                 ) {
-                                                    Ok(decrypted) => {
-                                                        match serde_json::from_slice::<IpcEnvelope>(
-                                                            &decrypted,
+                                                    warn!(
+                                                        "Rejected IPC request with invalid token"
+                                                    );
+                                                    let _ = conn.close();
+                                                    continue;
+                                                }
+                                                let response = self.handle_message(envelope).await;
+                                                match serde_json::to_vec(&response) {
+                                                    Ok(response_bytes) => {
+                                                        match encrypt_windows_ipc_frame(
+                                                            &self.auth_token,
+                                                            &response_bytes,
                                                         ) {
-                                                            Ok(envelope) => {
-                                                                if !bool::from(
-                                                                    envelope
-                                                                        .token
-                                                                        .as_bytes()
-                                                                        .ct_eq(
-                                                                            self.auth_token
-                                                                                .as_bytes(),
-                                                                        ),
-                                                                ) {
-                                                                    warn!("Rejected IPC request with invalid token");
-                                                                    continue;
-                                                                }
-                                                                let response = self
-                                                                    .handle_message(envelope)
-                                                                    .await;
-                                                                match serde_json::to_vec(&response) {
-                                                                    Ok(response_bytes) => {
-                                                                        match encrypt_windows_ipc_frame(
-                                                                            &self.auth_token,
-                                                                            &response_bytes,
-                                                                        ) {
-                                                                            Ok(response_frame) => {
-                                                                                let response_len =
-                                                                                    response_frame.len()
-                                                                                        as u32;
-                                                                                let _ = stream
-                                                                                    .write_all(
-                                                                                        &response_len
-                                                                                            .to_be_bytes(),
-                                                                                    )
-                                                                                    .await;
-                                                                                let _ = stream
-                                                                                    .write_all(
-                                                                                        &response_frame,
-                                                                                    )
-                                                                                    .await;
-                                                                                let _ = stream
-                                                                                    .flush()
-                                                                                    .await;
-                                                                            }
-                                                                            Err(e) => {
-                                                                                error!(
-                                                                                    "Failed to encrypt IPC response frame: {}",
-                                                                                    e
-                                                                                );
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    Err(e) => {
-                                                                        error!(
-                                                                            "Failed to serialize response: {}",
-                                                                            e
-                                                                        );
-                                                                    }
+                                                            Ok(response_frame) => {
+                                                                if let Err(e) = conn
+                                                                    .write_message(&response_frame)
+                                                                    .await
+                                                                {
+                                                                    error!("Failed to send response: {}", e);
                                                                 }
                                                             }
                                                             Err(e) => {
-                                                                error!(
-                                                                    "Failed to parse IPC envelope: {}",
-                                                                    e
-                                                                );
+                                                                error!("Failed to encrypt IPC response frame: {}", e);
                                                             }
                                                         }
                                                     }
                                                     Err(e) => {
                                                         error!(
-                                                            "Failed to decrypt Windows IPC frame: {}",
+                                                            "Failed to serialize response: {}",
                                                             e
                                                         );
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                error!("Failed to read message: {}", e);
+                                                error!("Failed to parse IPC envelope: {}", e);
                                             }
                                         }
-                                    } else {
-                                        error!("Invalid message length: {}", length);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to decrypt Windows IPC frame: {}", e);
                                     }
                                 }
-                                Err(e) => {
-                                    error!("Failed to read length: {}", e);
-                                }
+                            }
+                            Err(TransportError::MessageTooLarge { size, .. }) => {
+                                error!("Rejected oversized message: {} bytes", size);
+                            }
+                            Err(e) => {
+                                error!("Failed to read message: {}", e);
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to accept connection: {}", e);
-                        }
                     }
-
-                    if self.shutdown.load(Ordering::Acquire) {
-                        info!("IPC: shutdown requested — stopping accept loop");
-                        break;
+                    Err(e) => {
+                        error!("Failed to accept named pipe connection: {}", e);
                     }
                 }
-            } else {
-                // Default: Use named pipes with per-user ACLs
-                let transport = WindowsNamedPipeTransport::new(TransportConfig {
-                    windows_pipe_path: Some(windows_named_pipe_path()),
-                    ..Default::default()
-                })
-                .map_err(|e| {
-                    PasswordManagerError::from(DatabaseError::Ipc(format!(
-                        "Failed to create transport: {}",
-                        e
-                    )))
-                })?;
 
-                let pipe_name = transport.pipe_name();
-                info!("IPC server listening on named pipe: {}", pipe_name);
-
-                loop {
-                    // Create the named pipe server
-                    let pipe_server = transport.create_server().map_err(|e| {
-                        PasswordManagerError::from(DatabaseError::Ipc(format!(
-                            "Failed to create named pipe: {}",
-                            e
-                        )))
-                    })?;
-
-                    debug!("Named pipe created, waiting for connection");
-
-                    // Wait for a client to connect
-                    match pipe_server.connect().await {
-                        Ok(_) => {
-                            debug!("IPC client connected (named pipe)");
-
-                            let mut conn = WindowsNamedPipeConnection::from_server(pipe_server);
-
-                            // Read encrypted message
-                            match conn.read_message().await {
-                                Ok(buffer) => {
-                                    // Decrypt the frame
-                                    match decrypt_windows_ipc_frame(&self.auth_token, &buffer) {
-                                        Ok(decrypted) => {
-                                            match serde_json::from_slice::<IpcEnvelope>(&decrypted)
-                                            {
-                                                Ok(envelope) => {
-                                                    if !bool::from(
-                                                        envelope
-                                                            .token
-                                                            .as_bytes()
-                                                            .ct_eq(self.auth_token.as_bytes()),
-                                                    ) {
-                                                        warn!("Rejected IPC request with invalid token");
-                                                        let _ = conn.close();
-                                                        continue;
-                                                    }
-                                                    let response =
-                                                        self.handle_message(envelope).await;
-                                                    match serde_json::to_vec(&response) {
-                                                        Ok(response_bytes) => {
-                                                            match encrypt_windows_ipc_frame(
-                                                                &self.auth_token,
-                                                                &response_bytes,
-                                                            ) {
-                                                                Ok(response_frame) => {
-                                                                    if let Err(e) = conn
-                                                                        .write_message(
-                                                                            &response_frame,
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        error!("Failed to send response: {}", e);
-                                                                    }
-                                                                }
-                                                                Err(e) => {
-                                                                    error!("Failed to encrypt IPC response frame: {}", e);
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            error!(
-                                                                "Failed to serialize response: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    error!("Failed to parse IPC envelope: {}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to decrypt Windows IPC frame: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(TransportError::MessageTooLarge { size, .. }) => {
-                                    error!("Rejected oversized message: {} bytes", size);
-                                }
-                                Err(e) => {
-                                    error!("Failed to read message: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to accept named pipe connection: {}", e);
-                        }
-                    }
-
-                    if self.shutdown.load(Ordering::Acquire) {
-                        info!("IPC: shutdown requested — stopping accept loop");
-                        break;
-                    }
-
-                    // Connection is closed when dropped
+                if self.shutdown.load(Ordering::Acquire) {
+                    info!("IPC: shutdown requested — stopping accept loop");
+                    break;
                 }
+
+                // Connection is closed when dropped
             }
 
             let _ = std::fs::remove_file(&self.socket_path);

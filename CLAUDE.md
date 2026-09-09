@@ -191,9 +191,9 @@ sentinelpass-daemon
 
 ### IPC (Inter-Process Communication)
 
-**Unix (Linux/macOS):** Unix domain socket at `/tmp/sentinelpass.sock` (or `$XDG_RUNTIME_DIR/sentinelpass.sock`)
-**Windows:** Named pipes at `\\.\pipe\SentinelPass-<username>` (per-user ACLs + AES-256-GCM encryption)
-**Legacy TCP:** Custom `tcp://...` paths use loopback TCP with AES-256-GCM encryption
+**Unix (Linux/macOS):** Unix domain socket at `$XDG_RUNTIME_DIR/SentinelPass/sentinelpass.sock` (fallback: `<config dir>/PasswordManager/runtime/sentinelpass.sock`) — the `/tmp` fallback is REMOVED (WBS-507): the socket directory is owner-only (0700, created/verified at bind), both daemon and clients REFUSE sockets outside a private runtime directory, and the server verifies the peer's effective UID (`SO_PEERCRED` / `getpeereid`).
+**Windows:** Named pipes at `\\.\pipe\SentinelPass-<username>` (explicit current-user DACL + first-instance squatting protection + `PIPE_REJECT_REMOTE_CLIENTS`, WBS-508; AES-256-GCM framing)
+**Legacy TCP:** REMOVED in Phase 3 (ADR-007 migration) — `tcp://` paths are no longer accepted by the daemon or clients
 **Auth:** All IPC requests require a 32-byte hex token from `~/.config/sentinelpass/ipc.token` (mode 0600). Messages use length-prefixed JSON with an envelope containing the token.
 
 **Origin gate (browser-surface containment):** browser-autofill IPC (`GetCredential`, `GetTotpCode`, `ListDomainCredentials`, `SaveCredential`) is denied for clients that present no origin marker (pre-0.8 hosts) — denied by default since 0.8.x containment. `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily restores the legacy path (removed in 1.0). CLI-tagged origins are denied; only `NativeHost` is allowed. External tools must use `GetExternalSecret`/`SaveSecret` grants.

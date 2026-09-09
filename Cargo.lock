@@ -5005,6 +5005,7 @@ dependencies = [
  "aes-gcm",
  "dirs 5.0.1",
  "hex",
+ "libc",
  "rand 0.8.5",
  "serde",
  "serde_json",

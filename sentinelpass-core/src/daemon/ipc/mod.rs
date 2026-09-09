@@ -60,7 +60,7 @@ pub use server::IpcServer;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     #[cfg(unix)]
     #[tokio::test]
@@ -76,7 +76,12 @@ mod tests {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let short_suffix = &suffix[..12];
         let vault_path = std::env::temp_dir().join(format!("sentinelpass_ipc_{short_suffix}.db"));
-        let socket_path = PathBuf::from(format!("/tmp/sp-{short_suffix}.sock"));
+        let socket_dir = tempfile::TempDir::new().unwrap().keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let socket_path = socket_dir.join("s.sock");
         let allowlist_path =
             std::env::temp_dir().join(format!("sentinelpass_ipc_allowlist_{short_suffix}.json"));
         let password = b"test_password_123!";
@@ -210,6 +215,7 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir(socket_dir);
         let _ = std::fs::remove_file(allowlist_path);
         let _ = std::fs::remove_file(vault_path);
     }
@@ -228,7 +234,12 @@ mod tests {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let short_suffix = &suffix[..12];
         let vault_path = std::env::temp_dir().join(format!("sentinelpass_tok_{short_suffix}.db"));
-        let socket_path = PathBuf::from(format!("/tmp/sp-tok-{short_suffix}.sock"));
+        let socket_dir = tempfile::TempDir::new().unwrap().keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let socket_path = socket_dir.join("s.sock");
         let allowlist_path =
             std::env::temp_dir().join(format!("sentinelpass_tok_allow_{short_suffix}.json"));
         let password = b"test_password_123!";
@@ -362,6 +373,7 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir(socket_dir);
         let _ = std::fs::remove_file(allowlist_path);
         let _ = std::fs::remove_file(vault_path);
     }
@@ -378,7 +390,12 @@ mod tests {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let short_suffix = &suffix[..12];
         let vault_path = std::env::temp_dir().join(format!("sentinelpass_lock_{short_suffix}.db"));
-        let socket_path = PathBuf::from(format!("/tmp/sp-lock-{short_suffix}.sock"));
+        let socket_dir = tempfile::TempDir::new().unwrap().keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let socket_path = socket_dir.join("s.sock");
         let allowlist_path =
             std::env::temp_dir().join(format!("sentinelpass_lock_allow_{short_suffix}.json"));
         let password = b"test_password_123!";
@@ -551,6 +568,7 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir(socket_dir);
         let _ = std::fs::remove_file(allowlist_path);
         let _ = std::fs::remove_file(vault_path);
         let _ = ClientTokenStatus::Legacy;
@@ -571,6 +589,10 @@ mod tests {
         let short_suffix = &suffix[..12];
         let vault_dir = std::env::temp_dir().join(format!("sentinelpass_boot_{short_suffix}"));
         std::fs::create_dir_all(&vault_dir).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&vault_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let vault_path = vault_dir.join("vault.db");
         let socket_path = vault_dir.join("bootstrap.sock");
         let password = b"bootstrap_password_123!";
@@ -688,7 +710,12 @@ mod tests {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let short_suffix = &suffix[..12];
         let vault_path = std::env::temp_dir().join(format!("sentinelpass_live_{short_suffix}.db"));
-        let socket_path = PathBuf::from(format!("/tmp/sp-live-{short_suffix}.sock"));
+        let socket_dir = tempfile::TempDir::new().unwrap().keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let socket_path = socket_dir.join("s.sock");
         let password = b"test_password_123!";
 
         let vault = VaultManager::create(&vault_path, password).unwrap();
@@ -773,6 +800,7 @@ mod tests {
 
         server_task.abort();
         let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir(socket_dir);
         let _ = std::fs::remove_file(&vault_path);
     }
 }
