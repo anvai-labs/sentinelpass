@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use rpassword::prompt_password;
 use sentinelpass_core::{CredentialType, ExternalSecretField, VaultManager};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -879,6 +879,84 @@ pub(crate) fn run_async<T>(future: impl std::future::Future<Output = T>) -> Resu
         .enable_all()
         .build()?;
     Ok(runtime.block_on(future))
+}
+
+/// Run `f` while holding the EXCLUSIVE vault maintenance lock (WBS-503,
+/// ADR-007): offline maintenance (creation, password rotation, backup
+/// restore, recovery) refuses while a live daemon — or any other exclusive
+/// process — owns the vault, and holds the lock itself for the duration of
+/// the operation so the daemon cannot start mid-operation.
+///
+/// The in-memory dev vault (`:memory:`) has no durable state to guard and
+/// runs unlocked.
+pub(crate) fn with_maintenance_lock<T>(
+    vault_path: &Path,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if vault_path.as_os_str() == ":memory:" {
+        return f();
+    }
+    let guard = sentinelpass_core::daemon::try_acquire(vault_path)?;
+    let outcome = f();
+    drop(guard);
+    outcome
+}
+
+#[cfg(test)]
+mod maintenance_lock_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// WBS-503 negative: offline maintenance refuses while the lock is held
+    /// (a live daemon holds it for its lifetime), with the remediation in
+    /// the message.
+    #[test]
+    fn maintenance_refuses_while_exclusively_held() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault.db");
+
+        let held = sentinelpass_core::daemon::try_acquire(&vault).unwrap();
+
+        let err = with_maintenance_lock(&vault, || Ok(()))
+            .expect_err("maintenance must refuse while the daemon owns the vault");
+        let message = err.to_string();
+        assert!(
+            message.contains("daemon") && message.contains("lock"),
+            "refusal must name the owner and the lock: {message}"
+        );
+
+        drop(held);
+        with_maintenance_lock(&vault, || Ok(()))
+            .expect("release must allow the next maintenance run");
+    }
+
+    /// Positive: the operation runs under the lock and the lock is released
+    /// afterwards (even when the operation fails).
+    #[test]
+    fn maintenance_runs_under_lock_and_releases() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault.db");
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_clone = ran.clone();
+        let result: anyhow::Result<()> = with_maintenance_lock(&vault, || {
+            ran_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("operation failed"))
+        });
+        assert!(result.is_err());
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            sentinelpass_core::daemon::try_acquire(&vault).is_ok(),
+            "lock must be released even after a failed operation"
+        );
+    }
+
+    /// The in-memory dev vault bypasses the lock (no durable state).
+    #[test]
+    fn dev_memory_vault_bypasses_lock() {
+        let path = PathBuf::from(":memory:");
+        assert!(with_maintenance_lock(&path, || Ok(42)).unwrap() == 42);
+    }
 }
 
 fn main() -> Result<()> {

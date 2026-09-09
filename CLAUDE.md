@@ -198,6 +198,10 @@ sentinelpass-daemon
 
 **Origin gate (browser-surface containment):** browser-autofill IPC (`GetCredential`, `GetTotpCode`, `ListDomainCredentials`, `SaveCredential`) is denied for clients that present no origin marker (pre-0.8 hosts) — denied by default since 0.8.x containment. `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily restores the legacy path (removed in 1.0). CLI-tagged origins are denied; only `NativeHost` is allowed. External tools must use `GetExternalSecret`/`SaveSecret` grants.
 
+**Daemon authority (Phase 3, ADR-007):** the daemon is the sole live DEK owner and vault writer. UI/CLI vault operations go through the application-service boundary: `IpcMessage::ServiceCall { op: VaultOp }` → `ServiceResult` (see `sentinelpass-protocol/src/service.rs`; served by `LiveVaultService` in `sentinelpass-core/src/daemon/service.rs`, executed on the blocking pool).
+
+**Exclusive maintenance (WBS-501/503):** the daemon holds an advisory lock beside the vault (`<vault>.maint-lock`, 0600) for its lifetime; a second daemon refuses to start. Offline operations (`init`, `passwd`, `backup create/restore`, `recovery setup/recover`) take the same lock and refuse while a daemon owns the vault. A daemon started with NO vault enters maintenance mode: it serves only status/bootstrap (`VaultCreate`) over IPC until creation flips it to live.
+
 ### Sync Protocol
 
 **Auth Header:**

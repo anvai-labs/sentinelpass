@@ -649,3 +649,52 @@ they were granted — no more.
   (no SO_PEERCRED/getpeyeid reliance; macOS cannot expose peer PIDs).
 - Environment-injected secrets cannot be zeroized once a child process owns
   them. `sentinelpass exec` is for trusted children only.
+
+## 11. DAEMON AUTHORITY AND EXCLUSIVE MAINTENANCE (Phase 3, ADR-007)
+
+The daemon is the sole live desktop DEK owner and vault writer (ADR-007,
+WBS-501/503). UI, CLI, and the native host reach vault operations ONLY
+through the application-service IPC boundary (`IpcMessage::ServiceCall` →
+`VaultOp`, served by `sentinelpass_core::daemon::service::LiveVaultService`).
+Origin labels are provenance, never authorization.
+
+### Exclusive maintenance lock (WBS-501/503)
+
+- A persistent advisory lock file lives BESIDE the vault
+  (`<vault>.maint-lock`, 0600; parent directory created 0700 for the
+  bootstrap case) and is locked with `File::try_lock` (flock on Unix,
+  LockFileEx on Windows).
+- The daemon acquires it at startup and holds it for its LIFETIME: a second
+  daemon refuses to start (coexistence refusal), fail-closed.
+- Vault creation/onboarding and offline maintenance (CLI `init`, `passwd`,
+  `backup create`, `backup restore`, `recovery setup`, `recovery recover`)
+  acquire the lock for the duration of the operation and REFUSE while it is
+  held — the daemon cannot race an offline maintenance process and vice
+  versa.
+- During offline maintenance, audit ownership transfers to the exclusive
+  maintenance process: the WBS-415 audit chain is multi-process-append safe
+  (the chain head is re-derived from the file tail under `audit.lock`), so
+  maintenance appends stay verifiable while the daemon — which cannot run —
+  writes nothing.
+- The lock FILE is never unlinked while or after being held (unlinking a
+  held advisory lock reintroduces the two-inodes-behind-one-path race).
+
+### Bootstrap / maintenance mode (no vault yet)
+
+- A daemon started with no vault on disk enters MAINTENANCE MODE instead of
+  exiting: it holds the maintenance lock and serves ONLY `CheckVault`,
+  `Shutdown`, and the bootstrap service ops (`VaultStatus`,
+  `VaultCreate`). Every other op is refused with the typed
+  `maintenance_mode` service error.
+- `VaultCreate` runs the Argon2id KDF and schema creation on the blocking
+  pool, audit-logs `VaultCreated`, loads the created vault as unlocked, and
+  flips the daemon to live mode. Creation against an existing vault is
+  refused (`vault_exists` / `invalid_input` depending on mode).
+
+### Interim compatibility window (flagged, temporary)
+
+Until UI/CLI direct-write paths are gone from shipped binaries (WBS-502),
+the open-time epoch guard plus stale-epoch UPDATE guards remain the interim
+cross-process invariant (ADR-007 migration). The daemon does not claim
+sole-writer authority until then; the daemon-owned summary index (ADR-005)
+tolerates no legacy writers, which bounds the window.
