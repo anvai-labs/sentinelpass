@@ -20,6 +20,9 @@ pub struct IpcClient {
     client_token: Option<String>,
     /// Provenance label for this process (native host / CLI).
     origin: Option<Origin>,
+    /// WBS-505: presented installation-capability secret (the native host
+    /// presents its own; a general client has none).
+    capability: Option<String>,
 }
 
 impl IpcClient {
@@ -36,6 +39,7 @@ impl IpcClient {
             auth_token,
             client_token: None,
             origin: None,
+            capability: None,
         }
     }
 
@@ -47,6 +51,7 @@ impl IpcClient {
             auth_token,
             client_token,
             origin: Some(Origin::Cli),
+            capability: None,
         })
     }
 
@@ -58,7 +63,16 @@ impl IpcClient {
         self
     }
 
-    /// Browser native-messaging host client.
+    /// Attach an installation-capability secret (WBS-505).
+    pub fn with_capability(mut self, capability: Option<String>) -> Self {
+        self.capability = capability;
+        self
+    }
+
+    /// Browser native-messaging host client. Presents the installation
+    /// capability when it has been provisioned (the daemon mints it on its
+    /// first start; a host running before that has none and the daemon's
+    /// legacy window applies).
     pub fn new_for_native_host(socket_path: PathBuf) -> Result<Self> {
         let auth_token = load_ipc_token()?;
         Ok(Self {
@@ -66,6 +80,7 @@ impl IpcClient {
             auth_token,
             client_token: None,
             origin: Some(Origin::NativeHost),
+            capability: crate::token::load_native_host_capability(),
         })
     }
 
@@ -78,6 +93,7 @@ impl IpcClient {
             token: self.auth_token.clone(),
             client_token: self.client_token.clone(),
             origin: self.origin,
+            capability: self.capability.clone(),
             message: msg,
         };
         let msg_bytes = serde_json::to_vec(&envelope)

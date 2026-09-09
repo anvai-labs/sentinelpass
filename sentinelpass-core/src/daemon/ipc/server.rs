@@ -55,6 +55,9 @@ pub struct IpcServer {
     /// WBS-512: bounds concurrent client connections (stalled/slow clients
     /// cannot exhaust daemon tasks).
     client_limiter: Arc<tokio::sync::Semaphore>,
+    /// WBS-504/505: capability store (default location; injectable for
+    /// tests).
+    capability_store_path: PathBuf,
 }
 
 impl IpcServer {
@@ -103,7 +106,14 @@ impl IpcServer {
             shutdown: Arc::new(AtomicBool::new(false)),
             mode: Arc::new(AtomicU8::new(MODE_LIVE)),
             client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
+            capability_store_path: crate::daemon::capabilities::default_store_path(),
         }
+    }
+
+    /// Override the capability store path (tests / embedders).
+    pub fn with_capability_store_path(mut self, path: PathBuf) -> Self {
+        self.capability_store_path = path;
+        self
     }
 
     /// Handle to observe (or trigger) server shutdown from outside the accept loop.
@@ -353,37 +363,62 @@ impl IpcServer {
     ///   running a pre-0.8 native host can temporarily restore legacy
     ///   behavior with SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1; the escape
     ///   hatch exists only so upgrades are not forced and is removed in 1.0.
-    fn browser_surface_allowed(origin: Option<Origin>) -> bool {
-        match origin {
-            Some(Origin::NativeHost) => true,
-            Some(Origin::Cli) => false,
-            None => {
-                let allowed = std::env::var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS")
-                    .map(|v| v == "1")
-                    .unwrap_or(false);
-                if !allowed {
-                    // The deny itself is correct; the warn exists so a
-                    // pre-0.8 native host after a daemon-only upgrade is
-                    // DEBUGGABLE (review finding: the silent deny was
-                    // indistinguishable from an empty vault).
-                    warn!(
-                        "denied browser-surface request from an originless (pre-0.8) \
-                         client — upgrade sentinelpass-host, or set \
-                         SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 to temporarily \
-                         re-enable the legacy path (removed in 1.0)"
-                    );
-                }
-                allowed
-            }
-        }
+    fn browser_surface_allowed(&self, origin: Option<Origin>, capability: Option<&str>) -> bool {
+        let capabilities = crate::daemon::capabilities::InstallationCapabilities::load_from_path(
+            &self.capability_store_path,
+        );
+        let store = capabilities.unwrap_or_default();
+        Self::browser_surface_allowed_with_store(origin, capability, &store)
     }
 
-    fn warn_originless_browser_surface(&self) {
-        warn!(
-            "Browser-surface request without origin marker allowed via \
-             SENTINELPASS_ALLOW_LEGACY_ORIGINLESS (legacy pre-0.8 host). \
-             Upgrade sentinelpass-host; this escape hatch is removed in 1.0."
-        );
+    /// Pure decision core (testable without the default store path).
+    fn browser_surface_allowed_with_store(
+        origin: Option<Origin>,
+        capability: Option<&str>,
+        capabilities: &crate::daemon::capabilities::InstallationCapabilities,
+    ) -> bool {
+        // WBS-504/505: the installation capability is the authority. The
+        // origin label stays provenance-only and can never authorize.
+        if capabilities.verify(
+            crate::daemon::capabilities::NATIVE_HOST_AUDIENCE,
+            capability,
+        ) {
+            return true;
+        }
+
+        // Legacy migration windows (both announced; both removed in 1.0):
+        let legacy_originless = std::env::var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let legacy_self_asserted = std::env::var("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        match origin {
+            Some(Origin::NativeHost) if legacy_self_asserted => {
+                warn!(
+                    "allowed SELF-ASSERTED NativeHost origin via \
+                     SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN=1 (pre-capability host; \
+                     upgrade sentinelpass-host — removed in 1.0)"
+                );
+                true
+            }
+            None if legacy_originless => {
+                warn!(
+                    "allowed ORIGINLESS browser-surface request via \
+                     SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 (pre-0.8 host; upgrade \
+                     sentinelpass-host — removed in 1.0)"
+                );
+                true
+            }
+            _ => {
+                warn!(
+                    "denied browser-surface request without a valid native-host \
+                     capability (audience/native-host presentation required; upgrade \
+                     sentinelpass-host)"
+                );
+                false
+            }
+        }
     }
 
     /// Handle an IPC envelope (auth token was already verified by the caller).
@@ -646,16 +681,13 @@ impl IpcServer {
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::GetCredentialResponse {
                         username: None,
                         password: None,
                         title: None,
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -729,14 +761,11 @@ impl IpcServer {
                     base_domain
                 );
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::ListDomainCredentialsResponse {
                         credentials: Vec::new(),
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -773,15 +802,12 @@ impl IpcServer {
             IpcMessage::GetTotpCode { domain } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::GetTotpCodeResponse {
                         code: None,
                         seconds_remaining: None,
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -827,7 +853,7 @@ impl IpcServer {
                     domain, username
                 );
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::SaveCredentialResponse {
                         success: false,
                         error: Some(
@@ -835,9 +861,6 @@ impl IpcServer {
                         ),
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -1242,56 +1265,130 @@ impl IpcServer {
 #[cfg(test)]
 mod browser_surface_gate_tests {
     use super::*;
+    use crate::daemon::capabilities::InstallationCapabilities;
     use sentinelpass_protocol::Origin;
 
-    #[test]
-    fn native_host_origin_is_allowed() {
-        assert!(IpcServer::browser_surface_allowed(Some(Origin::NativeHost)));
+    fn store_with_native_host() -> InstallationCapabilities {
+        let mut store = InstallationCapabilities::default();
+        store
+            .capabilities
+            .push(crate::daemon::capabilities::Capability {
+                audience: crate::daemon::capabilities::NATIVE_HOST_AUDIENCE.to_string(),
+                secret_hash: {
+                    use sha2::Digest;
+                    hex::encode(sha2::Sha256::digest(b"valid-host-capability-secret"))
+                },
+                issued_at: 0,
+                expires_at: None,
+                nonce: "test-nonce".to_string(),
+            });
+        store
     }
 
-    #[test]
-    fn cli_origin_is_denied() {
-        assert!(!IpcServer::browser_surface_allowed(Some(Origin::Cli)));
+    /// Env is process-global: every env-touching test holds this lock for
+    /// its whole body (same pattern as the pre-existing gate tests).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 
-    /// Originless (pre-0.8 host) requests are denied by default; the explicit
-    /// legacy escape hatch restores them, and only the exact value "1" counts.
-    /// Env mutations are sequential inside this one test to avoid cross-test
-    /// races on the process-global environment.
+    /// WBS-505 positive: a valid native-host capability authorizes the
+    /// browser surface regardless of the (forgeable) origin label.
     #[test]
-    fn originless_denied_by_default_with_explicit_opt_in() {
-        std::env::remove_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS");
-        assert!(
-            !IpcServer::browser_surface_allowed(None),
-            "originless browser-surface request must be denied by default"
-        );
+    fn valid_capability_authorizes_browser_surface() {
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+        set_env("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", None);
+        let store = store_with_native_host();
+        assert!(IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            Some("valid-host-capability-secret"),
+            &store,
+        ));
+    }
 
-        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "1");
-        assert!(
-            IpcServer::browser_surface_allowed(None),
-            "SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 must restore the legacy path"
-        );
+    /// WBS-505 negative (the phase gate): a GENERAL client claiming
+    /// NativeHost — origin label present, capability material absent — is
+    /// DENIED. Origin is provenance, never authorization.
+    #[test]
+    fn native_host_claim_without_capability_is_denied() {
+        let _env = ENV_LOCK.lock().unwrap();
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+        set_env("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", None);
+        let store = store_with_native_host();
 
-        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "0");
-        assert!(
-            !IpcServer::browser_surface_allowed(None),
-            "only the exact value 1 opts in"
-        );
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
+        // Wrong secret material is denied too.
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            Some("attacker-guess"),
+            &store,
+        ));
+        // Originless with a guess is denied.
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            None,
+            Some("attacker-guess"),
+            &store,
+        ));
+        // A CLI-LABELED request presenting VALID material is allowed: the
+        // origin label is provenance and cannot authorize OR de-authorize —
+        // possession of the capability material is the authority (a
+        // "CLI" label is trivially droppable by an attacker, so consulting
+        // it would be security theater). What the capability model removes
+        // is the AMBIENT grant: without the material, every claim fails.
+        assert!(IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::Cli),
+            Some("valid-host-capability-secret"),
+            &store,
+        ));
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::Cli),
+            None,
+            &store,
+        ));
+    }
 
-        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "yes");
-        assert!(!IpcServer::browser_surface_allowed(None));
+    /// The legacy self-asserted-origin window requires BOTH the exact env
+    /// value and the NativeHost label; it is announced and temporary.
+    #[test]
+    fn legacy_self_asserted_origin_window_is_explicit_opt_in() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let store = store_with_native_host();
 
-        std::env::remove_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS");
-        assert!(!IpcServer::browser_surface_allowed(None));
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
 
-        // The pre-0.9 opt-in-deny variable must not re-enable originless
-        // access (kept in THIS test: both tests mutated the process-global
-        // environment and raced under the parallel harness — review finding).
-        std::env::set_var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL", "0");
-        assert!(
-            !IpcServer::browser_surface_allowed(None),
-            "old SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=0 must not re-enable originless access"
-        );
-        std::env::remove_var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL");
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", Some("1"));
+        assert!(IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
+
+        // Only the exact value "1" opts in.
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", Some("yes"));
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+
+        // The OLD originless window stays independent and still denied by
+        // default (env cleaned above).
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            None, None, &store
+        ));
     }
 }

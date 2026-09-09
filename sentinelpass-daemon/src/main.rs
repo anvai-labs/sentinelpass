@@ -67,6 +67,14 @@ async fn main() -> Result<()> {
 
     let maintenance_mode = !vault_path.exists();
 
+    // WBS-505: provision the native-host installation capability on every
+    // start (mint-once; the host presents the 0600 secret file and the
+    // daemon verifies it for browser-surface operations).
+    if let Err(e) = sentinelpass_core::daemon::ensure_native_host_capability() {
+        error!("Native-host capability provisioning failed: {}", e);
+        return Ok(());
+    }
+
     // Create DaemonVault (works for the bootstrap case: the path is only
     // touched once a vault exists — maintenance mode serves creation).
     let vault = DaemonVault::new(Some(vault_path.clone()), DEFAULT_INACTIVITY_TIMEOUT)?;
