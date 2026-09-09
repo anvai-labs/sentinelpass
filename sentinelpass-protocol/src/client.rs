@@ -69,81 +69,58 @@ impl IpcClient {
         })
     }
 
-    /// Send a message and wait for response
-    #[allow(unused_variables)]
+    /// Send a message and wait for response. The connection negotiates the
+    /// v1 SECURED session (WBS-509/510/511) before the envelope is sent:
+    /// HKDF directional keys over the auth token + session randoms, AAD-
+    /// bound frames, strictly-increasing counters, and bounded reads.
     pub async fn send(&self, msg: IpcMessage) -> Result<IpcMessage> {
+        let envelope = IpcEnvelope {
+            token: self.auth_token.clone(),
+            client_token: self.client_token.clone(),
+            origin: self.origin,
+            message: msg,
+        };
+        let msg_bytes = serde_json::to_vec(&envelope)
+            .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
+
+        // --- platform connect ---------------------------------------------
         #[cfg(unix)]
-        {
-            // Use Unix socket transport
-            let mut conn =
-                crate::transport::unix::UnixSocketConnection::connect(self.socket_path.clone())
-                    .await
-                    .map_err(|e| {
-                        ProtocolError::Ipc(format!("Failed to connect to daemon: {}", e))
-                    })?;
-
-            let envelope = IpcEnvelope {
-                token: self.auth_token.clone(),
-                client_token: self.client_token.clone(),
-                origin: self.origin,
-                message: msg,
-            };
-            let msg_bytes = serde_json::to_vec(&envelope)
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
-
-            conn.write_message(&msg_bytes)
+        let transport_conn = {
+            crate::transport::unix::UnixSocketConnection::connect(self.socket_path.clone())
                 .await
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to write message: {}", e)))?;
+                .map_err(|e| ProtocolError::Ipc(format!("Failed to connect to daemon: {}", e)))?
+        };
 
-            // Read response
-            let buffer = conn
-                .read_message()
-                .await
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to read response: {}", e)))?;
-
-            serde_json::from_slice::<IpcMessage>(&buffer)
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to parse response: {}", e)))
-        }
         #[cfg(windows)]
-        {
-            // Named pipes only: the legacy tcp:// loopback branch was removed
-            // in Phase 3 (ADR-007 migration).
+        let transport_conn = {
+            // Named pipes only: the legacy tcp:// loopback branch was
+            // removed in Phase 3 (ADR-007 migration).
             let pipe_name = crate::windows_frame::windows_named_pipe_path();
             debug!("Connecting to named pipe: {}", pipe_name);
-
-            let mut conn = crate::transport::windows::connect_named_pipe(&pipe_name, 3000)
+            crate::transport::windows::connect_named_pipe(&pipe_name, 3000)
                 .await
                 .map_err(|e| {
                     ProtocolError::Ipc(format!("Failed to connect to named pipe: {}", e))
-                })?;
+                })?
+        };
 
-            let envelope = IpcEnvelope {
-                token: self.auth_token.clone(),
-                client_token: self.client_token.clone(),
-                origin: self.origin,
-                message: msg,
-            };
-            let msg_bytes = serde_json::to_vec(&envelope)
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
-            let msg_bytes =
-                crate::windows_frame::encrypt_windows_ipc_frame(&self.auth_token, &msg_bytes)?;
+        // --- session negotiation + exchange ---------------------------------
+        let conn = crate::connection::TransportConnection::from(transport_conn);
+        let mut ipc = crate::connection::IpcConnection::connect_client(conn, &self.auth_token)
+            .await
+            .map_err(|e| ProtocolError::Ipc(format!("Session negotiation failed: {}", e)))?;
 
-            conn.write_message(&msg_bytes)
-                .await
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to write message: {}", e)))?;
+        ipc.send_frame(&msg_bytes)
+            .await
+            .map_err(|e| ProtocolError::Ipc(format!("Failed to write message: {}", e)))?;
 
-            // Read response
-            let buffer = conn
-                .read_message()
-                .await
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to read response: {}", e)))?;
+        let buffer = ipc
+            .recv_frame()
+            .await
+            .map_err(|e| ProtocolError::Ipc(format!("Failed to read response: {}", e)))?;
 
-            let buffer =
-                crate::windows_frame::decrypt_windows_ipc_frame(&self.auth_token, &buffer)?;
-
-            serde_json::from_slice::<IpcMessage>(&buffer)
-                .map_err(|e| ProtocolError::Ipc(format!("Failed to parse response: {}", e)))
-        }
+        serde_json::from_slice::<IpcMessage>(&buffer)
+            .map_err(|e| ProtocolError::Ipc(format!("Failed to parse response: {}", e)))
     }
 
     /// One application-service call (WBS-408): send `ServiceCall { op }` and

@@ -697,6 +697,99 @@ mod tests {
         let _ = std::fs::remove_dir_all(&vault_dir);
     }
 
+    /// WBS-512 evidence: a STALLED client (connected, sends nothing) no
+    /// longer wedges the daemon — another client completes normally because
+    /// connections are handled on bounded concurrent tasks with deadlines.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_client_does_not_wedge_other_clients() {
+        use crate::daemon::{DaemonVault, IpcServer};
+        use crate::VaultManager;
+        use sentinelpass_protocol::connection::{IpcConnection, TransportConnection};
+        use std::sync::Arc;
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let short_suffix = &suffix[..12];
+        let vault_path = std::env::temp_dir().join(format!("sentinelpass_stall_{short_suffix}.db"));
+        let socket_dir = tempfile::TempDir::new().unwrap().keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let socket_path = socket_dir.join("s.sock");
+        let password = b"test_password_123!";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        drop(vault);
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        daemon_vault.unlock(password).await.unwrap();
+        let server = Arc::new(IpcServer::new(
+            socket_path.clone(),
+            daemon_vault,
+            "stall-token".to_string(),
+        ));
+        let server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            assert!(!server_task.is_finished());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The stalled client: connects and sends NOTHING.
+        let _stalled = sentinelpass_protocol::UnixSocketConnection::connect(socket_path.clone())
+            .await
+            .unwrap();
+
+        // A well-behaved client still completes promptly.
+        let good_client = IpcClient::new_with_token(socket_path.clone(), "stall-token".to_string());
+        let started = std::time::Instant::now();
+        let response = good_client.send(IpcMessage::CheckVault).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "daemon must serve other clients while one is stalled (took {elapsed:?})"
+        );
+        assert!(matches!(
+            response,
+            IpcMessage::VaultStatusResponse { unlocked: true, .. }
+        ));
+
+        // The session negotiation works for a full client exchange.
+        let raw = sentinelpass_protocol::UnixSocketConnection::connect(socket_path.clone())
+            .await
+            .unwrap();
+        let mut ipc = IpcConnection::connect_client(TransportConnection::Unix(raw), "stall-token")
+            .await
+            .unwrap();
+        // Frames carry full envelopes (token + message), like IpcClient.
+        let envelope = IpcEnvelope {
+            token: "stall-token".to_string(),
+            client_token: None,
+            origin: None,
+            message: IpcMessage::CheckVault,
+        };
+        ipc.send_frame(serde_json::to_vec(&envelope).unwrap().as_slice())
+            .await
+            .unwrap();
+        let response_bytes = ipc.recv_frame().await.unwrap();
+        let response: IpcMessage = serde_json::from_slice(&response_bytes).unwrap();
+        assert!(matches!(
+            response,
+            IpcMessage::VaultStatusResponse { unlocked: true, .. }
+        ));
+
+        server_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir(&socket_dir);
+        let _ = std::fs::remove_file(&vault_path);
+    }
+
     /// Negative: a LIVE daemon refuses bootstrap creation (the vault already
     /// exists; creation is a maintenance-only op).
     #[cfg(unix)]

@@ -117,7 +117,9 @@ async fn main() -> Result<()> {
         ipc_server.enter_maintenance_mode();
     }
 
-    // Spawn IPC server in background
+    // Spawn IPC server in background (WBS-512: run takes Arc<Self> so it
+    // can spawn bounded per-connection tasks).
+    let ipc_server = Arc::new(ipc_server);
     let ipc_handle = tokio::spawn(async move {
         info!("IPC server starting at {:?}", ipc_socket_path);
         if let Err(e) = ipc_server.run().await {
