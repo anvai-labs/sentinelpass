@@ -211,8 +211,18 @@ impl IpcServer {
         {
             // Named pipes only: the legacy tcp:// loopback branch was
             // removed in Phase 3 (ADR-007 migration).
+            // Honor an explicit \\.\pipe\ path (tests, custom deploys);
+            // default to the per-user pipe name otherwise.
+            let configured_pipe_path = {
+                let as_str = self.socket_path.to_string_lossy().to_string();
+                if as_str.starts_with(r"\\.\pipe\") {
+                    Some(as_str)
+                } else {
+                    Some(windows_named_pipe_path())
+                }
+            };
             let transport = WindowsNamedPipeTransport::new(TransportConfig {
-                windows_pipe_path: Some(windows_named_pipe_path()),
+                windows_pipe_path: configured_pipe_path,
                 ..Default::default()
             })
             .map_err(|e| {

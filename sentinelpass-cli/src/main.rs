@@ -1502,7 +1502,15 @@ mod reroute_tests {
             if socket_path.exists() {
                 break;
             }
-            assert!(!server_task.is_finished());
+            if server_task.is_finished() {
+                // Surface run()'s startup error instead of asserting blind —
+                // a silently-dead server gives no diagnosis.
+                match (&mut server_task).await {
+                    Ok(Err(e)) => panic!("IPC server exited during startup: {e}"),
+                    Ok(Ok(())) => panic!("IPC server exited cleanly during startup"),
+                    Err(join) => panic!("IPC server task panicked: {join}"),
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
