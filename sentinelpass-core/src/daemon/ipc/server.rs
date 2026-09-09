@@ -1215,9 +1215,11 @@ impl IpcServer {
                 )),
                 Some(vault) => {
                     // `spawn_blocking` needs 'static: DaemonVault hands out an
-                    // Arc'd manager (and holding the async-mutex slot for the
-                    // duration serializes vault ops — one blocking op at a time
-                    // per vault, the ADR-004 rev 5 property).
+                    // Arc'd manager. Serialization of vault ops comes from
+                    // VaultManager's internal db mutex (review F5: the Arc
+                    // clone means concurrent service tasks DO run in
+                    // parallel; SQLite access — and therefore one write at a
+                    // time — is serialized inside the manager).
                     let joined = tokio::task::spawn_blocking(move || {
                         LiveVaultService::new(&vault).execute(&op)
                     })

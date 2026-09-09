@@ -195,8 +195,12 @@ pub struct ServiceBiometricStatus {
 /// This is the single call shape for vault operations. Most ops execute
 /// against the live vault on the blocking pool via
 /// `sentinelpass_core::daemon::service::LiveVaultService`; the daemon's
-/// async dispatcher owns the relay-network ops (`SyncNow`, `SyncPairStart`,
-/// `SyncPairJoin`) because they await HTTP.
+/// async dispatcher owns `SyncNow` (relay HTTP). `SyncPairStart` /
+/// `SyncPairJoin` are NOT served by the daemon in this release: pairing is
+/// an exclusive OFFLINE maintenance flow run by the CLI under the
+/// maintenance lock (pair-join creates local vaults — creation the daemon's
+/// live surface must not perform); over IPC they fail with the typed
+/// `op_not_served` code.
 ///
 /// `Debug` is hand-written and redacts every field: this enum carries
 /// master passwords, TOTP seeds, and private keys, and derived Debug would
@@ -341,11 +345,15 @@ pub enum VaultOp {
     /// relay HTTP, so the daemon's async dispatcher executes this op.
     SyncNow,
 
-    // --- sync pairing (daemon-async: relay network I/O) -----------------------
-    /// Upload this vault's bootstrap under a fresh pairing code.
+    // --- sync pairing (NOT served by the daemon; offline CLI maintenance) ------
+    /// Upload this vault's bootstrap under a fresh pairing code. Not served
+    /// over IPC in this release — the CLI runs pairing as exclusive offline
+    /// maintenance under the vault lock.
     SyncPairStart,
     /// Fetch a bootstrap with a pairing code and adopt it (creating the
-    /// local vault when none exists — daemon bootstrap path).
+    /// local vault when none exists). Not served over IPC in this release —
+    /// the CLI runs pairing as exclusive offline maintenance under the
+    /// vault lock.
     SyncPairJoin {
         relay_url: String,
         code: String,
@@ -363,7 +371,11 @@ impl std::fmt::Debug for VaultOp {
 }
 
 /// Successful outcome of one [`VaultOp`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` prints the VARIANT NAME ONLY: `TotpCode` carries a live
+/// two-factor code and `Entry`/`Entries` carry plaintext secrets, and
+/// derived Debug would render them into any log line or panic payload.
+#[derive(Clone, Serialize, Deserialize)]
 pub enum VaultOpResult {
     Ok,
     EntryId(i64),
@@ -389,6 +401,36 @@ pub enum VaultOpResult {
     Biometric(ServiceBiometricStatus),
     SyncDevices(Vec<ServiceSyncDeviceInfo>),
     SyncStatus(ServiceSyncStatus),
+}
+
+impl std::fmt::Debug for VaultOpResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.kind())
+    }
+}
+
+impl VaultOpResult {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Ok => "VaultOpResult::Ok",
+            Self::EntryId(_) => "VaultOpResult::EntryId",
+            Self::Entry(_) => "VaultOpResult::Entry",
+            Self::EntryList(_) => "VaultOpResult::EntryList",
+            Self::Entries(_) => "VaultOpResult::Entries",
+            Self::Imported(_) => "VaultOpResult::Imported",
+            Self::TotpCode { .. } => "VaultOpResult::TotpCode",
+            Self::TotpMetadata(_) => "VaultOpResult::TotpMetadata",
+            Self::SshKey(_) => "VaultOpResult::SshKey",
+            Self::SshKeyList(_) => "VaultOpResult::SshKeyList",
+            Self::Entity(_) => "VaultOpResult::Entity",
+            Self::EntityList(_) => "VaultOpResult::EntityList",
+            Self::Report(_) => "VaultOpResult::Report",
+            Self::Status(_) => "VaultOpResult::Status",
+            Self::Biometric(_) => "VaultOpResult::Biometric",
+            Self::SyncDevices(_) => "VaultOpResult::SyncDevices",
+            Self::SyncStatus(_) => "VaultOpResult::SyncStatus",
+        }
+    }
 }
 
 /// Typed service error. `code` is a stable machine-readable label; `message`
@@ -568,5 +610,17 @@ mod tests {
         };
         let rendered = format!("{key:?}");
         assert!(!rendered.contains("private-material"), "{rendered}");
+
+        // The result enum must not leak live TOTP codes or entry secrets.
+        let result = VaultOpResult::TotpCode {
+            code: "123456".to_string(),
+            seconds_remaining: 30,
+        };
+        let rendered = format!("{result:?}");
+        assert!(!rendered.contains("123456"), "{rendered}");
+
+        let result = VaultOpResult::Entry(Box::new(entry));
+        let rendered = format!("{result:?}");
+        assert!(!rendered.contains("plain-secret-value"), "{rendered}");
     }
 }

@@ -11,7 +11,7 @@ SentinelPass is a secure, local-first password manager written in Rust with a Ta
 ## Development Environment
 
 **Prerequisites:**
-- Rust 1.70+
+- Rust 1.89+ (workspace `rust-version`; the maintenance lock uses `File::try_lock`)
 - Node.js 20+
 - npm 10+
 

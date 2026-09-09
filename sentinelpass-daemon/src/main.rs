@@ -59,7 +59,9 @@ async fn main() -> Result<()> {
         Ok(guard) => guard,
         Err(e) => {
             error!("Refusing to start: {}", e);
-            return Ok(());
+            // Non-zero exit: a refusal must never look like a clean start to
+            // supervisors waiting on the process (review F4).
+            std::process::exit(1);
         }
     };
 

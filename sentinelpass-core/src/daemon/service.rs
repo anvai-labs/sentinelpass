@@ -40,6 +40,9 @@ pub mod codes {
     pub const MAINTENANCE_MODE: &str = "maintenance_mode";
     /// Bootstrap create refused because a vault already exists.
     pub const VAULT_EXISTS: &str = "vault_exists";
+    /// Op exists in the contract but is intentionally not served by the
+    /// daemon (pairing is exclusive offline CLI maintenance in this release).
+    pub const OP_NOT_SERVED: &str = "op_not_served";
 }
 
 impl From<PasswordManagerError> for ServiceError {
@@ -85,6 +88,16 @@ impl<'a> LiveVaultService<'a> {
 
 impl VaultApplicationService for LiveVaultService<'_> {
     fn execute(&self, op: &VaultOp) -> std::result::Result<VaultOpResult, ServiceError> {
+        // Pairing is exclusive offline CLI maintenance in this release
+        // (review F3: the contract previously advertised daemon dispatch
+        // that did not exist). Fail with the typed code, never silently.
+        if matches!(op, VaultOp::SyncPairStart | VaultOp::SyncPairJoin { .. }) {
+            return Err(ServiceError::new(
+                codes::OP_NOT_SERVED,
+                "pairing is exclusive offline maintenance (CLI under the vault lock); \
+                 the daemon does not serve it over IPC",
+            ));
+        }
         self.execute_op(op).map_err(ServiceError::from)
     }
 }
@@ -428,15 +441,20 @@ impl LiveVaultService<'_> {
                 }))
             }
 
-            // Relay network I/O — the daemon's async dispatcher owns these
-            // variants (see `daemon/ipc/server.rs`); the blocking executor
-            // never runs them.
-            VaultOp::SyncNow | VaultOp::SyncPairStart | VaultOp::SyncPairJoin { .. } => {
-                Err(PasswordManagerError::NotImplemented(
-                    "this op awaits relay HTTP and is executed by the daemon's async dispatcher"
-                        .to_string(),
-                ))
-            }
+            // Relay network I/O — the daemon's async dispatcher owns
+            // `SyncNow` (see `daemon/ipc/server.rs`); the blocking executor
+            // never runs it. Pairing never reaches this match (intercepted
+            // in `execute` with the typed op_not_served code).
+            VaultOp::SyncNow => Err(PasswordManagerError::NotImplemented(
+                "SyncNow awaits relay HTTP and is executed by the daemon's async dispatcher"
+                    .to_string(),
+            )),
+
+            // Unreachable via `execute` (intercepted above) but the match
+            // must stay exhaustive.
+            VaultOp::SyncPairStart | VaultOp::SyncPairJoin { .. } => Err(
+                PasswordManagerError::NotImplemented("pairing is not daemon-served".to_string()),
+            ),
         }
     }
 }

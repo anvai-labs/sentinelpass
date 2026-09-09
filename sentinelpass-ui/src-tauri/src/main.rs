@@ -608,6 +608,12 @@ fn ensure_native_host_registered() -> Result<(), String> {
 }
 
 // Command: Create vault
+//
+// Stage-2 review F2: creation is EXCLUSIVE offline onboarding — the UI
+// takes the maintenance lock so it can never race a live daemon (or the
+// daemon's own maintenance-mode bootstrap) while creating the vault. WBS-502
+// completes the daemon-authority story; until then this is the flagged,
+// lock-guarded creation path.
 #[tauri::command]
 async fn create_vault(
     master_password: String,
@@ -623,6 +629,10 @@ async fn create_vault(
     // Ensure data directory exists
     sentinelpass_core::ensure_data_dir()
         .map_err(|e| format!("Failed to create data directory: {}", e))?;
+
+    // Exclusive onboarding: refuse while a daemon owns the vault location.
+    let _lock = sentinelpass_core::daemon::try_acquire(&vault_path)
+        .map_err(|e| format!("Cannot create vault: {}", e))?;
 
     match VaultManager::create(&vault_path, master_password.as_bytes()) {
         Ok(vault) => {

@@ -9,6 +9,22 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
+    // Pairing flows are EXCLUSIVE offline operations (stage-2 review F1):
+    // pair-start opens and reads the vault directly, and pair-join CREATES a
+    // local vault on a fresh machine — creation the epoch guard cannot
+    // protect (there is no vault/epoch yet). They must hold the exclusive
+    // maintenance lock so a live daemon (or a concurrent create) cannot own
+    // or race the vault while they run.
+    if matches!(
+        cmd,
+        crate::SyncCommands::PairStart | crate::SyncCommands::PairJoin { .. }
+    ) {
+        let guard = sentinelpass_core::daemon::try_acquire(&vault_path)?;
+        let result = handle_pairing(vault_path, cmd);
+        drop(guard);
+        return result;
+    }
+
     match cmd {
         crate::SyncCommands::Init {
             ref relay_url,
@@ -172,6 +188,45 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             println!("Run 'sentinelpass sync now' to propagate to the relay server.");
         }
 
+        crate::SyncCommands::Disable => {
+            let master_password = crate::prompt_master_password(false)?;
+            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+
+            let status = vault.get_sync_status()?;
+            if !status.enabled {
+                println!("Sync is already disabled.");
+                return Ok(());
+            }
+
+            print!("Disable sync? This will not delete remote data. [y/N]: ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+            if !confirmation.trim().to_lowercase().starts_with('y') {
+                println!("Cancelled");
+                return Ok(());
+            }
+
+            vault.disable_sync()?;
+
+            println!("Sync disabled. Device identity and vault ID are preserved.");
+            println!("Use 'sentinelpass sync init' to re-enable.");
+        }
+
+        // Intercepted above and handled by handle_pairing under the
+        // maintenance lock.
+        crate::SyncCommands::PairStart | crate::SyncCommands::PairJoin { .. } => {
+            unreachable!("pairing commands are handled under the maintenance lock")
+        }
+    }
+
+    Ok(())
+}
+
+/// Pairing flows, run while HOLDING the exclusive maintenance lock.
+fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
+    match cmd {
         crate::SyncCommands::PairStart => {
             let master_password = crate::prompt_master_password(false)?;
             let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
@@ -335,31 +390,7 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             println!("Next: run 'sentinelpass sync now' once sync transport is fully implemented.");
         }
 
-        crate::SyncCommands::Disable => {
-            let master_password = crate::prompt_master_password(false)?;
-            let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-
-            let status = vault.get_sync_status()?;
-            if !status.enabled {
-                println!("Sync is already disabled.");
-                return Ok(());
-            }
-
-            print!("Disable sync? This will not delete remote data. [y/N]: ");
-            use std::io::Write;
-            std::io::stdout().flush()?;
-            let mut confirmation = String::new();
-            std::io::stdin().read_line(&mut confirmation)?;
-            if !confirmation.trim().to_lowercase().starts_with('y') {
-                println!("Cancelled");
-                return Ok(());
-            }
-
-            vault.disable_sync()?;
-
-            println!("Sync disabled. Device identity and vault ID are preserved.");
-            println!("Use 'sentinelpass sync init' to re-enable.");
-        }
+        _ => unreachable!("handle_pairing is only called for pairing commands"),
     }
 
     Ok(())
