@@ -1464,6 +1464,15 @@ mod reroute_tests {
 
         let tmp = tempfile::TempDir::new().unwrap();
         let vault_path = tmp.path().join("vault.db");
+        // Windows transports are NAMED PIPES, not socket files — a temp-dir
+        // path is unbindable there (the server task exits instantly). Use a
+        // unique pipe name on Windows, the private-dir socket on Unix.
+        #[cfg(windows)]
+        let socket_path = std::path::PathBuf::from(format!(
+            r"\\.\pipe\SentinelPass-cli-test-{}",
+            std::process::id()
+        ));
+        #[cfg(not(windows))]
         let socket_path = tmp.path().join("test.sock");
         // The socket must live in a private (0700) dir (WBS-507); tempfile
         // dirs can be 0755 on some platforms. Unix-only: on Windows the
