@@ -959,12 +959,29 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
 - **WBS-704 — Privacy cover before visibility loss.** TD-CLIENT-02. Est 2d.
 - **WBS-705 — Reauthentication for sensitive ops.** TD-UX-01 (op half). Est 2d.
 - **WBS-706 — Structured URL parsing; HTTP warn/refuse.** TD-CLIENT-06 (URL half). Est 1.5d.
+  **Status:** Done (2026-09-08, PR #126) — extension save paths use WHATWG
+  structured parsing (IDN→punycode, ports/userinfo/IPv6; unparseable values
+  refused, not stored raw); plain-HTTP saves warn with explicit consent on
+  all three save surfaces (25 test cases; ~60 adversarial inputs, zero
+  wrong-host results). Hard default-deny autofill remains WBS-711.
 - **WBS-707 — Minimize Tauri capabilities + CSP.** SR-CLIENT-002, TD-CLIENT-03. Est 2d.
+  **Status:** Done (2026-09-08, PR #126) — grep-evidence capability audit:
+  tauri-plugin-shell removed entirely (dependency, registration, config),
+  unused dialog/clipboard grants dropped, capabilities single-sourced in
+  default.json, CSP script-src 'self' with Tauri IPC origins; 18-case
+  negative gate test tripwires capability/CSP regressions in CI.
 - **WBS-708 — Remove production debug-unlock artifacts.** Est 1d.
   **Status:** Done (2026-09-07, PR #107) — debug-unlock paths removed from
   production wiring; no plaintext unlock shortcut remains (stream C verification
   + gate review).
 - **WBS-709 — Native expiring/sensitive clipboard.** Est 1.5d.
+  **Status:** Done (2026-09-08, PR #126) — secrets copy Rust-side (arboard)
+  with native sensitive markers (macOS ConcealedType, Windows
+  exclude-from-monitoring); expiry (30s, re-armed) clears only if the
+  clipboard still hashes the registered secret; vault-lock and app-exit
+  clear hooks; the clipboard-manager plugin and its IPC surface are
+  removed entirely. Known residual (documented): frontend-timed expiry is
+  throttled in hidden webviews — backend timer is the tracked follow-up.
 - **WBS-710 — Windows Hello-bound key release.** TD-CLIENT-04, SR-CLIENT (biometric
   parity). Est 3d.
 - **WBS-711 — Default-deny HTTP autofill.** SR-CLIENT-003, SR-EXT-002, TD-CLIENT-05.
