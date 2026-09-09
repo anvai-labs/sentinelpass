@@ -1494,7 +1494,7 @@ mod reroute_tests {
             daemon_vault,
             "reroute-token".to_string(),
         ));
-        let server_task = tokio::spawn({
+        let mut server_task = tokio::spawn({
             let server = server.clone();
             async move { server.run().await }
         });
