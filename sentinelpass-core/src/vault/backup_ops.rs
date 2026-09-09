@@ -2665,7 +2665,9 @@ mod tests {
         // The SR-DATA-003 Refuse policy still applies to a corrupt live
         // file (InvalidInput propagates — restore must not launder a
         // permission violation), so the user repairs the mode first, as
-        // the refusal instructs.
+        // the refusal instructs. Unix-only: on Windows the mode policy
+        // is a documented no-op, so nothing to repair.
+        #[cfg(unix)]
         std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
 
