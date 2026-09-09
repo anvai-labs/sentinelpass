@@ -56,7 +56,23 @@ runs:
       if: runner.os == 'Linux' && inputs.linux-deps == 'true'
       shell: bash
       run: |
-        sudo apt-get update
+        # Mirror drift (release-file hash mismatch mid-sync) fails apt
+        # transiently; retry the index refresh with backoff, and let apt
+        # itself retry per-download.
+        for attempt in 1 2 3; do
+          if sudo apt-get \
+            -o Acquire::Retries=5 \
+            -o Acquire::Check-Valid-Until=false \
+            update; then
+            break
+          fi
+          if [ "$attempt" = 3 ]; then
+            echo "apt-get update failed after 3 attempts" >&2
+            exit 1
+          fi
+          echo "apt-get update failed (attempt $attempt) — retrying in 60s"
+          sleep 60
+        done
         sudo apt-get install -y \
           libglib2.0-dev \
           libwebkit2gtk-4.1-dev \
