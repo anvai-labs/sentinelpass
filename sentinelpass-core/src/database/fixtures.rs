@@ -32,7 +32,7 @@
 
 use super::migrations::{
     migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6,
-    migrate_v6_to_v7, migrate_v7_to_v8, migrate_v8_to_v9,
+    migrate_v6_to_v7, migrate_v7_to_v8, migrate_v8_to_v9, migrate_v9_to_v10,
 };
 use super::schema::CURRENT_SCHEMA_VERSION;
 use crate::crypto::cipher::{encrypt_entry, encrypt_string, DataEncryptionKey};
@@ -187,6 +187,9 @@ fn migrate_ladder_to(conn: &rusqlite::Connection, target: i32) {
     }
     if target >= 9 {
         migrate_v8_to_v9(conn).unwrap();
+    }
+    if target >= 10 {
+        migrate_v9_to_v10(conn).unwrap();
     }
     let version: i32 = conn
         .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
@@ -448,6 +451,12 @@ mod tests {
                     "v8 drops the plaintext domain index"
                 );
             }
+            assert_eq!(
+                has_column("entries", "sync_acked_version"),
+                fixture.version >= 10,
+                "v{}: per-object ack tracking arrives in v10 (WBS-604/605)",
+                fixture.version
+            );
         }
 
         // Content flowed through the ladder intact: every fixture still

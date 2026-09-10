@@ -158,7 +158,6 @@ pub struct ObjectVersion(pub u64);
 
 impl ObjectVersion {
     pub const INITIAL: ObjectVersion = ObjectVersion(0);
-
     /// The version this mutation produces from an expected version.
     ///
     /// Checked: `ObjectVersion` arithmetic never silently wraps (WBS-602 —
@@ -169,6 +168,12 @@ impl ObjectVersion {
 
     pub fn as_u64(self) -> u64 {
         self.0
+    }
+}
+
+impl std::fmt::Display for ObjectVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -346,26 +351,37 @@ pub struct PullResponseV2 {
 /// any fixed value works; it only separates this id space from other v5 uses).
 const MUTATION_ID_NAMESPACE: Uuid = Uuid::from_u128(0x7370_5f73_796e_635f_7632_0000_0000_0001);
 
+impl std::fmt::Display for RejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectionReason::VersionConflict { current_version } => {
+                write!(f, "version conflict (relay holds v{current_version})")
+            }
+            RejectionReason::StaleEpoch { vault_epoch } => {
+                write!(f, "stale key epoch (vault epoch {vault_epoch})")
+            }
+            RejectionReason::Malformed => write!(f, "malformed mutation"),
+        }
+    }
+}
+
 /// Derive the idempotency key for a mutation deterministically (WBS-603).
 ///
-/// Same mutation content retried → same `mutation_id` → the relay returns
-/// the ORIGINAL durable result. A DIFFERENT edit of the same object at the
-/// same version (e.g. after a conflict, a fresh local edit) produces a
-/// different id because the payload bytes differ. The id is a UUIDv5-shaped
-/// digest: SHA-256 over (namespace || canonical inputs), truncated, with
-/// version/variant bits set — no dependency on serde or time.
-pub fn mutation_id_for(
-    vault_id: Uuid,
-    object_id: Uuid,
-    resulting_version: ObjectVersion,
-    encrypted_payload: &[u8],
-) -> Uuid {
+/// The key is (vault, object, resulting_version): every LOCAL edit bumps the
+/// row's `sync_version` monotonically (repository update rule), so these
+/// three coordinates are unique per distinct mutation attempt, and a RETRY
+/// of the same attempt — re-collected from the still-pending row — derives
+/// the SAME id even though the payload re-encrypts under a fresh GCM nonce.
+/// (The payload bytes are deliberately NOT part of the id: they are
+/// per-encryption randomized.) The id is a UUIDv5-shaped digest: SHA-256
+/// over (namespace || canonical inputs), truncated, with version/variant
+/// bits set — no dependency on serde or time.
+pub fn mutation_id_for(vault_id: Uuid, object_id: Uuid, resulting_version: ObjectVersion) -> Uuid {
     let mut hasher = Sha256::new();
     hasher.update(MUTATION_ID_NAMESPACE.as_bytes());
     hasher.update(vault_id.as_bytes());
     hasher.update(object_id.as_bytes());
     hasher.update(resulting_version.0.to_be_bytes());
-    hasher.update(Sha256::digest(encrypted_payload));
     let digest = hasher.finalize();
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
@@ -395,12 +411,7 @@ pub struct MutationInput {
 /// Build a [`MutationV2`] from its parts, computing the deterministic
 /// mutation id and the metadata MAC.
 pub fn build_mutation(mac_key: &[u8], input: &MutationInput) -> Result<MutationV2, CryptoError> {
-    let mutation_id = mutation_id_for(
-        input.vault_id,
-        input.object_id,
-        input.resulting_version,
-        &input.encrypted_payload,
-    );
+    let mutation_id = mutation_id_for(input.vault_id, input.object_id, input.resulting_version);
     let payload_sha256 = Sha256::digest(&input.encrypted_payload);
     let metadata = MutationMetadata {
         vault_id: input.vault_id,
@@ -655,76 +666,32 @@ mod tests {
 
     #[test]
     fn mutation_id_is_stable_across_retries() {
-        let a = mutation_id_for(
-            Uuid::from_u128(1),
-            Uuid::from_u128(2),
-            ObjectVersion(4),
-            &[1, 2, 3],
-        );
-        let b = mutation_id_for(
-            Uuid::from_u128(1),
-            Uuid::from_u128(2),
-            ObjectVersion(4),
-            &[1, 2, 3],
-        );
+        let a = mutation_id_for(Uuid::from_u128(1), Uuid::from_u128(2), ObjectVersion(4));
+        let b = mutation_id_for(Uuid::from_u128(1), Uuid::from_u128(2), ObjectVersion(4));
         assert_eq!(a, b, "the same mutation retried must reuse its id");
     }
 
     #[test]
-    fn mutation_id_diverges_per_edit_and_object_and_version() {
-        let base = mutation_id_for(
-            Uuid::from_u128(1),
-            Uuid::from_u128(2),
-            ObjectVersion(4),
-            &[1, 2, 3],
+    fn mutation_id_diverges_per_object_and_version_and_vault() {
+        let base = mutation_id_for(Uuid::from_u128(1), Uuid::from_u128(2), ObjectVersion(4));
+        assert_ne!(
+            base,
+            mutation_id_for(Uuid::from_u128(1), Uuid::from_u128(2), ObjectVersion(5)),
+            "the next local edit (bumped version) is a NEW mutation"
         );
         assert_ne!(
             base,
-            mutation_id_for(
-                Uuid::from_u128(1),
-                Uuid::from_u128(2),
-                ObjectVersion(4),
-                &[9, 9, 9]
-            ),
-            "a different edit at the same version is a NEW mutation"
+            mutation_id_for(Uuid::from_u128(1), Uuid::from_u128(77), ObjectVersion(4)),
         );
         assert_ne!(
             base,
-            mutation_id_for(
-                Uuid::from_u128(1),
-                Uuid::from_u128(2),
-                ObjectVersion(5),
-                &[1, 2, 3]
-            ),
-        );
-        assert_ne!(
-            base,
-            mutation_id_for(
-                Uuid::from_u128(1),
-                Uuid::from_u128(77),
-                ObjectVersion(4),
-                &[1, 2, 3]
-            ),
-        );
-        assert_ne!(
-            base,
-            mutation_id_for(
-                Uuid::from_u128(88),
-                Uuid::from_u128(2),
-                ObjectVersion(4),
-                &[1, 2, 3]
-            ),
+            mutation_id_for(Uuid::from_u128(88), Uuid::from_u128(2), ObjectVersion(4)),
         );
     }
 
     #[test]
     fn mutation_id_is_uuid_shaped() {
-        let id = mutation_id_for(
-            Uuid::from_u128(1),
-            Uuid::from_u128(2),
-            ObjectVersion(1),
-            &[],
-        );
+        let id = mutation_id_for(Uuid::from_u128(1), Uuid::from_u128(2), ObjectVersion(1));
         assert_eq!(id.get_version_num(), 5, "id must be UUID-shaped");
         assert_ne!(id, Uuid::nil());
     }

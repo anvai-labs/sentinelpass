@@ -542,11 +542,12 @@ pub fn collect_pending_totp_blobs(
 /// tables commit as ONE transaction — an interruption leaves every row
 /// pending (a partially-marked batch is never committed).
 ///
-/// KNOWN LIMITATION (see `engine.rs` on `complete_push_checkpoint`, and
-/// WBS-605): an interrupted push whose checkpoint DID commit cannot simply
-/// be re-pushed — the relay enforces a strictly increasing
-/// `device_sequence`, so the retry derives a consumed sequence and is
-/// rejected until sync v2 (ADR-006). Do not treat re-push as idempotent.
+/// The v1 strictly-increasing device_sequence wedge (an interrupted push
+/// whose checkpoint committed could not be re-pushed) is GONE in sync v2
+/// (ADR-006 / WBS-603-605): the engine pushes deterministic idempotent
+/// mutations, the relay replays original durable results, and the outbox
+/// leaves only on its own ack (see [`crate::sync::outbox`]). This v1 helper
+/// remains for non-mutation callers and wire-compat tests.
 pub fn mark_entries_synced(conn: &Connection, sync_ids: &[Uuid]) -> Result<()> {
     let tx = conn
         .unchecked_transaction()

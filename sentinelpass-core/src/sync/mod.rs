@@ -23,6 +23,7 @@ pub mod device;
 #[cfg(feature = "sync")]
 pub mod engine;
 pub mod models;
+pub mod outbox;
 pub mod pairing;
 pub mod v2;
 

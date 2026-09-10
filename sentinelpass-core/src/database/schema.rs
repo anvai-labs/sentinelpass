@@ -21,7 +21,12 @@ use tracing::warn;
 /// change re-pushed forever). Every local mutation path writes sync
 /// bookkeeping explicitly (repository insert/update, delete, sweeps), so
 /// the trigger is load-bearing for nothing; see `migrate_v8_to_v9`.
-pub const CURRENT_SCHEMA_VERSION: i32 = 9;
+/// v10 (WBS-604/605 / ADR-006): `sync_acked_version` on entries, ssh_keys,
+/// and totp_secrets — the durable per-object record of the version the
+/// relay has ACKNOWLEDGED (the CAS `expected_version` for the next v2
+/// mutation). Seeded from `sync_version` for already-synced rows (v1's
+/// relay held those versions) and 0 for pending rows.
+pub const CURRENT_SCHEMA_VERSION: i32 = 10;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -309,6 +314,7 @@ impl Database {
                 favorite INTEGER NOT NULL DEFAULT 0,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -399,6 +405,7 @@ impl Database {
                 modified_at INTEGER NOT NULL,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -427,6 +434,7 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,

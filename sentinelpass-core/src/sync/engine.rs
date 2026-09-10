@@ -1,19 +1,26 @@
-//! Sync engine: orchestrates push/pull/resolve/apply cycle.
+//! Sync engine: orchestrates the v2 push/pull/resolve/apply cycle (ADR-006).
+//!
+//! Push collects pending rows as deterministic v2 mutations
+//! ([`crate::sync::outbox`]); the outbox entry leaves ONLY on its own
+//! `Applied` acknowledgement, and a rejected object's retry re-derives the
+//! same mutation id so the relay replays the original durable result — the
+//! v1 lost-checkpoint wedge (strictly-increasing `device_sequence` versus a
+//! locally lost cursor) is structurally impossible in v2.
+//! Pull walks the relay's append-only vault log with a distinct
+//! [`ServerCursor`].
 
 use crate::crypto::cipher::DataEncryptionKey;
 use crate::database::Database;
-use crate::sync::change_tracker::{
-    collect_pending_credential_blobs, collect_pending_ssh_key_blobs, collect_pending_totp_blobs,
-    count_pending_changes, mark_entries_synced_in,
-};
-use crate::sync::client::SyncClient;
+use crate::sync::change_tracker::count_pending_changes;
+use crate::sync::client::{SyncClient, SyncTransport};
 use crate::sync::config::SyncConfig;
 use crate::sync::conflict::{ConflictResolver, Resolution};
 use crate::sync::crypto::decrypt_from_sync;
 use crate::sync::models::{
-    CredentialPayload, PullRequest, PushRequest, SshKeyPayload, SyncEntryBlob, SyncEntryType,
-    SyncStatus, TotpPayload,
+    CredentialPayload, SshKeyPayload, SyncEntryBlob, SyncEntryType, SyncStatus, TotpPayload,
 };
+use crate::sync::outbox;
+use crate::sync::v2::{DeviceSequence, MutationV2, PullRequestV2, PushRequestV2, ServerCursor};
 use crate::{DatabaseError, PasswordManagerError, Result};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -164,48 +171,37 @@ fn prepare_credential_blobs(
 }
 
 /// Orchestrates the full sync lifecycle: push local changes, pull remote changes, resolve conflicts.
-pub struct SyncEngine {
-    client: SyncClient,
+///
+/// Generic over the v2 transport ([`SyncTransport`]): production runs over
+/// HTTP ([`SyncClient`]); tests drive the same engine against an in-memory
+/// relay model, which is how loss/retry/duplicate acceptance evidence is
+/// produced without a network.
+pub struct SyncEngine<T: SyncTransport + 'static = SyncClient> {
+    client: T,
     db: Arc<Mutex<Database>>,
     device_id: Uuid,
 }
 
-/// Mark the pushed blobs synced and advance the push cursor as ONE
-/// transaction (SR-DATA-001 / WBS-411): never a partially-marked batch
-/// against a moved cursor.
-///
-/// KNOWN LIMITATION (pre-existing, documented here rather than papered
-/// over): the relay enforces a strictly increasing `device_sequence`, and
-/// the retry derives its sequence from the LOCAL `last_push_sequence`. If
-/// this checkpoint is lost after the relay accepted the push, the retry
-/// re-uses the consumed sequence and is rejected with a Conflict on every
-/// subsequent sync until the local cursor is reconciled — "just re-push
-/// next cycle" is NOT idempotent against today's relay protocol. Sequence
-/// reconciliation/requeue belongs to sync v2 (ADR-006 / WBS-605).
-///
-/// Free function so tests can fault-inject every statement without an HTTP
-/// client.
-pub(crate) fn complete_push_checkpoint(
-    conn: &rusqlite::Connection,
-    sync_ids: &[Uuid],
-    server_sequence: u64,
-) -> Result<()> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(DatabaseError::Sqlite)?;
-    mark_entries_synced_in(&tx, sync_ids)?;
-
-    let mut config = SyncConfig::load(&tx)?;
-    config.last_push_sequence = server_sequence;
-    config.save(&tx)?;
-
-    tx.commit().map_err(DatabaseError::Sqlite)?;
-    Ok(())
+/// Convert a pulled v2 log mutation into the blob shape the apply paths
+/// consume. v2 carries no LWW timestamp: `modified_at` is 0 so the
+/// version-lineage compare decides (a strictly greater version applies; an
+/// equal-or-lower version keeps local — conflict preservation hardens this
+/// in WBS-611).
+fn blob_from_log_mutation(m: &MutationV2) -> SyncEntryBlob {
+    SyncEntryBlob {
+        sync_id: m.object_id,
+        entry_type: m.object_type,
+        sync_version: m.resulting_version.as_u64(),
+        modified_at: 0,
+        encrypted_payload: m.encrypted_payload.clone(),
+        is_tombstone: m.is_tombstone,
+        origin_device_id: m.origin_device_id,
+    }
 }
 
-impl SyncEngine {
+impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// Create a new sync engine with the given client, database, and device identity.
-    pub fn new(client: SyncClient, db: Arc<Mutex<Database>>, device_id: Uuid) -> Self {
+    pub fn new(client: T, db: Arc<Mutex<Database>>, device_id: Uuid) -> Self {
         Self {
             client,
             db,
@@ -246,55 +242,74 @@ impl SyncEngine {
         })
     }
 
-    /// Push all pending local changes to the relay.
+    /// Push all pending local changes as v2 mutations (WBS-603/604/605).
+    ///
+    /// Mutations go out in bounded pages (the relay caps a request at
+    /// [`outbox::MAX_PUSH_MUTATIONS`]); every page is independently
+    /// idempotent, so a failure mid-batch costs a retry of the unacked
+    /// remainder only.
     async fn push_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
-        let blobs = {
+        let (mutations, device_sequence) = {
             let db = self
                 .db
                 .lock()
                 .map_err(|_| DatabaseError::LockPoisoned("push".to_string()))?;
             let conn = db.conn();
 
-            let mut all_blobs = collect_pending_credential_blobs(conn, dek, self.device_id)?;
-            all_blobs.extend(collect_pending_ssh_key_blobs(conn, dek, self.device_id)?);
-            all_blobs.extend(collect_pending_totp_blobs(conn, dek, self.device_id)?);
-            all_blobs
+            let config = SyncConfig::load(conn)?;
+            let relay_vault_id = config.vault_id.ok_or_else(|| {
+                PasswordManagerError::InvalidInput("Sync vault ID missing".to_string())
+            })?;
+            let (_, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
+
+            let mutations = outbox::collect_pending_mutations(
+                conn,
+                dek,
+                self.device_id,
+                relay_vault_id,
+                epoch,
+            )?;
+            // Framing counter: diagnostic only in v2 (idempotency keys carry
+            // correctness). A retry deliberately re-sends the same value.
+            let device_sequence = DeviceSequence(config.last_push_sequence + 1);
+            (mutations, device_sequence)
         };
 
-        if blobs.is_empty() {
+        let total = mutations.len();
+        if total == 0 {
             return Ok(0);
         }
 
-        let sync_ids: Vec<Uuid> = blobs.iter().map(|b| b.sync_id).collect();
-        let count = blobs.len() as u64;
+        for chunk in mutations.chunks(outbox::MAX_PUSH_MUTATIONS) {
+            let request = PushRequestV2 {
+                device_sequence,
+                mutations: chunk.iter().map(|m| m.mutation.clone()).collect(),
+            };
+            let response = self.client.push_v2(&request).await?;
 
-        let config = {
-            let db = self
-                .db
-                .lock()
-                .map_err(|_| DatabaseError::LockPoisoned("push seq".to_string()))?;
-            SyncConfig::load(db.conn())?
-        };
+            // Per-object durable checkpoint (WBS-604/605): only Applied
+            // objects leave the outbox; rejections stay pending with their
+            // acked version untouched. One transaction with the relay-cursor
+            // diagnostic.
+            {
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|_| DatabaseError::LockPoisoned("mark acked".to_string()))?;
+                outbox::apply_push_acks(
+                    db.conn(),
+                    chunk,
+                    &response.results,
+                    response.server_cursor.as_u64(),
+                )?;
+            }
+        }
 
-        let request = PushRequest {
-            device_sequence: config.last_push_sequence + 1,
-            entries: blobs,
-        };
-
-        let response = self.client.push(&request).await?;
-
-        // Mark synced + advance the push cursor as ONE unit (see
-        // [`Self::complete_push_checkpoint`]).
-        let db = self
-            .db
-            .lock()
-            .map_err(|_| DatabaseError::LockPoisoned("mark synced".to_string()))?;
-        complete_push_checkpoint(db.conn(), &sync_ids, response.server_sequence)?;
-
-        Ok(count)
+        Ok(total as u64)
     }
 
-    /// Pull remote changes from the relay and apply them locally.
+    /// Pull remote changes from the relay's vault log and apply them
+    /// locally (paged; the cursor is a distinct ServerCursor domain).
     async fn pull_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
         let mut cursor = {
             let db = self
@@ -308,15 +323,21 @@ impl SyncEngine {
         let mut total_count = 0u64;
 
         loop {
-            let request = PullRequest {
-                since_sequence: cursor,
-                limit: Some(1000),
+            let request = PullRequestV2 {
+                since: ServerCursor(cursor),
+                limit: Some(500),
             };
 
-            let response = self.client.pull(&request).await?;
+            let response = self.client.pull_v2(&request).await?;
 
             if response.entries.is_empty() {
                 break;
+            }
+
+            if response.cursor.as_u64() <= cursor {
+                return Err(PasswordManagerError::InvalidInput(
+                    "Relay pull cursor did not advance".to_string(),
+                ));
             }
 
             total_count += response.entries.len() as u64;
@@ -327,28 +348,25 @@ impl SyncEngine {
                 .map_err(|_| DatabaseError::LockPoisoned("apply pull".to_string()))?;
 
             let mut apply_failures: u64 = 0;
-            for blob in &response.entries {
-                // Skip our own changes
-                if blob.origin_device_id == self.device_id {
+            for entry in &response.entries {
+                let mutation = &entry.mutation;
+                // Skip our own changes (their acks already moved the outbox).
+                if mutation.origin_device_id == self.device_id {
                     continue;
                 }
-                // Per-blob resilience (adoption review): one unreadable
-                // blob — an old-peer payload shape, a decode failure —
-                // must NOT abort the page before the cursor advances,
-                // wedging every future sync on the same blob forever.
-                // Skip-and-warn names the blob; the experimental-sync
-                // data-loss tradeoff is spelled out in docs/SYNC.md.
-                //
+                // Per-blob resilience (adoption review, WBS-607 will
+                // replace skip-and-advance with dead-letter): one
+                // unreadable blob must NOT abort the page before the
+                // cursor advances, wedging every future sync forever.
                 // Each blob applies inside its OWN transaction — see
-                // [`Self::apply_remote_entry`] (SR-DATA-001 / WBS-411):
-                // a failure at any statement rolls that blob back entirely
-                // (complete-old for this entry) while the rest of the page
-                // proceeds.
-                if let Err(e) = self.apply_remote_entry(db.conn(), dek, blob) {
+                // [`Self::apply_remote_entry`].
+                let blob = blob_from_log_mutation(mutation);
+                if let Err(e) = self.apply_remote_entry(db.conn(), dek, &blob) {
                     apply_failures += 1;
                     tracing::warn!(
-                        sync_id = %blob.sync_id,
-                        entry_type = ?blob.entry_type,
+                        sync_id = %mutation.object_id,
+                        entry_type = ?mutation.object_type,
+                        server_sequence = entry.server_sequence.as_u64(),
                         error = %e,
                         "sync pull: skipping unappliable blob (cursor advances; \
                          the change is NOT applied)"
@@ -363,13 +381,7 @@ impl SyncEngine {
                 );
             }
 
-            if response.server_sequence <= cursor {
-                return Err(PasswordManagerError::InvalidInput(
-                    "Relay pull cursor did not advance".to_string(),
-                ));
-            }
-
-            cursor = response.server_sequence;
+            cursor = response.cursor.as_u64();
 
             let mut config = SyncConfig::load(db.conn())?;
             config.last_pull_sequence = cursor;
@@ -1045,6 +1057,7 @@ impl SyncEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::change_tracker::collect_pending_credential_blobs;
     use crate::sync::crypto::encrypt_for_sync;
     use crate::sync::models::CredentialPayload;
 
@@ -1498,11 +1511,13 @@ mod tests {
         assert_eq!(index, 1, "clean run: complete-new including the index");
     }
 
-    /// The push checkpoint: mark-synced for the whole batch + the cursor
-    /// advance commit together — an injected failure leaves every row
-    /// pending and the cursor untouched.
+    /// The v2 push checkpoint ([`outbox::apply_push_acks`]): the per-object
+    /// acked marks + the cursor diagnostic commit together — an injected
+    /// failure leaves every row pending with unmoved acked versions.
     #[test]
-    fn complete_push_checkpoint_fault_injection_is_all_or_nothing() {
+    fn apply_push_acks_fault_injection_is_all_or_nothing() {
+        use crate::sync::v2::{MutationOutcome, ObjectVersion, ServerCursor};
+
         let db = apply_test_db();
         let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
         {
@@ -1511,28 +1526,60 @@ mod tests {
                 conn.execute(
                     "INSERT INTO entries (vault_id, title, username, password, credential_type,
                         entry_nonce, auth_tag, created_at, modified_at, favorite,
-                        sync_id, sync_version, sync_state, is_deleted)
+                        sync_id, sync_version, sync_acked_version, sync_state, is_deleted)
                      VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
-                             ?1, 1, 'pending', 0)",
+                             ?1, 1, 0, 'pending', 0)",
                     [&id.to_string()],
                 )
                 .unwrap();
             }
         }
 
+        let mutations: Vec<outbox::OutboxMutation> = ids
+            .iter()
+            .map(|id| outbox::OutboxMutation {
+                mutation: crate::sync::v2::MutationV2 {
+                    mutation_id: Uuid::new_v4(),
+                    vault_id: Uuid::new_v4(),
+                    object_id: *id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![1, 2, 3],
+                    metadata_mac: [0u8; 32],
+                },
+                object_id: *id,
+                object_type: SyncEntryType::Credential,
+            })
+            .collect();
+        let results: Vec<crate::sync::v2::MutationResult> = mutations
+            .iter()
+            .map(|m| crate::sync::v2::MutationResult {
+                mutation_id: m.mutation.mutation_id,
+                object_id: m.object_id,
+                outcome: MutationOutcome::Applied {
+                    resulting_version: ObjectVersion(1),
+                    server_sequence: ServerCursor(42),
+                },
+            })
+            .collect();
+
         let mut fail_at = 0usize;
         let mut injected_failures = 0usize;
         loop {
             install_fault(&db, fail_at);
-            let result = complete_push_checkpoint(db.conn(), &ids, 42);
+            let result = outbox::apply_push_acks(db.conn(), &mutations, &results, 42);
             clear_fault(&db);
 
-            let (pending, synced): (i64, i64) = {
+            let (pending, acked): (i64, i64) = {
                 let conn = db.conn();
                 conn.query_row(
                     "SELECT \
                          (SELECT COUNT(*) FROM entries WHERE sync_state = 'pending'), \
-                         (SELECT COUNT(*) FROM entries WHERE sync_state = 'synced')",
+                         (SELECT COUNT(*) FROM entries WHERE sync_acked_version = 1)",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -1546,12 +1593,13 @@ mod tests {
                 Err(_) => {
                     injected_failures += 1;
                     assert_eq!(pending, 2, "complete-old at write {fail_at}");
-                    assert_eq!(synced, 0, "complete-old at write {fail_at}");
+                    assert_eq!(acked, 0, "complete-old at write {fail_at}");
                     assert_eq!(cursor, 0, "complete-old: cursor unmoved at write {fail_at}");
                 }
-                Ok(()) => {
+                Ok(summary) => {
+                    assert_eq!(summary.applied, 2);
                     assert_eq!(pending, 0, "complete-new at write {fail_at}");
-                    assert_eq!(synced, 2, "complete-new at write {fail_at}");
+                    assert_eq!(acked, 2, "complete-new at write {fail_at}");
                     assert_eq!(cursor, 42, "complete-new: cursor advanced WITH the marks");
                     break;
                 }
@@ -1572,7 +1620,7 @@ mod tests {
 
     /// A pending v1-shape credential row with configurable optional fields
     /// (None -> NULL column; Some -> v1 bincode blob under `dek`).
-    fn insert_pending_with_optionals(
+    pub(crate) fn insert_pending_with_optionals(
         conn: &rusqlite::Connection,
         dek: &DataEncryptionKey,
         url: Option<&str>,
@@ -1868,5 +1916,337 @@ mod registry_boundary_tests {
             guard.seen() >= 1,
             "the index write must have been attempted"
         );
+    }
+}
+
+/// Engine-level v2 acceptance tests against an in-memory relay MODEL that
+/// mirrors the shipped relay's semantics (CAS guard + durable idempotent
+/// results + append-only log) — SR-SYNC-001/003 acceptance evidence with no
+/// HTTP in the loop.
+#[cfg(all(test, feature = "sync"))]
+mod v2_cycle_tests {
+    use super::tests::{apply_test_db, credential_blob};
+    use super::*;
+    use crate::sync::v2::{
+        MutationOutcome, ObjectVersion, PullRequestV2, PullResponseV2, RejectionReason,
+    };
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    // --- in-memory relay model ----------------------------------------------
+
+    #[derive(Clone)]
+    struct ObjectState {
+        version: u64,
+    }
+
+    #[derive(Clone, Default)]
+    struct Model {
+        vault: Option<Uuid>,
+        objects: HashMap<(Uuid, Uuid), ObjectState>,
+        results: HashMap<Uuid, crate::sync::v2::MutationResult>,
+        log: Vec<crate::sync::v2::MutationV2>,
+        counter: u64,
+    }
+
+    /// Shareable fake relay implementing the v2 semantics the shipped relay
+    /// enforces: idempotency (duplicates replay the ORIGINAL durable
+    /// result), CAS acceptance, append-only log.
+    #[derive(Clone, Default)]
+    struct FakeRelay {
+        model: Arc<Mutex<Model>>,
+        /// Drop the NEXT push response AFTER committing (lost-response fault).
+        drop_next_push_response: Arc<std::sync::atomic::AtomicBool>,
+        seen_pushes: Arc<Mutex<Vec<Vec<Uuid>>>>,
+    }
+
+    impl FakeRelay {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn set_vault(&self, vault: Uuid) {
+            self.model.lock().unwrap().vault = Some(vault);
+        }
+
+        fn seed_object(&self, vault: Uuid, object: Uuid, version: u64) {
+            self.model
+                .lock()
+                .unwrap()
+                .objects
+                .insert((vault, object), ObjectState { version });
+        }
+
+        fn log_len(&self) -> usize {
+            self.model.lock().unwrap().log.len()
+        }
+    }
+
+    impl SyncTransport for FakeRelay {
+        fn push_v2<'a>(
+            &'a self,
+            request: &'a crate::sync::v2::PushRequestV2,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::sync::v2::PushResponseV2>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let mut model = self.model.lock().unwrap();
+                self.seen_pushes
+                    .lock()
+                    .unwrap()
+                    .push(request.mutations.iter().map(|m| m.mutation_id).collect());
+
+                let mut results = Vec::with_capacity(request.mutations.len());
+                for m in &request.mutations {
+                    if Some(m.vault_id) != model.vault {
+                        return Err(PasswordManagerError::InvalidInput(
+                            "vault mismatch".to_string(),
+                        ));
+                    }
+                    // Idempotency: duplicates return the ORIGINAL result.
+                    if let Some(stored) = model.results.get(&m.mutation_id) {
+                        results.push(stored.clone());
+                        continue;
+                    }
+                    let key = (m.vault_id, m.object_id);
+                    let outcome = match model.objects.get(&key) {
+                        Some(state) => {
+                            if state.version == m.expected_version.as_u64() {
+                                model.counter += 1;
+                                MutationOutcome::Applied {
+                                    resulting_version: m.resulting_version,
+                                    server_sequence: ServerCursor(model.counter),
+                                }
+                            } else {
+                                MutationOutcome::Rejected {
+                                    reason: RejectionReason::VersionConflict {
+                                        current_version: ObjectVersion(state.version),
+                                    },
+                                }
+                            }
+                        }
+                        None => {
+                            if m.expected_version.as_u64() == 0 {
+                                model.counter += 1;
+                                MutationOutcome::Applied {
+                                    resulting_version: m.resulting_version,
+                                    server_sequence: ServerCursor(model.counter),
+                                }
+                            } else {
+                                MutationOutcome::Rejected {
+                                    reason: RejectionReason::VersionConflict {
+                                        current_version: ObjectVersion(0),
+                                    },
+                                }
+                            }
+                        }
+                    };
+                    if matches!(outcome, MutationOutcome::Applied { .. }) {
+                        model.log.push(m.clone());
+                        model.objects.insert(
+                            key,
+                            ObjectState {
+                                version: m.resulting_version.as_u64(),
+                            },
+                        );
+                    }
+                    model.results.insert(
+                        m.mutation_id,
+                        crate::sync::v2::MutationResult {
+                            mutation_id: m.mutation_id,
+                            object_id: m.object_id,
+                            outcome: outcome.clone(),
+                        },
+                    );
+                    results.push(crate::sync::v2::MutationResult {
+                        mutation_id: m.mutation_id,
+                        object_id: m.object_id,
+                        outcome,
+                    });
+                }
+                let server_cursor = ServerCursor(model.counter);
+
+                if self
+                    .drop_next_push_response
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    // The relay COMMITTED (the model mutated above) but the
+                    // client never sees the response.
+                    return Err(PasswordManagerError::Io(std::io::Error::other(
+                        "simulated lost response",
+                    )));
+                }
+
+                Ok(crate::sync::v2::PushResponseV2 {
+                    server_cursor,
+                    results,
+                })
+            })
+        }
+
+        fn pull_v2<'a>(
+            &'a self,
+            _request: &'a PullRequestV2,
+        ) -> Pin<Box<dyn Future<Output = Result<PullResponseV2>> + Send + 'a>> {
+            Box::pin(async move {
+                Ok(PullResponseV2 {
+                    entries: Vec::new(),
+                    cursor: ServerCursor(self.model.lock().unwrap().counter),
+                    has_more: false,
+                })
+            })
+        }
+    }
+
+    // --- fixtures -------------------------------------------------------------
+
+    /// A pending credential row the COLLECTOR can actually read (legacy
+    /// v1-shape field blobs — the collector's dual-read opens them), with
+    /// explicit sync bookkeeping: `version` = the local (resulting) version,
+    /// `acked` = the last version the relay acknowledged.
+    fn insert_collectable_pending(
+        dek: &DataEncryptionKey,
+        conn: &rusqlite::Connection,
+        sync_id: &Uuid,
+        version: i64,
+        acked: i64,
+    ) {
+        use super::tests::insert_pending_with_optionals;
+        insert_pending_with_optionals(conn, dek, Some("https://pending.example"), None);
+        conn.execute(
+            "UPDATE entries SET sync_id = ?1, sync_version = ?2, sync_acked_version = ?3",
+            rusqlite::params![sync_id.to_string(), version, acked],
+        )
+        .unwrap();
+    }
+
+    fn row_bookkeeping(db: &Mutex<Database>, sync_id: &Uuid) -> (String, i64) {
+        let conn = db.lock().unwrap();
+        conn.conn()
+            .query_row(
+                "SELECT sync_state, sync_acked_version FROM entries WHERE sync_id = ?1",
+                [sync_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    // --- acceptance -----------------------------------------------------------
+
+    /// THE lost-response acceptance (SR-SYNC-001): the relay committed the
+    /// push but the response was lost. The retry re-derives the SAME
+    /// mutation ids, the relay replays the ORIGINAL results, the outbox
+    /// completes, and the relay log holds exactly ONE copy of the mutation —
+    /// the v1 device_sequence wedge is structurally impossible.
+    #[tokio::test]
+    async fn lost_push_response_retry_completes_without_wedge() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // A never-synced row: local v2, never acked (expected 0 → create).
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 2, 0);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        // First cycle: the push COMMITS relay-side, the response is lost.
+        relay
+            .drop_next_push_response
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let outcome = engine.sync(&dek).await;
+        assert!(outcome.is_err(), "the lost response surfaces as an error");
+        assert_eq!(relay.log_len(), 1, "the relay committed the mutation");
+        let (state, acked) = row_bookkeeping(&db, &sync_id);
+        assert_eq!(state, "pending", "no ack was seen — the row stays pending");
+        assert_eq!(acked, 0);
+
+        // Retry cycle: same mutation id, original result replayed, outbox
+        // completes.
+        engine.sync(&dek).await.unwrap();
+        assert_eq!(relay.log_len(), 1, "no duplicate data in the log");
+        let (state, acked) = row_bookkeeping(&db, &sync_id);
+        assert_eq!(
+            state, "synced",
+            "the retried mutation completed the outbox entry"
+        );
+        assert_eq!(acked, 2, "acked version advanced to the resulting version");
+
+        let pushes = relay.seen_pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(
+            pushes[0], pushes[1],
+            "the retry must reuse the identical mutation ids"
+        );
+    }
+
+    /// SR-SYNC-001 negative half: a rejected object is NEVER marked synced,
+    /// and its retry re-derives the same mutation id and receives the SAME
+    /// durable rejection (no decision flip-flop, no wedge).
+    #[tokio::test]
+    async fn rejected_object_stays_pending_across_retries() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        // Another device won this object already: the relay holds version 4.
+        relay.seed_object(relay_vault, sync_id, 4);
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        engine.sync(&dek).await.unwrap();
+        let (state, acked) = row_bookkeeping(&db, &sync_id);
+        assert_eq!(state, "pending", "a rejected object must stay pending");
+        assert_eq!(acked, 1, "its acked version is untouched");
+
+        // Retry: identical mutation id, identical durable rejection.
+        engine.sync(&dek).await.unwrap();
+        let pushes = relay.seen_pushes.lock().unwrap();
+        assert_eq!(pushes.len(), 2);
+        assert_eq!(
+            pushes[0], pushes[1],
+            "retry re-derives the same mutation id"
+        );
+        assert_eq!(
+            relay.log_len(),
+            0,
+            "a conflicted mutation never enters the log"
+        );
+    }
+
+    fn vault_config(db: &Database, relay_vault: Uuid, device: Uuid) {
+        let config = SyncConfig {
+            sync_enabled: true,
+            vault_id: Some(relay_vault),
+            device_id: Some(device),
+            device_name: Some("test".to_string()),
+            relay_url: Some("https://relay.invalid".to_string()),
+            last_push_sequence: 0,
+            last_pull_sequence: 0,
+            last_sync_at: None,
+        };
+        config.save(db.conn()).unwrap();
+    }
+
+    /// The credential blob helper stays referenced (parity with the apply
+    /// fixtures above; pull-apply reuse is covered by the shared tests).
+    #[test]
+    fn blob_helper_roundtrip_shape() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let blob = credential_blob(&dek, Uuid::new_v4(), 1);
+        assert!(matches!(blob.entry_type, SyncEntryType::Credential));
     }
 }
