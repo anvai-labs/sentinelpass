@@ -522,6 +522,7 @@ impl DaemonVault {
                 relay_url: None,
                 last_sync_at: None,
                 pending_changes: 0,
+                conflict_count: 0,
             })
         }
     }

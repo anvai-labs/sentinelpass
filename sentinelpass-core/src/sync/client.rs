@@ -386,3 +386,31 @@ impl SyncTransport for SyncClient {
         Box::pin(SyncClient::pull_v2(self, request))
     }
 }
+
+/// A transport that performs no I/O — for conflict-resolution paths that
+/// only run local applies (take-remote) and never touch the relay.
+pub struct DetachedTransport;
+
+impl SyncTransport for DetachedTransport {
+    fn push_v2<'a>(
+        &'a self,
+        _request: &'a PushRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PushResponseV2>> + Send + 'a>> {
+        Box::pin(async {
+            Err(PasswordManagerError::NotImplemented(
+                "resolution path never pushes".to_string(),
+            ))
+        })
+    }
+
+    fn pull_v2<'a>(
+        &'a self,
+        _request: &'a PullRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PullResponseV2>> + Send + 'a>> {
+        Box::pin(async {
+            Err(PasswordManagerError::NotImplemented(
+                "resolution path never pulls".to_string(),
+            ))
+        })
+    }
+}

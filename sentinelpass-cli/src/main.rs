@@ -780,6 +780,21 @@ enum SyncCommands {
     /// inspection)
     DeadLetterList,
 
+    /// List concurrent-edit conflicts awaiting resolution (WBS-611)
+    ConflictList,
+
+    /// Resolve a concurrent-edit conflict
+    ConflictResolve {
+        /// Object ID from `conflict-list`
+        #[arg(long)]
+        object_id: String,
+
+        /// Apply the REMOTE (peer's) version instead of keeping the local
+        /// edit
+        #[arg(long, default_value_t = false)]
+        take_remote: bool,
+    },
+
     /// Purge dead-lettered sync mutations (one by sequence, or all)
     DeadLetterPurge {
         /// Purge only this server sequence (from `dead-letter list`)

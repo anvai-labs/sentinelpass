@@ -1056,6 +1056,21 @@ after 408/409 stabilize.
 - **WBS-610 — One bounded paginated path (normal+full).** TD-ROB-06. Est 3d.
 - **WBS-611 — Preserve concurrent alternatives; expose conflicts.** SR-SYNC-005,
   TD-UX-02. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 3) — schema v12
+  `sync_conflicts` (one durable alternative per object, DEK ciphertext
+  stored relay-shaped, re-sealed under the LOCAL identity at resolution);
+  pull-side guard records any mutation (tombstones included) hitting an
+  object with an UNSYNCED local edit (equal-or-greater version; stale
+  blobs keep the lineage skip) and marks `sync_state = 'conflict'`;
+  push-side conflicts mark conflicted instead of adopting; resolvers
+  keep-local (re-version above the peer + CAS re-base) and take-remote
+  (apply the alternative through the normal seal-under-local path); CLI
+  `sync conflict-list` / `conflict-resolve --object-id [--take-remote]`;
+  conflict count surfaced through `SyncStatus` and the daemon service
+  contract (`ServiceSyncStatus.conflicts`, serde default). Evidence:
+  `conflict_preserves_alternatives_and_resolves_keep_local`,
+  `conflict_take_remote_applies_the_alternative`. The relay
+  same-version-rejection half landed with WBS-603 (stage 1).
 - **WBS-612 — Authenticate identity/type/origin/version/epoch/tombstone.** SR-SYNC-004,
   TD-SEC-02. Apply-side rule: pull never applies epoch/registry state below the
   local high-water sidecar — rejected as suspected rollback (ADR-004 rev 4). Est 4d.

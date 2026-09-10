@@ -55,9 +55,21 @@ The client engine pushes and pulls over `/api/v2/*`:
   a fresh mutation id.
 - **CAS acceptance.** A mutation applies iff its `expected_version` equals
   the relay's stored current version (0 = create). Same-version overwrites
-  do not exist in v2 — the v1 clock-gamed LWW tie-break is gone. A version
-  conflict is a durable rejection the client resolves by preserving both
-  alternatives (conflict preservation lands in the next stage).
+  do not exist in v2 — the v1 clock-gamed LWW tie-break is gone.
+- **Conflict preservation (WBS-611 / SR-SYNC-005).** A pulled mutation that
+  hits an object with an UNSYNCED local edit is never silently applied (or
+  deleted by a tombstone): it is recorded as a durable alternative in the
+  local `sync_conflicts` table and the row is marked
+  `sync_state = 'conflict'` — both alternatives preserved. Push conflicts
+  mark the row conflicted too; the same-run pull stores the relay's
+  content as the alternative. The user resolves with
+  `sentinelpass sync conflict-list` / `conflict-resolve --object-id <ID>
+  [--take-remote]`: keep-local re-versions the local content above the
+  peer (next push lands via CAS); take-remote applies the stored
+  alternative (sealing under the LOCAL identity). A stale incoming blob
+  (version below the local row) is not an alternative and is ignored.
+  Conflict counts surface through `sync status` and the daemon service
+  contract (`ServiceSyncStatus.conflicts`).
 - **Per-object acknowledgements.** The client's outbox entry is removed only
   by its own `Applied` ack (verified against the version the client
   actually sent), which also advances the object's durable

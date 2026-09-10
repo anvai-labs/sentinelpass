@@ -764,6 +764,47 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migrate schema from v11 to v12: durable concurrent-edit alternatives
+/// (WBS-611 / SR-SYNC-005, ADR-006). A pulled mutation hitting an object
+/// with an UNSYNCED local edit is recorded here (encrypted payload intact,
+/// sealed under the LOCAL identity on resolution) instead of silently
+/// overwriting; the local side stays in its own row with
+/// `sync_state = 'conflict'` until user resolution.
+///
+/// Additive CREATE IF NOT EXISTS + ONE-transaction version bump.
+pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_conflicts (
+                object_id TEXT PRIMARY KEY,
+                object_type TEXT NOT NULL,
+                remote_version INTEGER NOT NULL,
+                remote_payload BLOB NOT NULL,
+                origin_device_id TEXT NOT NULL,
+                is_tombstone INTEGER NOT NULL DEFAULT 0,
+                received_at INTEGER NOT NULL
+            );
+             UPDATE db_metadata SET version = 12 WHERE id = 1;",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -810,6 +851,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 11 {
         migrate_v10_to_v11(conn)?;
+    }
+
+    if version < 12 {
+        migrate_v11_to_v12(conn)?;
     }
 
     Ok(())

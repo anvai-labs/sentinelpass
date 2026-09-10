@@ -251,6 +251,10 @@ pub struct SyncStatus {
     pub relay_url: Option<String>,
     pub last_sync_at: Option<i64>,
     pub pending_changes: u64,
+    /// Objects with a stored concurrent-edit alternative awaiting user
+    /// resolution (WBS-611 / SR-SYNC-005).
+    #[serde(default)]
+    pub conflict_count: u64,
 }
 
 /// Information about a registered sync device.

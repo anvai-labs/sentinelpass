@@ -42,15 +42,45 @@ fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
 /// or tombstone has been applied). Returns `false` when the caller should proceed with
 /// the update. `tombstone_sql` must be a parameterized UPDATE with bindings
 /// `(?1 = now_timestamp, ?2 = sync_version, ?3 = local_id)`.
+/// The synced-bookkeeping columns of an existing local row, for the
+/// conflict guard and LWW preamble.
+struct ExistingLocalRow<'a> {
+    id: i64,
+    version: i64,
+    modified: i64,
+    state: &'a str,
+}
+
 fn apply_existing_preamble(
     conn: &rusqlite::Connection,
-    local_id: i64,
-    local_version: i64,
-    local_modified: i64,
+    local: ExistingLocalRow<'_>,
     blob: &SyncEntryBlob,
+    table: &str,
     tombstone_sql: &str,
 ) -> Result<bool> {
-    if ConflictResolver::resolve(local_version as u64, local_modified, blob)
+    // SR-SYNC-005 (WBS-611): an UNSYNCED local edit must never be silently
+    // overwritten (or silently deleted by a tombstone). Record the incoming
+    // mutation as the durable alternative and mark the row conflicted —
+    // the local side stays in its own row until user resolution
+    // (`resolve_sync_conflict`); the recorded mutation is the page
+    // disposition.
+    if (local.state == "pending" || local.state == "conflict")
+        && blob.sync_version >= local.version as u64
+    {
+        // Equal version = divergent content under the same lineage point;
+        // greater = the peer progressed past our base. A STALE blob
+        // (version below the local row) is not an alternative worth
+        // preserving — it cannot have applied anywhere current (relay CAS)
+        // and would only pollute resolution.
+        record_conflict(conn, blob)?;
+        conn.execute(
+            &format!("UPDATE {table} SET sync_state = 'conflict' WHERE sync_id = ?1"),
+            rusqlite::params![blob.sync_id.to_string()],
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        return Ok(true);
+    }
+    if ConflictResolver::resolve(local.version as u64, local.modified, blob)
         == Resolution::KeepLocal
     {
         return Ok(true);
@@ -61,13 +91,50 @@ fn apply_existing_preamble(
             rusqlite::params![
                 chrono::Utc::now().timestamp(),
                 blob.sync_version as i64,
-                local_id
+                local.id
             ],
         )
         .map_err(DatabaseError::Sqlite)?;
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Record a pulled mutation as a durable conflict alternative (WBS-611):
+/// latest alternative wins; the payload is stored relay-shaped (DEK
+/// ciphertext) and re-sealed under the LOCAL identity at resolution.
+fn record_conflict(conn: &rusqlite::Connection, blob: &SyncEntryBlob) -> Result<()> {
+    tracing::warn!(
+        sync_id = %blob.sync_id,
+        incoming_version = blob.sync_version,
+        tombstone = blob.is_tombstone,
+        "sync pull: concurrent edit preserved as a conflict alternative \
+         (local edit kept; resolve with 'sync conflict-resolve')"
+    );
+    conn.execute(
+        "INSERT INTO sync_conflicts (
+            object_id, object_type, remote_version, remote_payload,
+            origin_device_id, is_tombstone, received_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(object_id) DO UPDATE SET
+            object_type = excluded.object_type,
+            remote_version = excluded.remote_version,
+            remote_payload = excluded.remote_payload,
+            origin_device_id = excluded.origin_device_id,
+            is_tombstone = excluded.is_tombstone,
+            received_at = excluded.received_at",
+        rusqlite::params![
+            blob.sync_id.to_string(),
+            format!("{:?}", blob.entry_type),
+            blob.sync_version as i64,
+            blob.encrypted_payload,
+            blob.origin_device_id.to_string(),
+            blob.is_tombstone,
+            chrono::Utc::now().timestamp(),
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
 }
 
 /// Returns `true` when a new-entry insert should be skipped (tombstone or stale blob).
@@ -199,6 +266,118 @@ fn blob_from_log_mutation(m: &MutationV2) -> SyncEntryBlob {
     }
 }
 
+/// One stored concurrent-edit alternative (the peer's side of a conflict).
+#[derive(Debug, Clone)]
+pub struct ConflictAlternative {
+    pub entry_type: SyncEntryType,
+    pub remote_version: u64,
+    pub payload: Vec<u8>,
+    pub origin: Uuid,
+    pub is_tombstone: bool,
+}
+
+/// Parse the Debug-form object type tag stored in conflict/dead-letter rows.
+pub fn parse_object_type(type_str: &str) -> Result<SyncEntryType> {
+    match type_str {
+        "Credential" => Ok(SyncEntryType::Credential),
+        "SshKey" => Ok(SyncEntryType::SshKey),
+        "TotpSecret" => Ok(SyncEntryType::TotpSecret),
+        other => Err(PasswordManagerError::InvalidInput(format!(
+            "unknown sync object type {other}"
+        ))),
+    }
+}
+
+fn table_for(entry_type: SyncEntryType) -> &'static str {
+    match entry_type {
+        SyncEntryType::Credential => "entries",
+        SyncEntryType::SshKey => "ssh_keys",
+        SyncEntryType::TotpSecret => "totp_secrets",
+    }
+}
+
+/// KEEP-LOCAL resolution (WBS-611): re-version the local content above the
+/// peer and re-base its CAS expectation onto the peer's version — the next
+/// push applies it cleanly (CAS current == expected), and the stored
+/// alternative is discarded. The caller deletes the `sync_conflicts` row.
+pub fn resolve_conflict_keep_local(
+    conn: &rusqlite::Connection,
+    object_id: &Uuid,
+    entry_type: SyncEntryType,
+    remote_version: u64,
+) -> Result<()> {
+    let table = table_for(entry_type);
+    conn.execute(
+        &format!(
+            "UPDATE {table} SET sync_state = 'pending',
+             sync_acked_version = MAX(sync_acked_version, ?1),
+             sync_version = MAX(sync_version, ?2)
+             WHERE sync_id = ?3"
+        ),
+        rusqlite::params![
+            remote_version as i64,
+            remote_version.saturating_add(1) as i64,
+            object_id.to_string()
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    conn.execute(
+        "DELETE FROM sync_conflicts WHERE object_id = ?1",
+        [object_id.to_string()],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
+/// TAKE-REMOTE resolution (WBS-611): re-base the local row below the stored
+/// alternative and apply it through the normal path (sealing under the
+/// LOCAL identity); the alternative record is then deleted. A tombstone
+/// alternative deletes the local row.
+pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
+    engine: &SyncEngine<T>,
+    conn: &rusqlite::Connection,
+    dek: &DataEncryptionKey,
+    object_id: &Uuid,
+    alternative: &ConflictAlternative,
+) -> Result<()> {
+    let ConflictAlternative {
+        entry_type,
+        remote_version,
+        ref payload,
+        ref origin,
+        ref is_tombstone,
+    } = *alternative;
+    let table = table_for(entry_type);
+    conn.execute(
+        &format!(
+            "UPDATE {table} SET sync_state = 'synced',
+             sync_version = MIN(sync_version, ?1)
+             WHERE sync_id = ?2"
+        ),
+        rusqlite::params![
+            remote_version.saturating_sub(1) as i64,
+            object_id.to_string()
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    let blob = SyncEntryBlob {
+        sync_id: *object_id,
+        entry_type,
+        sync_version: remote_version,
+        modified_at: 0,
+        encrypted_payload: payload.clone(),
+        is_tombstone: *is_tombstone,
+        origin_device_id: *origin,
+    };
+    engine.apply_remote_entry(conn, dek, &blob)?;
+    conn.execute(
+        "DELETE FROM sync_conflicts WHERE object_id = ?1",
+        [object_id.to_string()],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
 /// Hard cap on dead-letter rows — bounded disposition state (ADR-006). At
 /// the cap the pull fails closed (page + cursor roll back) until the user
 /// inspects and purges.
@@ -302,6 +481,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         // main database file without blocking readers.
         let _ = db.wal_checkpoint();
 
+        let conflict_count = crate::sync::outbox::count_sync_conflicts(db.conn())?;
         Ok(SyncStatus {
             enabled: config.sync_enabled,
             device_id: config.device_id,
@@ -309,6 +489,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
             relay_url: config.relay_url.clone(),
             last_sync_at: config.last_sync_at,
             pending_changes: pending,
+            conflict_count,
         })
     }
 
@@ -554,9 +735,9 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// is never involved in an apply.
     /// Per-blob unit of work — production pull folds applies into the PAGE
     /// transaction ([`Self::apply_remote_entry_in_tx`]); this one-blob
-    /// wrapper is retained for the apply-path test fixtures.
-    #[cfg(test)]
-    pub(crate) fn apply_remote_entry(
+    /// wrapper serves the conflict-resolution path (take-remote applies one
+    /// stored alternative) and the apply-path test fixtures.
+    pub fn apply_remote_entry(
         &self,
         conn: &rusqlite::Connection,
         dek: &DataEncryptionKey,
@@ -611,21 +792,26 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         };
 
         // Check if we have this entry locally
-        let local: Option<(i64, i64, i64)> = conn
+        let local: Option<(i64, i64, i64, String)> = conn
             .query_row(
-                "SELECT entry_id, sync_version, modified_at FROM entries WHERE sync_id = ?1",
+                "SELECT entry_id, sync_version, modified_at, sync_state FROM entries WHERE sync_id = ?1",
                 [&sync_id_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        if let Some((entry_id, local_version, local_modified)) = local {
+        if let Some((entry_id, local_version, local_modified, local_state)) = local {
+            let local = ExistingLocalRow {
+                id: entry_id,
+                version: local_version,
+                modified: local_modified,
+                state: &local_state,
+            };
             if apply_existing_preamble(
                 conn,
-                entry_id,
-                local_version,
-                local_modified,
+                local,
                 blob,
+                "entries",
                 "UPDATE entries SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_acked_version = ?2, sync_state = 'synced', \
                  last_synced_at = ?1
@@ -817,21 +1003,26 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         // Local identity for v2 sealing (WBS-304) — see read_local_identity.
         let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
-        let local: Option<(i64, i64, i64)> = conn
+        let local: Option<(i64, i64, i64, String)> = conn
             .query_row(
-                "SELECT key_id, sync_version, modified_at FROM ssh_keys WHERE sync_id = ?1",
+                "SELECT key_id, sync_version, modified_at, sync_state FROM ssh_keys WHERE sync_id = ?1",
                 [&sync_id_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        if let Some((key_id, local_version, local_modified)) = local {
+        if let Some((key_id, local_version, local_modified, local_state)) = local {
+            let local = ExistingLocalRow {
+                id: key_id,
+                version: local_version,
+                modified: local_modified,
+                state: &local_state,
+            };
             if apply_existing_preamble(
                 conn,
-                key_id,
-                local_version,
-                local_modified,
+                local,
                 blob,
+                "ssh_keys",
                 "UPDATE ssh_keys SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_acked_version = ?2, sync_state = 'synced', \
                  last_synced_at = ?1
@@ -986,21 +1177,26 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         // Local identity for v2 sealing (WBS-304) — see read_local_identity.
         let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
-        let local: Option<(i64, i64, i64)> = conn
+        let local: Option<(i64, i64, i64, String)> = conn
             .query_row(
-                "SELECT totp_id, sync_version, created_at FROM totp_secrets WHERE sync_id = ?1",
+                "SELECT totp_id, sync_version, created_at, sync_state FROM totp_secrets WHERE sync_id = ?1",
                 [&sync_id_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        if let Some((totp_id, local_version, local_created)) = local {
+        if let Some((totp_id, local_version, local_created, local_state)) = local {
+            let local = ExistingLocalRow {
+                id: totp_id,
+                version: local_version,
+                modified: local_created,
+                state: &local_state,
+            };
             if apply_existing_preamble(
                 conn,
-                totp_id,
-                local_version,
-                local_created,
+                local,
                 blob,
+                "totp_secrets",
                 "UPDATE totp_secrets SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_acked_version = ?2, sync_state = 'synced', \
                  last_synced_at = ?1
@@ -2382,13 +2578,14 @@ mod v2_cycle_tests {
         );
     }
 
-    /// A version conflict where the relay is AT OR BEYOND our attempt: the
-    /// push is durably rejected, the client adopts the relay's baseline, and
-    /// the SAME sync's pull brings the peer's winning content down — the
-    /// object converges in one cycle (full two-alternative preservation is
-    /// WBS-611; this stage must at minimum never wedge).
+    /// SR-SYNC-005 (WBS-611): a push conflict where the relay is AT OR
+    /// BEYOND our attempt NEVER silently adopts the relay state — the row is
+    /// marked conflicted, the same-run pull stores the peer's content as the
+    /// durable alternative, and keep-local resolution re-versions the local
+    /// content above the peer so the next push lands cleanly. Both
+    /// alternatives were preserved and user resolution drives convergence.
     #[tokio::test]
-    async fn conflict_rejection_converges_without_wedge() {
+    async fn conflict_preserves_alternatives_and_resolves_keep_local() {
         let dek = DataEncryptionKey::new().unwrap();
         let relay_vault = Uuid::new_v4();
         let device = Uuid::new_v4();
@@ -2438,18 +2635,143 @@ mod v2_cycle_tests {
 
         engine.sync(&dek).await.unwrap();
         let (state, acked, version) = row_bookkeeping_full(&db, &sync_id);
-        assert_eq!(acked, 4, "acked learned the relay's current version");
-        assert_eq!(
-            version, 4,
-            "the pull applied the peer's winning mutation (v4 > local v3)"
-        );
-        assert_eq!(state, "synced", "converged onto the peer's state");
+        assert_eq!(state, "conflict", "the row is conflicted, never adopted");
+        assert_eq!(acked, 1, "acked untouched — the local edit is preserved");
+        assert_eq!(version, 3, "the LOCAL content stays in the row");
+        let conflicts: Vec<(i64, String)> = {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn
+                .conn()
+                .prepare("SELECT remote_version, object_id FROM sync_conflicts")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(conflicts.len(), 1, "the alternative is durably stored");
+        assert_eq!(conflicts[0].0, 4, "the alternative is the peer's v4");
 
-        // A follow-up sync is a no-op for this object (nothing pending —
-        // the engine never even contacts the relay's push endpoint).
+        // KEEP-LOCAL resolution: re-version above the peer, re-base CAS.
+        {
+            let conn = db.lock().unwrap();
+            resolve_conflict_keep_local(conn.conn(), &sync_id, SyncEntryType::Credential, 4)
+                .unwrap();
+        }
+        let (state, acked, version) = row_bookkeeping_full(&db, &sync_id);
+        assert_eq!(state, "pending");
+        assert_eq!(acked, 4, "CAS expectation re-based onto the peer's version");
+        assert_eq!(version, 5, "local content re-versioned above the peer");
+
+        // The next push applies the LOCAL content (CAS 4 == 4).
         engine.sync(&dek).await.unwrap();
-        let pushes = relay.seen_pushes.lock().unwrap();
-        assert_eq!(pushes.len(), 1, "nothing left to push after convergence");
+        let (state, acked) = row_bookkeeping(&db, &sync_id);
+        assert_eq!(state, "synced");
+        assert_eq!(acked, 5);
+        assert_eq!(relay.log_len(), 2, "peer v4 + our resolved v5");
+        let our_v4_overwrites = relay.model.lock().unwrap().log.iter().any(|(_, m)| {
+            m.object_id == sync_id
+                && m.resulting_version.as_u64() == 4
+                && m.origin_device_id == device
+        });
+        assert!(
+            !our_v4_overwrites,
+            "the peer's v4 was not overwritten by a fabricated v4 — ours is v5"
+        );
+    }
+
+    /// TAKE-REMOTE resolution: the stored alternative is applied through the
+    /// normal path (sealing under the LOCAL identity), the local edit is
+    /// discarded per the user's choice, and the record is removed.
+    #[tokio::test]
+    async fn conflict_take_remote_applies_the_alternative() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let peer_payload = {
+            let payload = CredentialPayload {
+                title: "Peer Title".to_string(),
+                username: "peer-user".to_string(),
+                password: Zeroizing::new("peer-pass".to_string()),
+                credential_type: crate::CredentialType::Password,
+                url: None,
+                notes: None,
+                favorite: false,
+                domains: vec![],
+                created_at: 1_700_000_000,
+                modified_at: 1_700_000_200,
+            };
+            encrypt_for_sync(&dek, &Zeroizing::new(serde_json::to_vec(&payload).unwrap())).unwrap()
+        };
+        let peer_mutation = crate::sync::v2::build_mutation(
+            &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+            &crate::sync::v2::MutationInput {
+                vault_id: relay_vault,
+                object_id: sync_id,
+                object_type: SyncEntryType::Credential,
+                expected_version: ObjectVersion(2),
+                resulting_version: ObjectVersion(4),
+                key_epoch: 1,
+                origin_device_id: Uuid::new_v4(),
+                is_tombstone: false,
+                encrypted_payload: peer_payload.clone(),
+            },
+        )
+        .unwrap();
+        relay.seed_peer_mutation(peer_mutation);
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+        assert_eq!(row_bookkeeping_full(&db, &sync_id).0, "conflict");
+
+        // TAKE REMOTE.
+        {
+            let conn = db.lock().unwrap();
+            let (remote_version, payload, origin): (i64, Vec<u8>, String) = conn
+                .conn()
+                .query_row(
+                    "SELECT remote_version, remote_payload, origin_device_id FROM sync_conflicts \
+                     WHERE object_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            resolve_conflict_take_remote(
+                &engine,
+                conn.conn(),
+                &dek,
+                &sync_id,
+                &ConflictAlternative {
+                    entry_type: SyncEntryType::Credential,
+                    remote_version: remote_version as u64,
+                    payload,
+                    origin: Uuid::parse_str(&origin).unwrap(),
+                    is_tombstone: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let (state, acked, version) = row_bookkeeping_full(&db, &sync_id);
+        assert_eq!(state, "synced", "the alternative applied");
+        assert_eq!(acked, 4);
+        assert_eq!(version, 4);
+        let conflicts: i64 = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sync_conflicts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(conflicts, 0, "the record is consumed by resolution");
     }
 
     /// THE pull-then-edit acceptance (reviewer finding 1): a peer's mutation

@@ -81,6 +81,12 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
                 println!("Last synced: {}", dt);
             }
             println!("Pending changes: {}", status.pending_changes);
+            if status.conflicts > 0 {
+                println!(
+                    "Conflicts awaiting resolution: {} (see 'sync conflict-list')",
+                    status.conflicts
+                );
+            }
         }
 
         crate::SyncCommands::Status => {
@@ -116,6 +122,12 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
                 println!("  Last synced:     never");
             }
             println!("  Pending changes: {}", status.pending_changes);
+            if status.conflicts > 0 {
+                println!(
+                    "  Conflicts awaiting resolution: {} (see 'sync conflict-list')",
+                    status.conflicts
+                );
+            }
             println!();
         }
 
@@ -164,6 +176,63 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
 
             println!("Device {} marked as revoked locally.", device_id);
             println!("Run 'sentinelpass sync now' to propagate to the relay server.");
+        }
+
+        crate::SyncCommands::ConflictList => {
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+            let report = match backend.call(VaultOp::SyncConflictList)? {
+                VaultOpResult::Report(value) => value,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
+            let rows = report.as_array().cloned().unwrap_or_default();
+            if rows.is_empty() {
+                println!("No sync conflicts awaiting resolution.");
+                return Ok(());
+            }
+            println!();
+            println!(
+                "{:<38} {:<12} {:>7} {:<10} Tombstone",
+                "Object ID", "Type", "Remote", "Origin"
+            );
+            println!("{}", "-".repeat(96));
+            for row in &rows {
+                let origin = row["origin_device_id"].as_str().unwrap_or("?");
+                let short = if origin.len() > 8 {
+                    origin[..8].to_string()
+                } else {
+                    origin.to_string()
+                };
+                println!(
+                    "{:<38} {:<12} {:>7} {:<10} {}",
+                    row["object_id"].as_str().unwrap_or("?"),
+                    row["object_type"].as_str().unwrap_or("?"),
+                    row["remote_version"].as_i64().unwrap_or(0),
+                    short,
+                    row["is_tombstone"].as_bool().unwrap_or(false),
+                );
+            }
+            println!();
+            println!(
+                "Resolve with: sentinelpass sync conflict-resolve --object-id <ID> [--take-remote]"
+            );
+        }
+
+        crate::SyncCommands::ConflictResolve {
+            ref object_id,
+            ref take_remote,
+        } => {
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+            backend.call(VaultOp::SyncConflictResolve {
+                object_id: object_id.clone(),
+                take_remote: *take_remote,
+            })?;
+            if *take_remote {
+                println!("Conflict resolved: the peer's version was applied.");
+            } else {
+                println!(
+                    "Conflict resolved: the local edit was kept and will sync on the next run."
+                );
+            }
         }
 
         crate::SyncCommands::DeadLetterList => {

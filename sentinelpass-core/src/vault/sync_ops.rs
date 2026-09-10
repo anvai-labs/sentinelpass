@@ -11,6 +11,7 @@ impl VaultManager {
         let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig::load(db.conn())?;
         let pending = crate::sync::change_tracker::count_pending_changes(db.conn())?;
+        let conflict_count = crate::sync::outbox::count_sync_conflicts(db.conn())?;
 
         Ok(crate::sync::models::SyncStatus {
             enabled: config.sync_enabled,
@@ -19,7 +20,67 @@ impl VaultManager {
             relay_url: config.relay_url.clone(),
             last_sync_at: config.last_sync_at,
             pending_changes: pending,
+            conflict_count,
         })
+    }
+
+    /// List stored conflict alternatives (metadata only; WBS-611).
+    pub fn list_sync_conflicts(&self) -> Result<Vec<crate::sync::outbox::SyncConflictRow>> {
+        let db = self.lock_db()?;
+        crate::sync::outbox::list_sync_conflicts(db.conn())
+    }
+
+    /// Resolve a stored concurrent-edit conflict (WBS-611 / SR-SYNC-005):
+    /// delegates to the engine-level resolvers.
+    #[cfg(feature = "sync")]
+    pub fn resolve_sync_conflict(&self, object_id: &uuid::Uuid, take_remote: bool) -> Result<()> {
+        let db = self.lock_db()?;
+        let conn = db.conn();
+        let row: Option<(String, i64, Vec<u8>, String, i64)> = conn
+            .query_row(
+                "SELECT object_type, remote_version, remote_payload, origin_device_id,
+                        is_tombstone
+                 FROM sync_conflicts WHERE object_id = ?1",
+                [object_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map_err(DatabaseError::Sqlite)
+            .ok();
+        let Some((type_str, remote_version, payload, origin, is_tombstone)) = row else {
+            return Err(PasswordManagerError::NotFound(format!(
+                "no stored conflict for object {object_id}"
+            )));
+        };
+        let entry_type = crate::sync::engine::parse_object_type(&type_str)?;
+        let origin_uuid = uuid::Uuid::parse_str(&origin).unwrap_or_default();
+        if take_remote {
+            let dek = self.key_hierarchy.dek()?.clone();
+            let engine = crate::sync::engine::SyncEngine::new(
+                crate::sync::client::DetachedTransport,
+                self.db.clone(),
+                uuid::Uuid::nil(),
+            );
+            crate::sync::engine::resolve_conflict_take_remote(
+                &engine,
+                conn,
+                &dek,
+                object_id,
+                &crate::sync::engine::ConflictAlternative {
+                    entry_type,
+                    remote_version: remote_version as u64,
+                    payload,
+                    origin: origin_uuid,
+                    is_tombstone: is_tombstone != 0,
+                },
+            )
+        } else {
+            crate::sync::engine::resolve_conflict_keep_local(
+                conn,
+                object_id,
+                entry_type,
+                remote_version as u64,
+            )
+        }
     }
 
     /// Load the local sync device identity (Ed25519 signing key + metadata) if present.
