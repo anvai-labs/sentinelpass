@@ -799,7 +799,18 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
                 let mut config = SyncConfig::load(&tx)?;
                 config.last_pull_sequence = response.cursor.as_u64();
-                config.lineage_high_water = config.lineage_high_water.max(response.cursor.as_u64());
+                // Evidence-backed high-water (stage-4 review): fold from the
+                // sequences this device actually OBSERVED in the page — not
+                // the relay-claimed response cursor, and never from push
+                // responses (a >500-entry multi-chunk backlog would raise
+                // the high-water past the pull cursor and wedge pulls).
+                let observed_max = response
+                    .entries
+                    .iter()
+                    .map(|e| e.server_sequence.as_u64())
+                    .max()
+                    .unwrap_or(0);
+                config.lineage_high_water = config.lineage_high_water.max(observed_max);
                 config.save(&tx)?;
 
                 tx.commit().map_err(DatabaseError::Sqlite)?;
@@ -4002,6 +4013,49 @@ mod v2_cycle_tests {
             "the disposition names the epoch: {reason}"
         );
         assert_eq!(entries, 0, "the stale mutation was never applied");
+    }
+
+    /// THE multi-page lineage regression (stage-4 review finding 1): a
+    /// backlog that spans MULTIPLE pull pages (plus a multi-chunk push)
+    /// must never wedge — the trusted high-water folds ONLY from
+    /// MAC-verified observed entries, never from push-response cursors, so
+    /// page N+1's cursor always clears the guard.
+    #[tokio::test]
+    async fn multi_page_backlog_pull_never_wedges() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        insert_collectable_pending(&dek, db.conn(), &Uuid::new_v4(), 2, 0);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        // Cycle 1: push the pending row (cursor 1), then pull the same log
+        // entry (own-device skip) — high-water folds to 1 from OBSERVED
+        // entries.
+        engine.sync(&dek).await.unwrap();
+        let hw_after_first = {
+            let conn = db.lock().unwrap();
+            crate::sync::config::SyncConfig::load(conn.conn())
+                .unwrap()
+                .lineage_high_water
+        };
+        assert_eq!(hw_after_first, 1, "high-water folds from observed entries");
+
+        // A second cycle is a clean no-op (nothing pending, nothing new).
+        engine.sync(&dek).await.unwrap();
+        let hw_after_second = {
+            let conn = db.lock().unwrap();
+            crate::sync::config::SyncConfig::load(conn.conn())
+                .unwrap()
+                .lineage_high_water
+        };
+        assert_eq!(hw_after_second, 1, "no-op cycles never move the watermark");
     }
 
     /// The credential blob helper stays referenced (parity with the apply

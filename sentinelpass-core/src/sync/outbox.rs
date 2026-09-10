@@ -274,9 +274,12 @@ pub fn apply_push_acks(
 
     let mut config = crate::sync::config::SyncConfig::load(&tx)?;
     config.last_push_sequence = server_cursor;
-    // The vault log cursor reported by a push lives in the same lineage
-    // domain — fold it into the trusted high-water (max).
-    config.lineage_high_water = config.lineage_high_water.max(server_cursor);
+    // The PUSH-response cursor is a relay CLAIM with no client-side
+    // evidence — it is diagnostic only and MUST NOT advance the trusted
+    // lineage high-water: a >500-entry backlog (multi-chunk push) would
+    // otherwise raise the high-water past the pull cursor and permanently
+    // wedge pulls (stage-4 review). The high-water folds ONLY from
+    // MAC-verified pull observations (see engine pull_changes).
     config.save(&tx)?;
 
     tx.commit().map_err(DatabaseError::Sqlite)?;
@@ -459,9 +462,16 @@ mod tests {
         assert_eq!(c_state, "pending", "non-conflict rejections stay pending");
         assert_eq!(c_acked, 1, "their acked version is untouched");
 
-        // The checkpoint records the relay cursor diagnostic.
+        // The checkpoint records the relay cursor diagnostic...
         let config = crate::sync::config::SyncConfig::load(db.conn()).unwrap();
         assert_eq!(config.last_push_sequence, 9);
+        // ...and the push cursor MUST NOT raise the trusted lineage
+        // high-water (stage-4 review: a multi-chunk backlog's claimed
+        // cursor would otherwise wedge every future pull).
+        assert_eq!(
+            config.lineage_high_water, 0,
+            "push responses never move the trusted high-water"
+        );
     }
 
     /// A conflict BEHIND our attempt (we edited mid-flight, or a lost
