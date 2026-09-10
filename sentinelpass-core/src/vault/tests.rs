@@ -4046,6 +4046,21 @@ fn degraded_sync_apply_index_is_repaired_by_sweep() {
     let entry_id = vault
         .add_entry(&wbs411_entry("Repair", "wbs411-repair-old"))
         .unwrap();
+    // WBS-611 guard interaction: a locally-UNSYNCED row receiving an
+    // equal-or-greater remote version takes the CONFLICT path (alternative
+    // recorded, never overwritten). This test exercises the degraded-index
+    // apply path, which requires a synced local row (peer sends v2 over our
+    // acknowledged v1).
+    {
+        let db = vault.lock_db().unwrap();
+        db.conn()
+            .execute(
+                "UPDATE entries SET sync_state = 'synced', sync_acked_version = 1 \
+                 WHERE entry_id = ?1",
+                [entry_id],
+            )
+            .unwrap();
+    }
     let dek = vault.key_hierarchy.dek().unwrap();
 
     // (0) Sweep once so the backfill flag is SET — this is the state where
