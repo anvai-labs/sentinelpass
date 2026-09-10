@@ -32,10 +32,12 @@ The client engine pushes and pulls over `/api/v2/*`:
   state, the DEK-encrypted payload, and an HMAC-SHA256 MAC (DEK-derived via
   HKDF) over the canonical shared metadata. The MAC is deliberately
   distinct from the ADR-005 per-device storage envelope (which never
-  appears on the wire). Stage-1 status: the MAC is computed, transported,
-  and stored opaquely by the relay; ENFORCEMENT (relay-side presence
-  checks plus client verification on pull-apply) lands with WBS-612/613 —
-  until then the MAC must not be claimed as an active control.
+  appears on the wire). ENFORCED on pull (WBS-612): every foreign
+  mutation is verified — MAC plus deterministic-id recomputation — BEFORE
+  application; a mismatch (relay rewriting identity, type, versions,
+  epoch, origin, tombstone state, or payload bytes) is dead-lettered,
+  never applied. The relay stores the MAC opaquely (it cannot compute or
+  invert it).
 - **Distinct counter types.** `DeviceSequence` (per-device push framing —
   recorded by the relay, never gated on), `ObjectVersion` (per-object CAS
   domain), and `ServerCursor` (relay vault log position) are distinct
@@ -89,9 +91,18 @@ The client engine pushes and pulls over `/api/v2/*`:
   structurally impossible.
 - **Stale-epoch gate.** Mutations whose `key_epoch` is below the vault's
   relay-side epoch high-water are rejected (`stale_epoch`); a mutation
-  carrying a higher epoch advances the vault epoch forward-only. Device
-  revocation is enforced by the Ed25519 auth middleware on every request,
-  as in v1.
+  carrying a higher epoch advances the vault epoch forward-only (bounded
+  jump). Apply-side mirror (WBS-614): a pulled mutation below the LOCAL
+  vault epoch is dead-lettered — a rotation revoked that key's authority
+  here. Device revocation is enforced by the Ed25519 auth middleware on
+  every request, as in v1.
+- **Lineage high-water (WBS-613).** The client retains a TRUSTED
+  sync-lineage high-water — the max relay vault-log cursor it ever
+  accepted (`sync_metadata.lineage_high_water`, schema v13). A pull whose
+  cursor moves below it is REFUSED fail-closed (relay log reset, vault
+  swap): local state is untouched and re-pairing is the remedy.
+  Deliberately distinct from the ADR-004 epoch sidecar (which protects
+  key-material rollback, not log-lineage rollback).
 - **Mixed-protocol gate (fail-closed, client side).** A sync configuration
   established before v2 (`sync_metadata.protocol_version != 2`) refuses to
   sync: its relay state lives in the v1 tables, and v2 mutations pushed

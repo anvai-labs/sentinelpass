@@ -22,6 +22,7 @@ use crate::sync::models::{
 use crate::sync::outbox;
 use crate::sync::v2::{DeviceSequence, MutationV2, PullRequestV2, PushRequestV2, ServerCursor};
 use crate::{DatabaseError, PasswordManagerError, Result};
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -594,13 +595,13 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// later in the page) get ONE bounded retry pass within the same
     /// transaction before being dead-lettered.
     async fn pull_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
-        let mut cursor = {
+        let (mut cursor, mut high_water) = {
             let db = self
                 .db
                 .lock()
                 .map_err(|_| DatabaseError::LockPoisoned("pull seq".to_string()))?;
             let config = SyncConfig::load(db.conn())?;
-            config.last_pull_sequence
+            (config.last_pull_sequence, config.lineage_high_water)
         };
 
         let mut total_count = 0u64;
@@ -623,6 +624,20 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 ));
             }
 
+            // WBS-613 lineage high-water (trusted state, distinct from the
+            // ADR-004 epoch sidecar): a cursor BELOW the high-water means
+            // the relay's log moved backwards — reset, vault swap, or a
+            // different relay behind the same URL. Fail closed; re-pairing
+            // is the remedy.
+            if response.cursor.as_u64() < high_water {
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "relay lineage moved backwards: cursor {backwards} is below the trusted \
+                     high-water {high_water}. The relay log may have been reset or the \
+                     vault swapped. Refusing to apply (re-pair under v2 to re-baseline)",
+                    backwards = response.cursor.as_u64()
+                )));
+            }
+
             total_count += response.entries.len() as u64;
 
             {
@@ -635,6 +650,16 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     .unchecked_transaction()
                     .map_err(DatabaseError::Sqlite)?;
 
+                // WBS-612: every foreign mutation is authenticated BEFORE
+                // application — the DEK-derived metadata MAC over the
+                // canonical shared metadata plus the deterministic
+                // mutation-id recomputation. A relay rewriting identity,
+                // type, versions, epoch, origin, tombstone state, or payload
+                // bytes is detected here; the mutation is dead-lettered
+                // (never applied, never silently trusted).
+                let mac_key = crate::sync::v2::derive_metadata_mac_key(dek)?;
+                let (_, local_epoch) = crate::vault::envelope_ops::read_local_identity(db.conn())?;
+
                 let mut deferred: Vec<(usize, String)> = Vec::new();
                 let mut applied = 0usize;
                 for (index, entry) in response.entries.iter().enumerate() {
@@ -642,6 +667,57 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     // Skip our own changes: their acks already governed the
                     // outbox, and the cursor passes them with this page.
                     if mutation.origin_device_id == self.device_id {
+                        continue;
+                    }
+                    let payload_sha256 = Sha256::digest(&mutation.encrypted_payload);
+                    let metadata = crate::sync::v2::MutationMetadata {
+                        vault_id: mutation.vault_id,
+                        object_id: mutation.object_id,
+                        object_type: mutation.object_type,
+                        expected_version: mutation.expected_version.as_u64(),
+                        resulting_version: mutation.resulting_version.as_u64(),
+                        key_epoch: mutation.key_epoch,
+                        origin_device_id: mutation.origin_device_id,
+                        is_tombstone: mutation.is_tombstone,
+                        mutation_id: mutation.mutation_id,
+                        payload_sha256: &payload_sha256,
+                    };
+                    if !metadata.verify_mac(&mac_key, &mutation.metadata_mac)? {
+                        let entry_ref = entry;
+                        dead_letter_entry(
+                            &tx,
+                            entry_ref,
+                            "metadata authentication failed (relay tamper suspected)",
+                        )?;
+                        continue;
+                    }
+                    if mutation.mutation_id
+                        != crate::sync::v2::mutation_id_for(
+                            mutation.vault_id,
+                            mutation.object_id,
+                            mutation.resulting_version,
+                        )
+                    {
+                        dead_letter_entry(
+                            &tx,
+                            entry,
+                            "mutation id does not match its content coordinates",
+                        )?;
+                        continue;
+                    }
+                    // WBS-612/614 apply-side epoch rule (ADR-004 rev 4): a
+                    // mutation sealed under a key epoch BELOW the local
+                    // vault's epoch is a pre-rotation upload — dead-letter
+                    // it (the rotation revoked that key's authority here).
+                    if mutation.key_epoch < local_epoch {
+                        dead_letter_entry(
+                            &tx,
+                            entry,
+                            &format!(
+                                "mutation epoch {} is below the local vault epoch {local_epoch}",
+                                mutation.key_epoch
+                            ),
+                        )?;
                         continue;
                     }
                     let blob = blob_from_log_mutation(mutation);
@@ -723,9 +799,11 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
                 let mut config = SyncConfig::load(&tx)?;
                 config.last_pull_sequence = response.cursor.as_u64();
+                config.lineage_high_water = config.lineage_high_water.max(response.cursor.as_u64());
                 config.save(&tx)?;
 
                 tx.commit().map_err(DatabaseError::Sqlite)?;
+                high_water = config.lineage_high_water;
 
                 if still_deferred > 0 {
                     tracing::warn!(
@@ -3174,6 +3252,7 @@ mod v2_cycle_tests {
             last_pull_sequence: 0,
             last_sync_at: None,
             protocol_version: protocol,
+            lineage_high_water: 0,
         };
         config.save(db.conn()).unwrap();
     }
@@ -3608,6 +3687,7 @@ mod v2_cycle_tests {
                 last_pull_sequence: 0,
                 last_sync_at: None,
                 protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+                lineage_high_water: 0,
             };
             config.save(db.lock().unwrap().conn()).unwrap();
         };
@@ -3707,6 +3787,221 @@ mod v2_cycle_tests {
             injected_failures >= 1,
             "the sweep must inject at least one real failure to be meaningful"
         );
+    }
+
+    // --- WBS-612/613/614: authenticated metadata, lineage, epoch -----------
+
+    /// THE metadata-tamper acceptance (SR-SYNC-004): a relay rewriting ANY
+    /// authenticated metadata field (here: flipping the tombstone state)
+    /// breaks the DEK-derived MAC — the mutation is dead-lettered, NEVER
+    /// applied.
+    #[tokio::test]
+    async fn relay_metadata_tamper_is_dead_lettered() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let mut served = crate::sync::v2::build_mutation(
+            &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+            &crate::sync::v2::MutationInput {
+                vault_id: relay_vault,
+                object_id: sync_id,
+                object_type: SyncEntryType::Credential,
+                expected_version: ObjectVersion(0),
+                resulting_version: ObjectVersion(1),
+                key_epoch: 1,
+                origin_device_id: Uuid::new_v4(),
+                is_tombstone: false,
+                encrypted_payload: vec![0x22; 40],
+            },
+        )
+        .unwrap();
+        // THE tamper: flip the authenticated tombstone state (the MAC no
+        // longer matches). The relay cannot detect this — only the client
+        // can.
+        served.is_tombstone = true;
+        relay.seed_peer_mutation(served);
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        // Dead-lettered with the authentication reason; NOTHING applied.
+        let (dead, entries): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM sync_dead_letter), \
+                            (SELECT COUNT(*) FROM entries)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(dead, 1);
+        let reason: String = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT reason FROM sync_dead_letter LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            reason.contains("metadata authentication failed"),
+            "the disposition names the tamper: {reason}"
+        );
+        assert_eq!(entries, 0, "the tampered mutation was never applied");
+    }
+
+    /// THE lineage high-water acceptance (WBS-613): a relay whose log
+    /// cursor moved BELOW the trusted high-water (reset, vault swap) is
+    /// refused fail-closed — the local state is untouched and the error
+    /// names the re-pairing remedy. Distinct from the ADR-004 epoch
+    /// sidecar: this is LOG-lineage rollback.
+    #[tokio::test]
+    async fn lineage_rollback_is_refused_fail_closed() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // Trust the lineage up to cursor 9 (e.g. from a long prior history).
+        {
+            let conn = db.conn();
+            conn.execute("UPDATE sync_metadata SET lineage_high_water = 9", [])
+                .unwrap();
+        }
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 2, 0);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        // The relay (reset) serves a SHORT log: cursor lands at 2 < 9.
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0x33; 40],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        let outcome = engine.sync(&dek).await;
+        assert!(outcome.is_err(), "lineage rollback must be refused");
+        let message = outcome.unwrap_err().to_string();
+        assert!(
+            message.contains("lineage moved backwards"),
+            "the refusal names the lineage check: {message}"
+        );
+        // Fail-closed: the pull page never committed — the cursor and the
+        // trusted high-water are untouched.
+        let (high_water, pull_cursor, dead): (i64, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT (SELECT lineage_high_water FROM sync_metadata), \
+                            (SELECT last_pull_sequence FROM sync_metadata), \
+                            (SELECT COUNT(*) FROM sync_dead_letter)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(high_water, 9, "the trusted high-water did not move");
+        assert_eq!(pull_cursor, 0, "the pull page never committed");
+        assert_eq!(
+            dead, 0,
+            "nothing from the rolled-back log was dispositioned"
+        );
+    }
+
+    /// THE stale-epoch apply-side rule (WBS-614 / ADR-004 rev 4): a pulled
+    /// mutation sealed under a key epoch BELOW the local vault's epoch is
+    /// dead-lettered — a rotation revoked that key's authority here.
+    #[tokio::test]
+    async fn stale_epoch_mutation_is_dead_lettered_on_pull() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // The LOCAL vault has rotated ahead (epoch 5).
+        {
+            let conn = db.conn();
+            conn.execute("UPDATE db_metadata SET key_epoch = 5", [])
+                .unwrap();
+        }
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 2,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0x44; 40],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        let (dead, entries): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM sync_dead_letter), \
+                            (SELECT COUNT(*) FROM entries)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(dead, 1);
+        let reason: String = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT reason FROM sync_dead_letter LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            reason.contains("epoch"),
+            "the disposition names the epoch: {reason}"
+        );
+        assert_eq!(entries, 0, "the stale mutation was never applied");
     }
 
     /// The credential blob helper stays referenced (parity with the apply

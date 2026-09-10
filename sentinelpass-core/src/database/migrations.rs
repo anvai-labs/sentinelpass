@@ -805,6 +805,50 @@ pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migrate schema from v12 to v13: the trusted sync-lineage high-water
+/// (WBS-613, ADR-006). `sync_metadata.lineage_high_water` records the max
+/// relay vault-log cursor this device ever accepted; a pull whose cursor
+/// moves below it is REFUSED (relay log reset / vault swap suspicion) —
+/// deliberately DISTINCT from the ADR-004 epoch sidecar's key-material
+/// rollback protection. Guarded column add (v5-v6 pattern), ONE
+/// transaction with the version bump.
+pub fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        let existing: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('sync_metadata')")
+                .map_err(DatabaseError::Sqlite)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(DatabaseError::Sqlite)?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let mut stmts = String::new();
+        if !existing.iter().any(|c| c == "lineage_high_water") {
+            stmts.push_str(
+                "ALTER TABLE sync_metadata ADD COLUMN lineage_high_water INTEGER NOT NULL DEFAULT 0;\n",
+            );
+        }
+        stmts.push_str("UPDATE db_metadata SET version = 13 WHERE id = 1;\n");
+        conn.execute_batch(&stmts).map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -855,6 +899,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 12 {
         migrate_v11_to_v12(conn)?;
+    }
+
+    if version < 13 {
+        migrate_v12_to_v13(conn)?;
     }
 
     Ok(())

@@ -23,6 +23,11 @@ pub struct SyncConfig {
     /// vault's relay state lives in different tables, and pushing v2
     /// mutations into it would silently split the fleet.
     pub protocol_version: u32,
+    /// TRUSTED sync-lineage high-water (WBS-613, ADR-006): the max relay
+    /// vault-log cursor this device ever accepted. A pull whose cursor is
+    /// below it is refused (relay log reset / vault swap). Deliberately
+    /// distinct from the ADR-004 epoch sidecar (key-material rollback).
+    pub lineage_high_water: u64,
 }
 
 /// The wire protocol version the current engine speaks.
@@ -46,7 +51,7 @@ impl SyncConfig {
         let result = conn.query_row(
             "SELECT vault_id, device_id, device_name, relay_url,
                     last_push_sequence, last_pull_sequence, last_sync_at, sync_enabled,
-                    protocol_version
+                    protocol_version, lineage_high_water
              FROM sync_metadata WHERE id = 1",
             [],
             |row| {
@@ -59,6 +64,7 @@ impl SyncConfig {
                 let last_sync_at: Option<i64> = row.get(6)?;
                 let sync_enabled: bool = row.get(7)?;
                 let protocol_version: i64 = row.get(8)?;
+                let lineage_high_water: i64 = row.get(9)?;
 
                 Ok(SyncConfig {
                     sync_enabled,
@@ -70,6 +76,7 @@ impl SyncConfig {
                     last_pull_sequence: last_pull_sequence as u64,
                     last_sync_at,
                     protocol_version: protocol_version.max(0) as u32,
+                    lineage_high_water: lineage_high_water.max(0) as u64,
                 })
             },
         );
@@ -86,8 +93,8 @@ impl SyncConfig {
         conn.execute(
             "INSERT INTO sync_metadata (id, vault_id, device_id, device_name, relay_url,
                                         last_push_sequence, last_pull_sequence, last_sync_at, sync_enabled,
-                                        protocol_version)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                                        protocol_version, lineage_high_water)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 vault_id = excluded.vault_id,
                 device_id = excluded.device_id,
@@ -97,7 +104,8 @@ impl SyncConfig {
                 last_pull_sequence = excluded.last_pull_sequence,
                 last_sync_at = excluded.last_sync_at,
                 sync_enabled = excluded.sync_enabled,
-                protocol_version = excluded.protocol_version",
+                protocol_version = excluded.protocol_version,
+                lineage_high_water = excluded.lineage_high_water",
             rusqlite::params![
                 self.vault_id.map(|u| u.to_string()),
                 self.device_id.map(|u| u.to_string()),
@@ -108,6 +116,7 @@ impl SyncConfig {
                 self.last_sync_at,
                 self.sync_enabled,
                 self.protocol_version as i64,
+                self.lineage_high_water as i64,
             ],
         )
         .map_err(DatabaseError::Sqlite)?;
@@ -279,6 +288,7 @@ mod tests {
             last_pull_sequence: 37,
             last_sync_at: Some(1700000000),
             protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+            lineage_high_water: 7,
         };
 
         config.save(conn).unwrap();
@@ -299,6 +309,10 @@ mod tests {
             loaded.protocol_version,
             crate::sync::config::SYNC_PROTOCOL_VERSION,
             "protocol version round-trips"
+        );
+        assert_eq!(
+            loaded.lineage_high_water, 7,
+            "lineage high-water round-trips"
         );
     }
 

@@ -375,6 +375,7 @@ impl VaultManager {
             last_pull_sequence: 0,
             last_sync_at: None,
             protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+            lineage_high_water: 0,
         };
         config.save(db.conn())?;
         let dek = self.key_hierarchy.dek()?;

@@ -1084,8 +1084,35 @@ after 408/409 stabilize.
 - **WBS-612 — Authenticate identity/type/origin/version/epoch/tombstone.** SR-SYNC-004,
   TD-SEC-02. Apply-side rule: pull never applies epoch/registry state below the
   local high-water sidecar — rejected as suspected rollback (ADR-004 rev 4). Est 4d.
+  **Status:** Done (2026-09-10, sync v2 stage 4) — every foreign pulled
+  mutation is authenticated BEFORE application: DEK-derived metadata MAC
+  verification (covering identity, type, versions, epoch, origin,
+  tombstone, payload hash — distinct identity-domain from the ADR-005
+  envelope) plus deterministic mutation-id recomputation; failures are
+  dead-lettered, never applied
+  (`relay_metadata_tamper_is_dead_lettered`). Apply-side epoch rule: a
+  mutation below the LOCAL vault epoch is dead-lettered
+  (`stale_epoch_mutation_is_dead_lettered_on_pull`).
 - **WBS-613 — Version/hash lineage + trusted high-water.** SR-SYNC-004. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 4) — schema v13
+  `sync_metadata.lineage_high_water` (TRUSTED max accepted vault-log
+  cursor; deliberately DISTINCT from the ADR-004 epoch sidecar): a pull
+  whose cursor moves below it is REFUSED fail-closed (relay log reset /
+  vault swap) — local state untouched, re-pairing is the remedy
+  (`lineage_rollback_is_refused_fail_closed`). Folded into the high-water
+  from BOTH the pull cursor and the push-response cursor. Follow-up
+  ticketed from stage-2 review: own-device log entries are skipped by
+  origin — a backup-restored device behind local version should apply
+  them (restore path already neutralizes sync state, ADR-008).
 - **WBS-614 — Device/epoch revocation everywhere.** TD-SEC-05. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stages 1+4) — revocation: the
+  Ed25519 auth middleware checks the device-revoked flag on EVERY request
+  (v1 and v2 alike); epoch: the relay rejects mutations below the vault's
+  forward-only epoch high-water (bounded jump), and the CLIENT dead-letters
+  pulled mutations below its LOCAL vault epoch (apply-side mirror of the
+  ADR-004 rotation revocation). Residual (documented): the relay-side
+  epoch high-water advances on client assertion — authenticated epoch
+  publication (epoch-bound MAC context) remains a later-stage option.
 - **WBS-615 — High-entropy QR bootstrap / reviewed PAKE.** SR-SYNC-006, TD-SEC-07,
   SR-RELAY-002. Est 5d.
 - **WBS-616 — Pairing material in bodies; one-use; transcript-bound.** TD-NET-01. Est 2d.

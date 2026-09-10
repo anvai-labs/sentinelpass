@@ -450,6 +450,7 @@ impl LiveVaultService<'_> {
                 })?;
                 Ok(VaultOpResult::Report(value))
             }
+            #[cfg(feature = "sync")]
             VaultOp::SyncConflictResolve {
                 ref object_id,
                 take_remote,
@@ -462,6 +463,10 @@ impl LiveVaultService<'_> {
                 vault.resolve_sync_conflict(&object_id, *take_remote)?;
                 Ok(VaultOpResult::Ok)
             }
+            #[cfg(not(feature = "sync"))]
+            VaultOp::SyncConflictResolve { .. } => Err(PasswordManagerError::NotImplemented(
+                "conflict resolution requires the sync feature".to_string(),
+            )),
 
             VaultOp::SyncDeadLetterList => {
                 let rows = vault.list_sync_dead_letter()?;

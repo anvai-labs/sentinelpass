@@ -274,6 +274,9 @@ pub fn apply_push_acks(
 
     let mut config = crate::sync::config::SyncConfig::load(&tx)?;
     config.last_push_sequence = server_cursor;
+    // The vault log cursor reported by a push lives in the same lineage
+    // domain — fold it into the trusted high-water (max).
+    config.lineage_high_water = config.lineage_high_water.max(server_cursor);
     config.save(&tx)?;
 
     tx.commit().map_err(DatabaseError::Sqlite)?;

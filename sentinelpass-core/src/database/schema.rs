@@ -34,7 +34,13 @@ use tracing::warn;
 /// a concurrent edit (one per object; the LOCAL side stays in its own row).
 /// A pull that hits a row with an unsynced local edit records the incoming
 /// mutation here instead of silently overwriting (SR-SYNC-005).
-pub const CURRENT_SCHEMA_VERSION: i32 = 12;
+/// v13 (WBS-613 / ADR-006): `sync_metadata.lineage_high_water` — the
+/// TRUSTED sync-lineage high-water (the max relay vault-log cursor this
+/// device ever accepted). Deliberately DISTINCT from the ADR-004 epoch
+/// sidecar (which protects key-material rollback): this column protects
+/// LOG-lineage rollback — a relay whose log moved backwards (reset, vault
+/// swap) is refused fail-closed and requires re-pairing.
+pub const CURRENT_SCHEMA_VERSION: i32 = 13;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -469,7 +475,8 @@ impl Database {
                     last_pull_sequence INTEGER NOT NULL DEFAULT 0,
                     last_sync_at INTEGER,
                     sync_enabled INTEGER NOT NULL DEFAULT 0,
-                    protocol_version INTEGER NOT NULL DEFAULT 0
+                    protocol_version INTEGER NOT NULL DEFAULT 0,
+                    lineage_high_water INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS sync_devices (
