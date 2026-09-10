@@ -1115,7 +1115,29 @@ after 408/409 stabilize.
   publication (epoch-bound MAC context) remains a later-stage option.
 - **WBS-615 — High-entropy QR bootstrap / reviewed PAKE.** SR-SYNC-006, TD-SEC-07,
   SR-RELAY-002. Est 5d.
+  **Status:** Done (2026-09-10, sync v2 stage 5) — the reviewed CHOICE is
+  the HMAC-challenge protocol (documented per ADR-006's allowance; a PAKE
+  was judged heavy for the coordinated-relay deployment model): pairing
+  uses a 256-bit CSPRNG secret S as the sole root — bootstrap encrypted
+  under HKDF(S); the relay stores ONLY Argon2id(S) + ciphertext, gates
+  retrieval on knowledge of S (POST body, one-use, TTL, exponential
+  attempt-limit backoff); a 6-digit TRANSCRIPT derived from S is shown on
+  both devices purely for human comparison and never encrypts anything.
+  v1 pairing endpoints remain for old clients until WBS-624 retirement.
+  Tests: 256-bit + roundtrip, short-numeric rejection, transcript
+  stability/divergence, bootstrap-id determinism, wrong-secret decryption
+  failure.
 - **WBS-616 — Pairing material in bodies; one-use; transcript-bound.** TD-NET-01. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 5) — pairing material moves
+  in POST bodies only (`/api/v2/pairing/bootstrap` upload — authenticated;
+  `/api/v2/pairing/bootstrap/retrieve` — public + attempt-limited);
+  retrieval is ONE-USE (consumed in the same transaction as the return
+  data) and short-lived (TTL); the transcript (6 digits from the secret,
+  shown on both devices) binds the human side; registration is bound to
+  the pairing via the registration proof, staged relay-side at successful
+  retrieval with a short window and consumed at device registration. The
+  pairing secret is PROMPTED at pair-join — never a command-line argument
+  (TD-NET-01's URL/CLI exposure gone).
 - **WBS-617 — TLS-only, safe redirects, no userinfo (full client rules).** SR-SYNC-007,
   TD-NET-02. Est 2d.
 - **WBS-618 — Proxy-trust config for forwarded IPs.** TD-NET-03. Est 1.5d.

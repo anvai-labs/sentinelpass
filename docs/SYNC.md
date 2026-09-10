@@ -145,7 +145,7 @@ client's next collection).
 |----------|-------|
 | Transport encryption | AES-256-GCM (vault DEK, per-blob random nonce) |
 | Request authentication | Ed25519 signatures over canonical request string |
-| Pairing key derivation | HKDF-SHA256 (6-digit code + random salt) |
+| Pairing key derivation | HKDF-SHA256 (256-bit secret, v2) — the six-digit code path is retired |
 | Conflict resolution | Last-Write-Wins (higher version → higher timestamp → keep local) |
 | Feature gate | `sync` (disabled by default; enables `reqwest`, `hkdf`) |
 | Relay default listen | `127.0.0.1:8743` |
@@ -191,39 +191,38 @@ Device A                           Relay
    │◀─────────────────────────────────│
 ```
 
-### 2. Pair a New Device
+### 2. Pair a New Device (v2)
 
 ```text
 Device A (existing)                Relay                   Device B (new)
    │                                 │                          │
-   │  generate pairing code (6 digits)                          │
-   │  derive pairing_key = HKDF(code, salt)                     │
-   │  encrypt VaultBootstrap with pairing_key                   │
+   │  generate 256-bit secret S                                 │
+   │  bootstrap encrypted under HKDF(S)                         │
+   │  transcript = 6 digits from S (display)                    │
    │                                 │                          │
-   │  POST /pairing/bootstrap        │                          │
-   │  { token, encrypted, salt }     │                          │
-   │────────────────────────────────▶│                          │
+   │  POST /api/v2/pairing/bootstrap {secret, encrypted, proof} │
+   │  (relay stores Argon2id(S) + ciphertext; never the key)    │
    │                                 │                          │
-   │  Display code to user ──────────────────(out of band)────▶│
+   │  secret via QR / out-of-band ───────────────────────────▶ │
+   │  transcript via out-of-band ────────────────────────────▶ │
    │                                 │                          │
-   │                                 │  GET /pairing/bootstrap  │
-   │                                 │◀─────────────────────────│
-   │                                 │  { encrypted, salt }     │
-   │                                 │─────────────────────────▶│
+   │                    POST /api/v2/pairing/bootstrap/retrieve
+   │                    {secret}  (body, never URL; attempt-limited,
+   │                     one-use, TTL 300s; Argon2id-verified)
+   │                                 │── encrypted + proof ────▶│
    │                                 │                          │
-   │                                 │  derive pairing_key      │
-   │                                 │  decrypt VaultBootstrap   │
-   │                                 │  extract: kdf_params,     │
-   │                                 │    wrapped_dek, relay_url │
+   │                          transcript comparison (human)      │
    │                                 │                          │
    │                                 │  POST /devices/register  │
-   │                                 │◀─────────────────────────│
-   │                                 │                          │
+   │                                 │  (secret + proof staged) │
    │                                 │  POST /sync/full-pull    │
-   │                                 │◀─────────────────────────│
-   │                                 │  (all encrypted blobs)   │
-   │                                 │─────────────────────────▶│
 ```
+
+The pairing secret is 256 bits of CSPRNG output — the v1 six-digit code
+(~20 bits, offline-guessable once the bootstrap leaked) is retired. The
+relay never sees the derived key; a six-digit transcript is shown on both
+devices purely for human comparison and never encrypts anything. Pairing
+material moves in POST bodies, never URLs.
 
 ### 3. Incremental Push / Pull
 

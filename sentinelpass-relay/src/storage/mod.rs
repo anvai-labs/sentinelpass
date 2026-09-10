@@ -102,6 +102,17 @@ impl RelayStorage {
                 consumed INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS pairing_bootstraps_v2 (
+                bootstrap_id TEXT PRIMARY KEY,
+                vault_id TEXT NOT NULL,
+                secret_hash TEXT NOT NULL,
+                encrypted_bootstrap BLOB NOT NULL,
+                registration_proof BLOB NOT NULL,
+                expires_at INTEGER NOT NULL,
+                consumed INTEGER NOT NULL DEFAULT 0,
+                received_at INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS pairing_fetch_attempts (
                 token_hash TEXT PRIMARY KEY,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -198,6 +209,8 @@ impl RelayStorage {
                 ON seen_nonces(seen_at);
             CREATE INDEX IF NOT EXISTS idx_pairing_expires
                 ON pairing_bootstraps(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_pairing_v2_expires
+                ON pairing_bootstraps_v2(expires_at);
             CREATE INDEX IF NOT EXISTS idx_pairing_registration_proofs_expires
                 ON pairing_registration_proofs(expires_at);
             CREATE INDEX IF NOT EXISTS idx_pairing_registration_proofs_vault

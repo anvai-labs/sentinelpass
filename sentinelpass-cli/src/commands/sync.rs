@@ -1,6 +1,5 @@
 use crate::commands::service_client as sc;
 use anyhow::Result;
-use base64::Engine;
 use sentinelpass_core::VaultManager;
 use sentinelpass_protocol::service::VaultOp;
 use sentinelpass_protocol::service::VaultOpResult;
@@ -343,9 +342,12 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
                 .ok_or_else(|| anyhow::anyhow!("Sync device identity is missing"))?;
             let bootstrap = vault.export_pairing_bootstrap()?;
 
-            let code = sentinelpass_core::sync::pairing::generate_pairing_code();
-            let salt = sentinelpass_core::sync::pairing::generate_pairing_salt();
-            let pairing_key = sentinelpass_core::sync::pairing::derive_pairing_key(&code, &salt)?;
+            // WBS-615: the secret is 256 bits — the QR payload IS the
+            // secret. The bootstrap encrypts under HKDF(secret); the relay
+            // stores only Argon2id(secret).
+            let secret = sentinelpass_core::sync::pairing::generate_pairing_secret();
+            let secret_b64 = sentinelpass_core::sync::pairing::pairing_secret_to_b64(&secret);
+            let pairing_key = sentinelpass_core::sync::pairing::derive_pairing_key_v2(&secret)?;
             let registration_proof = sentinelpass_core::sync::pairing::derive_registration_proof(
                 &pairing_key,
                 &bootstrap.vault_id,
@@ -363,42 +365,46 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
                 device_id,
                 signing_key,
             )?;
-            crate::run_async(client.upload_bootstrap_with_proof(
-                &code,
+            crate::run_async(client.upload_bootstrap_v2(
+                &secret_b64,
                 &encrypted_bootstrap,
-                &salt,
-                Some(&registration_proof),
+                &registration_proof,
             ))??;
 
-            let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt);
+            let transcript = sentinelpass_core::sync::pairing::transcript_digits(&secret);
 
             println!();
-            println!("Pairing Code: {}", code);
+            println!("Pairing secret (scan as QR or copy):");
+            println!("  {secret_b64}");
             println!();
-            println!("Share this code with the new device. It expires in 5 minutes.");
-            println!("On the new device, run:");
-            println!(
-                "  sentinelpass sync pair-join --relay-url {} --code {} --salt {}",
-                relay_url, code, salt_b64
-            );
+            println!("Transcript (must match on the joining device): {transcript}");
+            println!("Expires in 5 minutes. On the new device, run:");
+            println!("  sentinelpass sync pair-join --relay-url {relay_url}");
+            println!("and paste the secret when prompted.");
             println!();
             println!("Pairing bootstrap uploaded to relay.");
         }
 
-        crate::SyncCommands::PairJoin {
-            ref relay_url,
-            ref code,
-            ref salt,
-        } => {
-            if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-                anyhow::bail!("Pairing code must be exactly 6 digits");
-            }
-
-            let salt_bytes = base64::engine::general_purpose::STANDARD
-                .decode(salt)
-                .map_err(|e| anyhow::anyhow!("Invalid pairing salt: {}", e))?;
-            if salt_bytes.len() != 16 {
-                anyhow::bail!("Pairing salt must decode to 16 bytes");
+        crate::SyncCommands::PairJoin { ref relay_url } => {
+            // WBS-615/616: the pairing secret is PROMPTED (never a
+            // command-line argument) and the bootstrap is retrieved in a
+            // POST body after proving knowledge of the secret.
+            let secret_b64 =
+                rpassword::prompt_password("Pairing secret (paste from the originating device): ")?;
+            let secret = sentinelpass_core::sync::pairing::pairing_secret_from_b64(&secret_b64)
+                .map_err(|e| anyhow::anyhow!("invalid pairing secret: {e}"))?;
+            let transcript = sentinelpass_core::sync::pairing::transcript_digits(&secret);
+            println!("Transcript on this device: {transcript}");
+            print!("Does this match the originating device's transcript? [y/N]: ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+            if !confirmation.trim().to_lowercase().starts_with('y') {
+                anyhow::bail!(
+                    "Transcripts do not match — refusing to pair (the secret may be \
+                     wrong or mistyped)"
+                );
             }
 
             let master_password = crate::prompt_master_password(false)?;
@@ -406,7 +412,7 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
                 crate::open_vault_with_password(&vault_path, master_password.as_bytes())?
             } else {
                 VaultManager::create(&vault_path, master_password.as_bytes())
-                    .map_err(|e| anyhow::anyhow!("Failed to create local vault: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to create local vault: {e}"))?
             };
 
             let status = vault.get_sync_status()?;
@@ -424,20 +430,20 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
                 tmp_identity.device_id,
                 tmp_identity.signing_key,
             )?;
-            let (encrypted_bootstrap, relay_salt) =
-                crate::run_async(fetch_client.fetch_bootstrap(code))??;
-            if relay_salt != salt_bytes {
-                anyhow::bail!(
-                    "Pairing salt mismatch (relay returned different salt than provided)"
-                );
-            }
+            let (encrypted_bootstrap, registration_proof) =
+                crate::run_async(fetch_client.retrieve_bootstrap_v2(&secret_b64))??;
 
-            let pairing_key =
-                sentinelpass_core::sync::pairing::derive_pairing_key(code, &relay_salt)?;
+            let pairing_key = sentinelpass_core::sync::pairing::derive_pairing_key_v2(&secret)?;
             let bootstrap = sentinelpass_core::sync::pairing::decrypt_bootstrap(
                 &pairing_key,
                 &encrypted_bootstrap,
-            )?;
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Bootstrap decryption failed ({e}) — the secret may be wrong or the \
+                     bootstrap expired"
+                )
+            })?;
 
             if relay_url.trim_end_matches('/') != bootstrap.relay_url.trim_end_matches('/') {
                 anyhow::bail!(
@@ -445,11 +451,6 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
                     bootstrap.relay_url
                 );
             }
-
-            let registration_proof = sentinelpass_core::sync::pairing::derive_registration_proof(
-                &pairing_key,
-                &bootstrap.vault_id,
-            )?;
 
             vault.import_pairing_bootstrap(master_password.as_bytes(), &bootstrap)?;
 
@@ -466,7 +467,7 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
                 sentinelpass_core::sync::device::DeviceIdentity::current_device_type(),
                 &public_key,
                 &bootstrap.vault_id,
-                Some(code.as_str()),
+                Some(&secret_b64),
                 Some(&registration_proof),
             ))??;
 
@@ -478,12 +479,10 @@ fn handle_pairing(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> 
             )?;
 
             println!("Pair-join completed: this device is now registered for sync.");
-            println!("  Device name: {}", device_name);
+            println!("  Device name: {device_name}");
             println!("  Device ID:   {}", identity.device_id);
             println!("  Vault ID:    {}", bootstrap.vault_id);
             println!("  Relay URL:   {}", bootstrap.relay_url);
-            println!();
-            println!("Next: run 'sentinelpass sync now' once sync transport is fully implemented.");
         }
 
         _ => unreachable!("handle_pairing is only called for pairing commands"),

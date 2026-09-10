@@ -758,19 +758,12 @@ enum SyncCommands {
     /// Start pairing (existing device generates code for new device)
     PairStart,
 
-    /// Join sync from a new device using a pairing code
+    /// Join sync from a new device using a v2 pairing secret (WBS-615:
+    /// 256-bit; the secret is prompted, never a command-line argument)
     PairJoin {
         /// Relay server URL
         #[arg(long)]
         relay_url: String,
-
-        /// 6-digit pairing code
-        #[arg(long)]
-        code: String,
-
-        /// Pairing salt (base64) printed by `pair-start`
-        #[arg(long)]
-        salt: String,
     },
 
     /// Disable sync for this vault
