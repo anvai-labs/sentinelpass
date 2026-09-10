@@ -166,6 +166,54 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             println!("Run 'sentinelpass sync now' to propagate to the relay server.");
         }
 
+        crate::SyncCommands::DeadLetterList => {
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+            let report = match backend.call(VaultOp::SyncDeadLetterList)? {
+                VaultOpResult::Report(value) => value,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
+            let rows = report.as_array().cloned().unwrap_or_default();
+            if rows.is_empty() {
+                println!("No dead-lettered sync mutations.");
+                return Ok(());
+            }
+            println!();
+            println!(
+                "{:<16} {:<38} {:<12} Reason",
+                "Server Seq", "Object ID", "Type"
+            );
+            println!("{}", "-".repeat(100));
+            for row in &rows {
+                println!(
+                    "{:<16} {:<38} {:<12} {}",
+                    row["server_sequence"].as_i64().unwrap_or(0),
+                    row["object_id"].as_str().unwrap_or("?"),
+                    row["object_type"].as_str().unwrap_or("?"),
+                    row["reason"].as_str().unwrap_or("?"),
+                );
+            }
+            println!();
+            println!("Purge with: sentinelpass sync dead-letter-purge --server-sequence <SEQ>");
+        }
+
+        crate::SyncCommands::DeadLetterPurge {
+            ref server_sequence,
+            ref all,
+        } => {
+            if !*all && server_sequence.is_none() {
+                anyhow::bail!("Specify --server-sequence <SEQ> or --all");
+            }
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+            let report = match backend.call(VaultOp::SyncDeadLetterPurge {
+                server_sequence: *server_sequence,
+            })? {
+                VaultOpResult::Report(value) => value,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
+            let purged = report["purged"].as_i64().unwrap_or(0);
+            println!("Purged {purged} dead-lettered mutation(s).");
+        }
+
         crate::SyncCommands::Disable => {
             let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 

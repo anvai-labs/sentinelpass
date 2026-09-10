@@ -350,6 +350,15 @@ pub enum VaultOp {
     /// Run a full push+pull cycle. Daemon-async: the sync engine awaits
     /// relay HTTP, so the daemon's async dispatcher executes this op.
     SyncNow,
+    /// List dead-lettered sync mutations (metadata only; WBS-607).
+    SyncDeadLetterList,
+    /// Purge dead-lettered sync mutations: one by server sequence, or all
+    /// when `server_sequence` is None. The fail-closed dead-letter bound
+    /// requires a supported purge path (raw SQL against the daemon-owned
+    /// vault is not one).
+    SyncDeadLetterPurge {
+        server_sequence: Option<i64>,
+    },
 
     // --- sync pairing (NOT served by the daemon; offline CLI maintenance) ------
     /// Upload this vault's bootstrap under a fresh pairing code. Not served

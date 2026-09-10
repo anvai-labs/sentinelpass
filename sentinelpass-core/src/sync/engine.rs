@@ -204,6 +204,13 @@ fn blob_from_log_mutation(m: &MutationV2) -> SyncEntryBlob {
 /// inspects and purges.
 pub const MAX_DEAD_LETTER: usize = 1_000;
 
+/// The outcome of one savepoint-wrapped apply inside a page.
+enum ApplyDisposition {
+    Applied,
+    Deferred(String),
+    Failed(String),
+}
+
 /// Record the durable disposition for an unappliable mutation, inside the
 /// caller's page transaction.
 fn dead_letter_entry(
@@ -418,7 +425,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     .db
                     .lock()
                     .map_err(|_| DatabaseError::LockPoisoned("apply pull".to_string()))?;
-                let tx = db
+                let mut tx = db
                     .conn()
                     .unchecked_transaction()
                     .map_err(DatabaseError::Sqlite)?;
@@ -433,12 +440,33 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         continue;
                     }
                     let blob = blob_from_log_mutation(mutation);
-                    match self.apply_remote_entry_in_tx(&tx, dek, &blob) {
-                        Ok(()) => applied += 1,
-                        Err(PasswordManagerError::SyncDeferred(reason)) => {
-                            deferred.push((index, reason));
+                    // Per-blob SAVEPOINT: a mid-apply failure must not leave
+                    // the object's earlier writes (entry rewrite, mapping
+                    // deletes, ...) committed under a "not applied"
+                    // disposition — the page rolls the blob back to its
+                    // pre-apply state before dead-lettering.
+                    let outcome = {
+                        let mut sp = tx.savepoint().map_err(DatabaseError::Sqlite)?;
+                        let r = self.apply_remote_entry_in_tx(&sp, dek, &blob);
+                        match r {
+                            Ok(()) => {
+                                sp.commit().map_err(DatabaseError::Sqlite)?;
+                                ApplyDisposition::Applied
+                            }
+                            Err(PasswordManagerError::SyncDeferred(reason)) => {
+                                sp.rollback().map_err(DatabaseError::Sqlite)?;
+                                ApplyDisposition::Deferred(reason)
+                            }
+                            Err(e) => {
+                                sp.rollback().map_err(DatabaseError::Sqlite)?;
+                                ApplyDisposition::Failed(e.to_string())
+                            }
                         }
-                        Err(e) => dead_letter_entry(&tx, entry, &e.to_string())?,
+                    };
+                    match outcome {
+                        ApplyDisposition::Applied => applied += 1,
+                        ApplyDisposition::Deferred(reason) => deferred.push((index, reason)),
+                        ApplyDisposition::Failed(reason) => dead_letter_entry(&tx, entry, &reason)?,
                     }
                 }
 
@@ -448,18 +476,29 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 for (index, reason) in &deferred {
                     let entry = &response.entries[*index];
                     let blob = blob_from_log_mutation(&entry.mutation);
-                    match self.apply_remote_entry_in_tx(&tx, dek, &blob) {
-                        Ok(()) => applied += 1,
-                        Err(retry_err) => {
-                            still_deferred += 1;
-                            dead_letter_entry(
-                                &tx,
-                                entry,
-                                &format!(
-                                    "unresolved after one requeue pass: {reason} ({retry_err})"
-                                ),
-                            )?;
+                    let outcome = {
+                        let mut sp = tx.savepoint().map_err(DatabaseError::Sqlite)?;
+                        let r = self.apply_remote_entry_in_tx(&sp, dek, &blob);
+                        match r {
+                            Ok(()) => {
+                                sp.commit().map_err(DatabaseError::Sqlite)?;
+                                ApplyDisposition::Applied
+                            }
+                            Err(other) => {
+                                sp.rollback().map_err(DatabaseError::Sqlite)?;
+                                ApplyDisposition::Failed(format!(
+                                    "unresolved after one requeue pass: {reason} ({other})"
+                                ))
+                            }
                         }
+                    };
+                    match outcome {
+                        ApplyDisposition::Applied => applied += 1,
+                        ApplyDisposition::Failed(reason) => {
+                            still_deferred += 1;
+                            dead_letter_entry(&tx, entry, &reason)?;
+                        }
+                        ApplyDisposition::Deferred(_) => unreachable!("retry defers no more"),
                     }
                 }
 
@@ -541,7 +580,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// and therefore calls this variant.
     fn apply_remote_entry_in_tx(
         &self,
-        tx: &rusqlite::Transaction<'_>,
+        tx: &rusqlite::Connection,
         dek: &DataEncryptionKey,
         blob: &SyncEntryBlob,
     ) -> Result<()> {
@@ -2442,20 +2481,6 @@ mod v2_cycle_tests {
         let db_b = Arc::new(Mutex::new(db_b));
         let engine_b = SyncEngine::new(relay.clone(), db_b.clone(), device_b);
         engine_b.sync(&dek).await.unwrap();
-        eprintln!(
-            "DEBUG: log_len={} b_cursor={}",
-            relay.log_len(),
-            SyncConfig::load(db_b.lock().unwrap().conn())
-                .unwrap()
-                .last_pull_sequence
-        );
-        eprintln!(
-            "DEBUG: b_rows={:?}",
-            db_b.lock()
-                .unwrap()
-                .conn()
-                .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get::<_, i64>(0))
-        );
         let (b_state, b_acked) = row_bookkeeping(&db_b, &sync_id);
         assert_eq!(b_state, "synced", "B applied A's mutation");
         assert_eq!(b_acked, 1, "the apply recorded the relay's acked version");
@@ -2891,7 +2916,11 @@ mod v2_cycle_tests {
 
     /// The page transaction is all-or-nothing (SR-SYNC-003): a fault at any
     /// write of the page rolls the applies, dispositions, AND the cursor
-    /// back together; the clean run proves complete-new.
+    /// back together; the clean run proves complete-new AND that no denial
+    /// was silently swallowed (a best-effort site swallowing an authorizer
+    /// denial would inflate the clean run's write count past the baseline).
+    /// The page mixes an APPLICABLE mutation with an unappliable one, so the
+    /// apply-path writes are themselves fault-swept.
     #[tokio::test]
     async fn pull_page_fault_injection_is_all_or_nothing() {
         use crate::database::fault_injection::{clear_write_fault, install_write_fault};
@@ -2899,52 +2928,103 @@ mod v2_cycle_tests {
         let relay_vault = Uuid::new_v4();
         let device = Uuid::new_v4();
 
-        let db = apply_test_db();
-        vault_config(&db, relay_vault, device);
+        let build_state = || -> (FakeRelay, Database) {
+            let db = apply_test_db();
+            vault_config(&db, relay_vault, device);
+            let relay = FakeRelay::new();
+            relay.set_vault(relay_vault);
+            // Applicable first, poison second — the apply-path writes AND
+            // the dead-letter disposition writes are both in the sweep.
+            relay.seed_peer_mutation(
+                crate::sync::v2::build_mutation(
+                    &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                    &crate::sync::v2::MutationInput {
+                        vault_id: relay_vault,
+                        object_id: Uuid::new_v4(),
+                        object_type: SyncEntryType::Credential,
+                        expected_version: ObjectVersion(0),
+                        resulting_version: ObjectVersion(1),
+                        key_epoch: 1,
+                        origin_device_id: Uuid::new_v4(),
+                        is_tombstone: false,
+                        encrypted_payload: {
+                            let payload = CredentialPayload {
+                                title: "Applicable".to_string(),
+                                username: "u".to_string(),
+                                password: Zeroizing::new("p".to_string()),
+                                credential_type: crate::CredentialType::Password,
+                                url: None,
+                                notes: None,
+                                favorite: false,
+                                domains: vec![],
+                                created_at: 1,
+                                modified_at: 1,
+                            };
+                            encrypt_for_sync(
+                                &dek,
+                                &Zeroizing::new(serde_json::to_vec(&payload).unwrap()),
+                            )
+                            .unwrap()
+                        },
+                    },
+                )
+                .unwrap(),
+            );
+            relay.seed_peer_mutation(
+                crate::sync::v2::build_mutation(
+                    &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                    &crate::sync::v2::MutationInput {
+                        vault_id: relay_vault,
+                        object_id: Uuid::new_v4(),
+                        object_type: SyncEntryType::Credential,
+                        expected_version: ObjectVersion(0),
+                        resulting_version: ObjectVersion(1),
+                        key_epoch: 1,
+                        origin_device_id: Uuid::new_v4(),
+                        is_tombstone: false,
+                        encrypted_payload: vec![0xDD; 64], // poison
+                    },
+                )
+                .unwrap(),
+            );
+            (relay, db)
+        };
 
-        let relay = FakeRelay::new();
-        relay.set_vault(relay_vault);
-        relay.seed_peer_mutation(
-            crate::sync::v2::build_mutation(
-                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
-                &crate::sync::v2::MutationInput {
-                    vault_id: relay_vault,
-                    object_id: Uuid::new_v4(),
-                    object_type: SyncEntryType::Credential,
-                    expected_version: ObjectVersion(0),
-                    resulting_version: ObjectVersion(1),
-                    key_epoch: 1,
-                    origin_device_id: Uuid::new_v4(),
-                    is_tombstone: false,
-                    encrypted_payload: vec![0xDD; 64], // poison → dead-letter write
-                },
-            )
-            .unwrap(),
-        );
-        relay.seed_peer_mutation(
-            crate::sync::v2::build_mutation(
-                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
-                &crate::sync::v2::MutationInput {
-                    vault_id: relay_vault,
-                    object_id: Uuid::new_v4(),
-                    object_type: SyncEntryType::Credential,
-                    expected_version: ObjectVersion(0),
-                    resulting_version: ObjectVersion(1),
-                    key_epoch: 1,
-                    origin_device_id: Uuid::new_v4(),
-                    is_tombstone: false,
-                    encrypted_payload: vec![0xCC; 64], // poison → dead-letter write
-                },
-            )
-            .unwrap(),
-        );
-
+        let (relay, db) = build_state();
         let db = Arc::new(Mutex::new(db));
         let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        let reset_state = |db: &Arc<Mutex<Database>>| {
+            let conn = db.lock().unwrap();
+            conn.conn().execute("DELETE FROM entries", []).unwrap();
+            conn.conn()
+                .execute("DELETE FROM secret_equality_index", [])
+                .unwrap();
+            conn.conn()
+                .execute("DELETE FROM sync_dead_letter", [])
+                .unwrap();
+            drop(conn);
+            let config = SyncConfig {
+                sync_enabled: true,
+                vault_id: Some(relay_vault),
+                device_id: Some(device),
+                device_name: Some("test".to_string()),
+                relay_url: Some("https://relay.invalid".to_string()),
+                last_push_sequence: 0,
+                last_pull_sequence: 0,
+                last_sync_at: None,
+                protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+            };
+            config.save(db.lock().unwrap().conn()).unwrap();
+        };
+
+        // Sweep: reset the client state to pristine after every attempt so
+        // each run processes the IDENTICAL page (deterministic write order).
 
         let mut fail_at = 0usize;
         let mut injected_failures = 0usize;
         loop {
+            reset_state(&db);
             let guard = {
                 let conn = db.lock().unwrap();
                 install_write_fault(conn.conn(), fail_at)
@@ -2959,6 +3039,17 @@ mod v2_cycle_tests {
             let cursor = SyncConfig::load(db.lock().unwrap().conn())
                 .unwrap()
                 .last_pull_sequence;
+            let diag: (i64, i64) = db
+                .lock()
+                .unwrap()
+                .conn()
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM entries), \
+                            (SELECT COUNT(*) FROM sync_dead_letter)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
             // The PAGE transaction is the unit under test; sync() has writes
             // AFTER it (the last_sync_at checkpoint), so a denial that hits
             // those surfaces as Err with the page already complete-new.
@@ -2966,17 +3057,16 @@ mod v2_cycle_tests {
                 (Err(_), 0) => {
                     assert!(denied, "harness bug at write {fail_at}");
                     injected_failures += 1;
-                    let entries: i64 = db
+                    let (entries, dead): (i64, i64) = db
                         .lock()
                         .unwrap()
                         .conn()
-                        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
-                        .unwrap();
-                    let dead: i64 = db
-                        .lock()
-                        .unwrap()
-                        .conn()
-                        .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |r| r.get(0))
+                        .query_row(
+                            "SELECT (SELECT COUNT(*) FROM entries), \
+                                    (SELECT COUNT(*) FROM sync_dead_letter)",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
                         .unwrap();
                     assert_eq!(
                         (entries, dead),
@@ -2985,26 +3075,39 @@ mod v2_cycle_tests {
                     );
                 }
                 (Err(_), 2) => {
-                    // The page committed complete-new; the denial hit a
-                    // post-page statement.
+                    assert!(denied, "harness bug at write {fail_at}");
                     injected_failures += 1;
                 }
-                (Ok(_), 2) => {
-                    // Complete-new: both poisons dispositioned, cursor passed
-                    // them WITH the dispositions in the same commit.
-                    let dead: i64 = db
+                (Ok(_), 2) if diag != (1, 1) => {
+                    // A denial was absorbed by a per-blob savepoint (the
+                    // apply failed → dead-lettered → page committed): the
+                    // savepoint must have left NO partial rows behind.
+                    injected_failures += 1;
+                    let orphans: i64 = db
                         .lock()
                         .unwrap()
                         .conn()
-                        .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |r| r.get(0))
+                        .query_row(
+                            "SELECT COUNT(*) FROM entries WHERE sync_id IN \
+                             (SELECT object_id FROM sync_dead_letter)",
+                            [],
+                            |r| r.get(0),
+                        )
                         .unwrap();
-                    assert_eq!(dead, 2, "complete-new: both dispositions committed");
+                    assert_eq!(
+                        orphans, 0,
+                        "savepoint rollback: a dead-lettered object left partial rows"
+                    );
+                }
+                (Ok(_), 2) => {
+                    // TRUE complete-new: the applicable row applied and
+                    // exactly one disposition recorded.
                     break;
                 }
                 other => panic!("unexpected outcome at write {fail_at}: {other:?}"),
             }
             fail_at += 1;
-            assert!(fail_at < 48, "page never succeeded within the sweep bound");
+            assert!(fail_at < 64, "page never succeeded within the sweep bound");
         }
         assert!(
             injected_failures >= 1,

@@ -81,15 +81,18 @@ The client engine pushes and pulls over `/api/v2/*`:
   or a fresh v2 init/re-pair. The relay's v1 endpoints remain for older
   clients until v1 retirement hard-rejects them (WBS-624).
 - **Pull** walks the relay's append-only vault mutation log with a
-  `ServerCursor` and paged responses. Each page is ONE transaction:
-  applies, dead-letter dispositions, and the cursor advance commit
-  together. An unappliable mutation gets a durable disposition in the
-  bounded `sync_dead_letter` table (hard cap 1,000 — overflow fails
-  closed: the page and cursor roll back until the user purges); the
-  cursor never passes a mutation without a disposition. Order-dependent
-  applies (a TOTP whose parent credential arrives later in the page) get
-  one bounded requeue pass within the run. The v1 skip-and-advance data
-  loss is gone.
+  `ServerCursor` and paged responses. Each page is ONE transaction with a
+  per-mutation savepoint: an apply failure rolls its blob back to
+  pre-apply state and records a durable disposition in the bounded
+  `sync_dead_letter` table (hard cap 1,000 — overflow fails closed: the
+  page and cursor roll back until space is freed). The cursor never
+  passes a mutation without a disposition. Order-dependent applies (a
+  TOTP whose parent credential arrives later in the page) get one bounded
+  requeue pass within the run. The v1 skip-and-advance data loss is gone.
+  Inspection/purge is a supported flow, not raw SQL:
+  `sentinelpass sync dead-letter-list` and
+  `sentinelpass sync dead-letter-purge (--server-sequence <SEQ> | --all)`
+  (served through the daemon's application-service boundary).
 
 New relay configuration (TOML, defaults shown): `mutation_result_ttl_secs =
 604800`, `max_mutation_results_per_device = 4096`. New storage tables

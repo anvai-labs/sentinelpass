@@ -441,6 +441,23 @@ impl LiveVaultService<'_> {
                 }))
             }
 
+            VaultOp::SyncDeadLetterList => {
+                let rows = vault.list_sync_dead_letter()?;
+                let value = serde_json::to_value(&rows).map_err(|e| {
+                    PasswordManagerError::InvalidInput(format!(
+                        "dead-letter serialization failed: {e}"
+                    ))
+                })?;
+                Ok(VaultOpResult::Report(value))
+            }
+            VaultOp::SyncDeadLetterPurge {
+                ref server_sequence,
+            } => {
+                let purged = vault.purge_sync_dead_letter(*server_sequence)?;
+                let value = serde_json::json!({ "purged": purged });
+                Ok(VaultOpResult::Report(value))
+            }
+
             // Relay network I/O — the daemon's async dispatcher owns
             // `SyncNow` (see `daemon/ipc/server.rs`); the blocking executor
             // never runs it. Pairing never reaches this match (intercepted

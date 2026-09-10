@@ -511,6 +511,51 @@ mod tests {
         assert_eq!(retry.mutation.expected_version, ObjectVersion(2));
     }
 
+    /// THE WBS-607 sanctioned tooling: dead-letter listing and purge (one
+    /// or all) — the fail-closed bound must have a supported exit, not raw
+    /// SQL against the daemon-owned vault.
+    #[test]
+    fn dead_letter_list_and_purge_roundtrip() {
+        let db = Database::in_memory().unwrap();
+        db.initialize_schema().unwrap();
+        {
+            let conn = db.conn();
+            for seq in [1_i64, 2, 3] {
+                conn.execute(
+                    "INSERT INTO sync_dead_letter (server_sequence, mutation_id, object_id, \
+                        object_type, reason, received_at) \
+                     VALUES (?1, 'm', 'o', 'Credential', 'test reason', 1)",
+                    [seq],
+                )
+                .unwrap();
+            }
+        }
+
+        let rows = list_dead_letter(db.conn()).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].server_sequence, 1, "oldest first");
+        assert_eq!(rows[0].reason, "test reason");
+
+        // Purge ONE by sequence.
+        let purged = purge_dead_letter(db.conn(), Some(2)).unwrap();
+        assert_eq!(purged, 1);
+        let remaining: Vec<i64> = list_dead_letter(db.conn())
+            .unwrap()
+            .into_iter()
+            .map(|r| r.server_sequence)
+            .collect();
+        assert_eq!(remaining, vec![1, 3]);
+
+        // Purge ALL.
+        let purged = purge_dead_letter(db.conn(), None).unwrap();
+        assert_eq!(purged, 2);
+        assert!(list_dead_letter(db.conn()).unwrap().is_empty());
+
+        // Purging an unknown sequence is a no-op, not an error.
+        let purged = purge_dead_letter(db.conn(), Some(99)).unwrap();
+        assert_eq!(purged, 0);
+    }
+
     /// A relay reporting an Applied ack for a version we did not produce is
     /// IGNORED — bookkeeping never moves off our own mutations (malicious /
     /// buggy relay hardening).
@@ -590,4 +635,58 @@ mod tests {
         // The payload differs byte-wise (fresh GCM nonce per encryption) —
         // deliberately NOT part of the idempotency key.
     }
+}
+
+/// One dead-lettered sync mutation. Metadata only — payloads are never
+/// stored in the dead-letter table (the relay still holds the log entry).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeadLetterRow {
+    pub server_sequence: i64,
+    pub mutation_id: String,
+    pub object_id: String,
+    pub object_type: String,
+    pub reason: String,
+    pub received_at: i64,
+}
+
+/// List dead-lettered mutations, oldest first (WBS-607 sanctioned tooling).
+pub fn list_dead_letter(conn: &Connection) -> Result<Vec<DeadLetterRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT server_sequence, mutation_id, object_id, object_type, reason, received_at
+             FROM sync_dead_letter ORDER BY server_sequence ASC",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DeadLetterRow {
+                server_sequence: row.get(0)?,
+                mutation_id: row.get(1)?,
+                object_id: row.get(2)?,
+                object_type: row.get(3)?,
+                reason: row.get(4)?,
+                received_at: row.get(5)?,
+            })
+        })
+        .map_err(DatabaseError::Sqlite)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(DatabaseError::Sqlite)?;
+    Ok(rows)
+}
+
+/// Purge one dead-lettered mutation (`Some(seq)`) or all (`None`).
+/// Returns the number of rows removed.
+pub fn purge_dead_letter(conn: &Connection, server_sequence: Option<i64>) -> Result<usize> {
+    let purged = match server_sequence {
+        Some(seq) => conn
+            .execute(
+                "DELETE FROM sync_dead_letter WHERE server_sequence = ?1",
+                [seq],
+            )
+            .map_err(DatabaseError::Sqlite)?,
+        None => conn
+            .execute("DELETE FROM sync_dead_letter", [])
+            .map_err(DatabaseError::Sqlite)?,
+    };
+    Ok(purged)
 }

@@ -775,6 +775,21 @@ enum SyncCommands {
 
     /// Disable sync for this vault
     Disable,
+
+    /// List dead-lettered sync mutations (unappliable changes kept for
+    /// inspection)
+    DeadLetterList,
+
+    /// Purge dead-lettered sync mutations (one by sequence, or all)
+    DeadLetterPurge {
+        /// Purge only this server sequence (from `dead-letter list`)
+        #[arg(long)]
+        server_sequence: Option<i64>,
+
+        /// Purge ALL dead-lettered mutations
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
