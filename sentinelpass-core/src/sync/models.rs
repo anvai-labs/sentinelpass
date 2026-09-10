@@ -298,7 +298,7 @@ pub struct PullResponse {
 }
 
 /// Custom base64 serialization for `Vec<u8>`.
-mod base64_bytes {
+pub(crate) mod base64_bytes {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use serde::{Deserialize, Deserializer, Serializer};
 
