@@ -21,7 +21,16 @@ use tracing::warn;
 /// change re-pushed forever). Every local mutation path writes sync
 /// bookkeeping explicitly (repository insert/update, delete, sweeps), so
 /// the trigger is load-bearing for nothing; see `migrate_v8_to_v9`.
-pub const CURRENT_SCHEMA_VERSION: i32 = 9;
+/// v10 (WBS-604/605 / ADR-006): `sync_acked_version` on entries, ssh_keys,
+/// and totp_secrets — the durable per-object record of the version the
+/// relay has ACKNOWLEDGED (the CAS `expected_version` for the next v2
+/// mutation). Seeded from `sync_version` for already-synced rows (v1's
+/// relay held those versions) and 0 for pending rows.
+/// v11 (WBS-607 / ADR-006): `sync_dead_letter` — the bounded durable
+/// disposition for pulled mutations that cannot be applied. Every mutation
+/// in a page gets a disposition (applied or dead-lettered) before the pull
+/// cursor may pass it; the table is hard-capped (fail-closed at overflow).
+pub const CURRENT_SCHEMA_VERSION: i32 = 11;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -309,6 +318,7 @@ impl Database {
                 favorite INTEGER NOT NULL DEFAULT 0,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -399,6 +409,7 @@ impl Database {
                 modified_at INTEGER NOT NULL,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -427,6 +438,7 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -452,7 +464,8 @@ impl Database {
                     last_push_sequence INTEGER NOT NULL DEFAULT 0,
                     last_pull_sequence INTEGER NOT NULL DEFAULT 0,
                     last_sync_at INTEGER,
-                    sync_enabled INTEGER NOT NULL DEFAULT 0
+                    sync_enabled INTEGER NOT NULL DEFAULT 0,
+                    protocol_version INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS sync_devices (
@@ -474,6 +487,15 @@ impl Database {
                     deleted_at INTEGER NOT NULL,
                     origin_device_id TEXT NOT NULL,
                     pushed INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS sync_dead_letter (
+                    server_sequence INTEGER PRIMARY KEY,
+                    mutation_id TEXT NOT NULL,
+                    object_id TEXT NOT NULL,
+                    object_type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    received_at INTEGER NOT NULL
                 );",
             )
             .map_err(DatabaseError::Sqlite)?;

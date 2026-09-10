@@ -634,6 +634,136 @@ pub fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migrate schema from v9 to v10: per-object sync ack tracking
+/// (WBS-604/605, ADR-006).
+///
+/// Adds `sync_acked_version` to `entries`, `ssh_keys`, and `totp_secrets`:
+/// the durable per-object record of the version the relay has ACKNOWLEDGED.
+/// A v2 mutation's CAS `expected_version` is this column; a push ack moves
+/// it to the acked `resulting_version` together with `sync_state = 'synced'`
+/// in the same transaction, so an entry leaves the outbox ONLY on its own
+/// acknowledgement and a rejected entry's next mutation re-derives the same
+/// idempotency key (deterministic from object + resulting version + payload)
+/// and replays the relay's original durable result.
+///
+/// Seeding for v1-era rows (NOT migration-authoritative — ADR-006 moves
+/// v1→v2 through authoritative-device re-baselining onto a fresh relay
+/// vault): synced rows are seeded with their current `sync_version` (v1's
+/// aggregate "synced" semantics), pending rows with 0. NOTE: this seeding
+/// does NOT itself implement the re-baseline — the future authoritative
+/// device claim (WBS-624) must RESET `sync_state`/`sync_acked_version` for
+/// the full local baseline so the collector re-emits every object as fresh
+/// creates against the new relay vault; seeding alone only affects the
+/// first v2 CAS expectation.
+///
+/// ONE transaction with the version bump (ADR-005 rev 3); `COALESCE`
+/// column-adds are idempotent like the v6/v7 adds.
+pub fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
+    // Take the write lock FIRST, then probe per table (the v5→v6 pattern):
+    // column adds tolerate pre-existing columns (current-DDL test fixtures
+    // stamped at a legacy version, restores, hand-built databases).
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        let mut stmts = String::new();
+        // sync_metadata.protocol_version (fail-closed mixed-protocol gate,
+        // ADR-006): 0 = legacy/v1-era configuration; the engine refuses to
+        // run v2 against it until the authoritative-device re-baseline or a
+        // v2 re-init/re-pair stamps 2.
+        {
+            let existing: Vec<String> = {
+                let mut stmt = conn
+                    .prepare("SELECT name FROM pragma_table_info('sync_metadata')")
+                    .map_err(DatabaseError::Sqlite)?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(DatabaseError::Sqlite)?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            if !existing.iter().any(|c| c == "protocol_version") {
+                stmts.push_str(
+                    "ALTER TABLE sync_metadata ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 0;\n",
+                );
+            }
+        }
+        for table in ["entries", "ssh_keys", "totp_secrets"] {
+            let existing: Vec<String> = {
+                let mut stmt = conn
+                    .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                    .map_err(DatabaseError::Sqlite)?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(DatabaseError::Sqlite)?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            if !existing.iter().any(|c| c == "sync_acked_version") {
+                stmts.push_str(&format!(
+                    "ALTER TABLE {table} ADD COLUMN sync_acked_version INTEGER NOT NULL DEFAULT 0;\n"
+                ));
+            }
+            stmts.push_str(&format!(
+                "UPDATE {table} SET sync_acked_version = \
+                 CASE WHEN sync_state = 'synced' THEN sync_version ELSE 0 END;\n"
+            ));
+        }
+        stmts.push_str("UPDATE db_metadata SET version = 10 WHERE id = 1;\n");
+        conn.execute_batch(&stmts).map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Migrate schema from v10 to v11: the bounded sync dead-letter (WBS-607,
+/// ADR-006). Every pulled mutation receives a durable disposition — applied
+/// or dead-lettered — before the pull cursor may pass it; the skip-and-
+/// advance era ends here. The table is hard-capped by the engine (fail-
+/// closed at overflow: the page rolls back and the cursor does not move).
+///
+/// Additive CREATE IF NOT EXISTS + ONE-transaction version bump (ADR-005
+/// rev 3).
+pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_dead_letter (
+                server_sequence INTEGER PRIMARY KEY,
+                mutation_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                object_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                received_at INTEGER NOT NULL
+            );
+             UPDATE db_metadata SET version = 11 WHERE id = 1;",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -672,6 +802,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 9 {
         migrate_v8_to_v9(conn)?;
+    }
+
+    if version < 10 {
+        migrate_v9_to_v10(conn)?;
+    }
+
+    if version < 11 {
+        migrate_v10_to_v11(conn)?;
     }
 
     Ok(())
@@ -1469,9 +1607,14 @@ mod tests {
                 "{shape}: the echo trigger must be dropped"
             );
 
-            // Idempotence: the ladder re-runs cleanly (DROP IF EXISTS).
+            // Idempotence: the ladder re-runs cleanly (DROP IF EXISTS) and
+            // continues to the CURRENT version (v10+, per the ladder).
             run_migrations(&conn).unwrap();
-            assert_eq!(schema_version(&conn), 9, "{shape}");
+            assert_eq!(
+                schema_version(&conn),
+                crate::database::schema::CURRENT_SCHEMA_VERSION,
+                "{shape}"
+            );
         }
     }
 
@@ -1574,5 +1717,137 @@ mod tests {
             .unwrap();
         assert_eq!(state, "pending");
         assert_eq!(version, 8, "exactly one bump: 7 -> 8");
+    }
+
+    // --- WBS-604/605 / ADR-006: v9 → v10 per-object ack tracking -----------
+
+    /// A vault migrated to exactly v9.
+    fn create_v9_db() -> rusqlite::Connection {
+        let conn = create_v1_db();
+        migrate_v1_to_v2(&conn).unwrap();
+        migrate_v2_to_v3(&conn).unwrap();
+        migrate_v3_to_v4(&conn).unwrap();
+        migrate_v4_to_v5(&conn).unwrap();
+        migrate_v5_to_v6(&conn).unwrap();
+        migrate_v6_to_v7(&conn).unwrap();
+        migrate_v7_to_v8(&conn).unwrap();
+        migrate_v8_to_v9(&conn).unwrap();
+        conn
+    }
+
+    fn insert_v9_sync_row(conn: &rusqlite::Connection, sync_id: &str, version: i64, state: &str) {
+        conn.execute(
+            "INSERT INTO entries (vault_id, title, username, password, credential_type,
+                entry_nonce, auth_tag, created_at, modified_at, favorite,
+                sync_id, sync_version, sync_state)
+             VALUES (1, X'01', X'02', X'03', 'password', X'04', X'05', 100, 100, 0,
+                     ?1, ?2, ?3)",
+            rusqlite::params![sync_id, version, state],
+        )
+        .unwrap();
+    }
+
+    /// THE v10 seeding contract: synced rows assume the relay holds their
+    /// current version (v1 aggregate "synced"); pending rows seed 0. This
+    /// seeding alone does NOT implement the ADR-006 migration: the
+    /// authoritative-device re-baseline (WBS-624) must additionally RESET
+    /// the full local baseline so every object re-uploads as a fresh create
+    /// against the new relay vault.
+    #[test]
+    fn migrate_v9_to_v10_adds_acked_version_with_state_seeding() {
+        let conn = create_v9_db();
+        insert_v9_sync_row(&conn, "synced-row", 5, "synced");
+        insert_v9_sync_row(&conn, "pending-row", 3, "pending");
+
+        migrate_v9_to_v10(&conn).unwrap();
+
+        let version: i32 = conn
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 10);
+
+        for (table, pk) in [
+            ("entries", "entry_id"),
+            ("ssh_keys", "key_id"),
+            ("totp_secrets", "totp_id"),
+        ] {
+            let has_col: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') \
+                         WHERE name='sync_acked_version')"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(has_col, "{table} must gain sync_acked_version");
+            let _ = pk;
+        }
+
+        let synced_acked: i64 = conn
+            .query_row(
+                "SELECT sync_acked_version FROM entries WHERE sync_id = 'synced-row'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(synced_acked, 5, "synced rows seed from their sync_version");
+
+        let pending_acked: i64 = conn
+            .query_row(
+                "SELECT sync_acked_version FROM entries WHERE sync_id = 'pending-row'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_acked, 0, "pending rows seed 0");
+    }
+
+    /// Failure inside the migration rolls back completely (v9 intact, no
+    /// partial columns), and the runner continues cleanly afterwards.
+    #[test]
+    fn migrate_v9_to_v10_is_atomic_and_idempotent_continuation() {
+        let conn = create_v9_db();
+        insert_v9_sync_row(&conn, "row", 2, "synced");
+
+        // sql_guard: a race-tolerant BEGIN wrapper is emulated by running
+        // the migration inside an existing transaction's failure path —
+        // simplest reliable fault: a table that makes the UPDATE fail.
+        conn.execute_batch("ALTER TABLE entries RENAME TO entries_renamed;")
+            .unwrap();
+
+        let result = migrate_v9_to_v10(&conn);
+        assert!(result.is_err(), "the ALTER on a missing table must fail");
+
+        // Roll back: version still 9, column gone.
+        let version: i32 = conn
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 9, "the version bump must roll back");
+        conn.execute_batch("ALTER TABLE entries_renamed RENAME TO entries;")
+            .unwrap();
+        let has_col: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('entries') \
+                 WHERE name='sync_acked_version')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_col, "the ADD COLUMN must roll back");
+
+        // Clean continuation to the current version.
+        run_migrations(&conn).unwrap();
+        let version: i32 = conn
+            .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, crate::database::schema::CURRENT_SCHEMA_VERSION);
     }
 }

@@ -11,6 +11,8 @@ pub fn spawn_cleanup_task(
     tombstone_retention_days: u64,
     nonce_window_secs: i64,
     pairing_fetch_attempt_retention_secs: i64,
+    mutation_result_ttl_secs: i64,
+    max_mutation_results_per_device: usize,
 ) {
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(3600)); // hourly
@@ -21,6 +23,8 @@ pub fn spawn_cleanup_task(
                 tombstone_retention_days,
                 nonce_window_secs,
                 pairing_fetch_attempt_retention_secs,
+                mutation_result_ttl_secs,
+                max_mutation_results_per_device,
             ) {
                 tracing::error!("Cleanup error: {}", e);
             }
@@ -33,6 +37,8 @@ pub(crate) fn run_cleanup(
     tombstone_retention_days: u64,
     nonce_window_secs: i64,
     pairing_fetch_attempt_retention_secs: i64,
+    mutation_result_ttl_secs: i64,
+    max_mutation_results_per_device: usize,
 ) -> Result<(), String> {
     let conn = storage.conn().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
@@ -41,6 +47,30 @@ pub(crate) fn run_cleanup(
     let nonce_cutoff = now - nonce_window_secs.max(1);
     conn.execute("DELETE FROM seen_nonces WHERE seen_at < ?1", [nonce_cutoff])
         .map_err(|e| e.to_string())?;
+
+    // Prune aged-out v2 mutation results (bounded idempotency state,
+    // WBS-603): after expiry a duplicate is re-evaluated by the CAS guard,
+    // which rejects it rather than replaying it.
+    let result_cutoff = now - mutation_result_ttl_secs.max(1);
+    conn.execute(
+        "DELETE FROM mutation_results WHERE created_at < ?1",
+        [result_cutoff],
+    )
+    .map_err(|e| e.to_string())?;
+    // Per-device cap: keep the newest N records per device, evict the rest.
+    conn.execute(
+        "DELETE FROM mutation_results
+         WHERE rowid IN (
+             SELECT rowid FROM (
+                 SELECT rowid, ROW_NUMBER() OVER (
+                     PARTITION BY device_id ORDER BY created_at DESC, rowid DESC
+                 ) AS rn
+                 FROM mutation_results
+             ) WHERE rn > ?1
+         )",
+        [max_mutation_results_per_device as i64],
+    )
+    .map_err(|e| e.to_string())?;
 
     // Prune expired pairing bootstraps
     conn.execute(
@@ -174,7 +204,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        run_cleanup(&storage, 90, 60, 300).unwrap();
+        run_cleanup(&storage, 90, 60, 300, 7 * 24 * 3600, 4_096).unwrap();
 
         let conn = storage.conn().unwrap();
         let has_old_nonce: bool = conn

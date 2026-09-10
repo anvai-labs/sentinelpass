@@ -313,6 +313,7 @@ impl VaultManager {
             last_push_sequence: 0,
             last_pull_sequence: 0,
             last_sync_at: None,
+            protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
         };
         config.save(db.conn())?;
         let dek = self.key_hierarchy.dek()?;
@@ -422,6 +423,21 @@ impl VaultManager {
             .map_err(DatabaseError::Sqlite)?;
 
         Ok(devices)
+    }
+
+    /// List dead-lettered sync mutations (WBS-607 sanctioned tooling:
+    /// the fail-closed dead-letter bound requires a supported inspection
+    /// and purge path, not raw SQL against the daemon-owned vault).
+    pub fn list_sync_dead_letter(&self) -> Result<Vec<crate::sync::outbox::DeadLetterRow>> {
+        let db = self.lock_db()?;
+        crate::sync::outbox::list_dead_letter(db.conn())
+    }
+
+    /// Purge one (`Some`) or all (`None`) dead-lettered sync mutations.
+    /// Returns the number of rows removed.
+    pub fn purge_sync_dead_letter(&self, server_sequence: Option<i64>) -> Result<usize> {
+        let db = self.lock_db()?;
+        crate::sync::outbox::purge_dead_letter(db.conn(), server_sequence)
     }
 
     /// Revoke a sync device locally.

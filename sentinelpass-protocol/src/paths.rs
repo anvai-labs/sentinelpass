@@ -64,10 +64,16 @@ mod tests {
         assert!(path.to_string_lossy().contains("\\\\.\\pipe\\"));
     }
 
+    /// Env vars are process-global: these two tests mutate
+    /// XDG_RUNTIME_DIR and run in parallel by default, so they serialize
+    /// on this lock (a race here fails the not-tmp assertion flakily).
+    static XDG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// WBS-507: the default socket path uses $XDG_RUNTIME_DIR when present,
     /// nested in the private SentinelPass runtime dir — never bare /tmp.
     #[test]
     fn test_socket_path_with_xdg_runtime_dir() {
+        let _guard = XDG_ENV_LOCK.lock().unwrap();
         let custom_runtime = "/tmp/custom_runtime";
         std::env::set_var("XDG_RUNTIME_DIR", custom_runtime);
 
@@ -95,6 +101,7 @@ mod tests {
     /// the default falls back to the config dir's private runtime subdir.
     #[test]
     fn test_socket_path_without_xdg_runtime_dir_is_not_tmp() {
+        let _guard = XDG_ENV_LOCK.lock().unwrap();
         std::env::remove_var("XDG_RUNTIME_DIR");
         let path = default_ipc_socket_path();
         let path_str = path.to_string_lossy().to_string();

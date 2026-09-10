@@ -978,12 +978,79 @@ Gate: ADR-006 + WBS-300/400. **Owner** CM (client) + SL (relay). May overlap WBS
 after 408/409 stabilize.
 
 - **WBS-601 — v2 mutation schema.** SR-SYNC-004. Est 3d.
-- **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002, TD-ROB-01. Est 2d.
-- **WBS-603 — Idempotency + original-result replay.** SR-SYNC-001, TD-ROB-05. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `core/src/sync/v2.rs`:
+  `MutationV2` (vault/epoch, object UUID/type, expected+resulting versions,
+  origin device, idempotency key, authenticated tombstone state, payload,
+  DEK-derived metadata MAC over canonical shared metadata — distinct from
+  the ADR-005 per-device storage envelope, identity-domain split
+  documented; stage-1 computes/transports/stores the MAC, ENFORCEMENT is
+  WBS-612/613); per-field MAC-tamper negatives.
+- **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002,
+  TD-ROB-01. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `DeviceSequence` /
+  `ObjectVersion` / `ServerCursor` newtypes with checked arithmetic, no
+  cross-`From`, distinct serde fields; cursor lineage comparisons.
+- **WBS-603 — Idempotency + original-result replay.** SR-SYNC-001,
+  TD-ROB-05. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — relay `mutation_results`
+  (TTL `mutation_result_ttl_secs` + per-device cap
+  `max_mutation_results_per_device` in cleanup); duplicates replay the
+  ORIGINAL durable result (applied AND rejected); post-expiry duplicates
+  re-evaluated by CAS and REJECTED, never replayed; deterministic
+  content-derived mutation ids survive re-collection with fresh GCM
+  nonces; one SQLite transaction per push (results + object state + log +
+  counters). Negatives: `duplicate_push_returns_original_rejection`,
+  `expired_duplicate_is_re_evaluated_by_cas_and_rejected`,
+  `same_version_overwrite_is_rejected_regardless_of_content`.
 - **WBS-604 — Per-object acknowledgements.** SR-SYNC-001. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — schema v10
+  `sync_acked_version` on entries/ssh_keys/totp_secrets (migration seeds
+  synced=version, pending=0; fixtures extended); engine records each
+  object's own ack in the checkpoint transaction; relay per-mutation
+  results are the server-side durable ack.
 - **WBS-605 — Outbox removal only on specific ack.** TD-ROB-01. Est 1.5d.
+  **Status:** Done (2026-09-10, sync v2 stage 1, after adversarial review
+  round 1) — `outbox::apply_push_acks` honors ONLY an Applied ack matching
+  the version the client actually sent (mismatched acks are ignored —
+  hostile-relay hardening); Applied marks synced+acked in ONE transaction
+  with the cursor diagnostic. Conflicts reconcile without wedging: at-or-
+  beyond the attempt adopts the relay baseline (pull reconciles content),
+  behind it re-bases the row for a FRESH mutation id (review findings:
+  lost-response-then-edit and TTL-expiry wedges closed by
+  `conflict_behind_our_attempt_rebases_for_a_fresh_mutation`);
+  remote-apply arms record `sync_acked_version` so peer-sourced objects
+  are editable (`pull_then_edit_push_succeeds`). End-to-end over an
+  in-memory relay model serving its log:
+  `lost_push_response_retry_completes_without_wedge`,
+  `lost_response_then_edit_recovers`,
+  `conflict_rejection_converges_without_wedge`; fault-injection sweep
+  `apply_push_acks_fault_injection_is_all_or_nothing`. The #121
+  device_sequence wedge note in engine.rs is resolved (v2 framing counter
+  recorded, never gated). Two-alternative conflict PRESERVATION remains
+  WBS-611 (stage 1 adopts the relay state on superseding conflicts).
 - **WBS-606 — Relay atomic mutation/entry/sequence/ack.** SR-SYNC-003, TD-ROB-04. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 2) — `handlers/sync_v2.rs`:
+  one SQLite transaction per push request covers per-mutation result rows,
+  object state, the append-only log, the vault sequence counter, the epoch
+  high-water, and the device framing counter. Authorizer fault-injection
+  sweep (`push_v2_fault_injection_is_all_or_nothing`): denial at every
+  write → complete-old across ALL five stores; clean run proves
+  complete-new. (The handler was born transactional in stage 1; stage 2
+  added the evidence.)
 - **WBS-607 — Client atomic page/inbox/object/index/cursor.** TD-ROB-04. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 2) — schema v11
+  `sync_dead_letter` (hard-capped at 1,000, fail-closed at overflow); the
+  pull page folds applies, dispositions, and the cursor advance into ONE
+  transaction (`pull_page_fault_injection_is_all_or_nothing`); order-
+  dependent applies (TOTP parent later in the page) get one bounded
+  requeue pass (`deferred_totp_parent_resolves_within_one_run` — the
+  pre-v2 permanent silent loss is gone); unappliable mutations are
+  dead-lettered with their server_sequence as the disposition key and the
+  cursor passes them only with a disposition recorded
+  (`unappliable_mutation_is_dead_lettered_and_page_advances`); cap
+  overflow rolls the page back and errors until purged
+  (`dead_letter_cap_fails_closed_until_purged`). Skip-and-advance is
+  removed from the pull path.
 - **WBS-608 — Remove remote-apply trigger echo.** TD-ROB-02 (sync half). Est 1.5d.
 - **WBS-609 — Nullable encrypted fields preserved.** TD-ROB-03 (sync half). Est 1d.
 - **WBS-610 — One bounded paginated path (normal+full).** TD-ROB-06. Est 3d.

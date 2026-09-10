@@ -9,6 +9,8 @@ mod auth;
 mod cleanup;
 mod config;
 mod error;
+#[cfg(test)]
+mod fault_injection;
 mod handlers;
 mod pairing_security;
 mod rate_limit;
@@ -66,6 +68,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.tombstone_retention_days,
         cfg.nonce_window_secs,
         (cfg.pairing_ttl_secs + cfg.pairing_fetch_backoff_max_secs) as i64,
+        cfg.mutation_result_ttl_secs as i64,
+        cfg.max_mutation_results_per_device,
     );
 
     let app_state = app_state::RelayAppState::new(storage, cfg.clone());

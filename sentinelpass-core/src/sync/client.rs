@@ -4,9 +4,31 @@ use crate::sync::auth::{format_auth_header, sign_request};
 use crate::sync::models::{
     PullRequest, PullResponse, PushRequest, PushResponse, SyncDeviceInfo, SyncEntryBlob,
 };
+use crate::sync::v2::{PullRequestV2, PullResponseV2, PushRequestV2, PushResponseV2};
 use crate::{PasswordManagerError, Result};
 use ed25519_dalek::SigningKey;
+use std::future::Future;
+use std::pin::Pin;
 use uuid::Uuid;
+
+/// The v2 sync transport surface the engine consumes (ADR-006).
+///
+/// A trait so the engine can be driven against an in-memory relay model in
+/// tests — loss/retry/duplicate/convergence evidence without HTTP — while
+/// production uses [`SyncClient`].
+pub trait SyncTransport: Send + Sync {
+    /// Idempotent v2 push (duplicates replay their original results).
+    fn push_v2<'a>(
+        &'a self,
+        request: &'a PushRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PushResponseV2>> + Send + 'a>>;
+
+    /// Paged v2 pull over the relay's vault mutation log.
+    fn pull_v2<'a>(
+        &'a self,
+        request: &'a PullRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PullResponseV2>> + Send + 'a>>;
+}
 
 /// HTTP client for the SentinelPass relay server.
 pub struct SyncClient {
@@ -120,6 +142,38 @@ impl SyncClient {
         let response = self.signed_post(path, &body).await?;
         serde_json::from_slice(&response).map_err(|e| {
             PasswordManagerError::InvalidInput(format!("Invalid pull response: {}", e))
+        })
+    }
+
+    /// v2 protocol (ADR-006): idempotent push with durable per-object
+    /// results. Retrying the same mutations is always safe — duplicates
+    /// replay their original durable results.
+    pub async fn push_v2(
+        &self,
+        request: &crate::sync::v2::PushRequestV2,
+    ) -> Result<crate::sync::v2::PushResponseV2> {
+        let path = "/api/v2/sync/push";
+        let body = serde_json::to_vec(request)
+            .map_err(|e| PasswordManagerError::InvalidInput(e.to_string()))?;
+
+        let response = self.signed_post(path, &body).await?;
+        serde_json::from_slice(&response).map_err(|e| {
+            PasswordManagerError::InvalidInput(format!("Invalid v2 push response: {}", e))
+        })
+    }
+
+    /// v2 protocol: paged pull over the relay's vault mutation log.
+    pub async fn pull_v2(
+        &self,
+        request: &crate::sync::v2::PullRequestV2,
+    ) -> Result<crate::sync::v2::PullResponseV2> {
+        let path = "/api/v2/sync/pull";
+        let body = serde_json::to_vec(request)
+            .map_err(|e| PasswordManagerError::InvalidInput(e.to_string()))?;
+
+        let response = self.signed_post(path, &body).await?;
+        serde_json::from_slice(&response).map_err(|e| {
+            PasswordManagerError::InvalidInput(format!("Invalid v2 pull response: {}", e))
         })
     }
 
@@ -316,3 +370,19 @@ impl SyncClient {
 }
 
 use base64::Engine;
+
+impl SyncTransport for SyncClient {
+    fn push_v2<'a>(
+        &'a self,
+        request: &'a PushRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PushResponseV2>> + Send + 'a>> {
+        Box::pin(SyncClient::push_v2(self, request))
+    }
+
+    fn pull_v2<'a>(
+        &'a self,
+        request: &'a PullRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PullResponseV2>> + Send + 'a>> {
+        Box::pin(SyncClient::pull_v2(self, request))
+    }
+}

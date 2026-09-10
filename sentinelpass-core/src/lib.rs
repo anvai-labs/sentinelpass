@@ -144,6 +144,13 @@ pub enum PasswordManagerError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// A pulled sync mutation could not be applied YET for an order-dependent
+    /// reason (e.g. a TOTP whose parent credential arrives later in the log).
+    /// The pull gives it one bounded retry within the run and dead-letters it
+    /// if still unresolved (WBS-607) — never a silent skip.
+    #[error("Sync apply deferred: {0}")]
+    SyncDeferred(String),
+
     #[error(
         "slot registry failed integrity verification — a key slot may have been \
          added, edited, or restored without the vault's authority. Refusing to \

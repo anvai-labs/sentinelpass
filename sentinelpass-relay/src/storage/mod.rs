@@ -116,6 +116,80 @@ impl RelayStorage {
                 seen_at INTEGER NOT NULL
             );
 
+            -- v2 protocol (ADR-006): current object state, CAS-guarded.
+            -- Additive/parallel to the v1 `sync_entries` table; v1 rows are
+            -- never migrated or rewritten (v1 retirement is client-side
+            -- abandonment).
+            CREATE TABLE IF NOT EXISTS sync_entries_v2 (
+                vault_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                entry_type TEXT NOT NULL,
+                current_version INTEGER NOT NULL,
+                key_epoch INTEGER NOT NULL,
+                is_tombstone INTEGER NOT NULL DEFAULT 0,
+                metadata_mac TEXT NOT NULL,
+                encrypted_payload BLOB NOT NULL,
+                origin_device_id TEXT NOT NULL,
+                server_sequence INTEGER NOT NULL,
+                received_at INTEGER NOT NULL,
+                PRIMARY KEY (vault_id, object_id)
+            );
+
+            -- v2 protocol: append-only vault mutation log (pull source).
+            CREATE TABLE IF NOT EXISTS sync_mutations_v2 (
+                vault_id TEXT NOT NULL,
+                server_sequence INTEGER NOT NULL,
+                mutation_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                entry_type TEXT NOT NULL,
+                expected_version INTEGER NOT NULL,
+                resulting_version INTEGER NOT NULL,
+                key_epoch INTEGER NOT NULL,
+                origin_device_id TEXT NOT NULL,
+                is_tombstone INTEGER NOT NULL DEFAULT 0,
+                metadata_mac TEXT NOT NULL,
+                encrypted_payload BLOB NOT NULL,
+                received_at INTEGER NOT NULL,
+                PRIMARY KEY (vault_id, server_sequence)
+            );
+
+            -- v2 protocol: durable per-mutation results. The ack SURVIVES the
+            -- response: a duplicate request returns the stored original
+            -- result (ADR-006). Bounded: aged out by
+            -- `mutation_result_ttl_secs` and capped per device by
+            -- `max_mutation_results_per_device`; after expiry a duplicate is
+            -- re-evaluated by the CAS guard, which REJECTS it rather than
+            -- replaying it.
+            CREATE TABLE IF NOT EXISTS mutation_results (
+                mutation_id TEXT NOT NULL,
+                vault_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (outcome IN ('applied', 'rejected')),
+                rejection_reason TEXT,
+                resulting_version INTEGER,
+                server_sequence INTEGER,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (mutation_id, device_id, vault_id)
+            );
+
+            -- v2 protocol: vault key-epoch high-water (ADR-004/006). Advanced
+            -- only forward, by mutations carrying a higher epoch.
+            CREATE TABLE IF NOT EXISTS vault_epochs (
+                vault_id TEXT PRIMARY KEY,
+                key_epoch INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sync_entries_v2_vault_seq
+                ON sync_entries_v2(vault_id, server_sequence);
+            CREATE INDEX IF NOT EXISTS idx_sync_mutations_v2_object
+                ON sync_mutations_v2(vault_id, object_id, resulting_version);
+            CREATE INDEX IF NOT EXISTS idx_mutation_results_age
+                ON mutation_results(created_at);
+            CREATE INDEX IF NOT EXISTS idx_mutation_results_device
+                ON mutation_results(device_id, created_at);
+
             CREATE INDEX IF NOT EXISTS idx_sync_entries_vault_seq
                 ON sync_entries(vault_id, server_sequence);
             CREATE INDEX IF NOT EXISTS idx_devices_vault
