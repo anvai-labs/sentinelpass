@@ -19,6 +19,13 @@ pub struct RelayConfig {
     pub pairing_fetch_backoff_max_secs: u64,
     pub tombstone_retention_days: u64,
     pub nonce_window_secs: i64,
+    /// WBS-618 (TD-NET-03): reverse-proxy IPs trusted to set
+    /// `X-Forwarded-For`. Default EMPTY — a direct deployment keys rate
+    /// limits on the peer address and IGNORES forwarded headers, so a
+    /// spoofed XFF cannot rotate rate-limit identities. Set this to the
+    /// proxy's IP only when running behind a trusted reverse proxy.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
     /// v2 (ADR-006 / WBS-603): how long a durable per-mutation result is
     /// replayed to duplicate requests before the record ages out. Post-expiry
     /// duplicates are RE-evaluated by the CAS guard, which rejects them
@@ -46,6 +53,7 @@ impl Default for RelayConfig {
             pairing_fetch_backoff_max_secs: 300,
             tombstone_retention_days: 90,
             nonce_window_secs: 300,
+            trusted_proxies: Vec::new(),
             mutation_result_ttl_secs: 7 * 24 * 3600,
             max_mutation_results_per_device: 4_096,
         }

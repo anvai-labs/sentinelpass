@@ -91,15 +91,19 @@ async fn public_rate_limit_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Prefer proxy-provided client IP if present; fall back to direct connection IP.
-    let client_ip = request
+    // WBS-618 (TD-NET-03): X-Forwarded-For is honored ONLY when the direct
+    // peer is a CONFIGURED trusted proxy. With the default (empty) trust
+    // set, a spoofed XFF header cannot rotate rate-limit identities.
+    let xff = request
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| addr.ip().to_string());
+        .map(|s| s.to_string());
+    let client_ip = effective_client_ip(
+        &addr.ip().to_string(),
+        xff.as_deref(),
+        &state.config.trusted_proxies,
+    );
 
     let key = format!("public:{}:{}", path, client_ip);
     if !state.rate_limiter.check(&key) {
@@ -114,6 +118,25 @@ async fn public_rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
+/// The effective client identity for rate limiting (WBS-618 / TD-NET-03):
+/// the X-Forwarded-For value ONLY when the direct peer is a configured
+/// trusted proxy; otherwise the direct peer address. A spoofed XFF from an
+/// untrusted peer cannot rotate rate-limit identities.
+fn effective_client_ip(peer_ip: &str, xff: Option<&str>, trusted_proxies: &[String]) -> String {
+    let trusted = trusted_proxies.iter().any(|p| p == peer_ip);
+    if trusted {
+        xff.and_then(|v| {
+            v.split(',')
+                .next()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| peer_ip.to_string())
+    } else {
+        peer_ip.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,5 +148,30 @@ mod tests {
         assert_eq!(response.status, "ok");
         assert_eq!(response.service, "sentinelpass-relay");
         assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// WBS-618 / TD-NET-03: forwarded IPs are trusted ONLY from configured
+    /// proxies. Untrusted peer + spoofed XFF → the DIRECT address keys the
+    /// limiter; trusted proxy + XFF → the forwarded address keys it.
+    #[test]
+    fn forwarded_ip_trust_follows_configuration() {
+        let untrusted: &[String] = &[];
+        assert_eq!(
+            effective_client_ip("10.0.0.9", Some("203.0.113.7"), untrusted),
+            "10.0.0.9",
+            "untrusted proxy: the spoofed XFF is ignored"
+        );
+        let trusted: &[String] = &["10.0.0.9".to_string()];
+        assert_eq!(
+            effective_client_ip("10.0.0.9", Some("203.0.113.7"), trusted),
+            "203.0.113.7",
+            "trusted proxy: the forwarded address is honored"
+        );
+        // Empty/garbage XFF from a trusted proxy falls back to the peer.
+        assert_eq!(
+            effective_client_ip("10.0.0.9", Some("  "), trusted),
+            "10.0.0.9"
+        );
+        assert_eq!(effective_client_ip("10.0.0.9", None, trusted), "10.0.0.9");
     }
 }

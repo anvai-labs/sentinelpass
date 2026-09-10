@@ -1140,7 +1140,18 @@ after 408/409 stabilize.
   (TD-NET-01's URL/CLI exposure gone).
 - **WBS-617 — TLS-only, safe redirects, no userinfo (full client rules).** SR-SYNC-007,
   TD-NET-02. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 6) — `SyncClient` installs a
+  bounded redirect policy: max 3 hops, same scheme (TLS downgrade
+  refused), same host+port (cross-origin bounce refused), target
+  re-validated against the transport policy (`redirect_decision` free fn
+  pinned by cross-origin/downgrade/bound tests). TLS-only + no-userinfo
+  were enforced since 0.8.x (`validate_relay_url`).
 - **WBS-618 — Proxy-trust config for forwarded IPs.** TD-NET-03. Est 1.5d.
+  **Status:** Done (2026-09-10, sync v2 stage 6) — relay `trusted_proxies`
+  config (default EMPTY): X-Forwarded-For keys the rate limiter ONLY when
+  the direct peer is a configured trusted proxy; with the default, a
+  spoofed XFF cannot rotate rate-limit identities
+  (`forwarded_ip_trust_follows_configuration`).
 - **WBS-619 — Per-vault/device quotas + bounded limiter state.** TD-NET-04,
   SR-RELAY-001, FR-SYNC-001/003. Est 3d.
 - **WBS-620 — Non-blocking relay storage.** TD-NET-05. Est 3d.
