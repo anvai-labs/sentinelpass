@@ -8,19 +8,21 @@
 > `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`. The protocol details below remain
 > useful implementation documentation for v1, not target-state security claims.
 >
-> **v2 note (2026-09-10):** sync protocol v2 (ADR-006) stage 1 has landed — see
-> "Sync Protocol v2" below. The CLIENT engine now speaks v2 exclusively
-> (`/api/v2/*`); the v1 relay endpoints remain for older clients until v1
+> **v2 note (2026-09-10):** sync protocol v2 (ADR-006) stages 1–2 have
+> landed — see "Sync Protocol v2" below. The CLIENT engine now speaks v2
+> exclusively (`/api/v2/*`); relay push and client pull pages are
+> transactional with unappliable mutations dead-lettered (bounded,
+> fail-closed). The v1 relay endpoints remain for older clients until v1
 > retirement (WBS-624), when the relay hard-rejects them. v2 is NOT yet
 > approved for production credentials: conflict preservation, authenticated
 > metadata enforcement on apply, epoch/revocation checks on every request,
-> atomic pull pages with dead-letter, pairing upgrade, and v1 retirement are
-> still landing (ADR-006 stage plan). Sync stays experimental until the
-> phase gate (model-based + chaos convergence evidence) passes.
+> pairing upgrade, and v1 retirement are still landing (ADR-006 stage
+> plan). Sync stays experimental until the phase gate (model-based + chaos
+> convergence evidence) passes.
 
 End-to-end encrypted sync between SentinelPass devices via a relay server. The relay never sees plaintext — all payloads are encrypted with the vault's DEK before leaving the device.
 
-## Sync Protocol v2 (ADR-006, stage 1)
+## Sync Protocol v2 (ADR-006, stages 1–2)
 
 The client engine pushes and pulls over `/api/v2/*`:
 
@@ -79,23 +81,30 @@ The client engine pushes and pulls over `/api/v2/*`:
   or a fresh v2 init/re-pair. The relay's v1 endpoints remain for older
   clients until v1 retirement hard-rejects them (WBS-624).
 - **Pull** walks the relay's append-only vault mutation log with a
-  `ServerCursor` and paged responses.
+  `ServerCursor` and paged responses. Each page is ONE transaction:
+  applies, dead-letter dispositions, and the cursor advance commit
+  together. An unappliable mutation gets a durable disposition in the
+  bounded `sync_dead_letter` table (hard cap 1,000 — overflow fails
+  closed: the page and cursor roll back until the user purges); the
+  cursor never passes a mutation without a disposition. Order-dependent
+  applies (a TOTP whose parent credential arrives later in the page) get
+  one bounded requeue pass within the run. The v1 skip-and-advance data
+  loss is gone.
 
 New relay configuration (TOML, defaults shown): `mutation_result_ttl_secs =
 604800`, `max_mutation_results_per_device = 4096`. New storage tables
 (additive, backward-safe): `sync_entries_v2`, `sync_mutations_v2`,
-`mutation_results`, `vault_epochs`.
+`mutation_results`, `vault_epochs` (relay); `sync_dead_letter` (client,
+schema v11).
 
-Stage-1 residuals (tracked, not silently accepted): the v2 mutation LOG
+Stage residuals (tracked, not silently accepted): the v2 mutation LOG
 (`sync_mutations_v2`) and object-state table grow without bound — retention
 compatible with the future lineage high-water is a follow-up; the vault
 epoch high-water advances on client assertion with only a jump bound
 (1,000,000) guarding implausible advances — authenticated epoch
 publication lands with WBS-612/614; a malformed mutation is a
 request-level rejection (the whole request replays idempotently after the
-client's next collection) — per-mutation dead-letter lands with WBS-607;
-pull-side skip-and-advance for unappliable blobs persists until WBS-607's
-dead-letter replaces it.
+client's next collection).
 
 ## At a Glance
 

@@ -724,6 +724,46 @@ pub fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migrate schema from v10 to v11: the bounded sync dead-letter (WBS-607,
+/// ADR-006). Every pulled mutation receives a durable disposition — applied
+/// or dead-lettered — before the pull cursor may pass it; the skip-and-
+/// advance era ends here. The table is hard-capped by the engine (fail-
+/// closed at overflow: the page rolls back and the cursor does not move).
+///
+/// Additive CREATE IF NOT EXISTS + ONE-transaction version bump (ADR-005
+/// rev 3).
+pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_dead_letter (
+                server_sequence INTEGER PRIMARY KEY,
+                mutation_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                object_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                received_at INTEGER NOT NULL
+            );
+             UPDATE db_metadata SET version = 11 WHERE id = 1;",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -766,6 +806,10 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 10 {
         migrate_v9_to_v10(conn)?;
+    }
+
+    if version < 11 {
+        migrate_v10_to_v11(conn)?;
     }
 
     Ok(())

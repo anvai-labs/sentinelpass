@@ -1029,7 +1029,28 @@ after 408/409 stabilize.
   recorded, never gated). Two-alternative conflict PRESERVATION remains
   WBS-611 (stage 1 adopts the relay state on superseding conflicts).
 - **WBS-606 — Relay atomic mutation/entry/sequence/ack.** SR-SYNC-003, TD-ROB-04. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 2) — `handlers/sync_v2.rs`:
+  one SQLite transaction per push request covers per-mutation result rows,
+  object state, the append-only log, the vault sequence counter, the epoch
+  high-water, and the device framing counter. Authorizer fault-injection
+  sweep (`push_v2_fault_injection_is_all_or_nothing`): denial at every
+  write → complete-old across ALL five stores; clean run proves
+  complete-new. (The handler was born transactional in stage 1; stage 2
+  added the evidence.)
 - **WBS-607 — Client atomic page/inbox/object/index/cursor.** TD-ROB-04. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 2) — schema v11
+  `sync_dead_letter` (hard-capped at 1,000, fail-closed at overflow); the
+  pull page folds applies, dispositions, and the cursor advance into ONE
+  transaction (`pull_page_fault_injection_is_all_or_nothing`); order-
+  dependent applies (TOTP parent later in the page) get one bounded
+  requeue pass (`deferred_totp_parent_resolves_within_one_run` — the
+  pre-v2 permanent silent loss is gone); unappliable mutations are
+  dead-lettered with their server_sequence as the disposition key and the
+  cursor passes them only with a disposition recorded
+  (`unappliable_mutation_is_dead_lettered_and_page_advances`); cap
+  overflow rolls the page back and errors until purged
+  (`dead_letter_cap_fails_closed_until_purged`). Skip-and-advance is
+  removed from the pull path.
 - **WBS-608 — Remove remote-apply trigger echo.** TD-ROB-02 (sync half). Est 1.5d.
 - **WBS-609 — Nullable encrypted fields preserved.** TD-ROB-03 (sync half). Est 1d.
 - **WBS-610 — One bounded paginated path (normal+full).** TD-ROB-06. Est 3d.

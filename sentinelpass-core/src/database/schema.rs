@@ -26,7 +26,11 @@ use tracing::warn;
 /// relay has ACKNOWLEDGED (the CAS `expected_version` for the next v2
 /// mutation). Seeded from `sync_version` for already-synced rows (v1's
 /// relay held those versions) and 0 for pending rows.
-pub const CURRENT_SCHEMA_VERSION: i32 = 10;
+/// v11 (WBS-607 / ADR-006): `sync_dead_letter` — the bounded durable
+/// disposition for pulled mutations that cannot be applied. Every mutation
+/// in a page gets a disposition (applied or dead-lettered) before the pull
+/// cursor may pass it; the table is hard-capped (fail-closed at overflow).
+pub const CURRENT_SCHEMA_VERSION: i32 = 11;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -483,6 +487,15 @@ impl Database {
                     deleted_at INTEGER NOT NULL,
                     origin_device_id TEXT NOT NULL,
                     pushed INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS sync_dead_letter (
+                    server_sequence INTEGER PRIMARY KEY,
+                    mutation_id TEXT NOT NULL,
+                    object_id TEXT NOT NULL,
+                    object_type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    received_at INTEGER NOT NULL
                 );",
             )
             .map_err(DatabaseError::Sqlite)?;

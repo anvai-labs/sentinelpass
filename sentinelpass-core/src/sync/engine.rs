@@ -199,6 +199,43 @@ fn blob_from_log_mutation(m: &MutationV2) -> SyncEntryBlob {
     }
 }
 
+/// Hard cap on dead-letter rows — bounded disposition state (ADR-006). At
+/// the cap the pull fails closed (page + cursor roll back) until the user
+/// inspects and purges.
+pub const MAX_DEAD_LETTER: usize = 1_000;
+
+/// Record the durable disposition for an unappliable mutation, inside the
+/// caller's page transaction.
+fn dead_letter_entry(
+    tx: &rusqlite::Transaction<'_>,
+    entry: &crate::sync::v2::MutationLogEntry,
+    reason: &str,
+) -> Result<()> {
+    tracing::warn!(
+        sync_id = %entry.mutation.object_id,
+        entry_type = ?entry.mutation.object_type,
+        server_sequence = entry.server_sequence.as_u64(),
+        reason = %reason,
+        "sync pull: mutation dead-lettered (durable disposition; the cursor \
+         passes it, the change is NOT applied)"
+    );
+    tx.execute(
+        "INSERT INTO sync_dead_letter (
+            server_sequence, mutation_id, object_id, object_type, reason, received_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            entry.server_sequence.as_u64() as i64,
+            entry.mutation.mutation_id.to_string(),
+            entry.mutation.object_id.to_string(),
+            format!("{:?}", entry.mutation.object_type),
+            reason,
+            chrono::Utc::now().timestamp(),
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
 impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// Create a new sync engine with the given client, database, and device identity.
     pub fn new(client: T, db: Arc<Mutex<Database>>, device_id: Uuid) -> Self {
@@ -335,7 +372,15 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     }
 
     /// Pull remote changes from the relay's vault log and apply them
-    /// locally (paged; the cursor is a distinct ServerCursor domain).
+    /// locally (WBS-607 / SR-SYNC-003).
+    ///
+    /// UNIT OF WORK: each page applies, dispositions, and the cursor
+    /// advance inside ONE transaction — a mutation that cannot be applied
+    /// receives a DURABLE disposition (bounded dead-letter) rather than a
+    /// silent skip, and the cursor only ever passes a mutation that has
+    /// one. Order-dependent applies (a TOTP whose parent credential arrives
+    /// later in the page) get ONE bounded retry pass within the same
+    /// transaction before being dead-lettered.
     async fn pull_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
         let mut cursor = {
             let db = self
@@ -368,50 +413,86 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
             total_count += response.entries.len() as u64;
 
-            let db = self
-                .db
-                .lock()
-                .map_err(|_| DatabaseError::LockPoisoned("apply pull".to_string()))?;
+            {
+                let db = self
+                    .db
+                    .lock()
+                    .map_err(|_| DatabaseError::LockPoisoned("apply pull".to_string()))?;
+                let tx = db
+                    .conn()
+                    .unchecked_transaction()
+                    .map_err(DatabaseError::Sqlite)?;
 
-            let mut apply_failures: u64 = 0;
-            for entry in &response.entries {
-                let mutation = &entry.mutation;
-                // Skip our own changes (their acks already moved the outbox).
-                if mutation.origin_device_id == self.device_id {
-                    continue;
+                let mut deferred: Vec<(usize, String)> = Vec::new();
+                let mut applied = 0usize;
+                for (index, entry) in response.entries.iter().enumerate() {
+                    let mutation = &entry.mutation;
+                    // Skip our own changes: their acks already governed the
+                    // outbox, and the cursor passes them with this page.
+                    if mutation.origin_device_id == self.device_id {
+                        continue;
+                    }
+                    let blob = blob_from_log_mutation(mutation);
+                    match self.apply_remote_entry_in_tx(&tx, dek, &blob) {
+                        Ok(()) => applied += 1,
+                        Err(PasswordManagerError::SyncDeferred(reason)) => {
+                            deferred.push((index, reason));
+                        }
+                        Err(e) => dead_letter_entry(&tx, entry, &e.to_string())?,
+                    }
                 }
-                // Per-blob resilience (adoption review, WBS-607 will
-                // replace skip-and-advance with dead-letter): one
-                // unreadable blob must NOT abort the page before the
-                // cursor advances, wedging every future sync forever.
-                // Each blob applies inside its OWN transaction — see
-                // [`Self::apply_remote_entry`].
-                let blob = blob_from_log_mutation(mutation);
-                if let Err(e) = self.apply_remote_entry(db.conn(), dek, &blob) {
-                    apply_failures += 1;
+
+                // ONE bounded requeue pass: a parent credential later in the
+                // page satisfies an earlier deferred TOTP.
+                let mut still_deferred = 0usize;
+                for (index, reason) in &deferred {
+                    let entry = &response.entries[*index];
+                    let blob = blob_from_log_mutation(&entry.mutation);
+                    match self.apply_remote_entry_in_tx(&tx, dek, &blob) {
+                        Ok(()) => applied += 1,
+                        Err(retry_err) => {
+                            still_deferred += 1;
+                            dead_letter_entry(
+                                &tx,
+                                entry,
+                                &format!(
+                                    "unresolved after one requeue pass: {reason} ({retry_err})"
+                                ),
+                            )?;
+                        }
+                    }
+                }
+
+                // Bounded state (ADR-006): the dead-letter table is hard-
+                // capped. Overflow is FAIL-CLOSED — the whole page, cursor
+                // included, rolls back and the error surfaces to the user.
+                let dead_lettered: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |r| r.get(0))
+                    .map_err(DatabaseError::Sqlite)?;
+                if dead_lettered as usize > MAX_DEAD_LETTER {
+                    return Err(PasswordManagerError::InvalidInput(format!(
+                        "sync dead-letter exceeded its bound ({MAX_DEAD_LETTER}); \
+                         the pull page was rolled back and the cursor did NOT advance. \
+                         Inspect the sync_dead_letter table and purge resolved rows"
+                    )));
+                }
+
+                let mut config = SyncConfig::load(&tx)?;
+                config.last_pull_sequence = response.cursor.as_u64();
+                config.save(&tx)?;
+
+                tx.commit().map_err(DatabaseError::Sqlite)?;
+
+                if still_deferred > 0 {
                     tracing::warn!(
-                        sync_id = %mutation.object_id,
-                        entry_type = ?mutation.object_type,
-                        server_sequence = entry.server_sequence.as_u64(),
-                        error = %e,
-                        "sync pull: skipping unappliable blob (cursor advances; \
-                         the change is NOT applied)"
+                        unresolved = still_deferred,
+                        applied,
+                        "sync pull page committed with dead-lettered mutations"
                     );
                 }
             }
-            if apply_failures > 0 {
-                tracing::warn!(
-                    failures = apply_failures,
-                    "sync pull completed with skipped blobs — inspect the warnings \
-                     above; affected entries were not applied"
-                );
-            }
 
             cursor = response.cursor.as_u64();
-
-            let mut config = SyncConfig::load(db.conn())?;
-            config.last_pull_sequence = cursor;
-            config.save(db.conn())?;
 
             if !response.has_more {
                 break;
@@ -432,6 +513,10 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// `pub(crate)` (not private) so tests can drive the apply logic
     /// directly against a real vault database — the engine's HTTP client
     /// is never involved in an apply.
+    /// Per-blob unit of work — production pull folds applies into the PAGE
+    /// transaction ([`Self::apply_remote_entry_in_tx`]); this one-blob
+    /// wrapper is retained for the apply-path test fixtures.
+    #[cfg(test)]
     pub(crate) fn apply_remote_entry(
         &self,
         conn: &rusqlite::Connection,
@@ -441,17 +526,30 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         let tx = conn
             .unchecked_transaction()
             .map_err(DatabaseError::Sqlite)?;
-        let result = match blob.entry_type {
-            SyncEntryType::Credential => self.apply_credential(&tx, dek, blob),
-            SyncEntryType::SshKey => self.apply_ssh_key(&tx, dek, blob),
-            SyncEntryType::TotpSecret => self.apply_totp(&tx, dek, blob),
-        };
+        let result = self.apply_remote_entry_in_tx(&tx, dek, blob);
         if let Err(e) = result {
             // tx drops on return: the whole blob rolls back.
             let _ = tx.rollback();
             return Err(e);
         }
         Ok(tx.commit().map_err(DatabaseError::Sqlite)?)
+    }
+
+    /// The apply core WITHOUT its own transaction — the caller's transaction
+    /// is the unit of work. The pull page folds applies, dead-letter
+    /// dispositions, and the cursor advance into ONE transaction (WBS-607)
+    /// and therefore calls this variant.
+    fn apply_remote_entry_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        dek: &DataEncryptionKey,
+        blob: &SyncEntryBlob,
+    ) -> Result<()> {
+        match blob.entry_type {
+            SyncEntryType::Credential => self.apply_credential(tx, dek, blob),
+            SyncEntryType::SshKey => self.apply_ssh_key(tx, dek, blob),
+            SyncEntryType::TotpSecret => self.apply_totp(tx, dek, blob),
+        }
     }
 
     fn apply_credential(
@@ -940,16 +1038,13 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
             let Some(eid) = entry_id else {
                 // The parent credential has not landed locally (relay
-                // ordering or a conflicting local version). Dropping the
-                // blob silently loses the TOTP forever — warn loudly
-                // (re-sync after the credential lands re-delivers only if
-                // the peer re-pushes; sync v2's requeue is WBS-605).
-                tracing::warn!(
-                    sync_id = %sync_id_str,
-                    "sync pull: TOTP blob skipped — parent credential is not \
-                     present locally; the secret was NOT applied"
-                );
-                return Ok(());
+                // ordering). WBS-607: this is a DEFERRED apply — the pull
+                // retries after the rest of the page and dead-letters the
+                // mutation only if still unresolved. It is never a silent
+                // skip (the pre-v2 behavior permanently lost the TOTP).
+                return Err(PasswordManagerError::SyncDeferred(format!(
+                    "TOTP {sync_id_str}: parent credential not present locally yet"
+                )));
             };
 
             let now = chrono::Utc::now().timestamp();
@@ -1042,15 +1137,12 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 })
                 .transpose()?;
 
-            if entry_id.is_none() {
-                tracing::warn!(
-                    sync_id = %sync_id_str,
-                    "sync pull: TOTP blob skipped — parent credential is not \
-                     present locally; the secret was NOT applied"
-                );
-                return Ok(());
-            }
-            let eid = entry_id.unwrap();
+            let Some(eid) = entry_id else {
+                // Deferred, not dropped — see the UPDATE arm above.
+                return Err(PasswordManagerError::SyncDeferred(format!(
+                    "TOTP {sync_id_str}: parent credential not present locally yet"
+                )));
+            };
             {
                 let now = chrono::Utc::now().timestamp();
                 conn.execute(
@@ -1058,7 +1150,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         entry_id, secret_encrypted, nonce, auth_tag,
                         algorithm, digits, period, issuer, account_name, created_at,
                         sync_id, sync_version, sync_acked_version, sync_state, last_synced_at, is_deleted
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, 'synced', ?14, 0)",
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, 'synced', ?13, 0)",
                     rusqlite::params![
                         eid,
                         &secret_blob,
@@ -2502,6 +2594,422 @@ mod v2_cycle_tests {
         );
         let (state, _) = row_bookkeeping(&db, &sync_id);
         assert_eq!(state, "pending", "the row is untouched");
+    }
+
+    // --- WBS-607: bounded dead-letter + atomic pull pages -------------------
+
+    /// A peer mutation whose payload cannot be decrypted is DEAD-LETTERED
+    /// (durable disposition) while the rest of the page applies; the cursor
+    /// advances past it with the disposition recorded, so the poison never
+    /// wedges a later sync.
+    #[tokio::test]
+    async fn unappliable_mutation_is_dead_lettered_and_page_advances() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let good_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        // Poison first (undecryptable payload), good mutation after it.
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: Uuid::new_v4(),
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0xFF; 64],
+                },
+            )
+            .unwrap(),
+        );
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: good_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: {
+                        let payload = CredentialPayload {
+                            title: "Good".to_string(),
+                            username: "u".to_string(),
+                            password: Zeroizing::new("p".to_string()),
+                            credential_type: crate::CredentialType::Password,
+                            url: None,
+                            notes: None,
+                            favorite: false,
+                            domains: vec![],
+                            created_at: 1,
+                            modified_at: 1,
+                        };
+                        encrypt_for_sync(
+                            &dek,
+                            &Zeroizing::new(serde_json::to_vec(&payload).unwrap()),
+                        )
+                        .unwrap()
+                    },
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        // The poison has a durable disposition; the good row applied.
+        let (dead_lettered, seq): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(MIN(server_sequence), 0) FROM sync_dead_letter",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(dead_lettered, 1);
+        assert_eq!(
+            seq, 1,
+            "the poison's server_sequence is the disposition key"
+        );
+        let (state, _) = row_bookkeeping(&db, &good_id);
+        assert_eq!(
+            state, "synced",
+            "the good mutation applied in the same page"
+        );
+        let cursor = SyncConfig::load(db.lock().unwrap().conn())
+            .unwrap()
+            .last_pull_sequence;
+        assert_eq!(
+            cursor, 2,
+            "the cursor advanced past the dispositioned poison"
+        );
+
+        // A follow-up sync is not wedged: nothing new, nothing re-fetched.
+        engine.sync(&dek).await.unwrap();
+        assert_eq!(relay.log_len(), 2);
+    }
+
+    /// The order-dependent case: a TOTP whose parent credential arrives
+    /// LATER in the page. Pass 1 defers it; the bounded requeue pass (after
+    /// the credential applied) resolves it — both land in ONE run, and
+    /// nothing is dead-lettered. (Pre-v2 this was a permanent silent loss.)
+    #[tokio::test]
+    async fn deferred_totp_parent_resolves_within_one_run() {
+        use crate::sync::models::TotpPayload;
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let parent_id = Uuid::new_v4();
+        let totp_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+
+        let totp_mutation = crate::sync::v2::build_mutation(
+            &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+            &crate::sync::v2::MutationInput {
+                vault_id: relay_vault,
+                object_id: totp_id,
+                object_type: SyncEntryType::TotpSecret,
+                expected_version: ObjectVersion(0),
+                resulting_version: ObjectVersion(1),
+                key_epoch: 1,
+                origin_device_id: Uuid::new_v4(),
+                is_tombstone: false,
+                encrypted_payload: {
+                    let payload = TotpPayload {
+                        secret: Zeroizing::new("JBSWY3DPEHPK3PXP".to_string()),
+                        secret_encrypted: None,
+                        legacy_nonce: None,
+                        legacy_auth_tag: None,
+                        algorithm: "SHA1".to_string(),
+                        digits: 6,
+                        period: 30,
+                        issuer: None,
+                        account_name: None,
+                        created_at: 1,
+                        parent_credential_sync_id: Some(parent_id),
+                    };
+                    encrypt_for_sync(&dek, &Zeroizing::new(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap()
+                },
+            },
+        )
+        .unwrap();
+        let parent_mutation = crate::sync::v2::build_mutation(
+            &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+            &crate::sync::v2::MutationInput {
+                vault_id: relay_vault,
+                object_id: parent_id,
+                object_type: SyncEntryType::Credential,
+                expected_version: ObjectVersion(0),
+                resulting_version: ObjectVersion(1),
+                key_epoch: 1,
+                origin_device_id: Uuid::new_v4(),
+                is_tombstone: false,
+                encrypted_payload: {
+                    let payload = CredentialPayload {
+                        title: "Parent".to_string(),
+                        username: "u".to_string(),
+                        password: Zeroizing::new("p".to_string()),
+                        credential_type: crate::CredentialType::Password,
+                        url: None,
+                        notes: None,
+                        favorite: false,
+                        domains: vec![],
+                        created_at: 1,
+                        modified_at: 1,
+                    };
+                    encrypt_for_sync(&dek, &Zeroizing::new(serde_json::to_vec(&payload).unwrap()))
+                        .unwrap()
+                },
+            },
+        )
+        .unwrap();
+        // TOTP FIRST (deferred in pass 1), parent SECOND.
+        relay.seed_peer_mutation(totp_mutation);
+        relay.seed_peer_mutation(parent_mutation);
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        let conn = db.lock().unwrap();
+        let (parent_state, totp_count, dead_lettered): (String, i64, i64) = conn
+            .conn()
+            .query_row(
+                "SELECT (SELECT sync_state FROM entries WHERE sync_id = ?1), \
+                        (SELECT COUNT(*) FROM totp_secrets WHERE sync_id = ?2), \
+                        (SELECT COUNT(*) FROM sync_dead_letter)",
+                rusqlite::params![parent_id.to_string(), totp_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(parent_state, "synced");
+        assert_eq!(
+            totp_count, 1,
+            "the deferred TOTP resolved in the requeue pass"
+        );
+        assert_eq!(dead_lettered, 0, "nothing needed a dead-letter disposition");
+    }
+
+    /// THE dead-letter bound is fail-closed (ADR-006: bounded disposition
+    /// state): at the cap, the page — cursor included — rolls back and sync
+    /// errors; after the user purges a row, the same page applies cleanly.
+    #[tokio::test]
+    async fn dead_letter_cap_fails_closed_until_purged() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let good_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        {
+            let conn = db.conn();
+            // Pre-fill the dead-letter to exactly the cap (distinct PK space
+            // from the fake's sequences).
+            for i in 0..MAX_DEAD_LETTER {
+                conn.execute(
+                    "INSERT INTO sync_dead_letter (server_sequence, mutation_id, object_id, \
+                        object_type, reason, received_at) \
+                     VALUES (?1, 'm', 'o', 'Credential', 'seeded', 1)",
+                    [MAX_DEAD_LETTER as i64 + 10_000 + i as i64],
+                )
+                .unwrap();
+            }
+        }
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: Uuid::new_v4(),
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0xEE; 64],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        let outcome = engine.sync(&dek).await;
+        assert!(outcome.is_err(), "the cap must fail closed");
+        assert!(outcome.unwrap_err().to_string().contains("dead-letter"));
+        let cursor = SyncConfig::load(db.lock().unwrap().conn())
+            .unwrap()
+            .last_pull_sequence;
+        assert_eq!(cursor, 0, "the cursor did NOT advance past the cap");
+
+        // Purge ONE row; the same page now applies (fail-open after action).
+        {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .execute(
+                    "DELETE FROM sync_dead_letter WHERE server_sequence = ?1",
+                    [MAX_DEAD_LETTER as i64 + 10_000],
+                )
+                .unwrap();
+        }
+        engine.sync(&dek).await.unwrap();
+        let cursor = SyncConfig::load(db.lock().unwrap().conn())
+            .unwrap()
+            .last_pull_sequence;
+        assert_eq!(cursor, 1, "the page committed after the purge");
+        let _ = good_id;
+    }
+
+    /// The page transaction is all-or-nothing (SR-SYNC-003): a fault at any
+    /// write of the page rolls the applies, dispositions, AND the cursor
+    /// back together; the clean run proves complete-new.
+    #[tokio::test]
+    async fn pull_page_fault_injection_is_all_or_nothing() {
+        use crate::database::fault_injection::{clear_write_fault, install_write_fault};
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: Uuid::new_v4(),
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0xDD; 64], // poison → dead-letter write
+                },
+            )
+            .unwrap(),
+        );
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: Uuid::new_v4(),
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0xCC; 64], // poison → dead-letter write
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        let mut fail_at = 0usize;
+        let mut injected_failures = 0usize;
+        loop {
+            let guard = {
+                let conn = db.lock().unwrap();
+                install_write_fault(conn.conn(), fail_at)
+            };
+            let result = engine.sync(&dek).await;
+            {
+                let conn = db.lock().unwrap();
+                clear_write_fault(conn.conn());
+            }
+
+            let denied = guard.seen() > fail_at;
+            let cursor = SyncConfig::load(db.lock().unwrap().conn())
+                .unwrap()
+                .last_pull_sequence;
+            // The PAGE transaction is the unit under test; sync() has writes
+            // AFTER it (the last_sync_at checkpoint), so a denial that hits
+            // those surfaces as Err with the page already complete-new.
+            match (result, cursor) {
+                (Err(_), 0) => {
+                    assert!(denied, "harness bug at write {fail_at}");
+                    injected_failures += 1;
+                    let entries: i64 = db
+                        .lock()
+                        .unwrap()
+                        .conn()
+                        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+                        .unwrap();
+                    let dead: i64 = db
+                        .lock()
+                        .unwrap()
+                        .conn()
+                        .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |r| r.get(0))
+                        .unwrap();
+                    assert_eq!(
+                        (entries, dead),
+                        (0, 0),
+                        "complete-old: no partial page state at write {fail_at}"
+                    );
+                }
+                (Err(_), 2) => {
+                    // The page committed complete-new; the denial hit a
+                    // post-page statement.
+                    injected_failures += 1;
+                }
+                (Ok(_), 2) => {
+                    // Complete-new: both poisons dispositioned, cursor passed
+                    // them WITH the dispositions in the same commit.
+                    let dead: i64 = db
+                        .lock()
+                        .unwrap()
+                        .conn()
+                        .query_row("SELECT COUNT(*) FROM sync_dead_letter", [], |r| r.get(0))
+                        .unwrap();
+                    assert_eq!(dead, 2, "complete-new: both dispositions committed");
+                    break;
+                }
+                other => panic!("unexpected outcome at write {fail_at}: {other:?}"),
+            }
+            fail_at += 1;
+            assert!(fail_at < 48, "page never succeeded within the sweep bound");
+        }
+        assert!(
+            injected_failures >= 1,
+            "the sweep must inject at least one real failure to be meaningful"
+        );
     }
 
     /// The credential blob helper stays referenced (parity with the apply
