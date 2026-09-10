@@ -1261,6 +1261,91 @@ mod tests {
         assert!(resp.results[0].outcome.is_applied_outcome());
     }
 
+    /// THE WBS-606 acceptance (SR-SYNC-003): a fault at EVERY write
+    /// statement of a push leaves the complete-OLD state (results, object
+    /// state, log, sequence counter, and device framing counter all roll
+    /// back together), and the clean run proves complete-NEW. The authorizer
+    /// is connection state, so it is installed under the storage lock and
+    /// inherited by the handler after the lock is released.
+    #[tokio::test]
+    async fn push_v2_fault_injection_is_all_or_nothing() {
+        use crate::fault_injection::install_write_fault;
+
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let (device_id, vault_id, object_id) = setup(&state);
+
+        let mut m = sample_mutation(&vault_id, object_id, 0, 1);
+        m.origin_device_id = device_id;
+        let req = PushRequestV2 {
+            device_sequence: 7,
+            mutations: vec![m],
+        };
+
+        let assert_complete_old = |state: &RelayAppState, vault_id: &str, device_id: &Uuid| {
+            let conn = state.storage.conn().unwrap();
+            let (log, objects, results, counter, device_seq): (i64, i64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT                          (SELECT COUNT(*) FROM sync_mutations_v2),                          (SELECT COUNT(*) FROM sync_entries_v2),                          (SELECT COUNT(*) FROM mutation_results),                          (SELECT COALESCE((SELECT current_sequence FROM sequence_counters WHERE vault_id = ?1), 0)),                          (SELECT COALESCE((SELECT last_sequence FROM device_sequences WHERE device_id = ?2), 0))",
+                    rusqlite::params![vault_id, device_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (log, objects, results, counter, device_seq),
+                (0, 0, 0, 0, 0),
+                "a failed push must roll back EVERYTHING"
+            );
+        };
+
+        let mut fail_at = 0usize;
+        let mut injected_failures = 0usize;
+        loop {
+            // Install the authorizer while holding the lock; the handler
+            // re-locks and inherits it.
+            let guard = {
+                let conn = state.storage.conn().unwrap();
+                install_write_fault(&conn, fail_at)
+            };
+            let result = push_v2(
+                State(state.clone()),
+                auth_extensions(device_id),
+                Json(req.clone()),
+            )
+            .await;
+            {
+                let conn = state.storage.conn().unwrap();
+                guard.clear(&conn);
+            }
+
+            let denied = guard.seen() > fail_at;
+            match result {
+                Err(_) => {
+                    assert!(
+                        denied,
+                        "an Err without a denial is a harness bug at write {fail_at}"
+                    );
+                    injected_failures += 1;
+                    assert_complete_old(&state, &vault_id, &device_id);
+                }
+                Ok(resp) => {
+                    assert!(resp.results[0].outcome.is_applied_outcome());
+                    assert_eq!(
+                        guard.seen(),
+                        fail_at,
+                        "the clean run must prove the sweep reached every write"
+                    );
+                    break;
+                }
+            }
+            fail_at += 1;
+            assert!(fail_at < 32, "push never succeeded within the sweep bound");
+        }
+        assert!(
+            injected_failures >= 1,
+            "the sweep must inject at least one real failure to be meaningful"
+        );
+    }
+
     /// Cleanup ages out idempotency records and enforces the per-device cap.
     #[test]
     fn cleanup_prunes_mutation_results_by_age_and_cap() {

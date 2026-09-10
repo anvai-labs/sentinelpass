@@ -9,6 +9,8 @@ mod auth;
 mod cleanup;
 mod config;
 mod error;
+#[cfg(test)]
+mod fault_injection;
 mod handlers;
 mod pairing_security;
 mod rate_limit;
