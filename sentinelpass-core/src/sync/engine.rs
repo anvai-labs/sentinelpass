@@ -307,7 +307,13 @@ pub fn resolve_conflict_keep_local(
     remote_version: u64,
 ) -> Result<()> {
     let table = table_for(entry_type);
-    conn.execute(
+    // Atomic: the re-version and the record removal commit together — a
+    // half-resolved row (pending, record still present) would double-count
+    // in the conflict surface.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute(
         &format!(
             "UPDATE {table} SET sync_state = 'pending',
              sync_acked_version = MAX(sync_acked_version, ?1),
@@ -321,11 +327,12 @@ pub fn resolve_conflict_keep_local(
         ],
     )
     .map_err(DatabaseError::Sqlite)?;
-    conn.execute(
+    tx.execute(
         "DELETE FROM sync_conflicts WHERE object_id = ?1",
         [object_id.to_string()],
     )
     .map_err(DatabaseError::Sqlite)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
     Ok(())
 }
 
@@ -348,7 +355,15 @@ pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
         ref is_tombstone,
     } = *alternative;
     let table = table_for(entry_type);
-    conn.execute(
+    // ATOMIC resolution (review finding 3): the pre-adjust, the apply, and
+    // the record removal commit together — a FAILED take-remote (e.g. a
+    // locally-tampered stored payload) must leave the row conflicted with
+    // the record intact, never half-resolved into a state where the next
+    // sync would overwrite the local edit without a completed resolution.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute(
         &format!(
             "UPDATE {table} SET sync_state = 'synced',
              sync_version = MIN(sync_version, ?1)
@@ -369,12 +384,21 @@ pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
         is_tombstone: *is_tombstone,
         origin_device_id: *origin,
     };
-    engine.apply_remote_entry(conn, dek, &blob)?;
-    conn.execute(
+    // Apply INSIDE the resolution transaction (the in-tx variant — no
+    // nested BEGIN).
+    match engine.apply_remote_entry_in_tx(&tx, dek, &blob) {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = tx.rollback();
+            return Err(e);
+        }
+    }
+    tx.execute(
         "DELETE FROM sync_conflicts WHERE object_id = ?1",
         [object_id.to_string()],
     )
     .map_err(DatabaseError::Sqlite)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
     Ok(())
 }
 
@@ -853,12 +877,17 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
             // removed as the explicit typed contract. The historical
             // TD-ROB-03 fabrication was the 0.8.x era's
             // `unwrap_or(&[])`, which turned None into an empty blob.)
+            // Resurrection-safe apply (review finding 1/2): a conflicted row
+            // may be locally deleted (delete vs edit raced); applying REMOTE
+            // CONTENT must clear the tombstone or the resolution silently
+            // does nothing.
             conn.execute(
                 "UPDATE entries SET
                     title = ?1, username = ?2, password = ?3, url = ?4, notes = ?5,
                     credential_type = ?6, entry_nonce = ?7, auth_tag = ?8,
                     modified_at = ?9, favorite = ?10, sync_version = ?11,
-                    sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12
+                    sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12,
+                    is_deleted = 0, deleted_at = NULL
                  WHERE entry_id = ?13",
                 rusqlite::params![
                     blobs.title,
@@ -1072,12 +1101,14 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 .transpose()?;
 
             let now = chrono::Utc::now().timestamp();
+            // Resurrection-safe apply — see the credential arm.
             conn.execute(
                 "UPDATE ssh_keys SET
                     name = ?1, comment = ?2, key_type = ?3, key_size = ?4,
                     public_key = ?5, private_key_encrypted = ?6, nonce = ?7, auth_tag = ?8,
                     fingerprint = ?9, modified_at = ?10,
-                    sync_version = ?11, sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12
+                    sync_version = ?11, sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12,
+                    is_deleted = 0, deleted_at = NULL
                  WHERE key_id = ?13",
                 rusqlite::params![
                     payload.name,
@@ -1284,11 +1315,13 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
             let now = chrono::Utc::now().timestamp();
             {
+                // Resurrection-safe apply — see the credential arm.
                 conn.execute(
                     "UPDATE totp_secrets SET
                         entry_id = ?1, secret_encrypted = ?2, nonce = ?3, auth_tag = ?4,
                         algorithm = ?5, digits = ?6, period = ?7, issuer = ?8, account_name = ?9,
-                        sync_version = ?10, sync_acked_version = ?10, sync_state = 'synced', last_synced_at = ?11
+                        sync_version = ?10, sync_acked_version = ?10, sync_state = 'synced', last_synced_at = ?11,
+                        is_deleted = 0, deleted_at = NULL
                      WHERE totp_id = ?12",
                     rusqlite::params![
                         eid,
@@ -2678,6 +2711,245 @@ mod v2_cycle_tests {
             !our_v4_overwrites,
             "the peer's v4 was not overwritten by a fabricated v4 — ours is v5"
         );
+    }
+
+    /// Tombstone-vs-edit conflict (review finding 4): a peer's TOMBSTONE
+    /// arriving at an object with an UNSYNCED local edit is preserved as an
+    /// alternative (the local row stays ALIVE), take-remote applies the
+    /// deletion, and keep-local keeps the edit alive and pushes it.
+    #[tokio::test]
+    async fn tombstone_vs_edit_conflict_is_preserved_and_resolvable() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // Local edit, alive: v3 pending (acked 1).
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        // Peer DELETED the object: tombstone mutation at v4.
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(2),
+                    resulting_version: ObjectVersion(4),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: true,
+                    encrypted_payload: vec![0x11; 40],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        // The row is ALIVE and conflicted; the tombstone is the alternative.
+        let (state, is_deleted, version): (String, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, is_deleted, sync_version FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "conflict");
+        assert_eq!(
+            is_deleted, 0,
+            "the local edit stays alive — no silent delete"
+        );
+        assert_eq!(version, 3);
+        let (record_v, record_tomb): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT remote_version, is_tombstone FROM sync_conflicts \
+                     WHERE object_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(record_v, 4);
+        assert_eq!(record_tomb, 1, "the alternative IS the tombstone");
+
+        // TAKE REMOTE: the deletion applies (the user accepted the peer's
+        // delete) — the row ends tombstoned at the remote version.
+        {
+            let conn = db.lock().unwrap();
+            resolve_conflict_take_remote(
+                &engine,
+                conn.conn(),
+                &dek,
+                &sync_id,
+                &ConflictAlternative {
+                    entry_type: SyncEntryType::Credential,
+                    remote_version: 4,
+                    payload: vec![0x11; 40],
+                    origin: Uuid::new_v4(),
+                    is_tombstone: true,
+                },
+            )
+            .unwrap();
+        }
+        let (state, is_deleted, acked): (String, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, is_deleted, sync_acked_version FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "synced");
+        assert_eq!(is_deleted, 1, "take-remote applies the peer's deletion");
+        assert_eq!(acked, 4, "the deletion is acked — it does not re-push");
+        let records: i64 = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sync_conflicts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(records, 0);
+    }
+
+    /// Take-remote onto a LOCALLY DELETED row (delete-vs-edit raced, the
+    /// peer's edit won): the applied content must RESURRECT the row —
+    /// clearing the local tombstone — or the user's resolution silently
+    /// does nothing (review findings 1/2).
+    #[tokio::test]
+    async fn take_remote_resurrects_a_locally_deleted_row() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // Local row: alive at v3, then LOCALLY deleted (repository delete
+        // shape: is_deleted=1, version bumped, pending).
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+        {
+            let conn = db.conn();
+            conn.execute(
+                "UPDATE entries SET is_deleted = 1, deleted_at = 99, \
+                     sync_version = 4, sync_state = 'pending' WHERE sync_id = ?1",
+                [&sync_id.to_string()],
+            )
+            .unwrap();
+        }
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(2),
+                    resulting_version: ObjectVersion(4),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: {
+                        let payload = CredentialPayload {
+                            title: "Peer Resurrection".to_string(),
+                            username: "u".to_string(),
+                            password: Zeroizing::new("p".to_string()),
+                            credential_type: crate::CredentialType::Password,
+                            url: None,
+                            notes: None,
+                            favorite: false,
+                            domains: vec![],
+                            created_at: 1,
+                            modified_at: 1,
+                        };
+                        encrypt_for_sync(
+                            &dek,
+                            &Zeroizing::new(serde_json::to_vec(&payload).unwrap()),
+                        )
+                        .unwrap()
+                    },
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+        assert_eq!(row_bookkeeping_full(&db, &sync_id).0, "conflict");
+
+        // TAKE REMOTE: the peer's LIVE content resurrects the row.
+        {
+            let conn = db.lock().unwrap();
+            resolve_conflict_take_remote(
+                &engine,
+                conn.conn(),
+                &dek,
+                &sync_id,
+                &ConflictAlternative {
+                    entry_type: SyncEntryType::Credential,
+                    remote_version: 4,
+                    payload: {
+                        let payload = CredentialPayload {
+                            title: "Peer Resurrection".to_string(),
+                            username: "u".to_string(),
+                            password: Zeroizing::new("p".to_string()),
+                            credential_type: crate::CredentialType::Password,
+                            url: None,
+                            notes: None,
+                            favorite: false,
+                            domains: vec![],
+                            created_at: 1,
+                            modified_at: 1,
+                        };
+                        encrypt_for_sync(
+                            &dek,
+                            &Zeroizing::new(serde_json::to_vec(&payload).unwrap()),
+                        )
+                        .unwrap()
+                    },
+                    origin: Uuid::new_v4(),
+                    is_tombstone: false,
+                },
+            )
+            .unwrap();
+        }
+        let (state, is_deleted, acked): (String, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, is_deleted, sync_acked_version FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "synced");
+        assert_eq!(
+            is_deleted, 0,
+            "applying live REMOTE content must clear the local tombstone"
+        );
+        assert_eq!(acked, 4);
     }
 
     /// TAKE-REMOTE resolution: the stored alternative is applied through the

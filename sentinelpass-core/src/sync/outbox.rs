@@ -205,6 +205,16 @@ pub fn apply_push_acks(
                     ],
                 )
                 .map_err(DatabaseError::Sqlite)?;
+                // A stored alternative at or below the applied version is
+                // stale — remove it so the conflict surface stays truthful.
+                tx.execute(
+                    "DELETE FROM sync_conflicts WHERE object_id = ?1 AND remote_version <= ?2",
+                    rusqlite::params![
+                        outbox.object_id.to_string(),
+                        resulting_version.as_u64() as i64
+                    ],
+                )
+                .map_err(DatabaseError::Sqlite)?;
                 summary.applied += 1;
             }
             crate::sync::v2::MutationOutcome::Rejected { reason } => match reason {
@@ -689,10 +699,23 @@ pub fn purge_dead_letter(conn: &Connection, server_sequence: Option<i64>) -> Res
     Ok(purged)
 }
 
-/// Count stored conflict alternatives (status surfacing, WBS-611).
+/// Count conflict surface (status surfacing, WBS-611): the stored
+/// alternatives OR rows still sitting in the conflict state — the push side
+/// marks rows conflicted BEFORE the same-run pull stores a record, and a
+/// failed pull leaves such rows temporarily record-less; MAX keeps the
+/// surface truthful in both windows.
 pub fn count_sync_conflicts(conn: &Connection) -> Result<u64> {
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sync_conflicts", [], |r| r.get(0))
+        .query_row(
+            "SELECT MAX(a, b) FROM (
+                 SELECT (SELECT COUNT(*) FROM sync_conflicts) AS a,
+                        (SELECT COUNT(*) FROM entries WHERE sync_state = 'conflict') +
+                        (SELECT COUNT(*) FROM ssh_keys WHERE sync_state = 'conflict') +
+                        (SELECT COUNT(*) FROM totp_secrets WHERE sync_state = 'conflict') AS b
+             )",
+            [],
+            |r| r.get(0),
+        )
         .map_err(DatabaseError::Sqlite)?;
     Ok(count as u64)
 }

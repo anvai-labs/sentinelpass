@@ -1069,7 +1069,17 @@ after 408/409 stabilize.
   conflict count surfaced through `SyncStatus` and the daemon service
   contract (`ServiceSyncStatus.conflicts`, serde default). Evidence:
   `conflict_preserves_alternatives_and_resolves_keep_local`,
-  `conflict_take_remote_applies_the_alternative`. The relay
+  `conflict_take_remote_applies_the_alternative`,
+  `tombstone_vs_edit_conflict_is_preserved_and_resolvable`,
+  `take_remote_resurrects_a_locally_deleted_row`. After adversarial
+  review round 1: content applies are RESURRECTION-SAFE (clear the local
+  tombstone — delete-vs-edit races and take-remote resolution can no
+  longer silently no-op into an invisible row); resolutions are atomic
+  (pre-adjust + apply + record removal in ONE transaction — a failed
+  take-remote leaves the row conflicted with the record intact);
+  stale alternatives are purged when the row applies past them; the
+  conflict surface counts stored records OR conflicted rows (whichever
+  is larger) so transient record-less windows stay visible. The relay
   same-version-rejection half landed with WBS-603 (stage 1).
 - **WBS-612 — Authenticate identity/type/origin/version/epoch/tombstone.** SR-SYNC-004,
   TD-SEC-02. Apply-side rule: pull never applies epoch/registry state below the

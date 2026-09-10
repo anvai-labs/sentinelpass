@@ -66,10 +66,17 @@ The client engine pushes and pulls over `/api/v2/*`:
   `sentinelpass sync conflict-list` / `conflict-resolve --object-id <ID>
   [--take-remote]`: keep-local re-versions the local content above the
   peer (next push lands via CAS); take-remote applies the stored
-  alternative (sealing under the LOCAL identity). A stale incoming blob
+  alternative ATOMICALLY (sealing under the LOCAL identity; a stored
+  TOMBSTONE alternative deletes the row; applying live content over a
+  locally-deleted row RESURRECTS it — a failed resolution rolls back to
+  the conflicted state with the record intact). A stale incoming blob
   (version below the local row) is not an alternative and is ignored.
-  Conflict counts surface through `sync status` and the daemon service
-  contract (`ServiceSyncStatus.conflicts`).
+  A stored alternative is purged once the row applies past it. Conflict
+  counts surface through `sync status` (counted as stored records OR
+  conflicted rows, whichever is larger) and the daemon service contract
+  (`ServiceSyncStatus.conflicts`). Bound: ONE alternative per object
+  (latest wins) — N-way conflicts keep the newest peer's content plus
+  the local edit; older peer content remains in the relay's log.
 - **Per-object acknowledgements.** The client's outbox entry is removed only
   by its own `Applied` ack (verified against the version the client
   actually sent), which also advances the object's durable
