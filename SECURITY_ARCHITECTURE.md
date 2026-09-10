@@ -625,7 +625,7 @@ they were granted — no more.
 | Process → daemon | 32-byte IPC token file (`<config>/ipc.token`, 0600), constant-time compared | Same-OS-user trust root. Any process running as the user can read the token. |
 | Tool → secret scope | `ExternalSecretGrant` (client_id × domain × field [+ expires_at]) in `<config>/external-secret-access.json` (0600) | Exact scope match, no wildcards. |
 | Tool identity | Per-client token (`spt_…`, 32 random bytes, SHA-256 at rest, shown once at mint) | A client with a `client_tokens` entry is token-enforced on **all** its grants; revocation is fail-closed. Legacy (tokenless) clients keep working during the migration window but are warned about. |
-| Browser autofill | Native-messaging origin label on every envelope | **Provenance labeling, not authentication.** Originless requests are **denied by default** (with a warning naming the upgrade path); `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily **re-allows** the legacy pre-0.8-host path (removed in 1.0). |
+| Browser autofill | Installation capability (audience `native-host`) presented on every envelope | **The capability is the authority; the origin label is provenance only.** The daemon provisions `native_host.capability` (0600) on first start; presentation is verified against the hashed capability store (`ipc-capabilities.json`). Legacy windows, both announced and removed in 1.0: `SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN=1` (pre-capability hosts) and `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` (originless pre-0.8 hosts). Honest scope: same-user readable, effectively all-domains (ADR-003 rev 2 damage limitation). |
 
 ### Rules enforced by the daemon
 
@@ -691,10 +691,39 @@ Origin labels are provenance, never authorization.
   flips the daemon to live mode. Creation against an existing vault is
   refused (`vault_exists` / `invalid_input` depending on mode).
 
+### Protocol upgrade and credential rotation (WBS-515)
+
+- IPC session versioning: the session handshake carries a protocol version;
+  both endpoints refuse unknown versions (fail-closed) so a future v2 can
+  negotiate against installed bases.
+- IPC token rotation: quit the daemon (releasing the maintenance lock),
+  regenerate the token file, restart — clients load the token per
+  connection, so no client-side state carries over. Rotation requires the
+  exclusive lock, exactly like other maintenance.
+- Capability rotation: mint a replacement capability and delete the old
+  entry in the store; the old presentation stops verifying immediately
+  (store re-read per request). The native-host secret file is replaced by
+  re-running the daemon's provisioning after deleting it.
+- WBS-514 (lock-poisoning unwraps) remains deferred as tracked (TD-#9).
+
 ### Interim compatibility window (flagged, temporary)
 
-Until UI/CLI direct-write paths are gone from shipped binaries (WBS-502),
-the open-time epoch guard plus stale-epoch UPDATE guards remain the interim
-cross-process invariant (ADR-007 migration). The daemon does not claim
-sole-writer authority until then; the daemon-owned summary index (ADR-005)
-tolerates no legacy writers, which bounds the window.
+WBS-502 rerouted every UI/CLI vault command through the application-service
+IPC boundary. The remaining direct-access paths are:
+
+- CLI: `commands/service_client.rs` `Backend::Direct` — only reachable with
+  `SENTINELPASS_ALLOW_DIRECT_VAULT=1`, announced on stderr at every use,
+  and guarded by the exclusive maintenance lock (refuses while a daemon
+  owns the vault, so it can never race one). Custom `--vault` paths are
+  never daemon-served for the same reason.
+- UI: the same env var gates the pre-502 local-manager behavior for the
+  unlock/entry/registry/TOTP commands; IPC-only is the default.
+- Offline maintenance (CLI `init`, `passwd`, `backup create/restore`,
+  `recovery setup/recover`, `sync pair-start/pair-join`): in-process by
+  design, always under the exclusive maintenance lock.
+
+The open-time epoch guard plus stale-epoch UPDATE guards remain the interim
+cross-process invariant for the flagged window (ADR-007 migration). The
+daemon does not claim sole-writer authority until the compat env path is
+removed from shipped binaries (1.0); the daemon-owned summary index
+(ADR-005) tolerates no legacy writers, which bounds the window.

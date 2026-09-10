@@ -59,11 +59,23 @@ async fn main() -> Result<()> {
         Ok(guard) => guard,
         Err(e) => {
             error!("Refusing to start: {}", e);
-            return Ok(());
+            // Non-zero exit: a refusal must never look like a clean start to
+            // supervisors waiting on the process (review F4).
+            std::process::exit(1);
         }
     };
 
     let maintenance_mode = !vault_path.exists();
+
+    // WBS-505: provision the native-host installation capability on every
+    // start (mint-once; the host presents the 0600 secret file and the
+    // daemon verifies it for browser-surface operations).
+    if let Err(e) = sentinelpass_core::daemon::ensure_native_host_capability() {
+        error!("Native-host capability provisioning failed: {}", e);
+        // Non-zero exit: a refusal must never look like a clean start
+        // (stage-6 review F2, matching the lock-refusal rule).
+        std::process::exit(1);
+    }
 
     // Create DaemonVault (works for the bootstrap case: the path is only
     // touched once a vault exists — maintenance mode serves creation).
@@ -115,7 +127,9 @@ async fn main() -> Result<()> {
         ipc_server.enter_maintenance_mode();
     }
 
-    // Spawn IPC server in background
+    // Spawn IPC server in background (WBS-512: run takes Arc<Self> so it
+    // can spawn bounded per-connection tasks).
+    let ipc_server = Arc::new(ipc_server);
     let ipc_handle = tokio::spawn(async move {
         info!("IPC server starting at {:?}", ipc_socket_path);
         if let Err(e) = ipc_server.run().await {

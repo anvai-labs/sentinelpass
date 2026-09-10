@@ -1,5 +1,5 @@
+use crate::commands::service_client as sc;
 use anyhow::Result;
-use rpassword::prompt_password;
 use sentinelpass_core::{CredentialType, Entry as VaultEntry};
 use std::path::PathBuf;
 
@@ -62,8 +62,6 @@ pub fn handle_passkey_add(
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password to unlock vault: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
     let entry = build_passkey_reference_entry(
         relying_party_id,
         account_label,
@@ -74,7 +72,25 @@ pub fn handle_passkey_add(
         favorite,
     )?;
 
-    let entry_id = vault.add_entry(&entry)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+
+    let entry_id = match backend.call(sentinelpass_protocol::service::VaultOp::EntryAdd {
+        entry: sentinelpass_protocol::service::ServiceEntry {
+            entry_id: None,
+            title: entry.title.clone(),
+            username: entry.username.clone(),
+            password: entry.password.as_str().to_string().into(),
+            url: entry.url.clone(),
+            notes: entry.notes.clone(),
+            credential_type: entry.credential_type.as_str().to_string(),
+            created_at: entry.created_at.timestamp(),
+            modified_at: entry.modified_at.timestamp(),
+            favorite: entry.favorite,
+        },
+    })? {
+        sentinelpass_protocol::service::VaultOpResult::EntryId(id) => id,
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
     println!("✓ Passkey reference created with ID: {}", entry_id);
     println!("This is metadata only. Authentication remains with the platform authenticator.");
     Ok(())

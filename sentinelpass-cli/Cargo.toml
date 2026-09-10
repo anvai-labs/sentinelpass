@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 subtle = { workspace = true }
+zeroize = { workspace = true }
+sentinelpass-protocol = { path = "../sentinelpass-protocol" }
 sentinelpass-core = { path = "../sentinelpass-core", features = ["sync"] }
 clap = { workspace = true }
 tokio = { workspace = true }

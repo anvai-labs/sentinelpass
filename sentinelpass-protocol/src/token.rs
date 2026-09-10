@@ -13,13 +13,30 @@ use crate::paths::default_ipc_token_path;
 use crate::{ProtocolError, Result};
 use rand::{rngs::OsRng, RngCore};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 use zeroize::Zeroize;
 
 /// Read IPC auth token from disk.
 pub fn load_ipc_token() -> Result<String> {
     load_ipc_token_from(&default_ipc_token_path())
+}
+
+/// Path of the native-host installation capability secret (WBS-505):
+/// `<config dir>/PasswordManager/native_host.capability`, 0600, provisioned
+/// by the daemon. The host reads and presents it; only its hash lives in
+/// the daemon's capability store.
+pub fn native_host_capability_path() -> PathBuf {
+    crate::paths::get_config_dir().join("native_host.capability")
+}
+
+/// Load the presented native-host capability secret, if provisioned.
+/// `None` = not installed yet (the daemon mints it on its first start).
+pub fn load_native_host_capability() -> Option<String> {
+    std::fs::read_to_string(native_host_capability_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Path-parameterized variant of [`load_ipc_token`] (used by tests and

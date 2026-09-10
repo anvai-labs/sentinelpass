@@ -14,11 +14,13 @@
 //! in `sentinelpass-core`, not here.
 
 pub mod client;
+pub mod connection;
 pub mod envelope;
 pub mod error;
 pub mod message;
 pub mod paths;
 pub mod service;
+pub mod session;
 pub mod token;
 pub mod transport;
 #[cfg(windows)]

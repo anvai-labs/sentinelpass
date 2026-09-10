@@ -72,9 +72,6 @@ pub struct TransportConfig {
     /// Path for Windows named pipe
     pub windows_pipe_path: Option<String>,
 
-    /// TCP address for fallback (Windows only)
-    pub tcp_fallback_addr: Option<String>,
-
     /// Authentication token for encrypted transports
     pub auth_token: Option<String>,
 }
@@ -84,10 +81,12 @@ impl TransportConfig {
     pub fn for_current_platform() -> Self {
         #[cfg(unix)]
         {
-            let runtime_dir =
-                std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
             Self {
-                unix_socket_path: Some(format!("{}/sentinelpass.sock", runtime_dir)),
+                unix_socket_path: Some(
+                    crate::paths::default_ipc_socket_path()
+                        .to_string_lossy()
+                        .to_string(),
+                ),
                 ..Default::default()
             }
         }
@@ -96,7 +95,6 @@ impl TransportConfig {
         {
             Self {
                 windows_pipe_path: Some(r"\\.\pipe\SentinelPass".to_string()),
-                tcp_fallback_addr: Some("127.0.0.1:35873".to_string()),
                 ..Default::default()
             }
         }

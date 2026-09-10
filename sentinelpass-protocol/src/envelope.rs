@@ -17,8 +17,12 @@ pub enum Origin {
 
 /// Every IPC frame carries the daemon auth token alongside the message.
 ///
-/// `client_token` and `origin` are optional and serde-defaulted in both
-/// directions: an old client's frames parse on a new daemon and vice versa.
+/// `client_token`, `origin`, and `capability` are optional and
+/// serde-defaulted in both directions: an old client's frames parse on a
+/// new daemon and vice versa. `capability` is the WBS-504/505 presented
+/// installation-capability secret (e.g. the native host's); origin remains
+/// provenance-only and never authorizes (WBS-505 negative test holds:
+/// claiming NativeHost without the capability material is denied).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcEnvelope {
     pub token: String,
@@ -26,6 +30,8 @@ pub struct IpcEnvelope {
     pub client_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<Origin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
     pub message: IpcMessage,
 }
 
@@ -35,6 +41,7 @@ impl IpcEnvelope {
             token,
             client_token: None,
             origin: None,
+            capability: None,
             message,
         }
     }
@@ -46,6 +53,11 @@ impl IpcEnvelope {
 
     pub fn with_origin(mut self, origin: Origin) -> Self {
         self.origin = Some(origin);
+        self
+    }
+
+    pub fn with_capability(mut self, capability: Option<String>) -> Self {
+        self.capability = capability;
         self
     }
 }
@@ -60,6 +72,7 @@ mod tests {
             token: "test_token_12345".to_string(),
             client_token: None,
             origin: None,
+            capability: None,
             message: IpcMessage::GetCredential {
                 domain: "example.com".to_string(),
             },

@@ -4895,6 +4895,7 @@ dependencies = [
  "hostname",
  "rpassword",
  "sentinelpass-core",
+ "sentinelpass-protocol",
  "serde_json",
  "sha2",
  "subtle",
@@ -4903,6 +4904,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -5003,9 +5005,12 @@ dependencies = [
  "aes-gcm",
  "dirs 5.0.1",
  "hex",
+ "hkdf",
+ "libc",
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -5049,6 +5054,7 @@ dependencies = [
  "arboard",
  "dirs 5.0.1",
  "sentinelpass-core",
+ "sentinelpass-protocol",
  "serde",
  "serde_json",
  "sha2",

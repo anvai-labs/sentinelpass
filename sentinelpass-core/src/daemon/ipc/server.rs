@@ -1,7 +1,7 @@
 //! IPC server — handles daemon-side message dispatch.
 
 #[cfg(windows)]
-use super::{decrypt_windows_ipc_frame, encrypt_windows_ipc_frame, windows_named_pipe_path};
+use super::windows_named_pipe_path;
 use super::{
     log_daemon_audit, log_external_secret_audit, CredentialSummary, IpcEnvelope, IpcMessage,
 };
@@ -9,7 +9,7 @@ use crate::daemon::service::{codes, LiveVaultService, VaultApplicationService};
 #[cfg(unix)]
 use crate::daemon::transport::unix::UnixSocketTransport;
 #[cfg(windows)]
-use crate::daemon::transport::windows::{WindowsNamedPipeConnection, WindowsNamedPipeTransport};
+use crate::daemon::transport::windows::WindowsNamedPipeTransport;
 use crate::daemon::transport::{TransportConfig, TransportError};
 use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
@@ -23,8 +23,6 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
 
@@ -33,6 +31,8 @@ const MODE_LIVE: u8 = 0;
 /// Daemon started with no vault on disk: only bootstrap/status/shutdown are
 /// served until `VaultCreate` transitions to live (WBS-501/503).
 const MODE_MAINTENANCE: u8 = 1;
+/// WBS-512: maximum concurrently-connected IPC clients.
+const MAX_CONCURRENT_CLIENTS: usize = 16;
 
 #[allow(dead_code)]
 pub struct IpcServer {
@@ -50,6 +50,12 @@ pub struct IpcServer {
     shutdown: Arc<AtomicBool>,
     /// Live vs maintenance bootstrap mode (WBS-501/503).
     mode: Arc<AtomicU8>,
+    /// WBS-512: bounds concurrent client connections (stalled/slow clients
+    /// cannot exhaust daemon tasks).
+    client_limiter: Arc<tokio::sync::Semaphore>,
+    /// WBS-504/505: capability store (default location; injectable for
+    /// tests).
+    capability_store_path: PathBuf,
 }
 
 impl IpcServer {
@@ -97,7 +103,15 @@ impl IpcServer {
             audit_logger,
             shutdown: Arc::new(AtomicBool::new(false)),
             mode: Arc::new(AtomicU8::new(MODE_LIVE)),
+            client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
+            capability_store_path: crate::daemon::capabilities::default_store_path(),
         }
+    }
+
+    /// Override the capability store path (tests / embedders).
+    pub fn with_capability_store_path(mut self, path: PathBuf) -> Self {
+        self.capability_store_path = path;
+        self
     }
 
     /// Handle to observe (or trigger) server shutdown from outside the accept loop.
@@ -122,8 +136,8 @@ impl IpcServer {
         self.mode.store(MODE_LIVE, Ordering::Release);
     }
 
-    /// Start the IPC server
-    pub async fn run(&self) -> Result<()> {
+    /// Start the IPC server (WBS-512: BOUNDED concurrent connections).
+    pub async fn run(self: Arc<Self>) -> Result<()> {
         info!("Starting IPC server at {:?}", self.socket_path);
 
         // Remove existing socket if present
@@ -161,42 +175,22 @@ impl IpcServer {
 
             loop {
                 match transport.accept().await {
-                    Ok(mut conn) => {
+                    Ok(conn) => {
                         debug!("IPC client connected");
-
-                        match conn.read_message().await {
-                            Ok(buffer) => match serde_json::from_slice::<IpcEnvelope>(&buffer) {
-                                Ok(envelope) => {
-                                    if !bool::from(
-                                        envelope.token.as_bytes().ct_eq(self.auth_token.as_bytes()),
-                                    ) {
-                                        warn!("Rejected IPC request with invalid token");
-                                        continue;
+                        // WBS-512: each connection runs on its own task,
+                        // bounded by the client semaphore — a stalled or
+                        // slow client can no longer wedge the daemon.
+                        match self.client_limiter.clone().acquire_owned().await {
+                            Ok(permit) => {
+                                let server = Arc::clone(&self);
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    if let Err(e) = server.run_connection(conn.into()).await {
+                                        debug!("IPC connection ended: {}", e);
                                     }
-                                    let response = self.handle_message(envelope).await;
-                                    match serde_json::to_vec(&response) {
-                                        Ok(response_bytes) => {
-                                            if let Err(e) =
-                                                conn.write_message(&response_bytes).await
-                                            {
-                                                error!("Failed to send response: {}", e);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to serialize response: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Failed to parse IPC envelope: {}", e);
-                                }
-                            },
-                            Err(TransportError::MessageTooLarge { size, .. }) => {
-                                error!("Rejected oversized message: {} bytes", size);
+                                });
                             }
-                            Err(e) => {
-                                error!("Failed to read message: {}", e);
-                            }
+                            Err(e) => error!("client limiter closed: {}", e),
                         }
                     }
                     Err(e) => {
@@ -215,261 +209,163 @@ impl IpcServer {
 
         #[cfg(windows)]
         {
-            // Determine if using named pipes or legacy TCP
-            let path_str = self.socket_path.to_string_lossy().to_string();
-            let use_tcp = path_str.starts_with("tcp://");
+            // Named pipes only: the legacy tcp:// loopback branch was
+            // removed in Phase 3 (ADR-007 migration).
+            // Honor an explicit \\.\pipe\ path (tests, custom deploys);
+            // default to the per-user pipe name otherwise.
+            let configured_pipe_path = {
+                let as_str = self.socket_path.to_string_lossy().to_string();
+                if as_str.starts_with(r"\\.\pipe\") {
+                    Some(as_str)
+                } else {
+                    Some(windows_named_pipe_path())
+                }
+            };
+            let transport = WindowsNamedPipeTransport::new(TransportConfig {
+                windows_pipe_path: configured_pipe_path,
+                ..Default::default()
+            })
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Ipc(format!(
+                    "Failed to create transport: {}",
+                    e
+                )))
+            })?;
 
-            if use_tcp {
-                // Legacy TCP fallback for custom tcp://... paths
-                use tokio::net::TcpListener;
+            let pipe_name = transport.pipe_name().to_string();
+            info!("IPC server listening on named pipe: {}", pipe_name);
 
-                let addr_str = path_str.strip_prefix("tcp://").unwrap_or("127.0.0.1:35873");
-                info!("IPC server listening on legacy TCP: {}", addr_str);
-
-                let listener = TcpListener::bind(addr_str).await.map_err(|e| {
+            loop {
+                // Create the named pipe server instance (WBS-508: explicit
+                // current-user DACL, first-instance protection, remote
+                // rejection).
+                let pipe_server = transport.create_server().map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
-                        "Failed to bind TCP socket: {}",
+                        "Failed to create named pipe: {}",
                         e
                     )))
                 })?;
 
-                loop {
-                    match listener.accept().await {
-                        Ok((mut stream, _addr)) => {
-                            debug!("IPC client connected (TCP)");
+                debug!("Named pipe created, waiting for connection");
 
-                            let mut length_buf = [0u8; 4];
-                            match stream.read_exact(&mut length_buf).await {
-                                Ok(_) => {
-                                    let length = u32::from_be_bytes(length_buf) as usize;
-                                    if length > 0 && length <= 65536 {
-                                        let mut buffer = vec![0u8; length];
-                                        match stream.read_exact(&mut buffer).await {
-                                            Ok(_) => {
-                                                match decrypt_windows_ipc_frame(
-                                                    &self.auth_token,
-                                                    &buffer,
-                                                ) {
-                                                    Ok(decrypted) => {
-                                                        match serde_json::from_slice::<IpcEnvelope>(
-                                                            &decrypted,
-                                                        ) {
-                                                            Ok(envelope) => {
-                                                                if !bool::from(
-                                                                    envelope
-                                                                        .token
-                                                                        .as_bytes()
-                                                                        .ct_eq(
-                                                                            self.auth_token
-                                                                                .as_bytes(),
-                                                                        ),
-                                                                ) {
-                                                                    warn!("Rejected IPC request with invalid token");
-                                                                    continue;
-                                                                }
-                                                                let response = self
-                                                                    .handle_message(envelope)
-                                                                    .await;
-                                                                match serde_json::to_vec(&response) {
-                                                                    Ok(response_bytes) => {
-                                                                        match encrypt_windows_ipc_frame(
-                                                                            &self.auth_token,
-                                                                            &response_bytes,
-                                                                        ) {
-                                                                            Ok(response_frame) => {
-                                                                                let response_len =
-                                                                                    response_frame.len()
-                                                                                        as u32;
-                                                                                let _ = stream
-                                                                                    .write_all(
-                                                                                        &response_len
-                                                                                            .to_be_bytes(),
-                                                                                    )
-                                                                                    .await;
-                                                                                let _ = stream
-                                                                                    .write_all(
-                                                                                        &response_frame,
-                                                                                    )
-                                                                                    .await;
-                                                                                let _ = stream
-                                                                                    .flush()
-                                                                                    .await;
-                                                                            }
-                                                                            Err(e) => {
-                                                                                error!(
-                                                                                    "Failed to encrypt IPC response frame: {}",
-                                                                                    e
-                                                                                );
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                    Err(e) => {
-                                                                        error!(
-                                                                            "Failed to serialize response: {}",
-                                                                            e
-                                                                        );
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                error!(
-                                                                    "Failed to parse IPC envelope: {}",
-                                                                    e
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                            "Failed to decrypt Windows IPC frame: {}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to read message: {}", e);
-                                            }
-                                        }
-                                    } else {
-                                        error!("Invalid message length: {}", length);
+                match pipe_server.connect().await {
+                    // tokio's NamedPipeServer::connect resolves when a
+                    // client has attached — the value is (), the connected
+                    // pipe IS the server handle. Wrap it via the protocol
+                    // connection's server-side constructor.
+                    Ok(()) => {
+                        debug!("IPC client connected (named pipe)");
+                        let pipe_conn =
+                            sentinelpass_protocol::WindowsNamedPipeConnection::from_server(
+                                pipe_server,
+                            );
+                        match self.client_limiter.clone().acquire_owned().await {
+                            Ok(permit) => {
+                                let server = Arc::clone(&self);
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    if let Err(e) = server.run_connection(pipe_conn.into()).await {
+                                        debug!("IPC connection ended: {}", e);
                                     }
-                                }
-                                Err(e) => {
-                                    error!("Failed to read length: {}", e);
-                                }
+                                });
                             }
-                        }
-                        Err(e) => {
-                            error!("Failed to accept connection: {}", e);
+                            Err(e) => error!("client limiter closed: {}", e),
                         }
                     }
-
-                    if self.shutdown.load(Ordering::Acquire) {
-                        info!("IPC: shutdown requested — stopping accept loop");
-                        break;
+                    Err(e) => {
+                        error!("Failed to accept named pipe connection: {}", e);
                     }
                 }
-            } else {
-                // Default: Use named pipes with per-user ACLs
-                let transport = WindowsNamedPipeTransport::new(TransportConfig {
-                    windows_pipe_path: Some(windows_named_pipe_path()),
-                    ..Default::default()
-                })
-                .map_err(|e| {
-                    PasswordManagerError::from(DatabaseError::Ipc(format!(
-                        "Failed to create transport: {}",
-                        e
-                    )))
-                })?;
 
-                let pipe_name = transport.pipe_name();
-                info!("IPC server listening on named pipe: {}", pipe_name);
-
-                loop {
-                    // Create the named pipe server
-                    let pipe_server = transport.create_server().map_err(|e| {
-                        PasswordManagerError::from(DatabaseError::Ipc(format!(
-                            "Failed to create named pipe: {}",
-                            e
-                        )))
-                    })?;
-
-                    debug!("Named pipe created, waiting for connection");
-
-                    // Wait for a client to connect
-                    match pipe_server.connect().await {
-                        Ok(_) => {
-                            debug!("IPC client connected (named pipe)");
-
-                            let mut conn = WindowsNamedPipeConnection::from_server(pipe_server);
-
-                            // Read encrypted message
-                            match conn.read_message().await {
-                                Ok(buffer) => {
-                                    // Decrypt the frame
-                                    match decrypt_windows_ipc_frame(&self.auth_token, &buffer) {
-                                        Ok(decrypted) => {
-                                            match serde_json::from_slice::<IpcEnvelope>(&decrypted)
-                                            {
-                                                Ok(envelope) => {
-                                                    if !bool::from(
-                                                        envelope
-                                                            .token
-                                                            .as_bytes()
-                                                            .ct_eq(self.auth_token.as_bytes()),
-                                                    ) {
-                                                        warn!("Rejected IPC request with invalid token");
-                                                        let _ = conn.close();
-                                                        continue;
-                                                    }
-                                                    let response =
-                                                        self.handle_message(envelope).await;
-                                                    match serde_json::to_vec(&response) {
-                                                        Ok(response_bytes) => {
-                                                            match encrypt_windows_ipc_frame(
-                                                                &self.auth_token,
-                                                                &response_bytes,
-                                                            ) {
-                                                                Ok(response_frame) => {
-                                                                    if let Err(e) = conn
-                                                                        .write_message(
-                                                                            &response_frame,
-                                                                        )
-                                                                        .await
-                                                                    {
-                                                                        error!("Failed to send response: {}", e);
-                                                                    }
-                                                                }
-                                                                Err(e) => {
-                                                                    error!("Failed to encrypt IPC response frame: {}", e);
-                                                                }
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            error!(
-                                                                "Failed to serialize response: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    error!("Failed to parse IPC envelope: {}", e);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to decrypt Windows IPC frame: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(TransportError::MessageTooLarge { size, .. }) => {
-                                    error!("Rejected oversized message: {} bytes", size);
-                                }
-                                Err(e) => {
-                                    error!("Failed to read message: {}", e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to accept named pipe connection: {}", e);
-                        }
-                    }
-
-                    if self.shutdown.load(Ordering::Acquire) {
-                        info!("IPC: shutdown requested — stopping accept loop");
-                        break;
-                    }
-
-                    // Connection is closed when dropped
+                if self.shutdown.load(Ordering::Acquire) {
+                    info!("IPC: shutdown requested — stopping accept loop");
+                    break;
                 }
             }
-
-            let _ = std::fs::remove_file(&self.socket_path);
         }
 
         Ok(())
+    }
+
+    /// One negotiated client connection: session handshake (WBS-509/510),
+    /// then request/response cycles until EOF — every frame read bounded by
+    /// the session deadline and replay-checked (WBS-511).
+    async fn run_connection(
+        &self,
+        conn: sentinelpass_protocol::connection::TransportConnection,
+    ) -> Result<()> {
+        let (mut ipc, first_frame) =
+            sentinelpass_protocol::connection::IpcConnection::accept_server(conn, &self.auth_token)
+                .await
+                .map_err(|e| {
+                    PasswordManagerError::from(DatabaseError::Ipc(format!(
+                        "session negotiation failed: {}",
+                        e
+                    )))
+                })?;
+
+        // A legacy PLAIN client's first frame is already delivered.
+        if let Some(first) = first_frame {
+            if let Some(response_bytes) = self.process_frame(&first).await {
+                ipc.send_frame(&response_bytes).await.map_err(|e| {
+                    PasswordManagerError::from(DatabaseError::Ipc(format!(
+                        "Failed to send response: {}",
+                        e
+                    )))
+                })?;
+            }
+        }
+
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            let frame = match ipc.recv_frame().await {
+                Ok(frame) => frame,
+                Err(TransportError::Timeout) => {
+                    debug!("IPC connection idle past deadline — closing");
+                    break;
+                }
+                Err(e) => {
+                    debug!("IPC connection read ended: {}", e);
+                    break;
+                }
+            };
+            if let Some(response_bytes) = self.process_frame(&frame).await {
+                ipc.send_frame(&response_bytes).await.map_err(|e| {
+                    PasswordManagerError::from(DatabaseError::Ipc(format!(
+                        "Failed to send response: {}",
+                        e
+                    )))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Token check + dispatch for one plaintext envelope frame. Returns the
+    /// serialized response, or None when no response should be sent.
+    async fn process_frame(&self, frame: &[u8]) -> Option<Vec<u8>> {
+        match serde_json::from_slice::<IpcEnvelope>(frame) {
+            Ok(envelope) => {
+                if !bool::from(envelope.token.as_bytes().ct_eq(self.auth_token.as_bytes())) {
+                    warn!("Rejected IPC request with invalid token");
+                    return None;
+                }
+                let response = self.handle_message(envelope).await;
+                match serde_json::to_vec(&response) {
+                    Ok(response_bytes) => Some(response_bytes),
+                    Err(e) => {
+                        error!("Failed to serialize response: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to parse IPC envelope: {}", e);
+                None
+            }
+        }
     }
 
     /// Gate for the browser-autofill surface (GetCredential, GetTotpCode,
@@ -483,37 +379,62 @@ impl IpcServer {
     ///   running a pre-0.8 native host can temporarily restore legacy
     ///   behavior with SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1; the escape
     ///   hatch exists only so upgrades are not forced and is removed in 1.0.
-    fn browser_surface_allowed(origin: Option<Origin>) -> bool {
-        match origin {
-            Some(Origin::NativeHost) => true,
-            Some(Origin::Cli) => false,
-            None => {
-                let allowed = std::env::var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS")
-                    .map(|v| v == "1")
-                    .unwrap_or(false);
-                if !allowed {
-                    // The deny itself is correct; the warn exists so a
-                    // pre-0.8 native host after a daemon-only upgrade is
-                    // DEBUGGABLE (review finding: the silent deny was
-                    // indistinguishable from an empty vault).
-                    warn!(
-                        "denied browser-surface request from an originless (pre-0.8) \
-                         client — upgrade sentinelpass-host, or set \
-                         SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 to temporarily \
-                         re-enable the legacy path (removed in 1.0)"
-                    );
-                }
-                allowed
-            }
-        }
+    fn browser_surface_allowed(&self, origin: Option<Origin>, capability: Option<&str>) -> bool {
+        let capabilities = crate::daemon::capabilities::InstallationCapabilities::load_from_path(
+            &self.capability_store_path,
+        );
+        let store = capabilities.unwrap_or_default();
+        Self::browser_surface_allowed_with_store(origin, capability, &store)
     }
 
-    fn warn_originless_browser_surface(&self) {
-        warn!(
-            "Browser-surface request without origin marker allowed via \
-             SENTINELPASS_ALLOW_LEGACY_ORIGINLESS (legacy pre-0.8 host). \
-             Upgrade sentinelpass-host; this escape hatch is removed in 1.0."
-        );
+    /// Pure decision core (testable without the default store path).
+    fn browser_surface_allowed_with_store(
+        origin: Option<Origin>,
+        capability: Option<&str>,
+        capabilities: &crate::daemon::capabilities::InstallationCapabilities,
+    ) -> bool {
+        // WBS-504/505: the installation capability is the authority. The
+        // origin label stays provenance-only and can never authorize.
+        if capabilities.verify(
+            crate::daemon::capabilities::NATIVE_HOST_AUDIENCE,
+            capability,
+        ) {
+            return true;
+        }
+
+        // Legacy migration windows (both announced; both removed in 1.0):
+        let legacy_originless = std::env::var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let legacy_self_asserted = std::env::var("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        match origin {
+            Some(Origin::NativeHost) if legacy_self_asserted => {
+                warn!(
+                    "allowed SELF-ASSERTED NativeHost origin via \
+                     SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN=1 (pre-capability host; \
+                     upgrade sentinelpass-host — removed in 1.0)"
+                );
+                true
+            }
+            None if legacy_originless => {
+                warn!(
+                    "allowed ORIGINLESS browser-surface request via \
+                     SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 (pre-0.8 host; upgrade \
+                     sentinelpass-host — removed in 1.0)"
+                );
+                true
+            }
+            _ => {
+                warn!(
+                    "denied browser-surface request without a valid native-host \
+                     capability (audience/native-host presentation required; upgrade \
+                     sentinelpass-host)"
+                );
+                false
+            }
+        }
     }
 
     /// Handle an IPC envelope (auth token was already verified by the caller).
@@ -776,16 +697,13 @@ impl IpcServer {
             IpcMessage::GetCredential { domain } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::GetCredentialResponse {
                         username: None,
                         password: None,
                         title: None,
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -859,14 +777,11 @@ impl IpcServer {
                     base_domain
                 );
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::ListDomainCredentialsResponse {
                         credentials: Vec::new(),
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -903,15 +818,12 @@ impl IpcServer {
             IpcMessage::GetTotpCode { domain } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::GetTotpCodeResponse {
                         code: None,
                         seconds_remaining: None,
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -957,7 +869,7 @@ impl IpcServer {
                     domain, username
                 );
 
-                if !Self::browser_surface_allowed(origin) {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::SaveCredentialResponse {
                         success: false,
                         error: Some(
@@ -965,9 +877,6 @@ impl IpcServer {
                         ),
                         locked: None,
                     };
-                }
-                if origin.is_none() {
-                    self.warn_originless_browser_surface();
                 }
 
                 if !self.vault.is_unlocked().await {
@@ -1215,9 +1124,11 @@ impl IpcServer {
                 )),
                 Some(vault) => {
                     // `spawn_blocking` needs 'static: DaemonVault hands out an
-                    // Arc'd manager (and holding the async-mutex slot for the
-                    // duration serializes vault ops — one blocking op at a time
-                    // per vault, the ADR-004 rev 5 property).
+                    // Arc'd manager. Serialization of vault ops comes from
+                    // VaultManager's internal db mutex (review F5: the Arc
+                    // clone means concurrent service tasks DO run in
+                    // parallel; SQLite access — and therefore one write at a
+                    // time — is serialized inside the manager).
                     let joined = tokio::task::spawn_blocking(move || {
                         LiveVaultService::new(&vault).execute(&op)
                     })
@@ -1310,8 +1221,11 @@ impl IpcServer {
                 }
                 info!("IPC: creating vault through maintenance bootstrap");
                 // Argon2id KDF + schema creation on the blocking pool
-                // (ADR-004 rev 5: KDF work never runs on the async executor).
+                // (ADR-004 rev 5: KDF work never runs on the async executor)
+                // with the per-vault KDF gate held (WBS-513).
+                let kdf_permit = self.vault.kdf_permit().await;
                 let created = tokio::task::spawn_blocking(move || {
+                    let _kdf_permit = kdf_permit;
                     VaultManager::create(&vault_path, master_password.as_bytes())
                 })
                 .await;
@@ -1367,56 +1281,130 @@ impl IpcServer {
 #[cfg(test)]
 mod browser_surface_gate_tests {
     use super::*;
+    use crate::daemon::capabilities::InstallationCapabilities;
     use sentinelpass_protocol::Origin;
 
-    #[test]
-    fn native_host_origin_is_allowed() {
-        assert!(IpcServer::browser_surface_allowed(Some(Origin::NativeHost)));
+    fn store_with_native_host() -> InstallationCapabilities {
+        let mut store = InstallationCapabilities::default();
+        store
+            .capabilities
+            .push(crate::daemon::capabilities::Capability {
+                audience: crate::daemon::capabilities::NATIVE_HOST_AUDIENCE.to_string(),
+                secret_hash: {
+                    use sha2::Digest;
+                    hex::encode(sha2::Sha256::digest(b"valid-host-capability-secret"))
+                },
+                issued_at: 0,
+                expires_at: None,
+                nonce: "test-nonce".to_string(),
+            });
+        store
     }
 
-    #[test]
-    fn cli_origin_is_denied() {
-        assert!(!IpcServer::browser_surface_allowed(Some(Origin::Cli)));
+    /// Env is process-global: every env-touching test holds this lock for
+    /// its whole body (same pattern as the pre-existing gate tests).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_env(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 
-    /// Originless (pre-0.8 host) requests are denied by default; the explicit
-    /// legacy escape hatch restores them, and only the exact value "1" counts.
-    /// Env mutations are sequential inside this one test to avoid cross-test
-    /// races on the process-global environment.
+    /// WBS-505 positive: a valid native-host capability authorizes the
+    /// browser surface regardless of the (forgeable) origin label.
     #[test]
-    fn originless_denied_by_default_with_explicit_opt_in() {
-        std::env::remove_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS");
-        assert!(
-            !IpcServer::browser_surface_allowed(None),
-            "originless browser-surface request must be denied by default"
-        );
+    fn valid_capability_authorizes_browser_surface() {
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+        set_env("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", None);
+        let store = store_with_native_host();
+        assert!(IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            Some("valid-host-capability-secret"),
+            &store,
+        ));
+    }
 
-        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "1");
-        assert!(
-            IpcServer::browser_surface_allowed(None),
-            "SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1 must restore the legacy path"
-        );
+    /// WBS-505 negative (the phase gate): a GENERAL client claiming
+    /// NativeHost — origin label present, capability material absent — is
+    /// DENIED. Origin is provenance, never authorization.
+    #[test]
+    fn native_host_claim_without_capability_is_denied() {
+        let _env = ENV_LOCK.lock().unwrap();
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+        set_env("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", None);
+        let store = store_with_native_host();
 
-        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "0");
-        assert!(
-            !IpcServer::browser_surface_allowed(None),
-            "only the exact value 1 opts in"
-        );
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
+        // Wrong secret material is denied too.
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            Some("attacker-guess"),
+            &store,
+        ));
+        // Originless with a guess is denied.
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            None,
+            Some("attacker-guess"),
+            &store,
+        ));
+        // A CLI-LABELED request presenting VALID material is allowed: the
+        // origin label is provenance and cannot authorize OR de-authorize —
+        // possession of the capability material is the authority (a
+        // "CLI" label is trivially droppable by an attacker, so consulting
+        // it would be security theater). What the capability model removes
+        // is the AMBIENT grant: without the material, every claim fails.
+        assert!(IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::Cli),
+            Some("valid-host-capability-secret"),
+            &store,
+        ));
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::Cli),
+            None,
+            &store,
+        ));
+    }
 
-        std::env::set_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS", "yes");
-        assert!(!IpcServer::browser_surface_allowed(None));
+    /// The legacy self-asserted-origin window requires BOTH the exact env
+    /// value and the NativeHost label; it is announced and temporary.
+    #[test]
+    fn legacy_self_asserted_origin_window_is_explicit_opt_in() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let store = store_with_native_host();
 
-        std::env::remove_var("SENTINELPASS_ALLOW_LEGACY_ORIGINLESS");
-        assert!(!IpcServer::browser_surface_allowed(None));
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
 
-        // The pre-0.9 opt-in-deny variable must not re-enable originless
-        // access (kept in THIS test: both tests mutated the process-global
-        // environment and raced under the parallel harness — review finding).
-        std::env::set_var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL", "0");
-        assert!(
-            !IpcServer::browser_surface_allowed(None),
-            "old SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL=0 must not re-enable originless access"
-        );
-        std::env::remove_var("SENTINELPASS_DENY_LEGACY_GET_CREDENTIAL");
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", Some("1"));
+        assert!(IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
+
+        // Only the exact value "1" opts in.
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", Some("yes"));
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            Some(Origin::NativeHost),
+            None,
+            &store,
+        ));
+        set_env("SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN", None);
+
+        // The OLD originless window stays independent and still denied by
+        // default (env cleaned above).
+        assert!(!IpcServer::browser_surface_allowed_with_store(
+            None, None, &store
+        ));
     }
 }

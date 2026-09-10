@@ -2,7 +2,7 @@ use anyhow::Result;
 use rpassword::prompt_password;
 use sentinelpass_core::daemon::ipc::{default_ipc_socket_path, IpcClient, IpcMessage};
 use sentinelpass_core::VaultManager;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::error;
 
 /// Best-effort daemon reachability probe: attempts a real IPC round trip
@@ -65,25 +65,63 @@ pub fn handle_unlock(vault_path: PathBuf) -> Result<()> {
             vault_path
         );
     }
+    require_default_vault(&vault_path)?;
 
+    // WBS-502: unlock means unlocking the DAEMON — the daemon owns the only
+    // live DEK. The CLI no longer opens the vault locally at all.
+    use crate::commands::service_client as sc;
     let password = prompt_password("Enter master password: ")?;
+    match crate::run_async(sc::Backend::probe())?? {
+        Some(client) => {
+            let backend = sc::Backend::Daemon(client);
+            let already = backend.is_unlocked()?;
+            backend.ensure_unlocked(&password)?;
+            if already {
+                // Stage-3 review F4: an already-unlocked daemon accepts any
+                // password — say so instead of a false validation success.
+                println!("Daemon was already unlocked; the password was not verified.");
+            } else {
+                println!("✓ Daemon unlocked. The vault stays unlocked until auto-lock; `sentinelpass lock` locks it early.");
+            }
+        }
+        None => anyhow::bail!(
+            "No reachable SentinelPass daemon. Start it with `sentinelpass-daemon` \
+             (or launch the desktop app), then retry."
+        ),
+    }
+    Ok(())
+}
 
-    match crate::open_vault_with_password(&vault_path, password.as_bytes()) {
-        Ok(vault) => {
-            println!("✓ Vault unlocked successfully");
-            drop(vault);
-        }
-        Err(e) => {
-            error!("Failed to unlock vault: {}", e);
-            return Err(e);
-        }
+/// Unlock/lock target the DAEMON's vault — the default one. A custom
+/// `--vault` path is never daemon-served (stage-3 review F5).
+fn require_default_vault(vault_path: &Path) -> Result<()> {
+    if vault_path != sentinelpass_core::get_default_vault_path() {
+        anyhow::bail!(
+            "The daemon serves only the default vault; unlock/lock with a custom \
+             --vault path is not supported. Drop the --vault override."
+        );
     }
     Ok(())
 }
 
 pub fn handle_lock() -> Result<()> {
-    println!("Vault locks automatically when the process exits.");
-    println!("The vault is only kept in memory during operations.");
+    use crate::commands::service_client as sc;
+    match crate::run_async(sc::Backend::probe())?? {
+        Some(_) => {
+            // The service surface has no dedicated lock op (LockVault is a
+            // legacy message); send it directly.
+            let lock_client = sentinelpass_core::daemon::IpcClient::new_for_cli(
+                sentinelpass_core::daemon::default_ipc_socket_path(),
+                None,
+            )?;
+            crate::run_async(lock_client.send(sentinelpass_core::daemon::IpcMessage::LockVault))??;
+            println!("✓ Daemon locked.");
+        }
+        None => anyhow::bail!(
+            "No reachable SentinelPass daemon — the vault is not live anywhere. \
+             Start the daemon to use it."
+        ),
+    }
     Ok(())
 }
 
@@ -92,6 +130,8 @@ pub fn handle_biometric_status(vault_path: PathBuf) -> Result<()> {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
+    // Read-only metadata (no DEK, no writes): served locally so the command
+    // works even while the daemon is locked or stopped.
     let configured = VaultManager::is_biometric_unlock_enabled(&vault_path)?;
     let method_name = sentinelpass_core::BiometricManager::get_method_name();
     let available = sentinelpass_core::BiometricManager::is_available();
@@ -112,12 +152,17 @@ pub fn handle_biometric_enable(vault_path: PathBuf, master_password: Option<&str
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = match master_password {
+    use crate::commands::service_client as sc;
+    // Prompt at most ONCE (stage-3 review F2): the same password both
+    // unlocks the daemon (if locked) and is validated by the enable op.
+    let password = match master_password {
         Some(value) => value.to_string(),
         None => prompt_password("Enter master password: ")?,
     };
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    vault.enable_biometric_unlock(master_password.as_bytes())?;
+    let backend = sc::connect(&vault_path, || Ok(password.clone()))?;
+    backend.call(sentinelpass_protocol::service::VaultOp::BiometricEnable {
+        master_password: password.into(),
+    })?;
     println!("Biometric unlock enabled for this vault.");
     Ok(())
 }
@@ -127,9 +172,9 @@ pub fn handle_biometric_disable(vault_path: PathBuf) -> Result<()> {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    vault.disable_biometric_unlock()?;
+    use crate::commands::service_client as sc;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(sentinelpass_protocol::service::VaultOp::BiometricDisable)?;
     println!("Biometric unlock disabled for this vault.");
     Ok(())
 }
@@ -138,19 +183,43 @@ pub fn handle_unlock_biometric(vault_path: PathBuf) -> Result<()> {
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
+    require_default_vault(&vault_path)?;
 
-    let reason = "Unlock SentinelPass vault";
-    match VaultManager::open_with_biometric(&vault_path, reason) {
-        Ok(vault) => {
-            println!("✓ Vault unlocked successfully via biometric authentication");
-            drop(vault);
+    // WBS-502: biometric unlock means unlocking the DAEMON (it owns the only
+    // live DEK); the platform prompt runs in the daemon process.
+    use crate::commands::service_client as sc;
+    let client = match crate::run_async(sc::Backend::probe())?? {
+        Some(client) => client,
+        None => anyhow::bail!(
+            "No reachable SentinelPass daemon. Start it with `sentinelpass-daemon` \
+             (or launch the desktop app), then retry."
+        ),
+    };
+    let response = crate::run_async(client.send(
+        sentinelpass_core::daemon::IpcMessage::UnlockVaultBiometric {
+            prompt_reason: Some("Unlock SentinelPass vault".to_string()),
+        },
+    ))??;
+    match response {
+        sentinelpass_core::daemon::IpcMessage::UnlockVaultResponse { success: true, .. } => {
+            println!("✓ Daemon unlocked via biometric authentication");
+            Ok(())
         }
-        Err(e) => {
-            error!("Failed biometric unlock: {}", e);
-            anyhow::bail!("Biometric unlock failed: {}", e);
+        sentinelpass_core::daemon::IpcMessage::UnlockVaultResponse {
+            success: false,
+            error,
+        } => {
+            error!(
+                "Failed biometric unlock: {}",
+                error.as_deref().unwrap_or("unknown error")
+            );
+            anyhow::bail!(
+                "Biometric unlock failed: {}",
+                error.as_deref().unwrap_or("unknown error")
+            );
         }
+        other => anyhow::bail!("unexpected daemon response: {other:?}"),
     }
-    Ok(())
 }
 
 /// Rotate the vault master password (ADR-002). Re-wraps the DEK under a new
