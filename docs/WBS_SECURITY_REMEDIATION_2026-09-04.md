@@ -978,10 +978,46 @@ Gate: ADR-006 + WBS-300/400. **Owner** CM (client) + SL (relay). May overlap WBS
 after 408/409 stabilize.
 
 - **WBS-601 — v2 mutation schema.** SR-SYNC-004. Est 3d.
-- **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002, TD-ROB-01. Est 2d.
-- **WBS-603 — Idempotency + original-result replay.** SR-SYNC-001, TD-ROB-05. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `core/src/sync/v2.rs`:
+  `MutationV2` (vault/epoch, object UUID/type, expected+resulting versions,
+  origin device, idempotency key, authenticated tombstone state, payload,
+  DEK-derived metadata MAC over canonical shared metadata — distinct from
+  the ADR-005 per-device storage envelope, identity-domain split
+  documented); per-field MAC-tamper negatives.
+- **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002,
+  TD-ROB-01. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `DeviceSequence` /
+  `ObjectVersion` / `ServerCursor` newtypes with checked arithmetic, no
+  cross-`From`, distinct serde fields; cursor lineage comparisons.
+- **WBS-603 — Idempotency + original-result replay.** SR-SYNC-001,
+  TD-ROB-05. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — relay `mutation_results`
+  (TTL `mutation_result_ttl_secs` + per-device cap
+  `max_mutation_results_per_device` in cleanup); duplicates replay the
+  ORIGINAL durable result (applied AND rejected); post-expiry duplicates
+  re-evaluated by CAS and REJECTED, never replayed; deterministic
+  content-derived mutation ids survive re-collection with fresh GCM
+  nonces; one SQLite transaction per push (results + object state + log +
+  counters). Negatives: `duplicate_push_returns_original_rejection`,
+  `expired_duplicate_is_re_evaluated_by_cas_and_rejected`,
+  `same_version_overwrite_is_rejected_regardless_of_content`.
 - **WBS-604 — Per-object acknowledgements.** SR-SYNC-001. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — schema v10
+  `sync_acked_version` on entries/ssh_keys/totp_secrets (migration seeds
+  synced=version, pending=0; fixtures extended); engine records each
+  object's own ack in the checkpoint transaction; relay per-mutation
+  results are the server-side durable ack.
 - **WBS-605 — Outbox removal only on specific ack.** TD-ROB-01. Est 1.5d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `outbox::apply_push_acks`
+  marks ONLY Applied objects synced+acked in ONE transaction with the
+  cursor diagnostic; rejected objects stay pending with untouched acked
+  version and re-derive the same mutation id on retry. End-to-end
+  lost-response acceptance over an in-memory relay model:
+  `lost_push_response_retry_completes_without_wedge`,
+  `rejected_object_stays_pending_across_retries`; fault-injection sweep
+  `apply_push_acks_fault_injection_is_all_or_nothing`. The #121
+  device_sequence wedge note in engine.rs is resolved (v2 framing counter
+  recorded, never gated).
 - **WBS-606 — Relay atomic mutation/entry/sequence/ack.** SR-SYNC-003, TD-ROB-04. Est 2d.
 - **WBS-607 — Client atomic page/inbox/object/index/cursor.** TD-ROB-04. Est 3d.
 - **WBS-608 — Remove remote-apply trigger echo.** TD-ROB-02 (sync half). Est 1.5d.

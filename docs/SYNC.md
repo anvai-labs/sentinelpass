@@ -7,8 +7,65 @@
 > v2 replacement. See `docs/SECURITY_STATUS_MATRIX.md`, ADR-006, and
 > `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`. The protocol details below remain
 > useful implementation documentation for v1, not target-state security claims.
+>
+> **v2 note (2026-09-10):** sync protocol v2 (ADR-006) stage 1 has landed — see
+> "Sync Protocol v2" below. The CLIENT engine now speaks v2 exclusively
+> (`/api/v2/*`); the v1 relay endpoints remain for older clients until v1
+> retirement (WBS-624), when the relay hard-rejects them. v2 is NOT yet
+> approved for production credentials: conflict preservation, authenticated
+> metadata enforcement on apply, epoch/revocation checks on every request,
+> atomic pull pages with dead-letter, pairing upgrade, and v1 retirement are
+> still landing (ADR-006 stage plan). Sync stays experimental until the
+> phase gate (model-based + chaos convergence evidence) passes.
 
 End-to-end encrypted sync between SentinelPass devices via a relay server. The relay never sees plaintext — all payloads are encrypted with the vault's DEK before leaving the device.
+
+## Sync Protocol v2 (ADR-006, stage 1)
+
+The client engine pushes and pulls over `/api/v2/*`:
+
+- **Mutations, not blobs.** A v2 mutation carries vault UUID + key epoch,
+  stable object UUID/type, `expected_version` and `resulting_version`,
+  origin device, a deterministic idempotency key, authenticated tombstone
+  state, the DEK-encrypted payload, and an HMAC-SHA256 MAC (DEK-derived via
+  HKDF) over the canonical shared metadata. The MAC authenticates every
+  relay-writable metadata field end to end; it is deliberately distinct from
+  the ADR-005 per-device storage envelope (which never appears on the wire).
+- **Distinct counter types.** `DeviceSequence` (per-device push framing —
+  recorded by the relay, never gated on), `ObjectVersion` (per-object CAS
+  domain), and `ServerCursor` (relay vault log position) are distinct
+  newtypes; v1's mixed counters are gone.
+- **Idempotency with durable results.** The relay persists a result row per
+  mutation in the same transaction as the entry/log/sequence writes. A
+  duplicate request replays the ORIGINAL durable result (applied or
+  rejected). Result records age out (`mutation_result_ttl_secs`, default 7
+  days) and are capped per device (`max_mutation_results_per_device`);
+  after expiry a duplicate is re-evaluated by the CAS guard and REJECTED,
+  never replayed.
+- **CAS acceptance.** A mutation applies iff its `expected_version` equals
+  the relay's stored current version (0 = create). Same-version overwrites
+  do not exist in v2 — the v1 clock-gamed LWW tie-break is gone. A version
+  conflict is a durable rejection the client resolves by preserving both
+  alternatives (conflict preservation lands in the next stage).
+- **Per-object acknowledgements.** The client's outbox entry is removed only
+  by its own `Applied` ack, which also advances the object's durable
+  `sync_acked_version` (schema v10) — the CAS `expected_version` of the
+  next mutation. Rejected objects stay pending and their retry re-derives
+  the same mutation id. A lost push response therefore costs one retry
+  cycle, never a wedge (the v1 strictly-increasing `device_sequence`
+  checkpoint trap is structurally impossible).
+- **Stale-epoch gate.** Mutations whose `key_epoch` is below the vault's
+  relay-side epoch high-water are rejected (`stale_epoch`); a mutation
+  carrying a higher epoch advances the vault epoch forward-only. Device
+  revocation is enforced by the Ed25519 auth middleware on every request,
+  as in v1.
+- **Pull** walks the relay's append-only vault mutation log with a
+  `ServerCursor` and paged responses.
+
+New relay configuration (TOML, defaults shown): `mutation_result_ttl_secs =
+604800`, `max_mutation_results_per_device = 4096`. New storage tables
+(additive, backward-safe): `sync_entries_v2`, `sync_mutations_v2`,
+`mutation_results`, `vault_epochs`.
 
 ## At a Glance
 
