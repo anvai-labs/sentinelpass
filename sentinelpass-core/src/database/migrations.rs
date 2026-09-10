@@ -649,7 +649,12 @@ pub fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
 /// Seeding for v1-era rows (NOT migration-authoritative — ADR-006 moves
 /// v1→v2 through authoritative-device re-baselining onto a fresh relay
 /// vault): synced rows are seeded with their current `sync_version` (v1's
-/// aggregate "synced" semantics), pending rows with 0.
+/// aggregate "synced" semantics), pending rows with 0. NOTE: this seeding
+/// does NOT itself implement the re-baseline — the future authoritative
+/// device claim (WBS-624) must RESET `sync_state`/`sync_acked_version` for
+/// the full local baseline so the collector re-emits every object as fresh
+/// creates against the new relay vault; seeding alone only affects the
+/// first v2 CAS expectation.
 ///
 /// ONE transaction with the version bump (ADR-005 rev 3); `COALESCE`
 /// column-adds are idempotent like the v6/v7 adds.
@@ -662,6 +667,26 @@ pub fn migrate_v9_to_v10(conn: &Connection) -> Result<()> {
 
     let inner = || -> Result<()> {
         let mut stmts = String::new();
+        // sync_metadata.protocol_version (fail-closed mixed-protocol gate,
+        // ADR-006): 0 = legacy/v1-era configuration; the engine refuses to
+        // run v2 against it until the authoritative-device re-baseline or a
+        // v2 re-init/re-pair stamps 2.
+        {
+            let existing: Vec<String> = {
+                let mut stmt = conn
+                    .prepare("SELECT name FROM pragma_table_info('sync_metadata')")
+                    .map_err(DatabaseError::Sqlite)?;
+                let rows = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(DatabaseError::Sqlite)?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            if !existing.iter().any(|c| c == "protocol_version") {
+                stmts.push_str(
+                    "ALTER TABLE sync_metadata ADD COLUMN protocol_version INTEGER NOT NULL DEFAULT 0;\n",
+                );
+            }
+        }
         for table in ["entries", "ssh_keys", "totp_secrets"] {
             let existing: Vec<String> = {
                 let mut stmt = conn
@@ -1679,11 +1704,11 @@ mod tests {
     }
 
     /// THE v10 seeding contract: synced rows assume the relay holds their
-    /// current version (v1 aggregate "synced"); pending rows seed 0 — so
-    /// the first v2 mutation of a pending row claims a fresh create/CAS
-    /// baseline (honest, since v1 never tracked per-object acks), and the
-    /// authoritative-device re-baseline (ADR-006 migration) starts every
-    /// object from a fresh relay vault anyway.
+    /// current version (v1 aggregate "synced"); pending rows seed 0. This
+    /// seeding alone does NOT implement the ADR-006 migration: the
+    /// authoritative-device re-baseline (WBS-624) must additionally RESET
+    /// the full local baseline so every object re-uploads as a fresh create
+    /// against the new relay vault.
     #[test]
     fn migrate_v9_to_v10_adds_acked_version_with_state_seeding() {
         let conn = create_v9_db();

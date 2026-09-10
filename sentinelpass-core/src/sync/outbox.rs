@@ -115,22 +115,40 @@ fn acked_version_for(
 pub struct AckSummary {
     /// Objects acknowledged Applied — removed from the outbox.
     pub applied: u64,
-    /// Objects rejected with VersionConflict — kept pending (they carry an
-    /// unresolved concurrent edit; conflict preservation is WBS-611).
+    /// Objects rejected with VersionConflict — reconciled per the conflict
+    /// rules on [`apply_push_acks`] (adopted in place, or re-based for a
+    /// fresh-mutation retry; two-alternative preservation is WBS-611).
     pub conflicts: u64,
     /// Objects rejected for any other reason (stale epoch, …) — kept
     /// pending; the next sync retries the same deterministic mutation.
     pub rejected: u64,
+    /// Acks whose `resulting_version` did not match the mutation we sent —
+    /// ignored (a relay must never move our bookkeeping to a version we did
+    /// not produce).
+    pub suspicious_acks: u64,
 }
 
 /// Record a push response's durable results and move the push checkpoint as
 /// ONE transaction (SR-SYNC-003 groundwork / WBS-605).
 ///
-/// Per object, ONLY its own `Applied` ack marks the row synced and advances
-/// its `sync_acked_version` — a rejected object stays pending with its acked
-/// version untouched, so the retry re-derives the same mutation id. The
-/// relay's vault cursor is recorded as a diagnostic (v2 correctness never
-/// gates on it).
+/// Per-object rules:
+/// - `Applied{R}` — honored ONLY when `R` equals the resulting version WE
+///   sent (anything else is a relay misreport and is ignored): the row
+///   leaves the outbox (`sync_state = 'synced'`, `sync_acked_version = R`).
+/// - `Rejected{VersionConflict{C}}` — the relay's current version is C:
+///   - `C >= R` (our attempted resulting version): the relay is at or
+///     beyond our attempt — the relay state supersedes this row; record
+///     `sync_acked_version = C` and mark it synced. The next PULL brings
+///     the relay's content down (v1-equivalent adoption; full
+///     two-alternative conflict preservation lands with WBS-611).
+///   - `C < R` — our attempt was genuinely rejected while we moved on (a
+///     local edit, or a lost-response mutation committed and a later edit
+///     advanced the row): learn `C` into `sync_acked_version` and
+///     re-version the row PAST the attempted `R` so the next cycle pushes
+///     a FRESH mutation (a retry of the rejected id would only replay the
+///     stored rejection).
+/// - Other rejections — the row stays pending untouched; the same
+///   deterministic mutation retries next sync.
 pub fn apply_push_acks(
     conn: &Connection,
     mutations: &[OutboxMutation],
@@ -151,15 +169,30 @@ pub fn apply_push_acks(
             // A result for a mutation we did not send: ignore (cannot route).
             continue;
         };
+        let table = match outbox.object_type {
+            SyncEntryType::Credential => "entries",
+            SyncEntryType::SshKey => "ssh_keys",
+            SyncEntryType::TotpSecret => "totp_secrets",
+        };
+        let sent_resulting = outbox.mutation.resulting_version;
         match &result.outcome {
             crate::sync::v2::MutationOutcome::Applied {
                 resulting_version, ..
             } => {
-                let table = match outbox.object_type {
-                    SyncEntryType::Credential => "entries",
-                    SyncEntryType::SshKey => "ssh_keys",
-                    SyncEntryType::TotpSecret => "totp_secrets",
-                };
+                if resulting_version != &sent_resulting {
+                    // Never let a relay move our bookkeeping to a version we
+                    // did not produce (malicious or buggy relay): the acked
+                    // column is trusted local state.
+                    summary.suspicious_acks += 1;
+                    tracing::warn!(
+                        object_id = %outbox.object_id,
+                        sent = sent_resulting.as_u64(),
+                        reported = resulting_version.as_u64(),
+                        "sync push: ack resulting_version does not match the sent \
+                         mutation — ack ignored, the entry stays pending"
+                    );
+                    continue;
+                }
                 tx.execute(
                     &format!(
                         "UPDATE {table} SET sync_state = 'synced', sync_acked_version = ?1,
@@ -175,12 +208,45 @@ pub fn apply_push_acks(
                 summary.applied += 1;
             }
             crate::sync::v2::MutationOutcome::Rejected { reason } => match reason {
-                crate::sync::v2::RejectionReason::VersionConflict { .. } => {
+                crate::sync::v2::RejectionReason::VersionConflict { current_version } => {
                     summary.conflicts += 1;
+                    let current = current_version.as_u64() as i64;
+                    let sent = sent_resulting.as_u64() as i64;
+                    if current >= sent {
+                        // The relay is at or beyond our attempt: adopt the
+                        // relay state as the new baseline (the next pull
+                        // reconciles content).
+                        tx.execute(
+                            &format!(
+                                "UPDATE {table} SET sync_state = 'synced',
+                                 sync_acked_version = MAX(sync_acked_version, ?1),
+                                 last_synced_at = ?2 WHERE sync_id = ?3"
+                            ),
+                            rusqlite::params![current, now, outbox.object_id.to_string()],
+                        )
+                        .map_err(DatabaseError::Sqlite)?;
+                    } else {
+                        // Superseded mid-flight: learn the relay's current
+                        // version and re-version the row past our attempted
+                        // resulting version — the next cycle pushes a fresh
+                        // mutation (new id, correct CAS expectation).
+                        tx.execute(
+                            &format!(
+                                "UPDATE {table} SET sync_state = 'pending',
+                                 sync_acked_version = MAX(sync_acked_version, ?1),
+                                 sync_version = MAX(sync_version, ?2)
+                                 WHERE sync_id = ?3"
+                            ),
+                            rusqlite::params![current, sent + 1, outbox.object_id.to_string()],
+                        )
+                        .map_err(DatabaseError::Sqlite)?;
+                    }
                     tracing::warn!(
                         object_id = %outbox.object_id,
-                        "sync push: concurrent edit on another device won — the local \
-                         alternative is preserved and the entry stays pending"
+                        current,
+                        "sync push: version conflict — row re-based onto the relay's \
+                         current version (two-alternative conflict preservation \
+                         lands with WBS-611)"
                     );
                 }
                 other => {
@@ -283,11 +349,12 @@ mod tests {
         assert_eq!(b_m.mutation.resulting_version, ObjectVersion(1));
     }
 
-    /// THE WBS-605 pin: only Applied objects are marked synced+acked; a
-    /// rejected object stays pending with its acked version untouched, so
-    /// the retry re-derives the SAME mutation id.
+    /// THE WBS-605 ack bookkeeping: Applied marks synced+acked; a conflict
+    /// whose relay current is AT OR BEYOND our attempt adopts that baseline
+    /// (synced, acked = current — the next pull reconciles content); a
+    /// stale-epoch rejection leaves the row fully untouched.
     #[test]
-    fn ack_marks_only_applied_objects() {
+    fn ack_outcomes_drive_row_bookkeeping() {
         let dek = DataEncryptionKey::new().unwrap();
         let db = outbox_db();
         let device = Uuid::new_v4();
@@ -337,7 +404,8 @@ mod tests {
             AckSummary {
                 applied: 1,
                 conflicts: 1,
-                rejected: 1
+                rejected: 1,
+                suspicious_acks: 0,
             }
         );
 
@@ -352,25 +420,139 @@ mod tests {
         assert_eq!(a_state, "synced");
         assert_eq!(a_acked, 3, "acked version advanced WITH the mark");
 
-        for (id, expected_version) in [(b, 1), (c, 1)] {
-            let (state, acked): (String, i64) = db
-                .conn()
-                .query_row(
-                    "SELECT sync_state, sync_acked_version FROM entries WHERE sync_id = ?1",
-                    [id.to_string()],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(state, "pending", "rejected rows must stay pending");
-            assert_eq!(
-                acked, expected_version,
-                "rejected rows keep their acked version"
-            );
-        }
+        // b: conflict with relay current 4 >= attempted 2 → adopted baseline
+        // (the next pull reconciles content; WBS-611 adds preservation).
+        let (b_state, b_acked): (String, i64) = db
+            .conn()
+            .query_row(
+                "SELECT sync_state, sync_acked_version FROM entries WHERE sync_id = ?1",
+                [b.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            b_state, "synced",
+            "a superseding conflict adopts the relay state"
+        );
+        assert_eq!(b_acked, 4, "acked learns the relay's current version");
+
+        // c: stale-epoch rejection — fully untouched, retries same mutation.
+        let (c_state, c_acked): (String, i64) = db
+            .conn()
+            .query_row(
+                "SELECT sync_state, sync_acked_version FROM entries WHERE sync_id = ?1",
+                [c.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(c_state, "pending", "non-conflict rejections stay pending");
+        assert_eq!(c_acked, 1, "their acked version is untouched");
 
         // The checkpoint records the relay cursor diagnostic.
         let config = crate::sync::config::SyncConfig::load(db.conn()).unwrap();
         assert_eq!(config.last_push_sequence, 9);
+    }
+
+    /// A conflict BEHIND our attempt (we edited mid-flight, or a lost
+    /// response committed and a later edit moved on) learns the relay's
+    /// current version and re-versions the row PAST our attempted resulting
+    /// version — the next collection produces a FRESH mutation (new id,
+    /// correct CAS expectation) instead of replaying the stored rejection
+    /// forever (the reviewer's lost-response-then-edit wedge).
+    #[test]
+    fn conflict_behind_our_attempt_rebases_for_a_fresh_mutation() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let db = outbox_db();
+        let device = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        {
+            let conn = db.conn();
+            insert_pending(conn, &dek, &a, 3, 1, "pending");
+        }
+        let mutations =
+            collect_pending_mutations(db.conn(), &dek, device, relay_vault(), 1).unwrap();
+        let first = &mutations[0];
+        assert_eq!(first.mutation.resulting_version, ObjectVersion(3));
+
+        // Relay rejected: it holds version 2 (behind our attempted 3).
+        let results = vec![MutationResult {
+            mutation_id: first.mutation.mutation_id,
+            object_id: a,
+            outcome: MutationOutcome::Rejected {
+                reason: RejectionReason::VersionConflict {
+                    current_version: ObjectVersion(2),
+                },
+            },
+        }];
+        let summary = apply_push_acks(db.conn(), &mutations, &results, 5).unwrap();
+        assert_eq!(summary.conflicts, 1);
+
+        let (state, acked, version): (String, i64, i64) = db
+            .conn()
+            .query_row(
+                "SELECT sync_state, sync_acked_version, sync_version FROM entries \
+                 WHERE sync_id = ?1",
+                [a.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "pending", "still has an unsynced local edit");
+        assert_eq!(acked, 2, "acked learned the relay's current version");
+        assert_eq!(version, 4, "re-versioned past the attempted 3");
+
+        // Next collection: fresh id (v4), CAS expectation 2 — the retry is a
+        // NEW mutation, not a replay of the stored rejection.
+        let retry = collect_pending_mutations(db.conn(), &dek, device, relay_vault(), 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_ne!(retry.mutation.mutation_id, first.mutation.mutation_id);
+        assert_eq!(retry.mutation.resulting_version, ObjectVersion(4));
+        assert_eq!(retry.mutation.expected_version, ObjectVersion(2));
+    }
+
+    /// A relay reporting an Applied ack for a version we did not produce is
+    /// IGNORED — bookkeeping never moves off our own mutations (malicious /
+    /// buggy relay hardening).
+    #[test]
+    fn mismatched_ack_version_is_ignored() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let db = outbox_db();
+        let device = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        {
+            let conn = db.conn();
+            insert_pending(conn, &dek, &a, 3, 1, "pending");
+        }
+        let mutations =
+            collect_pending_mutations(db.conn(), &dek, device, relay_vault(), 1).unwrap();
+        let first = &mutations[0];
+
+        let results = vec![MutationResult {
+            mutation_id: first.mutation.mutation_id,
+            object_id: a,
+            outcome: MutationOutcome::Applied {
+                resulting_version: ObjectVersion(99),
+                server_sequence: ServerCursor(9),
+            },
+        }];
+        let summary = apply_push_acks(db.conn(), &mutations, &results, 9).unwrap();
+        assert_eq!(summary.suspicious_acks, 1);
+        assert_eq!(summary.applied, 0);
+
+        let (state, acked): (String, i64) = db
+            .conn()
+            .query_row(
+                "SELECT sync_state, sync_acked_version FROM entries WHERE sync_id = ?1",
+                [a.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state, "pending",
+            "the forged ack must not complete the outbox entry"
+        );
+        assert_eq!(acked, 1, "bookkeeping untouched");
     }
 
     /// The retry story end to end at the outbox layer: a rejected object's

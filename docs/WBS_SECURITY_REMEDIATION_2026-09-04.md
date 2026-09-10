@@ -983,7 +983,8 @@ after 408/409 stabilize.
   origin device, idempotency key, authenticated tombstone state, payload,
   DEK-derived metadata MAC over canonical shared metadata — distinct from
   the ADR-005 per-device storage envelope, identity-domain split
-  documented); per-field MAC-tamper negatives.
+  documented; stage-1 computes/transports/stores the MAC, ENFORCEMENT is
+  WBS-612/613); per-field MAC-tamper negatives.
 - **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002,
   TD-ROB-01. Est 2d.
   **Status:** Done (2026-09-10, sync v2 stage 1) — `DeviceSequence` /
@@ -1008,16 +1009,25 @@ after 408/409 stabilize.
   object's own ack in the checkpoint transaction; relay per-mutation
   results are the server-side durable ack.
 - **WBS-605 — Outbox removal only on specific ack.** TD-ROB-01. Est 1.5d.
-  **Status:** Done (2026-09-10, sync v2 stage 1) — `outbox::apply_push_acks`
-  marks ONLY Applied objects synced+acked in ONE transaction with the
-  cursor diagnostic; rejected objects stay pending with untouched acked
-  version and re-derive the same mutation id on retry. End-to-end
-  lost-response acceptance over an in-memory relay model:
+  **Status:** Done (2026-09-10, sync v2 stage 1, after adversarial review
+  round 1) — `outbox::apply_push_acks` honors ONLY an Applied ack matching
+  the version the client actually sent (mismatched acks are ignored —
+  hostile-relay hardening); Applied marks synced+acked in ONE transaction
+  with the cursor diagnostic. Conflicts reconcile without wedging: at-or-
+  beyond the attempt adopts the relay baseline (pull reconciles content),
+  behind it re-bases the row for a FRESH mutation id (review findings:
+  lost-response-then-edit and TTL-expiry wedges closed by
+  `conflict_behind_our_attempt_rebases_for_a_fresh_mutation`);
+  remote-apply arms record `sync_acked_version` so peer-sourced objects
+  are editable (`pull_then_edit_push_succeeds`). End-to-end over an
+  in-memory relay model serving its log:
   `lost_push_response_retry_completes_without_wedge`,
-  `rejected_object_stays_pending_across_retries`; fault-injection sweep
+  `lost_response_then_edit_recovers`,
+  `conflict_rejection_converges_without_wedge`; fault-injection sweep
   `apply_push_acks_fault_injection_is_all_or_nothing`. The #121
   device_sequence wedge note in engine.rs is resolved (v2 framing counter
-  recorded, never gated).
+  recorded, never gated). Two-alternative conflict PRESERVATION remains
+  WBS-611 (stage 1 adopts the relay state on superseding conflicts).
 - **WBS-606 — Relay atomic mutation/entry/sequence/ack.** SR-SYNC-003, TD-ROB-04. Est 2d.
 - **WBS-607 — Client atomic page/inbox/object/index/cursor.** TD-ROB-04. Est 3d.
 - **WBS-608 — Remove remote-apply trigger echo.** TD-ROB-02 (sync half). Est 1.5d.

@@ -460,7 +460,8 @@ impl Database {
                     last_push_sequence INTEGER NOT NULL DEFAULT 0,
                     last_pull_sequence INTEGER NOT NULL DEFAULT 0,
                     last_sync_at INTEGER,
-                    sync_enabled INTEGER NOT NULL DEFAULT 0
+                    sync_enabled INTEGER NOT NULL DEFAULT 0,
+                    protocol_version INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS sync_devices (

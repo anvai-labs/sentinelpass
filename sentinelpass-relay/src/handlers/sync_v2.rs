@@ -35,6 +35,12 @@ const MAX_ENTRY_PAYLOAD_SIZE: usize = 1_048_576;
 /// A mutation may not jump an object's version by more than this (sanity
 /// bound; legitimate clients advance by small steps per push).
 const MAX_VERSION_STEP: u64 = 10_000;
+/// A mutation may not claim an epoch more than this far ABOVE the vault's
+/// current epoch (sanity bound, WBS-614): real rotations advance the epoch
+/// by small steps, so an authenticated device cannot brick the vault's
+/// other devices with `key_epoch = i64::MAX` (a stale-epoch rejection no
+/// real rotation could ever rescue).
+const MAX_EPOCH_JUMP: i64 = 100_000;
 
 /// v2 mutation received by the relay (serde-compatible with the client's
 /// `sentinelpass_core::sync::v2::MutationV2`).
@@ -309,6 +315,12 @@ pub async fn push_v2(
             continue;
         }
         if m.key_epoch > vault_epoch {
+            if m.key_epoch - vault_epoch > MAX_EPOCH_JUMP {
+                return Err(RelayError::BadRequest(format!(
+                    "key_epoch advance of {} exceeds the maximum jump of {MAX_EPOCH_JUMP}",
+                    m.key_epoch - vault_epoch
+                )));
+            }
             vault_epoch = m.key_epoch;
             epoch_changed = true;
         }
@@ -1191,6 +1203,62 @@ mod tests {
                 server_sequence: 2,
             }
         );
+    }
+
+    /// An implausible epoch advance (any authenticated device could
+    /// otherwise brick the vault's other devices with an unreachable
+    /// stale-epoch gate) is a request-level rejection.
+    #[tokio::test]
+    async fn implausible_epoch_advance_is_rejected() {
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let (device_id, vault_id, object_id) = setup(&state);
+
+        // Establish vault epoch 1.
+        let mut first = sample_mutation(&vault_id, object_id, 0, 1);
+        first.origin_device_id = device_id;
+        first.key_epoch = 1;
+        let _ = push_v2(
+            State(state.clone()),
+            auth_extensions(device_id),
+            Json(PushRequestV2 {
+                device_sequence: 1,
+                mutations: vec![first],
+            }),
+        )
+        .await
+        .unwrap();
+
+        // A jump far beyond any real rotation count is rejected.
+        let mut hostile = sample_mutation(&vault_id, Uuid::new_v4(), 0, 1);
+        hostile.origin_device_id = device_id;
+        hostile.key_epoch = 1_000_001;
+        let err = push_v2(
+            State(state.clone()),
+            auth_extensions(device_id),
+            Json(PushRequestV2 {
+                device_sequence: 2,
+                mutations: vec![hostile],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RelayError::BadRequest(_)), "got: {err:?}");
+
+        // A plausible advance still passes.
+        let mut plausible = sample_mutation(&vault_id, Uuid::new_v4(), 0, 1);
+        plausible.origin_device_id = device_id;
+        plausible.key_epoch = 3;
+        let resp = push_v2(
+            State(state),
+            auth_extensions(device_id),
+            Json(PushRequestV2 {
+                device_sequence: 3,
+                mutations: vec![plausible],
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(resp.results[0].outcome.is_applied_outcome());
     }
 
     /// Cleanup ages out idempotency records and enforces the per-device cap.
