@@ -19,6 +19,16 @@ pub struct RelayConfig {
     pub pairing_fetch_backoff_max_secs: u64,
     pub tombstone_retention_days: u64,
     pub nonce_window_secs: i64,
+    /// v2 (ADR-006 / WBS-603): how long a durable per-mutation result is
+    /// replayed to duplicate requests before the record ages out. Post-expiry
+    /// duplicates are RE-evaluated by the CAS guard, which rejects them
+    /// rather than replaying them.
+    #[serde(default)]
+    pub mutation_result_ttl_secs: u64,
+    /// v2: per-device cap on stored mutation results (bounded idempotency
+    /// state; oldest records beyond the cap are pruned).
+    #[serde(default)]
+    pub max_mutation_results_per_device: usize,
 }
 
 impl Default for RelayConfig {
@@ -36,6 +46,8 @@ impl Default for RelayConfig {
             pairing_fetch_backoff_max_secs: 300,
             tombstone_retention_days: 90,
             nonce_window_secs: 300,
+            mutation_result_ttl_secs: 7 * 24 * 3600,
+            max_mutation_results_per_device: 4_096,
         }
     }
 }
@@ -89,6 +101,12 @@ impl RelayConfig {
         }
         if self.nonce_window_secs <= 0 {
             anyhow::bail!("Relay nonce_window_secs must be greater than zero");
+        }
+        if self.mutation_result_ttl_secs == 0 {
+            anyhow::bail!("Relay mutation_result_ttl_secs must be greater than zero");
+        }
+        if self.max_mutation_results_per_device == 0 {
+            anyhow::bail!("Relay max_mutation_results_per_device must be greater than zero");
         }
 
         Ok(())

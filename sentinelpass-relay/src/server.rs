@@ -2,7 +2,7 @@
 
 use crate::app_state::RelayAppState;
 use crate::auth::auth_middleware;
-use crate::handlers::{devices, pairing, sync};
+use crate::handlers::{devices, pairing, sync, sync_v2};
 use axum::extract::ConnectInfo;
 use axum::middleware;
 use axum::routing::{get, post};
@@ -25,6 +25,10 @@ pub fn build_router(app_state: RelayAppState) -> Router {
         .route("/api/v1/sync/full-push", post(sync::full_push))
         .route("/api/v1/sync/full-pull", post(sync::full_pull))
         .route("/api/v1/sync/status", get(sync::status))
+        // v2 mutation protocol (ADR-006): idempotent push with durable
+        // per-object results; paginated pull over the vault mutation log.
+        .route("/api/v2/sync/push", post(sync_v2::push_v2))
+        .route("/api/v2/sync/pull", post(sync_v2::pull_v2))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth_middleware,
