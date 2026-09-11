@@ -116,6 +116,14 @@ function runWithTty(
     env: {
       ...process.env,
       HOME: homeDir,
+      // The FULL XDG family — matching isolatedEnv. On Linux the dirs
+      // crate honors XDG_CONFIG_HOME/XDG_DATA_HOME over HOME; without
+      // these the CLI resolves its config/token dir OUTSIDE the isolated
+      // HOME and finds no daemon token (the CI-only unlock failure).
+      XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+      XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+      XDG_CACHE_HOME: path.join(homeDir, '.cache'),
+      XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
       XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
       SENTINELPASS_CLI_STDIN: stdin ?? '',
     },
