@@ -53,6 +53,7 @@ impl VaultManager {
         client.claim_migration(&origin_vault).await
     }
 
+    #[cfg(feature = "sync")]
     fn relay_url_for_client(&self) -> Result<String> {
         let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig::load(db.conn())?;
