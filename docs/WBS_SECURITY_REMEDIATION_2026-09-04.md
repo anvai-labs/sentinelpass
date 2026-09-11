@@ -1160,6 +1160,20 @@ after 408/409 stabilize.
   Est 1d.
 - **WBS-623 — Production self-host profile docs.** FR-SYNC-004, OP-001/002. Est 1.5d.
 - **WBS-624 — v1 retirement + authoritative-device re-bootstrap.** Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 7) — v1 routes mount ONLY
+  behind the retirement gate: `allow_v1` defaults false → every v1
+  sync/pairing endpoint responds 410 Gone with the re-pair remediation
+  (mixed v1/v2 forbidden, fail-closed both sides; clients refuse v1-era
+  configs via the protocol gate). Authoritative-device migration: relay
+  `POST /api/v2/migration/claim` mints a FRESH relay vault and records
+  ONE claim per origin (a second authoritative claim is refused —
+  `migration_claim_is_one_per_origin`); client
+  `migrate_sync_authoritative` resets every object's sync bookkeeping in
+  one transaction so the full local baseline re-uploads as fresh creates
+  against the empty v2 vault (CAS expects 0; "never upload from
+  pre-migration state" honored structurally); CLI
+  `sync migrate-authoritative` (confirm-gated). Old vault blobs persist
+  relay-side as the documented residual.
 - **Phase gate (tests):** loss/retry, duplicate/reorder, partial acceptance, concurrent
   edits, stale versions/devices/epochs, malicious relay metadata/tombstone/identity,
   crash between every persistence step, pagination boundaries, rate-limit/proxy/size/TLS

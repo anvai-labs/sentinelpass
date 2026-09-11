@@ -103,6 +103,15 @@ The client engine pushes and pulls over `/api/v2/*`:
   swap): local state is untouched and re-pairing is the remedy.
   Deliberately distinct from the ADR-004 epoch sidecar (which protects
   key-material rollback, not log-lineage rollback).
+- **v1 retirement (WBS-624).** The relay mounts v1 endpoints ONLY behind
+  the retirement gate: `allow_v1` (relay.toml) defaults FALSE and every
+  v1 sync/pairing endpoint answers 410 Gone with the re-pair remediation.
+  The authoritative-device migration (`sync migrate-authoritative`)
+  claims ONE fresh relay vault per origin (a second claim is refused),
+  re-baselines this device's full local baseline as fresh creates, and
+  other devices re-onboard exclusively through its v2 pairing. Old vault
+  blobs persist relay-side as the accepted residual — v1 retirement is
+  client-side abandonment, never a purge.
 - **Mixed-protocol gate (fail-closed, client side).** A sync configuration
   established before v2 (`sync_metadata.protocol_version != 2`) refuses to
   sync: its relay state lives in the v1 tables, and v2 mutations pushed

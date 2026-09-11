@@ -216,6 +216,26 @@ impl SyncClient {
         Ok(())
     }
 
+    /// v2 migration (WBS-624): claim the authoritative re-baseline for the
+    /// origin vault. The relay mints a fresh vault; a second claim for the
+    /// same origin is refused (409).
+    pub async fn claim_migration(&self, origin_vault_id: &Uuid) -> Result<Uuid> {
+        let body = serde_json::json!({ "origin_vault_id": origin_vault_id });
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| PasswordManagerError::InvalidInput(e.to_string()))?;
+        let response = self
+            .signed_post("/api/v2/migration/claim", &body_bytes)
+            .await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&response).map_err(|e| {
+            PasswordManagerError::InvalidInput(format!("invalid claim response: {e}"))
+        })?;
+        let id = parsed["new_vault_id"].as_str().ok_or_else(|| {
+            PasswordManagerError::InvalidInput("claim response missing new_vault_id".to_string())
+        })?;
+        Uuid::parse_str(id)
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("invalid new_vault_id: {e}")))
+    }
+
     /// v2 pairing: retrieve (and consume) the bootstrap by proving knowledge
     /// of the secret. Returns (encrypted_bootstrap, registration_proof).
     /// Material moves in the POST body — never in a URL (WBS-616).

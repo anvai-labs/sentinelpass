@@ -1092,6 +1092,24 @@ impl IpcServer {
         }
 
         let outcome = match op {
+            VaultOp::SyncMigrateClaim => {
+                #[cfg(feature = "sync")]
+                {
+                    match self.vault.claim_sync_migration().await {
+                        Ok(new_vault) => ServiceOutcome::from(VaultOpResult::Report(
+                            serde_json::json!({ "new_vault_id": new_vault.to_string() }),
+                        )),
+                        Err(e) => ServiceOutcome::from(ServiceError::from(e)),
+                    }
+                }
+                #[cfg(not(feature = "sync"))]
+                {
+                    ServiceOutcome::from(ServiceError::new(
+                        codes::INTERNAL,
+                        "sync support is not compiled into this daemon",
+                    ))
+                }
+            }
             VaultOp::SyncNow => {
                 #[cfg(feature = "sync")]
                 {

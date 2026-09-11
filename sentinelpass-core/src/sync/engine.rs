@@ -4058,6 +4058,148 @@ mod v2_cycle_tests {
         assert_eq!(hw_after_second, 1, "no-op cycles never move the watermark");
     }
 
+    // --- TV-006: model-based convergence ------------------------------------
+
+    /// Deterministic multi-device convergence (TV-006, honest scope): three
+    /// devices, scripted interleaving — create/edit — with rotation syncs.
+    /// At quiescence ALL devices hold identical content and versions and
+    /// the relay log holds every accepted mutation exactly once.
+    #[tokio::test]
+    async fn tv006_three_device_convergence() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+
+        let mut engines = Vec::new();
+        let mut dbs = Vec::new();
+        for device in 0..3u32 {
+            let db = apply_test_db();
+            let device_id = Uuid::from_u128(100 + device as u128);
+            vault_config(&db, relay_vault, device_id);
+            let db = Arc::new(Mutex::new(db));
+            engines.push(SyncEngine::new(relay.clone(), db.clone(), device_id));
+            dbs.push(db);
+        }
+
+        let object = Uuid::new_v4();
+
+        // Phase 1: device A creates the object (v1) and syncs.
+        insert_collectable_pending(&dek, dbs[0].lock().unwrap().conn(), &object, 1, 0);
+        engines[0].sync(&dek).await.unwrap();
+
+        // Phase 2: B and C pull it, then both EDIT (concurrent).
+        for i in [1usize, 2] {
+            engines[i].sync(&dek).await.unwrap();
+        }
+        for i in [1usize, 2] {
+            let conn = dbs[i].lock().unwrap();
+            conn.conn()
+                .execute(
+                    "UPDATE entries SET sync_version = 2, sync_state = 'pending' \
+                     WHERE sync_id = ?1",
+                    [&object.to_string()],
+                )
+                .unwrap();
+        }
+        // B syncs first — wins the CAS race.
+        engines[1].sync(&dek).await.unwrap();
+        // C syncs — conflict expected, NEVER silent adoption.
+        engines[2].sync(&dek).await.unwrap();
+        let (c_state, c_acked) = row_bookkeeping(&dbs[2], &object);
+        assert_eq!(c_state, "conflict", "C's concurrent edit is conflicted");
+        assert_eq!(c_acked, 1, "C's acked base untouched");
+        let alternatives: i64 = dbs[2]
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sync_conflicts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(alternatives, 1, "B's v2 stored as C's alternative");
+
+        // C resolves KEEP-LOCAL: re-versioned v3 over base 2 → pushes.
+        {
+            let conn = dbs[2].lock().unwrap();
+            resolve_conflict_keep_local(conn.conn(), &object, SyncEntryType::Credential, 2)
+                .unwrap();
+        }
+        engines[2].sync(&dek).await.unwrap();
+        let (c_state, c_acked) = row_bookkeeping(&dbs[2], &object);
+        assert_eq!(c_state, "synced");
+        assert_eq!(c_acked, 3, "C's v3 pushed over B's v2");
+
+        // Phase 3: A and B pull C's v3 — every device converges to v3.
+        engines[0].sync(&dek).await.unwrap();
+        engines[1].sync(&dek).await.unwrap();
+        for (i, db) in dbs.iter().enumerate() {
+            let (state, acked) = row_bookkeeping(db, &object);
+            assert_eq!(state, "synced", "device {i}");
+            assert_eq!(acked, 3, "device {i} converged to v3");
+        }
+        assert_eq!(
+            relay.log_len(),
+            3,
+            "log holds exactly the accepted mutations"
+        );
+    }
+
+    /// TV-006 lost-response ACROSS devices: A's push commits relay-side but
+    /// the response is lost; B pulls A's content, edits to v2, pushes; A
+    /// pulls B's edit (evidence-backed high-water keeps multi-device flows
+    /// monotone); every device converges.
+    #[tokio::test]
+    async fn lost_response_across_devices_converges() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+
+        let mut engines = Vec::new();
+        let mut dbs = Vec::new();
+        for device in 0..2u32 {
+            let db = apply_test_db();
+            let device_id = Uuid::from_u128(200 + device as u128);
+            vault_config(&db, relay_vault, device_id);
+            let db = Arc::new(Mutex::new(db));
+            engines.push(SyncEngine::new(relay.clone(), db.clone(), device_id));
+            dbs.push(db);
+        }
+
+        // A creates v1 and pushes (response lost — the relay committed).
+        insert_collectable_pending(&dek, dbs[0].lock().unwrap().conn(), &sync_id, 1, 0);
+        relay
+            .drop_next_push_response
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(engines[0].sync(&dek).await.is_err());
+
+        // B pulls A's v1, edits to v2, pushes.
+        engines[1].sync(&dek).await.unwrap();
+        {
+            let conn = dbs[1].lock().unwrap();
+            conn.conn()
+                .execute(
+                    "UPDATE entries SET sync_version = 2, sync_state = 'pending' \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                )
+                .unwrap();
+        }
+        engines[1].sync(&dek).await.unwrap();
+
+        // A pulls B's v2 (normal apply — A had no unsynced edit), converges.
+        engines[0].sync(&dek).await.unwrap();
+        let (a_state, a_acked) = row_bookkeeping(&dbs[0], &sync_id);
+        assert_eq!(a_state, "synced");
+        assert_eq!(a_acked, 2, "A converged onto B's v2");
+
+        // B re-syncs: no-op.
+        engines[1].sync(&dek).await.unwrap();
+        assert_eq!(relay.log_len(), 2, "v1 (A) + v2 (B) — no duplicates");
+    }
+
     /// The credential blob helper stays referenced (parity with the apply
     /// fixtures above; pull-apply reuse is covered by the shared tests).
     #[test]

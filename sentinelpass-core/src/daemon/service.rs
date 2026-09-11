@@ -485,6 +485,29 @@ impl LiveVaultService<'_> {
                 Ok(VaultOpResult::Report(value))
             }
 
+            #[cfg(feature = "sync")]
+            VaultOp::SyncMigrateAuthoritative {
+                ref new_relay_vault,
+            } => {
+                let new_vault = uuid::Uuid::parse_str(new_relay_vault).map_err(|_| {
+                    PasswordManagerError::InvalidInput(
+                        "new relay vault id must be a UUID".to_string(),
+                    )
+                })?;
+                vault.migrate_sync_authoritative(&new_vault)?;
+                Ok(VaultOpResult::Ok)
+            }
+            #[cfg(not(feature = "sync"))]
+            VaultOp::SyncMigrateAuthoritative { .. } => Err(PasswordManagerError::NotImplemented(
+                "migration requires the sync feature".to_string(),
+            )),
+
+            VaultOp::SyncMigrateClaim => Err(PasswordManagerError::NotImplemented(
+                "SyncMigrateClaim awaits relay HTTP and is executed by the CLI's sync \
+                 client directly (the daemon is not required for the claim POST)"
+                    .to_string(),
+            )),
+
             // Relay network I/O — the daemon's async dispatcher owns
             // `SyncNow` (see `daemon/ipc/server.rs`); the blocking executor
             // never runs it. Pairing never reaches this match (intercepted

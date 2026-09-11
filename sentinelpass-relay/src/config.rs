@@ -19,6 +19,12 @@ pub struct RelayConfig {
     pub pairing_fetch_backoff_max_secs: u64,
     pub tombstone_retention_days: u64,
     pub nonce_window_secs: i64,
+    /// WBS-624 (ADR-006 retirement): when false (the default), ALL v1
+    /// sync/pairing endpoints respond 410 Gone — the v1 protocol is
+    /// retired and mixed v1/v2 operation is forbidden. Set true ONLY for a
+    /// bounded migration window serving pre-v2 clients.
+    #[serde(default)]
+    pub allow_v1: bool,
     /// WBS-618 (TD-NET-03): reverse-proxy IPs trusted to set
     /// `X-Forwarded-For`. Default EMPTY — a direct deployment keys rate
     /// limits on the peer address and IGNORES forwarded headers, so a
@@ -53,6 +59,7 @@ impl Default for RelayConfig {
             pairing_fetch_backoff_max_secs: 300,
             tombstone_retention_days: 90,
             nonce_window_secs: 300,
+            allow_v1: false,
             trusted_proxies: Vec::new(),
             mutation_result_ttl_secs: 7 * 24 * 3600,
             max_mutation_results_per_device: 4_096,

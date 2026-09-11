@@ -788,6 +788,10 @@ enum SyncCommands {
         take_remote: bool,
     },
 
+    /// Claim the authoritative migration and re-baseline this device's
+    /// sync onto a FRESH relay vault (v1 retirement path)
+    MigrateAuthoritative,
+
     /// Purge dead-lettered sync mutations (one by sequence, or all)
     DeadLetterPurge {
         /// Purge only this server sequence (from `dead-letter list`)

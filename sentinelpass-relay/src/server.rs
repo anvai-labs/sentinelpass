@@ -2,6 +2,7 @@
 
 use crate::app_state::RelayAppState;
 use crate::auth::auth_middleware;
+use crate::error::RelayError;
 use crate::handlers::{devices, pairing, pairing_v2, sync, sync_v2};
 use axum::extract::ConnectInfo;
 use axum::middleware;
@@ -14,37 +15,64 @@ use std::net::SocketAddr;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
+/// WBS-624 (ADR-006 retirement): v1-shaped requests are HARD-REJECTED once
+/// v1 is retired — mixed v1/v2 operation is forbidden. Explicit 410 Gone
+/// with the remediation in the message (never a silent 404).
+async fn v1_retirement_middleware(
+    State(state): State<RelayAppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, RelayError> {
+    if state.config.allow_v1 {
+        return Ok(next.run(request).await);
+    }
+    Err(RelayError::Gone(
+        "sync protocol v1 is retired (ADR-006): this relay accepts only v2 \
+         requests. Upgrade the client and re-pair under v2"
+            .to_string(),
+    ))
+}
+
 pub fn build_router(app_state: RelayAppState) -> Router {
-    // Authenticated routes
-    let authenticated = Router::new()
+    // v1 routes (WBS-624): mounted ONLY behind the retirement gate — 410
+    // Gone by default; `allow_v1 = true` opens a bounded migration window.
+    let v1 = Router::new()
         .route("/api/v1/pairing/bootstrap", post(pairing::upload_bootstrap))
+        .route("/api/v1/devices/register", post(devices::register_device))
+        .route("/api/v1/sync/push", post(sync::push))
+        .route("/api/v1/sync/pull", post(sync::pull))
+        .route("/api/v1/sync/full-push", post(sync::full_push))
+        .route("/api/v1/sync/full-pull", post(sync::full_pull))
+        .route(
+            "/api/v1/pairing/bootstrap/{token}",
+            get(pairing::fetch_bootstrap),
+        )
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            v1_retirement_middleware,
+        ));
+
+    // Authenticated routes (v2 protocol + management)
+    let authenticated = Router::new()
         .route(
             "/api/v2/pairing/bootstrap",
             post(pairing_v2::upload_bootstrap_v2),
         )
         .route("/api/v1/devices", get(devices::list_devices))
         .route("/api/v1/devices/{id}/revoke", post(devices::revoke_device))
-        .route("/api/v1/sync/push", post(sync::push))
-        .route("/api/v1/sync/pull", post(sync::pull))
-        .route("/api/v1/sync/full-push", post(sync::full_push))
-        .route("/api/v1/sync/full-pull", post(sync::full_pull))
         .route("/api/v1/sync/status", get(sync::status))
         // v2 mutation protocol (ADR-006): idempotent push with durable
         // per-object results; paginated pull over the vault mutation log.
         .route("/api/v2/sync/push", post(sync_v2::push_v2))
         .route("/api/v2/sync/pull", post(sync_v2::pull_v2))
+        .route("/api/v2/migration/claim", post(sync_v2::migration_claim))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth_middleware,
         ));
 
-    // Unauthenticated routes
+    // Unauthenticated routes (v2 + management)
     let public = Router::new()
-        .route("/api/v1/devices/register", post(devices::register_device))
-        .route(
-            "/api/v1/pairing/bootstrap/{token}",
-            get(pairing::fetch_bootstrap),
-        )
         .route(
             "/api/v2/pairing/bootstrap/retrieve",
             post(pairing_v2::retrieve_bootstrap_v2),
@@ -56,6 +84,7 @@ pub fn build_router(app_state: RelayAppState) -> Router {
         ));
 
     Router::new()
+        .merge(v1)
         .merge(authenticated)
         .merge(public)
         .layer(TraceLayer::new_for_http())
