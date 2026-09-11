@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod autofill;
 pub mod biometric;
+pub mod biometric_hello;
 pub mod crypto;
 pub mod daemon;
 pub mod database;

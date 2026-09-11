@@ -1217,7 +1217,35 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   removed entirely. Known residual (documented): frontend-timed expiry is
   throttled in hidden webviews — backend timer is the tracked follow-up.
 - **WBS-710 — Windows Hello-bound key release.** TD-CLIENT-04, SR-CLIENT (biometric
-  parity). Est 3d.
+  parity).
+  Est 3d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the Windows DEK wrap
+  for biometric unlock is now bound to a per-vault TPM/Hello
+  `KeyCredentialManager` key: enable creates the key (ReplaceExisting;
+  platform verifies Hello presence), draws a random 32-byte challenge,
+  signs it twice (the Hello prompt), REFUSES enable unless both signatures
+  are byte-identical (RSASSA-PKCS1-v1_5 determinism self-check — a
+  randomizing platform fails closed before anything is stored), seals the
+  DEK under `HKDF-SHA256(signature, ref-bound)`, and verifies a full
+  release round-trip before persisting. The stored keyring value is now a
+  NON-SECRET blob; release requires a FRESH Hello-gated signature over the
+  stored challenge (the sign prompt IS the authentication — no separate
+  UserConsentVerifier double-prompt), and the GCM tag authenticates the
+  derived wrap key, so a refused gesture, wrong key, cross-vault ref, or
+  tampered blob all fail closed (master-password fallback). Legacy
+  pre-710 base64-DEK enrollments keep working (verify-then-read) and are
+  upgraded by re-enabling. Chosen primitive is the platform's DOCUMENTED
+  surface: passport keys are sign-only (NCryptDecrypt is undocumented),
+  so the release gate is the signature itself. Evidence: platform-free
+  orchestration unit suite (10 cases: roundtrip, cross-ref, refused
+  gesture, wrong key, tampered blob, non-deterministic refusal,
+  unsupported refusal, legacy/version decode, KDF binding) + the WinRT
+  call surface type-checked for x86_64-pc-windows-msvc against
+  windows 0.61 (KeyCredentialManager/KeyCredential/CryptographicBuffer);
+  runtime Hello verification rides the Windows CI matrix like the rest
+  of the named-pipe FFI. Honest residual: determinism relies on
+  RSA-PKCS1-v1_5 (self-checked at every enable, so platform drift fails
+  enable, not unlock).
 - **WBS-711 — Default-deny HTTP autofill.** SR-CLIENT-003, SR-EXT-002, TD-CLIENT-05.
   Est 2d.
   **Status:** Done (2026-09-10, Phase 5 remainder) — the daemon's

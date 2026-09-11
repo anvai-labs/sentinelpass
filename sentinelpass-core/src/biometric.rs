@@ -7,6 +7,8 @@ use std::path::Path;
 #[cfg(any(windows, target_os = "macos", test))]
 use zeroize::Zeroize;
 
+#[cfg(windows)]
+use crate::biometric_hello::{release_dek_under_hello, seal_dek_under_hello, HelloBoundBlob};
 use serde::{Deserialize, Serialize};
 
 /// Message used by every platform-unsupported stub. Matched BY REFERENCE
@@ -186,7 +188,21 @@ impl BiometricManager {
 
         #[cfg(windows)]
         {
+            // WBS-710: store a Hello-BOUND wrap, not the DEK. The per-vault
+            // TPM/Hello key is (re)created here; sealing signs the challenge
+            // (Hello prompt) and verifies a full release round-trip before
+            // anything is persisted. The keyring value below is NON-SECRET.
             let biometric_ref = Self::biometric_ref_for_vault(vault_path);
+            let credential_name = self::windows::hello::credential_name(&biometric_ref);
+
+            self::windows::hello::create_for_enable(&credential_name)?;
+
+            let signer = self::windows::hello::WindowsHelloSigner {
+                credential_name: credential_name.clone(),
+            };
+            let blob =
+                seal_dek_under_hello(&signer, credential_name.to_string(), &biometric_ref, dek)?;
+
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, &biometric_ref).map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Keyring(format!(
@@ -194,17 +210,12 @@ impl BiometricManager {
                         e
                     )))
                 })?;
-
-            // Store base64 to keep storage UTF-8 safe across keychain backends.
-            let mut encoded = Self::encode_vault_dek(dek);
-            let set_result = entry.set_password(&encoded).map_err(|e| {
+            entry.set_password(&blob.encode()).map_err(|e| {
                 PasswordManagerError::from(DatabaseError::Keyring(format!(
                     "Failed to store biometric keyring secret: {}",
                     e
                 )))
-            });
-            encoded.zeroize();
-            set_result?;
+            })?;
 
             Ok(biometric_ref)
         }
@@ -227,24 +238,22 @@ impl BiometricManager {
 
         #[cfg(windows)]
         {
-            let entry =
-                keyring::Entry::new(BIOMETRIC_SERVICE_NAME, biometric_ref).map_err(|e| {
-                    PasswordManagerError::from(DatabaseError::Keyring(format!(
-                        "Failed to initialize keyring entry: {}",
-                        e
-                    )))
-                })?;
+            let mut encoded = Self::read_windows_stored_value(biometric_ref)?;
 
-            let mut encoded = entry.get_password().map_err(|e| {
-                PasswordManagerError::NotFound(format!(
-                    "Biometric keyring secret is unavailable: {}",
-                    e
-                ))
-            })?;
+            // WBS-710: a v1 blob releases through the Hello-gated signature
+            // (the signer's prompt IS the authentication); the wrap key
+            // never exists outside the release call.
+            if let Some(blob) = HelloBoundBlob::decode(&encoded) {
+                encoded.zeroize();
+                let signer = self::windows::hello::WindowsHelloSigner {
+                    credential_name: self::windows::hello::credential_name(biometric_ref),
+                };
+                return release_dek_under_hello(&signer, biometric_ref, &blob);
+            }
 
-            // Zeroize the encoded DEK on BOTH paths — the previous `?`
-            // before `zeroize()` leaked it on the decode-failure path
-            // (WBS-308 / SR-CRYPTO-004).
+            // Legacy pre-710 format: plain base64 DEK. Kept so existing
+            // enrollments keep working; re-enabling upgrades them to the
+            // Hello-bound format. The decode consumes the zeroizing guard.
             let decoded = Self::decode_vault_dek(&encoded);
             encoded.zeroize();
             let dek = decoded?;
@@ -273,9 +282,43 @@ impl BiometricManager {
 
         #[cfg(not(target_os = "macos"))]
         {
+            // WBS-710: a Hello-bound blob carries its own gate — the release
+            // signature IS the Windows Hello verification, so no separate
+            // consent prompt runs first (that would double-prompt). Legacy
+            // pre-710 enrollments keep the verify-then-read flow.
+            #[cfg(windows)]
+            if Self::stored_blob_is_hello_bound(biometric_ref) {
+                return Self::load_vault_dek(biometric_ref);
+            }
             Self::require_authentication(reason)?;
             Self::load_vault_dek(biometric_ref)
         }
+    }
+
+    /// Whether the stored Windows keyring value is a v1 Hello-bound blob.
+    #[cfg(windows)]
+    fn stored_blob_is_hello_bound(biometric_ref: &str) -> bool {
+        match Self::read_windows_stored_value(biometric_ref) {
+            Ok(value) => HelloBoundBlob::decode(&value).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    /// Read the raw Windows keyring value for a biometric ref.
+    #[cfg(windows)]
+    fn read_windows_stored_value(biometric_ref: &str) -> Result<String> {
+        let entry = keyring::Entry::new(BIOMETRIC_SERVICE_NAME, biometric_ref).map_err(|e| {
+            PasswordManagerError::from(DatabaseError::Keyring(format!(
+                "Failed to initialize keyring entry: {}",
+                e
+            )))
+        })?;
+        entry.get_password().map_err(|e| {
+            PasswordManagerError::NotFound(format!(
+                "Biometric keyring secret is unavailable: {}",
+                e
+            ))
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -455,6 +498,134 @@ mod windows {
                 "Unhandled Windows Hello verification result: {:?}",
                 result
             )),
+        }
+    }
+
+    /// WBS-710: Hello-key (KeyCredentialManager) helpers. The per-vault
+    /// TPM/Hello key is sign-only by platform design; the DEK wrap derives
+    /// from a Hello-gated signature (see `crate::biometric_hello`).
+    pub(super) mod hello {
+        use super::super::HelloKeySigner;
+        use crate::{DatabaseError, PasswordManagerError, Result};
+        use windows::core::HSTRING;
+        use windows::Security::Credentials::{
+            KeyCredential, KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialStatus,
+        };
+        use windows::Security::Cryptography::CryptographicBuffer;
+
+        /// The KeyCredential name for one vault's biometric ref.
+        pub(super) fn credential_name(biometric_ref: &str) -> HSTRING {
+            HSTRING::from(format!("sentinelpass.{biometric_ref}"))
+        }
+
+        fn keyring_error(action: &str, detail: String) -> PasswordManagerError {
+            PasswordManagerError::from(DatabaseError::Keyring(format!(
+                "Failed to {action} Windows Hello key: {detail}"
+            )))
+        }
+
+        fn map_status(status: KeyCredentialStatus) -> PasswordManagerError {
+            match status {
+                KeyCredentialStatus::UserCanceled => PasswordManagerError::InvalidInput(
+                    "Windows Hello verification was cancelled".to_string(),
+                ),
+                KeyCredentialStatus::UserPrefersPassword => PasswordManagerError::InvalidInput(
+                    "Windows Hello verification was declined".to_string(),
+                ),
+                KeyCredentialStatus::NotFound
+                | KeyCredentialStatus::CredentialAlreadyExists
+                | KeyCredentialStatus::SecurityDeviceLocked
+                | KeyCredentialStatus::UnknownError => {
+                    keyring_error("use", format!("status {:?}", status))
+                }
+                _ => keyring_error("use", format!("status {:?}", status)),
+            }
+        }
+
+        fn open_credential(name: &HSTRING) -> Result<KeyCredential> {
+            ensure_com_initialized();
+            // FailIfExists on an EXISTING key returns it without recreating.
+            let op = KeyCredentialManager::RequestCreateAsync(
+                name,
+                KeyCredentialCreationOption::FailIfExists,
+            )
+            .map_err(|e| keyring_error("open", e.to_string()))?;
+            let retrieval = op.get().map_err(|e| keyring_error("open", e.to_string()))?;
+            let status = retrieval
+                .Status()
+                .map_err(|e| keyring_error("open", e.to_string()))?;
+            if status != KeyCredentialStatus::Success {
+                return Err(map_status(status));
+            }
+            retrieval
+                .Credential()
+                .map_err(|e| keyring_error("open", e.to_string()))
+        }
+
+        /// Whether the platform can create/use Hello keys at all.
+        pub(super) fn is_supported() -> bool {
+            match KeyCredentialManager::IsSupportedAsync() {
+                Ok(op) => op.get().unwrap_or(false),
+                Err(_) => false,
+            }
+        }
+
+        /// (Re)create the vault's Hello key at ENABLE time. ReplaceExisting
+        /// discards any stale key from a prior enrollment; the platform
+        /// verifies Hello presence as part of creation.
+        pub(super) fn create_for_enable(name: &HSTRING) -> Result<()> {
+            ensure_com_initialized();
+            let op = KeyCredentialManager::RequestCreateAsync(
+                name,
+                KeyCredentialCreationOption::ReplaceExisting,
+            )
+            .map_err(|e| keyring_error("create", e.to_string()))?;
+            let retrieval = op
+                .get()
+                .map_err(|e| keyring_error("create", e.to_string()))?;
+            let status = retrieval
+                .Status()
+                .map_err(|e| keyring_error("create", e.to_string()))?;
+            if status != KeyCredentialStatus::Success {
+                return Err(map_status(status));
+            }
+            Ok(())
+        }
+
+        /// Signs via the vault's Hello key. The platform prompts for the
+        /// Hello gesture on the private-key operation — that prompt IS the
+        /// release gate.
+        pub(super) struct WindowsHelloSigner {
+            pub(super) credential_name: HSTRING,
+        }
+
+        impl HelloKeySigner for WindowsHelloSigner {
+            fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
+                let credential = open_credential(&self.credential_name)?;
+                let buffer = CryptographicBuffer::CreateFromByteArray(data)
+                    .map_err(|e| keyring_error("sign", e.to_string()))?;
+                let op = credential
+                    .RequestSignAsync(&buffer)
+                    .map_err(|e| keyring_error("sign", e.to_string()))?;
+                let result = op.get().map_err(|e| keyring_error("sign", e.to_string()))?;
+                let status = result
+                    .Status()
+                    .map_err(|e| keyring_error("sign", e.to_string()))?;
+                if status != KeyCredentialStatus::Success {
+                    return Err(map_status(status));
+                }
+                let signature_buffer = result
+                    .Result()
+                    .map_err(|e| keyring_error("sign", e.to_string()))?;
+                let hex_signature = CryptographicBuffer::EncodeToHexString(&signature_buffer)
+                    .map_err(|e| keyring_error("sign", e.to_string()))?;
+                hex::decode(hex_signature.to_string())
+                    .map_err(|e| keyring_error("sign", e.to_string()))
+            }
+
+            fn is_supported(&self) -> bool {
+                is_supported()
+            }
         }
     }
 }
