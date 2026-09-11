@@ -537,6 +537,18 @@ impl DaemonVault {
         vault.sync_now().await
     }
 
+    /// Claim the AUTHORITATIVE migration at the relay (WBS-624); returns the
+    /// freshly minted relay vault id. Requires the vault unlocked (identity
+    /// + relay URL come from the live vault).
+    #[cfg(feature = "sync")]
+    pub async fn claim_sync_migration(&self) -> Result<uuid::Uuid> {
+        let vault_guard = self.vault.lock().await;
+        let vault = vault_guard
+            .as_ref()
+            .ok_or(PasswordManagerError::VaultLocked)?;
+        vault.claim_sync_migration().await
+    }
+
     /// Record activity (resets the auto-lock timer)
     pub async fn record_activity(&self) {
         *self.last_activity.lock().unwrap() = Instant::now();

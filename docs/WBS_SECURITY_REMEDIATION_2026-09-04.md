@@ -1140,7 +1140,18 @@ after 408/409 stabilize.
   (TD-NET-01's URL/CLI exposure gone).
 - **WBS-617 — TLS-only, safe redirects, no userinfo (full client rules).** SR-SYNC-007,
   TD-NET-02. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 6) — `SyncClient` installs a
+  bounded redirect policy: max 3 hops, same scheme (TLS downgrade
+  refused), same host+port (cross-origin bounce refused), target
+  re-validated against the transport policy (`redirect_decision` free fn
+  pinned by cross-origin/downgrade/bound tests). TLS-only + no-userinfo
+  were enforced since 0.8.x (`validate_relay_url`).
 - **WBS-618 — Proxy-trust config for forwarded IPs.** TD-NET-03. Est 1.5d.
+  **Status:** Done (2026-09-10, sync v2 stage 6) — relay `trusted_proxies`
+  config (default EMPTY): X-Forwarded-For keys the rate limiter ONLY when
+  the direct peer is a configured trusted proxy; with the default, a
+  spoofed XFF cannot rotate rate-limit identities
+  (`forwarded_ip_trust_follows_configuration`).
 - **WBS-619 — Per-vault/device quotas + bounded limiter state.** TD-NET-04,
   SR-RELAY-001, FR-SYNC-001/003. Est 3d.
 - **WBS-620 — Non-blocking relay storage.** TD-NET-05. Est 3d.
@@ -1149,6 +1160,20 @@ after 408/409 stabilize.
   Est 1d.
 - **WBS-623 — Production self-host profile docs.** FR-SYNC-004, OP-001/002. Est 1.5d.
 - **WBS-624 — v1 retirement + authoritative-device re-bootstrap.** Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 7) — v1 routes mount ONLY
+  behind the retirement gate: `allow_v1` defaults false → every v1
+  sync/pairing endpoint responds 410 Gone with the re-pair remediation
+  (mixed v1/v2 forbidden, fail-closed both sides; clients refuse v1-era
+  configs via the protocol gate). Authoritative-device migration: relay
+  `POST /api/v2/migration/claim` mints a FRESH relay vault and records
+  ONE claim per origin (a second authoritative claim is refused —
+  `migration_claim_is_one_per_origin`); client
+  `migrate_sync_authoritative` resets every object's sync bookkeeping in
+  one transaction so the full local baseline re-uploads as fresh creates
+  against the empty v2 vault (CAS expects 0; "never upload from
+  pre-migration state" honored structurally); CLI
+  `sync migrate-authoritative` (confirm-gated). Old vault blobs persist
+  relay-side as the documented residual.
 - **Phase gate (tests):** loss/retry, duplicate/reorder, partial acceptance, concurrent
   edits, stale versions/devices/epochs, malicious relay metadata/tombstone/identity,
   crash between every persistence step, pagination boundaries, rate-limit/proxy/size/TLS

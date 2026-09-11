@@ -30,6 +30,37 @@ impl VaultManager {
         crate::sync::outbox::list_sync_conflicts(db.conn())
     }
 
+    /// Claim the AUTHORITATIVE migration at the relay (WBS-624): mints a
+    /// fresh relay vault; returns its id. Requires sync configured (v1-era
+    /// or v2 — the claim names the ORIGIN vault explicitly).
+    #[cfg(feature = "sync")]
+    pub async fn claim_sync_migration(&self) -> Result<uuid::Uuid> {
+        let identity = self.load_sync_device_identity()?.ok_or_else(|| {
+            PasswordManagerError::InvalidInput("Sync device identity missing".to_string())
+        })?;
+        let origin_vault = {
+            let db = self.lock_db()?;
+            let config = crate::sync::config::SyncConfig::load(db.conn())?;
+            config.vault_id.ok_or_else(|| {
+                PasswordManagerError::InvalidInput("Sync vault ID missing".to_string())
+            })?
+        };
+        let client = crate::sync::client::SyncClient::new(
+            &self.relay_url_for_client()?,
+            identity.device_id,
+            identity.signing_key,
+        )?;
+        client.claim_migration(&origin_vault).await
+    }
+
+    fn relay_url_for_client(&self) -> Result<String> {
+        let db = self.lock_db()?;
+        let config = crate::sync::config::SyncConfig::load(db.conn())?;
+        config
+            .relay_url
+            .ok_or_else(|| PasswordManagerError::InvalidInput("Sync relay URL missing".to_string()))
+    }
+
     /// Resolve a stored concurrent-edit conflict (WBS-611 / SR-SYNC-005):
     /// delegates to the engine-level resolvers.
     #[cfg(feature = "sync")]
@@ -485,6 +516,59 @@ impl VaultManager {
             .map_err(DatabaseError::Sqlite)?;
 
         Ok(devices)
+    }
+
+    /// AUTHORITATIVE-DEVICE RE-BASELINE (WBS-624, ADR-006): this device is
+    /// the single migration authority for `origin_relay_vault`; the relay
+    /// has minted a FRESH vault (`new_relay_vault`). One transaction:
+    /// re-point the config at the new vault (protocol v2, cursors and
+    /// lineage zeroed) and reset EVERY object's sync bookkeeping so the
+    /// collector re-emits the full local baseline as fresh creates
+    /// (expected 0 against an empty v2 vault). Conflict alternatives and
+    /// dead-letters are purged (they belong to the abandoned lineage).
+    /// The ADR rule "never upload from pre-migration state" is honored
+    /// because the fresh vault's objects are all absent — CAS expects 0.
+    pub fn migrate_sync_authoritative(&self, new_relay_vault: &uuid::Uuid) -> Result<()> {
+        let db = self.lock_db()?;
+        let tx = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+
+        // Stale lineage state is PURGED (stage-7 review): conflict
+        // alternatives and dead-letters belong to the abandoned lineage —
+        // keeping them would let take-remote regress post-migration data
+        // and count pre-migration debris against the dead-letter cap.
+        tx.execute("DELETE FROM sync_conflicts", [])
+            .map_err(DatabaseError::Sqlite)?;
+        tx.execute("DELETE FROM sync_dead_letter", [])
+            .map_err(DatabaseError::Sqlite)?;
+
+        for table in ["entries", "ssh_keys", "totp_secrets"] {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET sync_state = 'pending',
+                     sync_acked_version = 0
+                     WHERE is_deleted = 0"
+                ),
+                [],
+            )
+            .map_err(DatabaseError::Sqlite)?;
+            // Locally deleted rows keep their tombstone (they push as
+            // deletions); a never-synced deleted row has nothing to push.
+        }
+
+        let mut config = crate::sync::config::SyncConfig::load(&tx)?;
+        config.vault_id = Some(*new_relay_vault);
+        config.last_push_sequence = 0;
+        config.last_pull_sequence = 0;
+        config.lineage_high_water = 0;
+        config.protocol_version = crate::sync::config::SYNC_PROTOCOL_VERSION;
+        config.sync_enabled = true;
+        config.save(&tx)?;
+
+        tx.commit().map_err(DatabaseError::Sqlite)?;
+        Ok(())
     }
 
     /// List dead-lettered sync mutations (WBS-607 sanctioned tooling:

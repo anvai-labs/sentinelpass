@@ -234,6 +234,48 @@ pub fn handle(vault_path: PathBuf, cmd: &crate::SyncCommands) -> Result<()> {
             }
         }
 
+        crate::SyncCommands::MigrateAuthoritative => {
+            let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+
+            println!();
+            println!("AUTHORITATIVE MIGRATION (WBS-624): this device becomes the ONLY");
+            println!("device allowed to re-upload sync data — onto a FRESH relay vault.");
+            println!("All other devices must re-pair through this one (v2 pairing).");
+            println!("The old relay vault is abandoned client-side (its blobs persist");
+            println!("relay-side as an accepted residual).");
+            println!();
+            print!("Proceed? [y/N]: ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut confirmation = String::new();
+            std::io::stdin().read_line(&mut confirmation)?;
+            if !confirmation.trim().to_lowercase().starts_with('y') {
+                println!("Migration cancelled");
+                return Ok(());
+            }
+
+            // 1. Claim: the relay mints the fresh vault (a second claim for
+            //    the same origin is refused — one authority).
+            let report = match backend.call(VaultOp::SyncMigrateClaim)? {
+                VaultOpResult::Report(value) => value,
+                other => anyhow::bail!("unexpected response: {other:?}"),
+            };
+            let new_vault = report["new_vault_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("claim response missing new_vault_id"))?
+                .to_string();
+            println!("Claimed. Fresh relay vault: {new_vault}");
+
+            // 2. Re-baseline: reset every object's sync bookkeeping so the
+            //    full local baseline re-uploads as fresh creates.
+            backend.call(VaultOp::SyncMigrateAuthoritative {
+                new_relay_vault: new_vault.clone(),
+            })?;
+
+            println!("Re-baselined. Run 'sentinelpass sync now' to upload the full");
+            println!("baseline, then re-pair other devices through this one.");
+        }
+
         crate::SyncCommands::DeadLetterList => {
             let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
             let report = match backend.call(VaultOp::SyncDeadLetterList)? {

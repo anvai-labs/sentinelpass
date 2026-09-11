@@ -184,6 +184,17 @@ impl RelayStorage {
                 PRIMARY KEY (mutation_id, device_id, vault_id)
             );
 
+            -- WBS-624 (ADR-006 migration): authoritative-device claims. One
+            -- claim per ORIGIN vault: a second device attempting to claim
+            -- the same origin is refused (the user selects exactly one
+            -- migrated device; others re-onboard via its v2 pairing).
+            CREATE TABLE IF NOT EXISTS migration_claims (
+                origin_vault_id TEXT PRIMARY KEY,
+                new_vault_id TEXT NOT NULL,
+                claimed_by TEXT NOT NULL,
+                claimed_at INTEGER NOT NULL
+            );
+
             -- v2 protocol: vault key-epoch high-water (ADR-004/006). Advanced
             -- only forward, by mutations carrying a higher epoch.
             CREATE TABLE IF NOT EXISTS vault_epochs (

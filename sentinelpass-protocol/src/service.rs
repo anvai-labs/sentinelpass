@@ -356,6 +356,17 @@ pub enum VaultOp {
     SyncNow,
     /// List dead-lettered sync mutations (metadata only; WBS-607).
     SyncDeadLetterList,
+    /// Claim the AUTHORITATIVE migration for the configured origin vault
+    /// (WBS-624): the relay mints a fresh vault and records the claim. A
+    /// second claim for the same origin is refused. Requires the relay
+    /// network (daemon-async like SyncNow).
+    SyncMigrateClaim,
+    /// Re-baseline THIS device as the migration authority for the given
+    /// fresh relay vault: resets every object's sync bookkeeping so the
+    /// full local baseline re-uploads as fresh creates. Local vault write.
+    SyncMigrateAuthoritative {
+        new_relay_vault: String,
+    },
     /// List stored concurrent-edit conflicts (metadata only; WBS-611 /
     /// SR-SYNC-005): the payload VALUES require an unlocked vault and are
     /// not part of this listing.
