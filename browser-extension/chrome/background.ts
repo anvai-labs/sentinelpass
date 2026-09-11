@@ -12,6 +12,7 @@ import { debugLog, infoLog, warnLog, errorLog } from './logger.js';
 import {
   PENDING_CREDENTIAL_KEY,
   PENDING_CREDENTIAL_TTL_MS,
+  PENDING_INLINE_PREFIX,
   PENDING_SAVE_PREFIX,
   PENDING_SAVE_TTL_MS,
   isSessionSecretExpired,
@@ -84,6 +85,18 @@ function isPopupSender(sender): boolean {
   // sender.id === chrome.runtime.id is already enforced above, so !sender.tab is
   // sufficient to identify our own popup/options pages on both Chrome and Firefox.
   return !sender.tab;
+}
+
+// WBS-711 review fix F2: content-script payloads never supply stored or
+// validated URLs — the browser-provided frame URL is authoritative for
+// anything the daemon parses (page_url) or stores (canonical save URL).
+// Popup senders keep their own values (they save arbitrary entries by
+// design and have no meaningful frame URL).
+function withSenderProvenance(data, sender) {
+  if (isPopupSender(sender) || !sender?.url) {
+    return data;
+  }
+  return { ...data, url: sender.url, submitted_url: sender.url };
 }
 
 function normalizeHostForSenderValidation(value) {
@@ -178,10 +191,12 @@ async function isCredentialUnchanged(data) {
     const response = await handleGetCredential(
       data.domain,
       generateRequestId(),
-      // The same browser-provided URL the save path validates; a delivery
-      // denial here only means the unchanged-check cannot run (fail-safe:
-      // the save proceeds as a duplicate upsert).
-      data?.submitted_url || data?.url || null
+      // Browser-provided URL (the dispatch layer overwrites payload URLs
+      // with sender.url — review F2); a delivery denial here only means
+      // the unchanged-check cannot run (fail-safe: the save proceeds as a
+      // duplicate upsert).
+      data?.submitted_url || data?.url || null,
+      undefined
     );
     if (!response?.success || !response?.data?.password) {
       return false;
@@ -294,8 +309,9 @@ function sessionRemove(keys) {
 
 const PURGE_SESSION_SECRETS_ALARM = 'purge-session-secrets';
 
-// One alarm tick per minute: sweep expired session-secret entries. Service
-// workers are ephemeral — timers cannot be relied on, alarms can.
+// One alarm tick per minute: sweep expired session-secret entries, and
+// clear everything if the vault was locked OUTSIDE this extension (daemon
+// auto-lock, CLI, UI — native messaging has no push channel, review F5).
 function sweepExpiredSessionSecrets() {
   void (async () => {
     const all = await sessionGet(null);
@@ -304,6 +320,19 @@ function sweepExpiredSessionSecrets() {
     if (expired.length > 0) {
       debugLog('[SentinelPass Background] Sweeping expired session secrets:', expired.length);
       await sessionRemove(expired);
+    }
+
+    if (Object.keys(all || {}).some((key) => isSessionSecretKey(key))) {
+      try {
+        const status = await handleCheckVaultStatus();
+        if (status.success && !status.unlocked) {
+          debugLog('[SentinelPass Background] Vault locked externally; purging pending secrets');
+          await purgeAllSessionSecrets();
+          await broadcastScrubSecrets();
+        }
+      } catch (error) {
+        debugLog('[SentinelPass Background] Locked-state check failed:', error);
+      }
     }
   })();
 }
@@ -474,13 +503,36 @@ function requestInlineSavePrompt(tabId, data) {
     return Promise.resolve(false);
   }
 
+  // WBS-716 review fix F1: the FULL payload (including the password) stays
+  // in the background under a one-time prompt id; the content script's
+  // inline prompt receives only display fields and confirms by id. The
+  // held entry is TTL-stamped and swept like every other session secret.
+  const promptId = generateRequestId();
+  const storageKey = `${PENDING_INLINE_PREFIX}${promptId}`;
+  void sessionSet({
+    [storageKey]: {
+      ...data,
+      expiresAt: sessionSecretExpiry(storageKey, Date.now())
+    }
+  });
+
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, {
       type: 'show_inline_save_prompt',
-      data
+      data: {
+        username: data?.username || '',
+        domain: data?.domain || '',
+        url: data?.url || '',
+        submitted_url: data?.submitted_url || '',
+        request_source: data?.request_source || 'inline_prompt',
+        insecure_http: data?.insecure_http === true,
+        promptId
+      }
     }, (response) => {
       if (chrome.runtime.lastError) {
         console.error('[SentinelPass Background] Failed sending inline save prompt message:', chrome.runtime.lastError.message);
+        // The prompt never appeared — drop the held payload immediately.
+        void sessionRemove([storageKey]);
         resolve(false);
         return;
       }
@@ -540,7 +592,7 @@ async function addNeverSaveDomain(domainOrUrl) {
 }
 
 // Handle get_credential request
-async function handleGetCredential(domain, requestId, pageUrl) {
+async function handleGetCredential(domain, requestId, pageUrl, username) {
   debugLog('[SentinelPass Background] handleGetCredential called for domain:', domain);
 
   try {
@@ -550,7 +602,9 @@ async function handleGetCredential(domain, requestId, pageUrl) {
       request_id: requestId,
       // WBS-711: browser-provided page URL; the daemon scheme-validates it
       // and default-denies unsafe origins.
-      page_url: pageUrl || undefined
+      page_url: pageUrl || undefined,
+      // WBS-712/715: exact-username disambiguator (popup per-row Pass).
+      username: username || undefined
     });
 
     debugLog('[SentinelPass Background] Got credential response from native host:', redactForLog(response));
@@ -962,7 +1016,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sender.url,
       isPopupSender(sender)
     );
-    handleGetCredential(request.domain, request.request_id, pageUrl)
+    const username = typeof request.username === 'string' ? request.username : undefined;
+    handleGetCredential(request.domain, request.request_id, pageUrl, username)
           .then(response => {
             debugLog('[SentinelPass Background] Get credential response:', redactForLog(response));
             sendResponse(response);
@@ -1053,7 +1108,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleSaveCredential(request.data)
+    handleSaveCredential(withSenderProvenance(request.data, sender))
           .then(response => {
             debugLog('[SentinelPass Background] Save credential response:', redactForLog(response));
             sendResponse(response);
@@ -1139,6 +1194,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
 
+  if (request.type === 'inline_save_confirm') {
+    // WBS-716 review fix F1: the inline prompt confirms by one-time id;
+    // the password never travels to (or from) the content script.
+    const promptId = typeof request.promptId === 'string' ? request.promptId : '';
+    if (!promptId) {
+      sendResponse({ success: false, error: 'Missing prompt id' });
+      return true;
+    }
+    void (async () => {
+      const storageKey = `${PENDING_INLINE_PREFIX}${promptId}`;
+      const stored = await sessionGet([storageKey]);
+      const payload = stored?.[storageKey];
+      if (!payload || isSessionSecretExpired(storageKey, payload, Date.now())) {
+        await sessionRemove([storageKey]);
+        sendResponse({ success: false, error: 'Save prompt expired' });
+        return;
+      }
+      try {
+        const result = await handleSaveCredential({
+          ...payload,
+          save_trigger: 'inline_prompt_confirm'
+        });
+        sendResponse(result);
+      } finally {
+        await sessionRemove([storageKey]);
+      }
+    })();
+    return true;
+  }
+
   if (request.type === 'capture_pending_login') {
     // WBS-716: the content script hands the captured submission over; the
     // plaintext now lives ONLY in the (trusted) background worker's session
@@ -1154,7 +1239,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return true;
     }
     const stamped = {
-      ...request.data,
+      ...withSenderProvenance(request.data, sender),
       expiresAt: sessionSecretExpiry(PENDING_CREDENTIAL_KEY, Date.now())
     };
     void sessionSet({ [PENDING_CREDENTIAL_KEY]: stamped }).then(() => {
@@ -1265,7 +1350,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'request_save_notification') {
     debugLog('[SentinelPass Background] Handling request_save_notification');
-    handleSaveNotification(request.data, sender)
+    handleSaveNotification(withSenderProvenance(request.data, sender), sender)
           .then(result => {
               debugLog('[SentinelPass Background] Save notification result:', result);
               sendResponse({ success: result });

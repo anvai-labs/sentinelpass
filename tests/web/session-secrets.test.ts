@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   PENDING_CREDENTIAL_KEY,
   PENDING_CREDENTIAL_TTL_MS,
+  PENDING_INLINE_PREFIX,
   PENDING_SAVE_PREFIX,
   PENDING_SAVE_TTL_MS,
   PENDING_UNLOCK_RETRY_KEY,
@@ -17,15 +18,18 @@ describe('session secret registry (WBS-716)', () => {
   it('classifies secret-bearing session keys', () => {
     expect(isSessionSecretKey(PENDING_CREDENTIAL_KEY)).toBe(true);
     expect(isSessionSecretKey(`${PENDING_SAVE_PREFIX}save-password-1`)).toBe(true);
+    expect(isSessionSecretKey(`${PENDING_INLINE_PREFIX}prompt-1`)).toBe(true);
     expect(isSessionSecretKey(PENDING_UNLOCK_RETRY_KEY)).toBe(true);
     expect(isSessionSecretKey('neverSaveDomains')).toBe(false);
     expect(isSessionSecretKey('pendingSaveCredentialX')).toBe(false);
+    expect(isSessionSecretKey('pendingInlinePromptX')).toBe(false);
     expect(isSessionSecretKey('debugModeEnabled')).toBe(false);
   });
 
   it('bounds every secret key with a TTL and stamps expiries', () => {
     expect(sessionSecretTtlMs(PENDING_CREDENTIAL_KEY)).toBe(PENDING_CREDENTIAL_TTL_MS);
     expect(sessionSecretTtlMs(`${PENDING_SAVE_PREFIX}x`)).toBe(PENDING_SAVE_TTL_MS);
+    expect(sessionSecretTtlMs(`${PENDING_INLINE_PREFIX}x`)).toBe(PENDING_SAVE_TTL_MS);
     expect(sessionSecretTtlMs(PENDING_UNLOCK_RETRY_KEY)).toBe(PENDING_UNLOCK_RETRY_TTL_MS);
     expect(sessionSecretTtlMs('neverSaveDomains')).toBeNull();
 

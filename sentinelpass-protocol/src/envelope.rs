@@ -76,6 +76,7 @@ mod tests {
             message: IpcMessage::GetCredential {
                 domain: "example.com".to_string(),
                 page_url: None,
+                username: None,
             },
         };
 

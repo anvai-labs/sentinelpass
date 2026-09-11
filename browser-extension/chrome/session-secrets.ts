@@ -26,6 +26,11 @@ export const PENDING_CREDENTIAL_KEY = 'pendingCredential';
 /** Prefix for per-notification pending save payloads. */
 export const PENDING_SAVE_PREFIX = 'pendingSaveCredential:';
 
+/** Prefix for inline-prompt payloads held by the background (WBS-716 review
+ * fix F1: the content script's inline prompt references one of these by id
+ * and NEVER receives the password itself). */
+export const PENDING_INLINE_PREFIX = 'pendingInlinePrompt:';
+
 /** Session-storage key holding a locked-vault save retry. */
 export const PENDING_UNLOCK_RETRY_KEY = 'pendingUnlockRetry';
 
@@ -46,7 +51,8 @@ export function isSessionSecretKey(key: string): boolean {
   return (
     key === PENDING_CREDENTIAL_KEY ||
     key === PENDING_UNLOCK_RETRY_KEY ||
-    key.startsWith(PENDING_SAVE_PREFIX)
+    key.startsWith(PENDING_SAVE_PREFIX) ||
+    key.startsWith(PENDING_INLINE_PREFIX)
   );
 }
 
@@ -58,7 +64,7 @@ export function sessionSecretTtlMs(key: string): number | null {
   if (key === PENDING_CREDENTIAL_KEY) {
     return PENDING_CREDENTIAL_TTL_MS;
   }
-  if (key.startsWith(PENDING_SAVE_PREFIX)) {
+  if (key.startsWith(PENDING_SAVE_PREFIX) || key.startsWith(PENDING_INLINE_PREFIX)) {
     return PENDING_SAVE_TTL_MS;
   }
   if (key === PENDING_UNLOCK_RETRY_KEY) {

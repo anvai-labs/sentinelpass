@@ -46,6 +46,9 @@ pub struct NativeMessage {
     /// WBS-712: requested permission state for grant_site_permission.
     #[serde(default)]
     pub allow_insecure: Option<bool>,
+    /// WBS-712/715: exact-username disambiguator for get_credential.
+    #[serde(default)]
+    pub username: Option<String>,
     #[serde(default)]
     pub data: Option<CredentialData>,
 }
@@ -128,6 +131,7 @@ impl NativeMessagingHost {
                     IpcMessage::GetCredential {
                         domain,
                         page_url: message.page_url.clone(),
+                        username: message.username.clone(),
                     }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;
@@ -139,6 +143,7 @@ impl NativeMessagingHost {
                     IpcMessage::GetCredential {
                         domain,
                         page_url: message.page_url.clone(),
+                        username: message.username.clone(),
                     }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;

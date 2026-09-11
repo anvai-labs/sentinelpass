@@ -23,6 +23,10 @@
 export const PENDING_CREDENTIAL_KEY = 'pendingCredential';
 /** Prefix for per-notification pending save payloads. */
 export const PENDING_SAVE_PREFIX = 'pendingSaveCredential:';
+/** Prefix for inline-prompt payloads held by the background (WBS-716 review
+ * fix F1: the content script's inline prompt references one of these by id
+ * and NEVER receives the password itself). */
+export const PENDING_INLINE_PREFIX = 'pendingInlinePrompt:';
 /** Session-storage key holding a locked-vault save retry. */
 export const PENDING_UNLOCK_RETRY_KEY = 'pendingUnlockRetry';
 /** How long a captured pending login may live (the 2FA-page window). */
@@ -38,7 +42,8 @@ export const PENDING_UNLOCK_RETRY_TTL_MS = 2 * 60_000;
 export function isSessionSecretKey(key) {
     return (key === PENDING_CREDENTIAL_KEY ||
         key === PENDING_UNLOCK_RETRY_KEY ||
-        key.startsWith(PENDING_SAVE_PREFIX));
+        key.startsWith(PENDING_SAVE_PREFIX) ||
+        key.startsWith(PENDING_INLINE_PREFIX));
 }
 /**
  * The bounded lifetime for a session-secret key, in milliseconds.
@@ -48,7 +53,7 @@ export function sessionSecretTtlMs(key) {
     if (key === PENDING_CREDENTIAL_KEY) {
         return PENDING_CREDENTIAL_TTL_MS;
     }
-    if (key.startsWith(PENDING_SAVE_PREFIX)) {
+    if (key.startsWith(PENDING_SAVE_PREFIX) || key.startsWith(PENDING_INLINE_PREFIX)) {
         return PENDING_SAVE_TTL_MS;
     }
     if (key === PENDING_UNLOCK_RETRY_KEY) {

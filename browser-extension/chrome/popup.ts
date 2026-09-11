@@ -1,5 +1,7 @@
 // Popup script for SentinelPass extension
 
+import { normalizeDomainForPolicy } from './save-heuristics.js';
+
 const CLIPBOARD_CLEAR_TIMEOUT_MS = 10_000;
 
 interface CredentialItem {
@@ -155,7 +157,7 @@ function renderCredentials(credentials: CredentialItem[]) {
     copyPassBtn.className = 'btn-copy';
     copyPassBtn.textContent = 'Pass';
     copyPassBtn.title = 'Copy password';
-    copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain));
+    copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain, cred.username));
 
     actions.appendChild(copyUserBtn);
     actions.appendChild(copyPassBtn);
@@ -166,16 +168,22 @@ function renderCredentials(credentials: CredentialItem[]) {
 }
 
 // Fetch a credential's password at copy-time to avoid holding it in memory.
-async function fetchAndCopyPassword(domain: string) {
+// The username disambiguates when the daemon's tab-host lookup matches
+// several accounts (WBS-712 review fix F3) — delivery is still bound to the
+// validated tab host, so only rows FOR THIS SITE are addressable.
+async function fetchAndCopyPassword(domain: string, username: string) {
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'get_credential',
       domain,
       request_id: generateUUID(),
       page_url: currentTabUrl,
+      username,
     });
     if (response?.success && response.data?.password) {
       await copyText(response.data.password, 'Password copied');
+    } else if (response?.error === 'vault_locked' || response?.unlocked === false) {
+      showNotification('Vault is locked', 'error');
     } else {
       showNotification('Could not retrieve password', 'error');
     }
@@ -337,9 +345,10 @@ async function refreshSiteAccess() {
     const response = await chrome.runtime.sendMessage({ type: 'list_site_permissions' });
     renderSiteGrants(response?.permissions ?? []);
     if (httpBtn) {
+      const normalizedCurrent = normalizeDomainForPolicy(currentDomain);
       const grantedForSite =
-        currentDomain &&
-        (response?.permissions ?? []).some((p: { host: string }) => p.host === currentDomain);
+        normalizedCurrent &&
+        (response?.permissions ?? []).some((p: { host: string }) => p.host === normalizedCurrent);
       httpBtn.textContent = grantedForSite ? 'Revoke' : 'Allow';
     }
   } catch {

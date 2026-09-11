@@ -54,6 +54,31 @@ pub fn default_store_path() -> PathBuf {
     crate::platform::get_config_dir().join("site_permissions.json")
 }
 
+/// Normalize a grant/check host EXACTLY the way the autofill gate's URL
+/// parse does: the gate sees punycoded IDN hosts (special-scheme WHATWG
+/// parsing), while bare `normalize_host`'s non-special dummy scheme does
+/// not IDNA-encode. Parsing behind `https://` here keeps grant storage and
+/// gate lookups in the same host alphabet (adversarial review F9).
+fn normalize_grant_host(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let candidate = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    match url::Url::parse(&candidate) {
+        Ok(parsed) if parsed.scheme() == "https" || parsed.scheme() == "http" => {
+            let host = parsed.host_str()?.trim();
+            if host.is_empty() {
+                None
+            } else {
+                crate::domain::normalize_host(host)
+            }
+        }
+        _ => crate::domain::normalize_host(trimmed),
+    }
+}
+
 impl SitePermissionStore {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         match std::fs::read(path) {
@@ -70,7 +95,18 @@ impl SitePermissionStore {
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
-        std::fs::write(path, json).map_err(PasswordManagerError::Io)?;
+        // Owner-only FROM BIRTH (adversarial review F6): write through the
+        // platform's owner-only creator (symlink/regular-file checks, 0600
+        // at open) so a first grant never lands umask-loose even for a
+        // moment; the mode repair below remains for pre-existing files.
+        let mut file = crate::platform::create_owner_only_file(path).map_err(|e| {
+            PasswordManagerError::from(DatabaseError::FileIo(format!(
+                "failed to open site permission store owner-only: {e}"
+            )))
+        })?;
+        use std::io::Write;
+        file.write_all(&json).map_err(PasswordManagerError::Io)?;
+        drop(file);
         crate::platform::set_owner_only_mode(path, false).map_err(|e| {
             PasswordManagerError::from(DatabaseError::FileIo(format!(
                 "failed to tighten site permission store mode: {e}"
@@ -82,7 +118,7 @@ impl SitePermissionStore {
     /// Whether plain-HTTP autofill is explicitly granted for `host`.
     /// Normalization failure or normalization mismatch denies.
     pub fn allows_insecure(&self, host: &str) -> bool {
-        let Some(normalized) = crate::domain::normalize_host(host) else {
+        let Some(normalized) = normalize_grant_host(host) else {
             return false;
         };
         self.permissions
@@ -93,7 +129,7 @@ impl SitePermissionStore {
     /// Grant (or re-confirm) plain-HTTP autofill for `host`. Returns false
     /// when the host could not be normalized (refused — fail-closed).
     pub fn grant_insecure(&mut self, path: &Path, host: &str) -> Result<bool> {
-        let Some(normalized) = crate::domain::normalize_host(host) else {
+        let Some(normalized) = normalize_grant_host(host) else {
             return Ok(false);
         };
         let now = chrono::Utc::now().timestamp();
@@ -114,7 +150,7 @@ impl SitePermissionStore {
 
     /// Revoke any grant for `host`. Returns whether an entry was removed.
     pub fn revoke(&mut self, path: &Path, host: &str) -> Result<bool> {
-        let Some(normalized) = crate::domain::normalize_host(host) else {
+        let Some(normalized) = normalize_grant_host(host) else {
             return Ok(false);
         };
         let before = self.permissions.len();

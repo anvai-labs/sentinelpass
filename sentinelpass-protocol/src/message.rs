@@ -37,6 +37,11 @@ pub enum IpcMessage {
         domain: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         page_url: Option<String>,
+        /// WBS-712/715 disambiguation: exact (case-insensitive) username
+        /// filter applied AFTER the domain match, so a multi-credential
+        /// site can request one account (popup "Pass" per row).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
     },
     GetExternalSecret {
         client_id: String,
@@ -279,6 +284,7 @@ mod tests {
             IpcMessage::GetCredential {
                 domain: "example.com".to_string(),
                 page_url: Some("https://example.com/login".to_string()),
+                username: None,
             },
             IpcMessage::GetExternalSecret {
                 client_id: "victor".to_string(),
@@ -305,14 +311,17 @@ mod tests {
                     IpcMessage::GetCredential {
                         domain: d1,
                         page_url: u1,
+                        username: n1,
                     },
                     IpcMessage::GetCredential {
                         domain: d2,
                         page_url: u2,
+                        username: n2,
                     },
                 ) => {
                     assert_eq!(d1, d2);
                     assert_eq!(u1, u2);
+                    assert_eq!(n1, n2);
                 }
                 (
                     IpcMessage::GetExternalSecret {
@@ -416,9 +425,14 @@ mod tests {
         let pre711_request = r#"{"GetCredential": {"domain": "example.com"}}"#;
         let deserialized: IpcMessage = serde_json::from_str(pre711_request).unwrap();
         match deserialized {
-            IpcMessage::GetCredential { domain, page_url } => {
+            IpcMessage::GetCredential {
+                domain,
+                page_url,
+                username,
+            } => {
                 assert_eq!(domain, "example.com");
                 assert_eq!(page_url, None);
+                assert_eq!(username, None);
             }
             _ => panic!("Wrong request type"),
         }

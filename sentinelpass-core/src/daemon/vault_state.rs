@@ -176,6 +176,23 @@ impl DaemonVault {
     /// for the matched rows). Falls back to a full entry scan when no
     /// domain mappings exist (e.g. entries created before sync was enabled).
     pub async fn get_credential(&self, domain: &str) -> Result<Option<CredentialResponse>> {
+        self.get_credential_for_username(domain, None).await
+    }
+
+    /// Credential delivery optionally narrowed to ONE exact username
+    /// (case-insensitive) — the disambiguator for multi-credential sites
+    /// (WBS-712 popup "Pass", WBS-715 chooser). The domain match semantics
+    /// are unchanged; the username filter applies AFTER the domain match.
+    pub async fn get_credential_for_username(
+        &self,
+        domain: &str,
+        username: Option<&str>,
+    ) -> Result<Option<CredentialResponse>> {
+        let username_matches = |candidate: &str| match username {
+            None => true,
+            Some(want) => want.trim().eq_ignore_ascii_case(candidate.trim()),
+        };
+
         let vault_guard = self.vault.lock().await;
         let vault = match vault_guard.as_ref() {
             Some(v) => v,
@@ -186,10 +203,9 @@ impl DaemonVault {
         // Fast path: indexed lookup via domain_mappings
         if let Some(host) = normalize_host(domain) {
             let indexed = vault.find_entries_by_domain(&host)?;
-            if let Some(entry) = indexed
-                .into_iter()
-                .find(|entry| entry.credential_type.is_retrievable_secret())
-            {
+            if let Some(entry) = indexed.into_iter().find(|entry| {
+                entry.credential_type.is_retrievable_secret() && username_matches(&entry.username)
+            }) {
                 return Ok(Some(CredentialResponse {
                     username: entry.username,
                     password: entry.password.as_str().to_string(),
@@ -206,7 +222,7 @@ impl DaemonVault {
             }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
                 if let Some(ref url) = entry.url {
-                    if domains_match(domain, url) {
+                    if domains_match(domain, url) && username_matches(&entry.username) {
                         return Ok(Some(CredentialResponse {
                             username: entry.username,
                             password: entry.password.as_str().to_string(),

@@ -294,19 +294,23 @@ function init() {
       fillCredentials(request.username, request.password);
     }
     if (request.type === 'show_inline_save_prompt') {
+      // WBS-716 review fix F1: this prompt is a REFERENCE to a payload held
+      // by the background worker (promptId). No password crosses this
+      // boundary in either direction; confirming sends the id, and the
+      // background performs the save itself.
       const payload = request.data || {};
       const username = payload.username || '';
-      const password = payload.password || '';
       const domain = payload.domain || window.location.hostname;
       const sourceUrl = payload.submitted_url || payload.url || window.location.href;
+      const promptId = typeof payload.promptId === 'string' ? payload.promptId : '';
 
-      if (!password) {
-        sendResponse({ success: false, error: 'Missing password for inline save prompt' });
+      if (!promptId) {
+        sendResponse({ success: false, error: 'Missing prompt id for inline save prompt' });
         return false;
       }
 
-      infoLog('Showing inline save prompt fallback');
-      showSavePrompt(username, domain, password, sourceUrl);
+      infoLog('Showing inline save prompt fallback (background-held payload)');
+      showSavePrompt(username, domain, null, sourceUrl, promptId);
       sendResponse({ success: true });
       return true;
     }
@@ -544,8 +548,10 @@ function isNewPasswordForm(form, passwordField) {
   return isNewPassword;
 }
 
-// Show prompt to save credentials
-function showSavePrompt(username, domain, password, sourceUrl = window.location.href) {
+// Show prompt to save credentials. `password` is the PAGE's own field
+// value for the direct (new-password form) path; background-driven prompts
+// pass null + promptId and confirm via the background (review F1).
+function showSavePrompt(username, domain, password, sourceUrl = window.location.href, promptId = null) {
   void (async () => {
     if (await shouldSuppressSavePrompt(domain)) {
       debugLog('[SentinelPass] Suppressing save prompt due to never-save policy');
@@ -797,7 +803,11 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     reportOnce('save_clicked', {
       usernamePresent: Boolean(username)
     });
-    saveCredentials(username, password, domain, sourceUrl);
+    if (promptId) {
+      void confirmInlineSave(promptId);
+    } else if (password) {
+      saveCredentials(username, password, domain, sourceUrl);
+    }
     prompt.remove();
   });
 
@@ -836,6 +846,35 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
       }
     }, 30000);
   })();
+}
+
+// Confirm a background-held inline prompt by id (review F1): the save is
+// performed entirely in the background worker; we only surface the result.
+async function confirmInlineSave(promptId) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'inline_save_confirm',
+      promptId
+    });
+
+    if (response?.success) {
+      if (response.unchanged) {
+        showNotification('Password already up to date', 'info');
+      } else if (response.insecure_http) {
+        showNotification('Password saved, but this site used unencrypted HTTP', 'warning');
+      } else {
+        showNotification('Password saved successfully!', 'success');
+      }
+    } else if (response?.code === 'vault_locked') {
+      showNotification('Vault locked. Unlock SentinelPass app, then submit the login again.', 'warning');
+    } else {
+      console.error('[SentinelPass] Inline save confirm failed:', response?.error);
+      showNotification('Failed to save: ' + (response?.error || 'Unknown error'), 'error');
+    }
+  } catch (error) {
+    console.error('[SentinelPass] Inline save confirm error:', error);
+    showNotification('Failed to save password', 'error');
+  }
 }
 
 // Save credentials to vault via native messaging

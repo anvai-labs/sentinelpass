@@ -1302,7 +1302,15 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   scripts' in-memory autofill context (also cleared on `pagehide`).
   Evidence: registry unit suite (classification, TTL bounds, expiry,
   fail-closed malformed stamps, sweep list); typecheck + vitest green;
-  artifacts rebuilt byte-parity.
+  artifacts rebuilt byte-parity. Adversarial-review round 1 fixes: the
+  background-driven inline prompt no longer ships the payload (incl. the
+  password) to the content script — it holds it under a TTL-stamped
+  one-time `pendingInlinePrompt:<id>` key and the prompt confirms by id
+  (`inline_save_confirm`); content-script save/notification/capture
+  payloads get their URLs overwritten with the browser sender URL
+  (provenance enforcement, not convention); the minute alarm now also
+  purges + scrubs when the vault was locked OUTSIDE the extension (daemon
+  auto-lock/CLI/UI have no push channel).
 - **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08. Est 3d.
 - **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.

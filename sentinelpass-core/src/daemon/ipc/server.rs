@@ -60,6 +60,10 @@ pub struct IpcServer {
     /// WBS-712: per-site autofill permission store (default location;
     /// injectable for tests).
     site_permissions_path: PathBuf,
+    /// WBS-712 (adversarial review F7): serializes grant/revoke/list
+    /// read-modify-write cycles so a concurrent revoke cannot be
+    /// resurrected by an in-flight grant (last-writer-wins).
+    site_permissions_lock: std::sync::Mutex<()>,
 }
 
 impl IpcServer {
@@ -110,6 +114,7 @@ impl IpcServer {
             client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
             capability_store_path: crate::daemon::capabilities::default_store_path(),
             site_permissions_path: crate::daemon::site_permissions::default_store_path(),
+            site_permissions_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -766,7 +771,11 @@ impl IpcServer {
                     ),
                 }
             }
-            IpcMessage::GetCredential { domain, page_url } => {
+            IpcMessage::GetCredential {
+                domain,
+                page_url,
+                username,
+            } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -819,7 +828,11 @@ impl IpcServer {
                     }
                 };
 
-                match self.vault.get_credential(&validated_host).await {
+                match self
+                    .vault
+                    .get_credential_for_username(&validated_host, username.as_deref())
+                    .await
+                {
                     Ok(Some(cred)) => {
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
@@ -1901,6 +1914,7 @@ mod autofill_origin_gate_tests {
                 IpcMessage::GetCredential {
                     domain: "example.com".to_string(),
                     page_url: Some("https://example.com/login".to_string()),
+                    username: None,
                 },
                 Some(h.capability.clone()),
             ),
@@ -1936,6 +1950,7 @@ mod autofill_origin_gate_tests {
                     // the delivery must be example.com's entry instead.
                     domain: "github.com".to_string(),
                     page_url: Some("https://example.com/login".to_string()),
+                    username: None,
                 },
                 Some(h.capability.clone()),
             ),
@@ -1972,6 +1987,7 @@ mod autofill_origin_gate_tests {
                 IpcMessage::GetCredential {
                     domain: "example.com".to_string(),
                     page_url: Some("http://example.com/login".to_string()),
+                    username: None,
                 },
                 Some(h.capability.clone()),
             ),
@@ -2005,6 +2021,7 @@ mod autofill_origin_gate_tests {
                     IpcMessage::GetCredential {
                         domain: "example.com".to_string(),
                         page_url,
+                        username: None,
                     },
                     Some(h.capability.clone()),
                 ),
@@ -2115,6 +2132,7 @@ mod autofill_origin_gate_tests {
                 IpcMessage::GetCredential {
                     domain: "example.com".to_string(),
                     page_url: Some("http://example.com/login".to_string()),
+                    username: None,
                 },
                 Some(h.capability.clone()),
             ),
@@ -2144,6 +2162,7 @@ mod autofill_origin_gate_tests {
                     IpcMessage::GetCredential {
                         domain: "example.com".to_string(),
                         page_url: Some("http://example.com/login".to_string()),
+                        username: None,
                     },
                     Some(harness.capability.clone()),
                 ),
@@ -2197,6 +2216,7 @@ mod autofill_origin_gate_tests {
                 IpcMessage::GetCredential {
                     domain: "github.com".to_string(),
                     page_url: Some("http://github.com/login".to_string()),
+                    username: None,
                 },
                 Some(h.capability.clone()),
             ),
@@ -2244,6 +2264,62 @@ mod autofill_origin_gate_tests {
         match list {
             IpcMessage::ListSitePermissionsResponse { permissions, .. } => {
                 assert!(permissions.is_empty());
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    /// A username disambiguator narrows delivery to the exact account
+    /// (WBS-712 popup "Pass" per row / WBS-715 chooser): the vault holds
+    /// user@example.com AND gh@example.com for the SAME tab host only in
+    /// the suffix-match sense, so this test uses two entries on one host.
+    #[test]
+    fn username_filter_selects_the_exact_account() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // example.com has exactly one entry; asking for another username
+        // must NOT return it.
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    domain: "example.com".to_string(),
+                    page_url: Some("https://example.com/login".to_string()),
+                    username: Some("nobody@example.com".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match response {
+            IpcMessage::GetCredentialResponse { username, .. } => {
+                assert_eq!(username, None, "non-matching username must not deliver");
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        // The exact (case-insensitive) username delivers its own row.
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    domain: "example.com".to_string(),
+                    page_url: Some("https://example.com/login".to_string()),
+                    username: Some("  User@Example.COM ".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match response {
+            IpcMessage::GetCredentialResponse {
+                username,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(denied_reason, None);
+                assert_eq!(username.as_deref(), Some("user@example.com"));
             }
             other => panic!("wrong response: {other:?}"),
         }

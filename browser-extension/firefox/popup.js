@@ -1,4 +1,5 @@
 // Popup script for SentinelPass extension
+import { normalizeDomainForPolicy } from './save-heuristics.js';
 const CLIPBOARD_CLEAR_TIMEOUT_MS = 10_000;
 let currentDomain = '';
 let currentTabUrl = '';
@@ -124,7 +125,7 @@ function renderCredentials(credentials) {
         copyPassBtn.className = 'btn-copy';
         copyPassBtn.textContent = 'Pass';
         copyPassBtn.title = 'Copy password';
-        copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain));
+        copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain, cred.username));
         actions.appendChild(copyUserBtn);
         actions.appendChild(copyPassBtn);
         item.appendChild(info);
@@ -133,16 +134,23 @@ function renderCredentials(credentials) {
     }
 }
 // Fetch a credential's password at copy-time to avoid holding it in memory.
-async function fetchAndCopyPassword(domain) {
+// The username disambiguates when the daemon's tab-host lookup matches
+// several accounts (WBS-712 review fix F3) — delivery is still bound to the
+// validated tab host, so only rows FOR THIS SITE are addressable.
+async function fetchAndCopyPassword(domain, username) {
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'get_credential',
             domain,
             request_id: generateUUID(),
             page_url: currentTabUrl,
+            username,
         });
         if (response?.success && response.data?.password) {
             await copyText(response.data.password, 'Password copied');
+        }
+        else if (response?.error === 'vault_locked' || response?.unlocked === false) {
+            showNotification('Vault is locked', 'error');
         }
         else {
             showNotification('Could not retrieve password', 'error');
@@ -291,8 +299,9 @@ async function refreshSiteAccess() {
         const response = await chrome.runtime.sendMessage({ type: 'list_site_permissions' });
         renderSiteGrants(response?.permissions ?? []);
         if (httpBtn) {
-            const grantedForSite = currentDomain &&
-                (response?.permissions ?? []).some((p) => p.host === currentDomain);
+            const normalizedCurrent = normalizeDomainForPolicy(currentDomain);
+            const grantedForSite = normalizedCurrent &&
+                (response?.permissions ?? []).some((p) => p.host === normalizedCurrent);
             httpBtn.textContent = grantedForSite ? 'Revoke' : 'Allow';
         }
     }
@@ -437,4 +446,3 @@ function generateUUID() {
         return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
     });
 }
-export {};

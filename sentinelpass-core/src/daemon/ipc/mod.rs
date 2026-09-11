@@ -867,6 +867,7 @@ mod tests {
                     .send(IpcMessage::GetCredential {
                         domain: "example.com".to_string(),
                         page_url: Some("https://example.com/login".to_string()),
+                        username: None,
                     })
                     .await
                     .unwrap()
