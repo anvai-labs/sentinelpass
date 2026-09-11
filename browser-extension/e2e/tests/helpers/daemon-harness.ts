@@ -305,6 +305,14 @@ export function grantInsecureViaHost(homeDir: string, host: string): void {
       env: {
         ...process.env,
         HOME: homeDir,
+        // FULL XDG family — matching isolatedEnv. On Linux the dirs crate
+        // honors XDG_CONFIG_HOME over HOME; without it the host resolves
+        // its config/token dir OUTSIDE the isolated HOME and fails the
+        // daemon handshake (CI-only; macOS ignores XDG_CONFIG_HOME).
+        XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+        XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+        XDG_CACHE_HOME: path.join(homeDir, '.cache'),
+        XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
         XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
       },
       timeout: 30_000,
@@ -318,9 +326,7 @@ export function grantInsecureViaHost(homeDir: string, host: string): void {
     !combined.includes('"type":"credential_response"') ||
     !combined.includes('"success":true')
   ) {
-    throw new Error(
-      `host grant failed: ${combined.slice(0, 4000)}\n--- daemon log ---\n${daemonLog.join('')}`
-    );
+    throw new Error(`host grant failed: ${combined.slice(0, 4000)}`);
   }
 }
 
