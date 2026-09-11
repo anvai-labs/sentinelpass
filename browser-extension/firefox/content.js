@@ -248,6 +248,7 @@
   var NEVER_SAVE_DOMAINS_KEY = "neverSaveDomains";
   var SAVE_NOTIFICATION_REQUEST_DEDUP_WINDOW_MS = 4e3;
   var AUTOFILL_SUBMISSION_WINDOW_MS = 10 * 60 * 1e3;
+  var mousedownInstrumentedForms = /* @__PURE__ */ new WeakSet();
   var recentSaveNotificationRequests = /* @__PURE__ */ new Map();
   var lastAutofillContext = null;
   function normalizeUsernameValue(value) {
@@ -620,7 +621,6 @@
     }
     return pool[pool.length - 1];
   }
-  var mousedownInstrumentedForms = /* @__PURE__ */ new WeakSet();
   function isNewPasswordForm(form, passwordField) {
     debugLog("[SentinelPass] Checking if new password form...");
     const described = [];

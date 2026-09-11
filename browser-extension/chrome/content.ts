@@ -65,6 +65,12 @@ const SENSITIVE_LOG_KEYS = new Set(['password', 'secret', 'token', 'passphrase']
 const NEVER_SAVE_DOMAINS_KEY = 'neverSaveDomains';
 const SAVE_NOTIFICATION_REQUEST_DEDUP_WINDOW_MS = 4000;
 const AUTOFILL_SUBMISSION_WINDOW_MS = 10 * 60 * 1000;
+// Forms already instrumented for the submit-button mousedown capture (one
+// listener per form, not per field — review F2). Declared BEFORE the
+// bootstrap: the document_idle path runs init() synchronously, and
+// top-level `const` assignments execute in order (a WeakSet declared
+// below the bootstrap was still `undefined` at first use — WBS-719 find).
+const mousedownInstrumentedForms = new WeakSet();
 const recentSaveNotificationRequests = new Map();
 let lastAutofillContext = null;
 
@@ -558,10 +564,6 @@ function selectCaptureTarget(form) {
   }
   return pool[pool.length - 1];
 }
-
-// Forms already instrumented for the submit-button mousedown capture
-// (one listener per form, not per field — review F2).
-const mousedownInstrumentedForms = new WeakSet();
 
 // Detect what a form's password fields mean (WBS-714): the page's own
 // autocomplete attributes are the primary signal — `new-password` marks

@@ -51,15 +51,19 @@ function generateRequestId() {
     }
     return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
-// Returns true when the message was sent from this extension's own popup or options
-// page rather than from a content script embedded in a web page. Popup messages are
-// already authenticated (same extension ID) and have no meaningful "sender domain"
-// to validate against, so domain-context checks must be skipped for them.
+// Returns true when the message was sent from this extension's own popup,
+// options page, or ANY of our own extension pages (they may be opened in a
+// tab — popup-as-tab is a supported pattern and site-access management
+// depends on it) rather than from a content script embedded in a web page.
+// Messages from our own pages are already authenticated (same extension ID,
+// and sender.url reflects the actual sending frame — a web page can never
+// present an extension-page URL), so domain-context checks are skipped.
 function isPopupSender(sender) {
-    // Content scripts always have sender.tab; extension pages (popup, options) do not.
-    // sender.id === chrome.runtime.id is already enforced above, so !sender.tab is
-    // sufficient to identify our own popup/options pages on both Chrome and Firefox.
-    return !sender.tab;
+    if (!sender.tab) {
+        return true;
+    }
+    const ownBaseUrl = chrome.runtime.getURL('');
+    return typeof sender.url === 'string' && sender.url.startsWith(ownBaseUrl);
 }
 // WBS-711 review fix F2: content-script payloads never supply stored or
 // validated URLs — the browser-provided frame URL is authoritative for

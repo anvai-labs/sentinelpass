@@ -54,6 +54,8 @@ export interface HarnessCliResult {
 }
 
 export interface DaemonHarness {
+  /** Register an additional fixture route at runtime (both http + https). */
+  addFixturePage: (page: FixturePage) => void;
   homeDir: string;
   socketPath: string;
   httpBaseUrl: string;
@@ -216,6 +218,11 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
     }
   }
 
+  const fixturePages = pages;
+  const addFixturePage = (page: FixturePage) => {
+    fixturePages.push(page);
+  };
+
   const shutdown = async () => {
     try {
       httpServer.close();
@@ -242,6 +249,7 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
     get daemonLog() {
       return daemonLog.join('');
     },
+    addFixturePage,
     cli,
     shutdown,
   };

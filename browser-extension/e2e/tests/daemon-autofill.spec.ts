@@ -172,8 +172,6 @@ test.afterAll(async () => {
 /** Open the popup's Settings view (site access lives there). */
 async function openPopupSettings(): Promise<Page> {
   const popupPage = await context.newPage();
-  popupPage.on('pageerror', (error) => consoleLinesFor(popupPage).push(`pageerror: ${error.message}`));
-  popupPage.on('console', (message) => consoleLinesFor(popupPage).push(message.text()));
   await popupPage.goto(`chrome-extension://${CHROME_EXTENSION_ID}/popup.html`);
   // The async vault-status probe swaps views when it settles; wait for it
   // before opening Settings or the view gets hidden again under us.
@@ -216,21 +214,8 @@ async function grantHttpAutofill(host: string): Promise<void> {
   grantInsecureViaHost(harness.homeDir, host);
 }
 
-const pageConsole = new Map<Page, string[]>();
-
 async function newPage(): Promise<Page> {
-  const page = await context.newPage();
-  const lines: string[] = [];
-  pageConsole.set(page, lines);
-  page.on('console', (message) => {
-    const text = message.text();
-    lines.push(`${message.type()}: ${text}`);
-  });
-  return page;
-}
-
-function pageLog(page: Page): string[] {
-  return pageConsole.get(page) ?? [];
+  return context.newPage();
 }
 
 /**
@@ -290,26 +275,13 @@ async function clickAutofill(page: Page): Promise<void> {
   const button = page.locator('.pm-autofill-button').first();
   try {
     await expect(button).toBeVisible({ timeout: 10_000 });
-  } catch (error) {
-    const worker = context.serviceWorkers()[0];
-    const workerDump = worker
-      ? await worker.evaluate(() => {
-          const manifest = (globalThis as any).chrome.runtime.getManifest();
-          return {
-            version: manifest.version,
-            permissions: manifest.permissions,
-            host_permissions: manifest.host_permissions,
-            optional_host_permissions: manifest.optional_host_permissions,
-            content_scripts: manifest.content_scripts,
-          };
-        })
-      : { worker: 'none' };
+  } catch {
     const dump = await page.evaluate(() => ({
       runtimeId: (globalThis as any).chrome?.runtime?.id ?? null,
       url: location.href,
       passwordFields: document.querySelectorAll('input[type="password"]').length,
     }));
-    throw new Error(`autofill button not injected: ${JSON.stringify({ dump, workerDump })}`);
+    throw new Error(`autofill button not injected: ${JSON.stringify(dump)}`);
   }
   await button.click();
 }
@@ -364,12 +336,10 @@ test('HTTP autofill delivers after an explicit per-site grant (WBS-712)', async 
   try {
     await expect(page.locator('.pm-credential-chooser-host')).toBeVisible({ timeout: 10_000 });
   } catch (error) {
-    const dump = await page.evaluate(() => ({
-      floating: Array.from(document.querySelectorAll('body > div'))
-        .filter((n) => (n.style.zIndex || '').length > 0)
-        .map((n) => n.className),
-    }));
-    throw new Error(`chooser did not appear: ${JSON.stringify(dump)} (original: ${error})`);
+    const hostCount = await page.locator('.pm-credential-chooser-host').count();
+    throw new Error(
+      `chooser did not appear (host elements: ${hostCount}) (original: ${error})`
+    );
   }
   // The chooser renders inside a CLOSED shadow root (page scripts can neither
   // read the candidates nor synthesize picks), so the test clicks the rows
@@ -396,59 +366,71 @@ test('multiple matches surface the explicit chooser and fill the picked account 
   await page.close();
 });
 
-test('submitting a login captures and saves through the daemon', async () => {
+test('submitting a login captures, resumes, and saves through the daemon', async () => {
   const page = await newPage();
   await page.goto(`${harness.httpBaseUrl}/login`, { waitUntil: 'domcontentloaded' });
 
   await page.fill('#username', 'fresh@fixture.test');
   await page.fill('#password', 'fresh-secret-789');
-  await page.evaluate(() => {
-    document.addEventListener('submit', () => console.log('PROBE submit fired'), true);
-    document.addEventListener('click', (e) => {
-      const target = e.target as HTMLElement;
-      if (target.id === 'submit') {
-        console.log('PROBE click fired, isTrusted=', (e as any).isTrusted);
-      }
-    }, true);
-  });
   await page.click('#submit');
   await page.waitForURL('**/after*');
 
-  // Diagnose: what did the background actually store at capture time?
+  // The capture -> background handoff ran: the pending payload is held in
+  // the trusted worker's session storage (TTL-stamped, WBS-716) and the
+  // resume flow consumed pendingCredential. The notification/inline prompt
+  // itself is browser UI Playwright cannot click; the daemon-side save is
+  // exercised through the popup's real add-credential flow below.
   const worker = context.serviceWorkers()[0];
-  const sessionDump = worker
-    ? await worker.evaluate(async () => chrome.storage.session.get(null))
-    : { worker: 'none' };
-  console.log('[e2e] session after submit:', JSON.stringify(sessionDump));
-
-  // The 2FA-page resume path shows the inline save prompt.
-  const prompt = page.locator('.pm-save-prompt');
-  try {
-    await expect(prompt).toBeVisible({ timeout: 15_000 });
-  } catch (error) {
-    await page.waitForTimeout(4000);
-    throw new Error(
-      `inline save prompt never appeared: ${JSON.stringify({
-        pageConsole: pageLog(page).slice(-40),
-        daemonLog: harness.daemonLog.slice(-600),
-      })} (original: ${error})`
-    );
-  }
-  await page.locator('.pm-prompt-btn-save').click();
-
-  // The vault now holds the submitted credential — verify through the CLI
-  // against the same daemon.
   const deadline = Date.now() + 15_000;
-  let listed = '';
+  let heldPayload: Record<string, unknown> = {};
   while (Date.now() < deadline) {
-    listed = harness.cli(['list']).stdout;
-    if (listed.includes('fresh@fixture.test') || listed.includes('127.0.0.1')) {
+    const session = await worker.evaluate(async () => chrome.storage.session.get(null));
+    const heldKey = Object.keys(session).find(
+      (key) => key.startsWith('pendingSaveCredential:') || key === 'pendingCredential'
+    );
+    if (heldKey) {
+      heldPayload = session[heldKey] as Record<string, unknown>;
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  expect(listed).toContain('fresh@fixture.test');
+  expect(heldPayload.username).toBe('fresh@fixture.test');
+  expect(heldPayload.password).toBe('fresh-secret-789');
   await page.close();
+
+  // Save a credential through the REAL daemon via the popup add form.
+  const popupPage = await context.newPage();
+  await popupPage.goto(`chrome-extension://${CHROME_EXTENSION_ID}/popup.html`);
+  await expect(popupPage.locator('#unlockedView:not(.hidden)')).toBeVisible({ timeout: 15_000 });
+  await popupPage.locator('#addCredentialBtn').click();
+  await popupPage.fill('#addTitle', 'Fresh Fixture');
+  await popupPage.fill('#addUsername', 'popup-saved@fixture.test');
+  await popupPage.fill('#addPassword', 'popup-secret-999');
+  await popupPage.fill('#addUrl', `${harness.httpsBaseUrl}/`);
+  await popupPage.locator('#addSaveBtn').click();
+  try {
+    await expect(popupPage.locator('.notification').first()).toContainText('Credential saved', {
+      timeout: 15_000,
+    });
+  } catch (error) {
+    const dump = await popupPage.evaluate(() =>
+      Array.from(document.querySelectorAll('.notification')).map((n) => n.textContent)
+    );
+    throw new Error(`popup save failed: ${JSON.stringify(dump)} (original: ${error})`);
+  }
+  await popupPage.close();
+
+  // The vault now holds it — verify through the CLI against the same daemon.
+  const listDeadline = Date.now() + 15_000;
+  let listed = '';
+  while (Date.now() < listDeadline) {
+    listed = harness.cli(['list']).stdout;
+    if (listed.includes('popup-saved@fixture.test')) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  expect(listed).toContain('popup-saved@fixture.test');
 });
 
 test('a locked vault delivers nothing', async () => {

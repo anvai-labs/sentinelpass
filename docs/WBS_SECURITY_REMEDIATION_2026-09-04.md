@@ -1348,7 +1348,21 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   (provenance enforcement, not convention); the minute alarm now also
   purges + scrubs when the vault was locked OUTSIDE the extension (daemon
   auto-lock/CLI/UI have no push channel).
-- **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08. Est 3d.
+- **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08.
+  Est 3d.
+  **Status:** Done (2026-09-10/11, Phase 5 remainder) — ONE pipeline and ONE
+  source set. `scripts/build-extension.mjs` compiles the shared TypeScript
+  sources once (repo-local tsc via `tsconfig.extension.json`; the content
+  script is esbuild-BUNDLED into a single classic IIFE — content scripts are
+  classic scripts, and the ES `import` syntax the previous artifacts carried
+  made injection fail silently; discovered by the 719 suite) and copies the
+  artifacts byte-identically into chrome/ and firefox/. The firefox/*.ts
+  copies are DELETED (single source; the stale pre-hardening copies were a
+  live re-introduction trap). Gate: `tests/web/extension-pipeline.test.ts`
+  asserts no per-target .ts sources, byte-parity of every artifact across
+  targets, and byte-exact reproduction through a fresh pipeline build.
+  Verified: the pipeline reproduces the previously checked-in artifacts
+  byte-for-byte (zero diff at introduction).
 - **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.
   Est 4d.
