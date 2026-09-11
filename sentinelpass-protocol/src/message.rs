@@ -25,8 +25,18 @@ impl ExternalSecretField {
 /// IPC message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IpcMessage {
+    /// Browser-surface credential delivery (WBS-711). `page_url` is the
+    /// full URL of the requesting page as reported by the browser (the
+    /// native host forwards the validated sender URL, never a content-
+    /// script-claimed value). The daemon parses it with the WHATWG parser
+    /// and DEFAULT-DENIES delivery for plain-HTTP and unverifiable
+    /// origins; the scheme-validated host is the lookup identity.
+    /// `serde(default)` keeps pre-711 peers deserializing (they are then
+    /// denied as origin-unverified — fail-closed).
     GetCredential {
         domain: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_url: Option<String>,
     },
     GetExternalSecret {
         client_id: String,
@@ -48,23 +58,36 @@ pub enum IpcMessage {
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locked: Option<bool>,
+        /// WBS-711: set when delivery was refused by the autofill origin
+        /// gate (`origin-unverified` / `insecure-http`) — distinct from a
+        /// plain no-match, which stays all-None.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denied_reason: Option<String>,
     },
     ListDomainCredentials {
         base_domain: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_url: Option<String>,
     },
     ListDomainCredentialsResponse {
         credentials: Vec<CredentialSummary>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locked: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denied_reason: Option<String>,
     },
     GetTotpCode {
         domain: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_url: Option<String>,
     },
     GetTotpCodeResponse {
         code: Option<String>,
         seconds_remaining: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locked: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denied_reason: Option<String>,
     },
     SaveCredential {
         domain: String,
@@ -108,6 +131,34 @@ pub enum IpcMessage {
     },
     UnlockVault {
         master_password: String,
+    },
+    // --- WBS-712 per-site autofill permissions ------------------------------
+    /// Grant (or re-confirm) plain-HTTP autofill for one host. The host is
+    /// normalized daemon-side; the grant is EXACT-host (no suffix matching).
+    /// Browser-surface gated: only the native host may manage grants.
+    GrantSitePermission {
+        host: String,
+        allow_insecure: bool,
+    },
+    GrantSitePermissionResponse {
+        success: bool,
+        error: Option<String>,
+    },
+    /// Revoke any grant for `host` (deletes the entry immediately).
+    RevokeSitePermission {
+        host: String,
+    },
+    RevokeSitePermissionResponse {
+        success: bool,
+        removed: bool,
+        error: Option<String>,
+    },
+    /// List all per-site grants (popup settings view).
+    ListSitePermissions,
+    ListSitePermissionsResponse {
+        permissions: Vec<SitePermissionSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
     },
     UnlockVaultBiometric {
         prompt_reason: Option<String>,
@@ -170,6 +221,17 @@ pub struct CredentialSummary {
     pub domain: String,
 }
 
+/// One per-site autofill permission grant, as listed to the popup (WBS-712).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SitePermissionSummary {
+    /// Normalized bare host.
+    pub host: String,
+    /// The only grant kind today: explicit plain-HTTP autofill consent.
+    pub allow_insecure: bool,
+    /// Unix seconds — when the grant was first made.
+    pub granted_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +278,7 @@ mod tests {
         let messages = vec![
             IpcMessage::GetCredential {
                 domain: "example.com".to_string(),
+                page_url: Some("https://example.com/login".to_string()),
             },
             IpcMessage::GetExternalSecret {
                 client_id: "victor".to_string(),
@@ -228,6 +291,7 @@ mod tests {
             IpcMessage::Shutdown,
             IpcMessage::ListDomainCredentials {
                 base_domain: "example.com".to_string(),
+                page_url: None,
             },
         ];
 
@@ -238,10 +302,17 @@ mod tests {
             // Verify round-trip
             match (&msg, &deserialized) {
                 (
-                    IpcMessage::GetCredential { domain: d1 },
-                    IpcMessage::GetCredential { domain: d2 },
+                    IpcMessage::GetCredential {
+                        domain: d1,
+                        page_url: u1,
+                    },
+                    IpcMessage::GetCredential {
+                        domain: d2,
+                        page_url: u2,
+                    },
                 ) => {
                     assert_eq!(d1, d2);
+                    assert_eq!(u1, u2);
                 }
                 (
                     IpcMessage::GetExternalSecret {
@@ -263,10 +334,17 @@ mod tests {
                     assert_eq!(p1, p2);
                 }
                 (
-                    IpcMessage::ListDomainCredentials { base_domain: b1 },
-                    IpcMessage::ListDomainCredentials { base_domain: b2 },
+                    IpcMessage::ListDomainCredentials {
+                        base_domain: b1,
+                        page_url: p1,
+                    },
+                    IpcMessage::ListDomainCredentials {
+                        base_domain: b2,
+                        page_url: p2,
+                    },
                 ) => {
                     assert_eq!(b1, b2);
+                    assert_eq!(p1, p2);
                 }
                 (IpcMessage::CheckVault, IpcMessage::CheckVault) => {}
                 (IpcMessage::LockVault, IpcMessage::LockVault) => {}
@@ -283,6 +361,7 @@ mod tests {
             password: Some("password123".to_string()),
             title: Some("Example".to_string()),
             locked: None,
+            denied_reason: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -294,12 +373,54 @@ mod tests {
                 password,
                 title,
                 locked: None,
+                denied_reason: None,
             } => {
                 assert_eq!(username, Some("user@example.com".to_string()));
                 assert_eq!(password, Some("password123".to_string()));
                 assert_eq!(title, Some("Example".to_string()));
             }
             _ => panic!("Wrong response type"),
+        }
+    }
+
+    /// WBS-711: a pre-711 response payload (no `denied_reason` key) must
+    /// deserialize with the field defaulting to None, and a denial carries
+    /// its reason on the wire.
+    #[test]
+    fn test_autofill_denied_reason_wire_compat() {
+        let legacy = r#"{
+            "GetCredentialResponse": {
+                "username": null,
+                "password": null,
+                "title": null
+            }
+        }"#;
+        let deserialized: IpcMessage = serde_json::from_str(legacy).unwrap();
+        match deserialized {
+            IpcMessage::GetCredentialResponse { denied_reason, .. } => {
+                assert_eq!(denied_reason, None);
+            }
+            _ => panic!("Wrong response type"),
+        }
+
+        let denied = IpcMessage::GetCredentialResponse {
+            username: None,
+            password: None,
+            title: None,
+            locked: None,
+            denied_reason: Some("insecure-http".to_string()),
+        };
+        let serialized = serde_json::to_string(&denied).unwrap();
+        assert!(serialized.contains("insecure-http"));
+
+        let pre711_request = r#"{"GetCredential": {"domain": "example.com"}}"#;
+        let deserialized: IpcMessage = serde_json::from_str(pre711_request).unwrap();
+        match deserialized {
+            IpcMessage::GetCredential { domain, page_url } => {
+                assert_eq!(domain, "example.com");
+                assert_eq!(page_url, None);
+            }
+            _ => panic!("Wrong request type"),
         }
     }
 
@@ -348,6 +469,7 @@ mod tests {
         let response = IpcMessage::ListDomainCredentialsResponse {
             credentials: credentials.clone(),
             locked: None,
+            denied_reason: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -357,6 +479,7 @@ mod tests {
             IpcMessage::ListDomainCredentialsResponse {
                 credentials: decoded,
                 locked: None,
+                denied_reason: None,
             } => {
                 assert_eq!(decoded.len(), 2);
                 assert_eq!(decoded[0].username, "user1@example.com");
@@ -462,6 +585,7 @@ mod tests {
             code: Some("123456".to_string()),
             seconds_remaining: Some(30),
             locked: None,
+            denied_reason: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -472,6 +596,7 @@ mod tests {
                 code,
                 seconds_remaining,
                 locked: None,
+                denied_reason: None,
             } => {
                 assert_eq!(code, Some("123456".to_string()));
                 assert_eq!(seconds_remaining, Some(30));
@@ -547,6 +672,7 @@ mod tests {
         let response = IpcMessage::ListDomainCredentialsResponse {
             credentials: vec![],
             locked: None,
+            denied_reason: None,
         };
 
         let serialized = serde_json::to_string(&response).unwrap();
@@ -556,6 +682,7 @@ mod tests {
             IpcMessage::ListDomainCredentialsResponse {
                 credentials,
                 locked: None,
+                denied_reason: None,
             } => {
                 assert!(credentials.is_empty());
             }
@@ -567,13 +694,14 @@ mod tests {
     fn test_get_totp_code_message_serialization() {
         let msg = IpcMessage::GetTotpCode {
             domain: "example.com".to_string(),
+            page_url: Some("https://example.com/login".to_string()),
         };
 
         let serialized = serde_json::to_string(&msg).unwrap();
         let deserialized: IpcMessage = serde_json::from_str(&serialized).unwrap();
 
         match deserialized {
-            IpcMessage::GetTotpCode { domain } => {
+            IpcMessage::GetTotpCode { domain, .. } => {
                 assert_eq!(domain, "example.com");
             }
             _ => panic!("Wrong message type"),

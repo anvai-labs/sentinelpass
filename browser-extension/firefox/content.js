@@ -943,6 +943,17 @@ async function requestAutofill(passwordField) {
             // Show success indicator
             showNotification(statusMessage, 'success');
         }
+        else if (typeof response?.error === 'string' && response.error.startsWith('autofill denied:')) {
+            // WBS-711: the daemon refused delivery for this origin (plain HTTP or
+            // an unverifiable context). This is a policy denial, not a no-match.
+            debugLog('[SentinelPass] Autofill denied by daemon origin policy:', response.error);
+            if (response.error.includes('insecure-http')) {
+                showNotification('Autofill is disabled on unencrypted HTTP sites', 'warning');
+            }
+            else {
+                showNotification('Autofill is not available for this page', 'warning');
+            }
+        }
         else {
             debugLog('[SentinelPass] No credentials found for', domain);
             showNotification('No credentials found for this site', 'info');

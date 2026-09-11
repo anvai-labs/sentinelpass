@@ -329,7 +329,7 @@ ADR-003 through ADR-010.
 | TD-CLIENT-02 | Desktop visibility change does not enforce lifecycle lock/privacy cover | Inactivity/background/session-lock/suspend/logout policy | 0.10 | Open |
 | TD-CLIENT-03 | Tauri shell/clipboard/CSP permissions are broader than demonstrated need | Least-privilege capabilities and CSP | 0.10 | Open |
 | TD-CLIENT-04 | Windows biometric consent is separate from generic keyring retrieval | Cryptographically Windows Hello/protection-bound slot | 0.10 | Open |
-| TD-CLIENT-05 | Browser permits HTTP and broad hosts | Default-deny HTTP; optional site access where feasible | 0.10 | Open |
+| TD-CLIENT-05 | Browser permits HTTP and broad hosts | Default-deny HTTP; optional site access where feasible | 0.10 | Closed 2026-09-10 (WBS-711/712): daemon origin gate default-denies AUTOFILL delivery for plain-HTTP and unverifiable origins (browser-provided `page_url`, WHATWG-parsed, delivery bound to the validated host; typed denial reason; capability does not bypass); the only allow-list is an explicit EXACT-host user grant (`site_permissions.json` 0600, popup-only management, revoke immediate); manifests moved to `optional_host_permissions` + per-site browser grants so install no longer requests every site |
 | TD-CLIENT-06 | Autofill ignores target and chooses the first password field | Validated field/form descriptor and ambiguity chooser | 0.10 | Open |
 | TD-CLIENT-07 | Plaintext pending credentials live in extension session storage | Eliminate or minimize/scrub with bounded lifetime | 0.10 | Open |
 | TD-CLIENT-08 | Chrome/Firefox source and native-host identifiers can drift | Shared generation and CI parity checks | 0.10 | Open |

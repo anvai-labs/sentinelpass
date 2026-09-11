@@ -75,6 +75,7 @@ mod tests {
             capability: None,
             message: IpcMessage::GetCredential {
                 domain: "example.com".to_string(),
+                page_url: None,
             },
         };
 
@@ -85,7 +86,7 @@ mod tests {
         assert!(deserialized.client_token.is_none());
         assert!(deserialized.origin.is_none());
         match deserialized.message {
-            IpcMessage::GetCredential { domain } => {
+            IpcMessage::GetCredential { domain, .. } => {
                 assert_eq!(domain, "example.com");
             }
             _ => panic!("Wrong message type"),

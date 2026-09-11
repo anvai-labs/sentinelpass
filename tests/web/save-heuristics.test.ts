@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  autofillPageUrlForDaemon,
   buildSaveNotificationRequestKey,
   classifyCredentialUrlSecurity,
   domainMatchesPolicy,
@@ -179,5 +180,35 @@ describe('save heuristics', () => {
     expect(isUsernameMatchOrUnknown('user@example.com', '')).toBe(true);
     expect(isUsernameMatchOrUnknown('a@example.com', 'a@example.com')).toBe(true);
     expect(isUsernameMatchOrUnknown('a@example.com', 'b@example.com')).toBe(false);
+  });
+});
+
+// WBS-711: the daemon binds autofill delivery to the host of a
+// BROWSER-provided page URL. A content-script-claimed value must never win.
+describe('autofill page URL resolution (WBS-711)', () => {
+  it('prefers the browser-provided sender URL for content-script senders', () => {
+    expect(
+      autofillPageUrlForDaemon(
+        'https://attacker.example/steal',
+        'https://page.example/login',
+        false
+      )
+    ).toBe('https://page.example/login');
+  });
+
+  it('ignores a missing or blank sender URL and never falls back to the claimed value', () => {
+    expect(autofillPageUrlForDaemon('https://claimed.example/', undefined, false)).toBeNull();
+    expect(autofillPageUrlForDaemon('https://claimed.example/', '', false)).toBeNull();
+    expect(autofillPageUrlForDaemon('https://claimed.example/', null, false)).toBeNull();
+  });
+
+  it('uses the requested URL only for trusted popup senders', () => {
+    expect(
+      autofillPageUrlForDaemon('https://tab.example/view', undefined, true)
+    ).toBe('https://tab.example/view');
+    expect(autofillPageUrlForDaemon(undefined, undefined, true)).toBeNull();
+    expect(autofillPageUrlForDaemon('', undefined, true)).toBeNull();
+    expect(autofillPageUrlForDaemon('   ', undefined, true)).toBeNull();
+    expect(autofillPageUrlForDaemon(null, 'https://tab.example/', true)).toBeNull();
   });
 });

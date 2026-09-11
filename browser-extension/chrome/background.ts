@@ -1,5 +1,6 @@
 // Background service worker for Password Manager Extension
 import {
+  autofillPageUrlForDaemon,
   classifyCredentialUrlSecurity,
   domainMatchesPolicy,
   normalizeCredentialUrl,
@@ -166,7 +167,14 @@ async function isCredentialUnchanged(data) {
   }
 
   try {
-    const response = await handleGetCredential(data.domain, generateRequestId());
+    const response = await handleGetCredential(
+      data.domain,
+      generateRequestId(),
+      // The same browser-provided URL the save path validates; a delivery
+      // denial here only means the unchanged-check cannot run (fail-safe:
+      // the save proceeds as a duplicate upsert).
+      data?.submitted_url || data?.url || null
+    );
     if (!response?.success || !response?.data?.password) {
       return false;
     }
@@ -469,14 +477,17 @@ async function addNeverSaveDomain(domainOrUrl) {
 }
 
 // Handle get_credential request
-async function handleGetCredential(domain, requestId) {
+async function handleGetCredential(domain, requestId, pageUrl) {
   debugLog('[SentinelPass Background] handleGetCredential called for domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'get_credential',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      // WBS-711: browser-provided page URL; the daemon scheme-validates it
+      // and default-denies unsafe origins.
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Got credential response from native host:', redactForLog(response));
@@ -491,14 +502,15 @@ async function handleGetCredential(domain, requestId) {
 }
 
 // Handle list_domain_credentials request
-async function handleListDomainCredentials(domain, requestId) {
+async function handleListDomainCredentials(domain, requestId, pageUrl) {
   debugLog('[SentinelPass Background] handleListDomainCredentials called for base domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'list_domain_credentials',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Got domain credentials response from native host:', response?.credentials?.length || 0, 'credentials');
@@ -514,14 +526,15 @@ async function handleListDomainCredentials(domain, requestId) {
 }
 
 // Handle get_totp_code request
-async function handleGetTotpCode(domain, requestId) {
+async function handleGetTotpCode(domain, requestId, pageUrl) {
   debugLog('[SentinelPass Background] handleGetTotpCode called for domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'get_totp_code',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Got TOTP response from native host:', redactForLog(response));
@@ -619,13 +632,14 @@ async function handleSaveCredential(data) {
 }
 
 // Handle check_credential_exists request
-async function handleCheckCredentialExists(domain) {
+async function handleCheckCredentialExists(domain, pageUrl) {
   debugLog('[SentinelPass Background] handleCheckCredentialExists called for domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'check_credential_exists',
-      domain: domain
+      domain: domain,
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Credential exists check result:', redactForLog(response));
@@ -680,6 +694,59 @@ async function handleLockVault() {
       unlocked: true,
       error: error.message
     };
+  }
+}
+
+// ── WBS-712 per-site autofill permissions (popup-only surface) ──────────────
+
+// Handle grant_site_permission request (popup settings view). The daemon
+// normalizes the host and stores an EXACT-host grant; https never needs one.
+async function handleGrantSitePermission(host, allowInsecure) {
+  debugLog('[SentinelPass Background] handleGrantSitePermission for host:', host);
+  if (!host || typeof host !== 'string') {
+    return { success: false, error: 'Missing host' };
+  }
+  try {
+    const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
+      type: 'grant_site_permission',
+      domain: host,
+      allow_insecure: allowInsecure === true
+    });
+    return { success: response?.success === true, error: response?.error || null };
+  } catch (error) {
+    console.error('[SentinelPass Background] Error granting site permission:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Handle revoke_site_permission request (popup settings view).
+async function handleRevokeSitePermission(host) {
+  debugLog('[SentinelPass Background] handleRevokeSitePermission for host:', host);
+  if (!host || typeof host !== 'string') {
+    return { success: false, error: 'Missing host' };
+  }
+  try {
+    const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
+      type: 'revoke_site_permission',
+      domain: host
+    });
+    return { success: response?.success === true, error: response?.error || null };
+  } catch (error) {
+    console.error('[SentinelPass Background] Error revoking site permission:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Handle list_site_permissions request (popup settings view).
+async function handleListSitePermissions() {
+  try {
+    const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
+      type: 'list_site_permissions'
+    });
+    return { success: response?.success === true, permissions: response?.site_permissions || [] };
+  } catch (error) {
+    console.error('[SentinelPass Background] Error listing site permissions:', error);
+    return { success: false, permissions: [], error: error.message };
   }
 }
 
@@ -824,7 +891,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleGetCredential(request.domain, request.request_id)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleGetCredential(request.domain, request.request_id, pageUrl)
           .then(response => {
             debugLog('[SentinelPass Background] Get credential response:', redactForLog(response));
             sendResponse(response);
@@ -849,7 +921,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleListDomainCredentials(request.domain, request.request_id)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleListDomainCredentials(request.domain, request.request_id, pageUrl)
           .then(response => {
             debugLog('[SentinelPass Background] List domain credentials response:', response?.data?.length || 0, 'credentials');
             sendResponse(response);
@@ -873,7 +950,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: validation.error });
       return true;
     }
-    handleGetTotpCode(request.domain, request.request_id)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleGetTotpCode(request.domain, request.request_id, pageUrl)
           .then(response => {
             debugLog('[SentinelPass Background] Get TOTP response:', redactForLog(response));
             sendResponse(response);
@@ -930,7 +1012,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleCheckCredentialExists(request.domain)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleCheckCredentialExists(request.domain, pageUrl)
           .then(exists => {
               debugLog('[SentinelPass Background] Credential exists:', exists);
               sendResponse({ exists: exists });
@@ -980,6 +1067,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           });
         return true;
       }
+
+  if (request.type === 'grant_site_permission') {
+    // WBS-712: permission management is popup-only — a content script (and
+    // therefore any page) must not be able to move the permission store.
+    if (!isPopupSender(sender)) {
+      console.warn('[SentinelPass Background] Blocked grant_site_permission from non-popup sender');
+      sendResponse({ success: false, error: 'permission changes are popup-only' });
+      return true;
+    }
+    handleGrantSitePermission(request.host, request.allow_insecure)
+      .then(response => sendResponse(response));
+    return true;
+  }
+
+  if (request.type === 'revoke_site_permission') {
+    if (!isPopupSender(sender)) {
+      console.warn('[SentinelPass Background] Blocked revoke_site_permission from non-popup sender');
+      sendResponse({ success: false, error: 'permission changes are popup-only' });
+      return true;
+    }
+    handleRevokeSitePermission(request.host)
+      .then(response => sendResponse(response));
+    return true;
+  }
+
+  if (request.type === 'list_site_permissions') {
+    if (!isPopupSender(sender)) {
+      console.warn('[SentinelPass Background] Blocked list_site_permissions from non-popup sender');
+      sendResponse({ success: false, permissions: [], error: 'permission changes are popup-only' });
+      return true;
+    }
+    handleListSitePermissions()
+      .then(response => sendResponse(response));
+    return true;
+  }
 
   if (request.type === 'save_prompt_outcome') {
     const outcome = request.data?.outcome || 'unknown';

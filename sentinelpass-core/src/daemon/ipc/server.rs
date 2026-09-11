@@ -24,6 +24,7 @@ use subtle::ConstantTimeEq;
 #[allow(unused_imports)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
+use url::Url;
 use zeroize::Zeroize;
 
 /// Daemon serving the full surface against an existing vault.
@@ -56,6 +57,9 @@ pub struct IpcServer {
     /// WBS-504/505: capability store (default location; injectable for
     /// tests).
     capability_store_path: PathBuf,
+    /// WBS-712: per-site autofill permission store (default location;
+    /// injectable for tests).
+    site_permissions_path: PathBuf,
 }
 
 impl IpcServer {
@@ -105,12 +109,19 @@ impl IpcServer {
             mode: Arc::new(AtomicU8::new(MODE_LIVE)),
             client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
             capability_store_path: crate::daemon::capabilities::default_store_path(),
+            site_permissions_path: crate::daemon::site_permissions::default_store_path(),
         }
     }
 
     /// Override the capability store path (tests / embedders).
     pub fn with_capability_store_path(mut self, path: PathBuf) -> Self {
         self.capability_store_path = path;
+        self
+    }
+
+    /// Override the per-site permission store path (tests / embedders).
+    pub fn with_site_permissions_path(mut self, path: PathBuf) -> Self {
+        self.site_permissions_path = path;
         self
     }
 
@@ -437,6 +448,67 @@ impl IpcServer {
         }
     }
 
+    /// WBS-711 autofill origin gate: validate the requesting page URL and
+    /// return the scheme-validated host that credential delivery is BOUND
+    /// to, or a denial reason.
+    ///
+    /// Default-deny contract (SR-CLIENT-003 / SR-EXT-002):
+    /// - `https:` origins deliver, bound to the parsed host.
+    /// - plain `http:` origins are REFUSED (`insecure-http`) unless the
+    ///   WBS-712 per-site permission store holds an explicit
+    ///   `allow_insecure` grant for the EXACT host (user action in the
+    ///   popup). WBS-706's consent covered SAVE; this covers AUTOFILL
+    ///   delivery.
+    /// - a missing URL (pre-711 host), an unparseable value, a non-web
+    ///   scheme (`file:`, `chrome-extension:`, …), or an empty host are
+    ///   all REFUSED (`origin-unverified`) — fail-closed; a valid
+    ///   capability does NOT bypass the scheme gate, and a missing or
+    ///   unreadable permission store denies too.
+    ///
+    /// The returned host comes from the WHATWG parse of the URL the
+    /// BROWSER reported (sender URL), never from a content-script-claimed
+    /// domain string, so the vault lookup cannot be pointed at a host the
+    /// page is not on.
+    fn autofill_origin_decision(
+        &self,
+        page_url: Option<&str>,
+    ) -> std::result::Result<String, &'static str> {
+        // WBS-712: grants load from the store per request (mirroring the
+        // capability store). A missing/unreadable store is an EMPTY store —
+        // the gate stays fail-closed without it.
+        let permissions = crate::daemon::site_permissions::SitePermissionStore::load_from_path(
+            &self.site_permissions_path,
+        )
+        .unwrap_or_default();
+        Self::autofill_origin_decision_with_store(page_url, &permissions)
+    }
+
+    /// Pure decision core (testable without a store path).
+    fn autofill_origin_decision_with_store(
+        page_url: Option<&str>,
+        permissions: &crate::daemon::site_permissions::SitePermissionStore,
+    ) -> std::result::Result<String, &'static str> {
+        let Some(raw) = page_url.map(str::trim).filter(|v| !v.is_empty()) else {
+            return Err("origin-unverified");
+        };
+        let parsed = Url::parse(raw).map_err(|_| "origin-unverified")?;
+        let insecure = match parsed.scheme() {
+            "https" => false,
+            "http" => true,
+            _ => return Err("origin-unverified"),
+        };
+        let host = parsed.host_str().map(str::trim).unwrap_or("");
+        if host.is_empty() {
+            return Err("origin-unverified");
+        }
+        let normalized =
+            crate::domain::normalize_host(host).unwrap_or_else(|| host.to_ascii_lowercase());
+        if insecure && !permissions.allows_insecure(&normalized) {
+            return Err("insecure-http");
+        }
+        Ok(normalized)
+    }
+
     /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
     async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
@@ -694,7 +766,7 @@ impl IpcServer {
                     ),
                 }
             }
-            IpcMessage::GetCredential { domain } => {
+            IpcMessage::GetCredential { domain, page_url } => {
                 debug!("IPC: GetCredential for domain '{}'", domain);
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -703,6 +775,7 @@ impl IpcServer {
                         password: None,
                         title: None,
                         locked: None,
+                        denied_reason: None,
                     };
                 }
 
@@ -712,10 +785,41 @@ impl IpcServer {
                         password: None,
                         title: None,
                         locked: Some(true),
+                        denied_reason: None,
                     };
                 }
 
-                match self.vault.get_credential(&domain).await {
+                // WBS-711: default-deny unsafe/unverifiable origins and
+                // bind delivery to the scheme-validated host (never the
+                // claimed domain string).
+                let validated_host = match self.autofill_origin_decision(page_url.as_deref()) {
+                    Ok(host) => host,
+                    Err(reason) => {
+                        warn!(
+                            "denied autofill credential delivery for claimed domain \
+                             '{}' ({})",
+                            domain, reason
+                        );
+                        log_external_secret_audit(
+                            self.audit_logger.as_deref(),
+                            None,
+                            &domain,
+                            None,
+                            None,
+                            false,
+                            "Autofill credential delivery denied by the origin gate",
+                        );
+                        return IpcMessage::GetCredentialResponse {
+                            username: None,
+                            password: None,
+                            title: None,
+                            locked: None,
+                            denied_reason: Some(reason.to_string()),
+                        };
+                    }
+                };
+
+                match self.vault.get_credential(&validated_host).await {
                     Ok(Some(cred)) => {
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
@@ -731,6 +835,7 @@ impl IpcServer {
                             password: Some(cred.password),
                             title: Some(cred.title),
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                     Ok(None) => {
@@ -749,6 +854,7 @@ impl IpcServer {
                             password: None,
                             title: None,
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                     Err(e) => {
@@ -767,11 +873,15 @@ impl IpcServer {
                             password: None,
                             title: None,
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                 }
             }
-            IpcMessage::ListDomainCredentials { base_domain } => {
+            IpcMessage::ListDomainCredentials {
+                base_domain,
+                page_url,
+            } => {
                 debug!(
                     "IPC: ListDomainCredentials for base domain '{}'",
                     base_domain
@@ -781,6 +891,7 @@ impl IpcServer {
                     return IpcMessage::ListDomainCredentialsResponse {
                         credentials: Vec::new(),
                         locked: None,
+                        denied_reason: None,
                     };
                 }
 
@@ -788,10 +899,38 @@ impl IpcServer {
                     return IpcMessage::ListDomainCredentialsResponse {
                         credentials: Vec::new(),
                         locked: Some(true),
+                        denied_reason: None,
                     };
                 }
 
-                match self.vault.list_domain_credentials(&base_domain).await {
+                // WBS-711: same origin gate as credential delivery — a
+                // listing also discloses which usernames exist for a site.
+                let validated_host = match self.autofill_origin_decision(page_url.as_deref()) {
+                    Ok(host) => host,
+                    Err(reason) => {
+                        warn!(
+                            "denied domain-credential listing for claimed domain \
+                             '{}' ({})",
+                            base_domain, reason
+                        );
+                        log_external_secret_audit(
+                            self.audit_logger.as_deref(),
+                            None,
+                            &base_domain,
+                            None,
+                            None,
+                            false,
+                            "Autofill domain listing denied by the origin gate",
+                        );
+                        return IpcMessage::ListDomainCredentialsResponse {
+                            credentials: Vec::new(),
+                            locked: None,
+                            denied_reason: Some(reason.to_string()),
+                        };
+                    }
+                };
+
+                match self.vault.list_domain_credentials(&validated_host).await {
                     Ok(credentials) => {
                         let summaries: Vec<CredentialSummary> = credentials
                             .into_iter()
@@ -804,6 +943,7 @@ impl IpcServer {
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: summaries,
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                     Err(e) => {
@@ -811,11 +951,12 @@ impl IpcServer {
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: Vec::new(),
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                 }
             }
-            IpcMessage::GetTotpCode { domain } => {
+            IpcMessage::GetTotpCode { domain, page_url } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -823,6 +964,7 @@ impl IpcServer {
                         code: None,
                         seconds_remaining: None,
                         locked: None,
+                        denied_reason: None,
                     };
                 }
 
@@ -831,14 +973,43 @@ impl IpcServer {
                         code: None,
                         seconds_remaining: None,
                         locked: Some(true),
+                        denied_reason: None,
                     };
                 }
 
-                match self.vault.get_totp_code(&domain).await {
+                // WBS-711: TOTP codes are login second factors — the same
+                // scheme safety rule applies.
+                let validated_host = match self.autofill_origin_decision(page_url.as_deref()) {
+                    Ok(host) => host,
+                    Err(reason) => {
+                        warn!(
+                            "denied TOTP code delivery for claimed domain '{}' ({})",
+                            domain, reason
+                        );
+                        log_external_secret_audit(
+                            self.audit_logger.as_deref(),
+                            None,
+                            &domain,
+                            None,
+                            None,
+                            false,
+                            "Autofill TOTP delivery denied by the origin gate",
+                        );
+                        return IpcMessage::GetTotpCodeResponse {
+                            code: None,
+                            seconds_remaining: None,
+                            locked: None,
+                            denied_reason: Some(reason.to_string()),
+                        };
+                    }
+                };
+
+                match self.vault.get_totp_code(&validated_host).await {
                     Ok(Some(code)) => IpcMessage::GetTotpCodeResponse {
                         code: Some(code.code),
                         seconds_remaining: Some(code.seconds_remaining),
                         locked: None,
+                        denied_reason: None,
                     },
                     Ok(None) => {
                         debug!("No TOTP code found for domain '{}'", domain);
@@ -846,6 +1017,7 @@ impl IpcServer {
                             code: None,
                             seconds_remaining: None,
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                     Err(e) => {
@@ -854,6 +1026,7 @@ impl IpcServer {
                             code: None,
                             seconds_remaining: None,
                             locked: None,
+                            denied_reason: None,
                         }
                     }
                 }
@@ -908,6 +1081,124 @@ impl IpcServer {
                             locked: None,
                         }
                     }
+                }
+            }
+            IpcMessage::GrantSitePermission {
+                host,
+                allow_insecure,
+            } => {
+                // WBS-712: permission management is a browser-surface op —
+                // the same capability gate as the ops it authorizes. The
+                // grant only ever loosens the gate for ONE exact host and
+                // only for the insecure scheme the user explicitly accepted.
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
+                    return IpcMessage::GrantSitePermissionResponse {
+                        success: false,
+                        error: Some(
+                            "browser-surface request rejected: non-native origin".to_string(),
+                        ),
+                    };
+                }
+
+                let result = if allow_insecure {
+                    let mut store =
+                        crate::daemon::site_permissions::SitePermissionStore::load_from_path(
+                            &self.site_permissions_path,
+                        )
+                        .unwrap_or_default();
+                    match store.grant_insecure(&self.site_permissions_path, &host) {
+                        Ok(true) => {
+                            info!("Site permission granted (allow_insecure) for '{}'", host);
+                            Ok(true)
+                        }
+                        Ok(false) => Ok(false),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Err(PasswordManagerError::InvalidInput(
+                        "only allow_insecure grants are supported".to_string(),
+                    ))
+                };
+
+                match result {
+                    Ok(true) => IpcMessage::GrantSitePermissionResponse {
+                        success: true,
+                        error: None,
+                    },
+                    Ok(false) => IpcMessage::GrantSitePermissionResponse {
+                        success: false,
+                        error: Some("invalid host".to_string()),
+                    },
+                    Err(e) => {
+                        error!("Failed to grant site permission: {}", e);
+                        IpcMessage::GrantSitePermissionResponse {
+                            success: false,
+                            error: Some("grant failed".to_string()),
+                        }
+                    }
+                }
+            }
+            IpcMessage::RevokeSitePermission { host } => {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
+                    return IpcMessage::RevokeSitePermissionResponse {
+                        success: false,
+                        removed: false,
+                        error: Some(
+                            "browser-surface request rejected: non-native origin".to_string(),
+                        ),
+                    };
+                }
+
+                let mut store =
+                    crate::daemon::site_permissions::SitePermissionStore::load_from_path(
+                        &self.site_permissions_path,
+                    )
+                    .unwrap_or_default();
+                match store.revoke(&self.site_permissions_path, &host) {
+                    Ok(removed) => {
+                        info!(
+                            "Site permission revoked for '{}' (removed={})",
+                            host, removed
+                        );
+                        IpcMessage::RevokeSitePermissionResponse {
+                            success: true,
+                            removed,
+                            error: None,
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to revoke site permission: {}", e);
+                        IpcMessage::RevokeSitePermissionResponse {
+                            success: false,
+                            removed: false,
+                            error: Some("revoke failed".to_string()),
+                        }
+                    }
+                }
+            }
+            IpcMessage::ListSitePermissions => {
+                if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
+                    return IpcMessage::ListSitePermissionsResponse {
+                        permissions: Vec::new(),
+                        locked: None,
+                    };
+                }
+
+                let store = crate::daemon::site_permissions::SitePermissionStore::load_from_path(
+                    &self.site_permissions_path,
+                )
+                .unwrap_or_default();
+                IpcMessage::ListSitePermissionsResponse {
+                    permissions: store
+                        .list()
+                        .into_iter()
+                        .map(|p| sentinelpass_protocol::SitePermissionSummary {
+                            host: p.host,
+                            allow_insecure: p.allow_insecure,
+                            granted_at: p.granted_at,
+                        })
+                        .collect(),
+                    locked: None,
                 }
             }
             IpcMessage::UnlockVault {
@@ -1425,5 +1716,569 @@ mod browser_surface_gate_tests {
         assert!(!IpcServer::browser_surface_allowed_with_store(
             None, None, &store
         ));
+    }
+}
+
+/// WBS-711 — default-deny HTTP autofill: the daemon-side origin gate.
+#[cfg(test)]
+mod autofill_origin_gate_tests {
+    use super::*;
+    use crate::daemon::capabilities::{InstallationCapabilities, NATIVE_HOST_AUDIENCE};
+    use crate::daemon::DaemonVault;
+    use crate::{Entry, VaultManager};
+    use chrono::Utc;
+    use sentinelpass_protocol::{IpcEnvelope, Origin};
+    use tempfile::TempDir;
+
+    // --- pure gate decision -------------------------------------------------
+
+    fn empty_permissions() -> crate::daemon::site_permissions::SitePermissionStore {
+        crate::daemon::site_permissions::SitePermissionStore::default()
+    }
+
+    #[test]
+    fn https_origins_deliver_with_their_validated_host() {
+        for (url, expected_host) in [
+            ("https://example.com/login", "example.com"),
+            ("https://Example.COM/login", "example.com"),
+            ("https://example.com:8443/x?y=1#z", "example.com"),
+            ("https://sub.example.com/deep/path", "sub.example.com"),
+            ("https://user:pw@example.com/", "example.com"),
+            ("https://[::1]:8443/login", "::1"),
+        ] {
+            let decision =
+                IpcServer::autofill_origin_decision_with_store(Some(url), &empty_permissions());
+            assert_eq!(
+                decision.as_deref(),
+                Ok(expected_host),
+                "gate must validate and bind {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_origins_are_denied_by_default() {
+        for url in [
+            "http://example.com/login",
+            "http://EXAMPLE.com",
+            "http://127.0.0.1:8080/login",
+            "http://[::1]/admin",
+        ] {
+            assert_eq!(
+                IpcServer::autofill_origin_decision_with_store(Some(url), &empty_permissions()),
+                Err("insecure-http"),
+                "plain HTTP must be denied: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn unverifiable_origins_are_denied() {
+        for url in [
+            None,
+            Some(""),
+            Some("   "),
+            // No scheme at all: the daemon cannot verify transport safety.
+            Some("example.com"),
+            Some("//example.com/path"),
+            // Non-web schemes are not autofill contexts.
+            Some("ftp://example.com/pub"),
+            Some("file:///etc/passwd"),
+            Some("chrome-extension://abcdef/popup.html"),
+            Some("about:blank"),
+            // Scheme-shaped but no host.
+            Some("https://"),
+        ] {
+            assert_eq!(
+                IpcServer::autofill_origin_decision_with_store(url, &empty_permissions()),
+                Err("origin-unverified"),
+                "unverifiable origin must be denied: {url:?}"
+            );
+        }
+    }
+
+    // --- handler-level behavior over a REAL unlocked daemon vault -----------
+
+    struct GateHarness {
+        _tmp: TempDir,
+        server: IpcServer,
+        capability: String,
+        permissions_path: std::path::PathBuf,
+    }
+
+    fn harness_with_vault() -> GateHarness {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        vault
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "Example".to_string(),
+                username: "user@example.com".to_string(),
+                password: "password-secret".to_string().into(),
+                url: Some("https://example.com/login".to_string()),
+                notes: None,
+                credential_type: crate::CredentialType::Password,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        vault
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "GitHub".to_string(),
+                username: "gh@example.com".to_string(),
+                password: "github-secret".to_string().into(),
+                url: Some("https://github.com/login".to_string()),
+                notes: None,
+                credential_type: crate::CredentialType::Password,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { daemon_vault.unlock(password).await })
+            .unwrap();
+
+        // Mint a native-host capability in a temp store.
+        let capability_store = tmp.path().join("ipc-capabilities.json");
+        let mut store = InstallationCapabilities::default();
+        let capability = store
+            .mint(&capability_store, NATIVE_HOST_AUDIENCE, None)
+            .unwrap();
+
+        let permissions_path = tmp.path().join("site_permissions.json");
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("test.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_capability_store_path(capability_store)
+        .with_site_permissions_path(permissions_path.clone());
+
+        GateHarness {
+            _tmp: tmp,
+            server,
+            capability: capability.to_string(),
+            permissions_path,
+        }
+    }
+
+    fn envelope(message: IpcMessage, capability: Option<String>) -> IpcEnvelope {
+        IpcEnvelope {
+            token: "test-token".to_string(),
+            client_token: None,
+            origin: Some(Origin::NativeHost),
+            capability,
+            message,
+        }
+    }
+
+    fn handle(
+        rt: &tokio::runtime::Runtime,
+        server: &IpcServer,
+        envelope: IpcEnvelope,
+    ) -> IpcMessage {
+        rt.block_on(server.handle_message(envelope))
+    }
+
+    #[test]
+    fn https_page_delivers_the_credential() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    domain: "example.com".to_string(),
+                    page_url: Some("https://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match response {
+            IpcMessage::GetCredentialResponse {
+                username,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(username.as_deref(), Some("user@example.com"));
+                assert_eq!(denied_reason, None);
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    /// The lookup identity is the host parsed from the validated page URL,
+    /// NOT the claimed domain: a page at https://example.com gets
+    /// example.com's credential even when the request claims github.com —
+    /// and never the claimed domain's stored secret.
+    #[test]
+    fn delivery_binds_to_the_validated_url_host_not_the_claimed_domain() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    // Claimed domain has its own stored credential
+                    // (gh@example.com) — the page is on example.com, so
+                    // the delivery must be example.com's entry instead.
+                    domain: "github.com".to_string(),
+                    page_url: Some("https://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match response {
+            IpcMessage::GetCredentialResponse {
+                username,
+                password,
+                title,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(denied_reason, None);
+                assert_eq!(
+                    username.as_deref(),
+                    Some("user@example.com"),
+                    "delivery must follow the URL host, not the claimed domain"
+                );
+                assert_eq!(password.as_deref(), Some("password-secret"));
+                assert_eq!(title.as_deref(), Some("Example"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_page_is_denied_with_a_reason_even_with_a_valid_capability() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    domain: "example.com".to_string(),
+                    page_url: Some("http://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match response {
+            IpcMessage::GetCredentialResponse {
+                username,
+                password,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(username, None);
+                assert_eq!(password, None);
+                assert_eq!(denied_reason.as_deref(), Some("insecure-http"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    /// A missing page URL (pre-711 host) is a denial, not a bypass: the
+    /// capability gate and the scheme gate are independent.
+    #[test]
+    fn missing_page_url_is_denied() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for page_url in [None, Some("".to_string()), Some("not a url".to_string())] {
+            let response = handle(
+                &rt,
+                &h.server,
+                envelope(
+                    IpcMessage::GetCredential {
+                        domain: "example.com".to_string(),
+                        page_url,
+                    },
+                    Some(h.capability.clone()),
+                ),
+            );
+            match response {
+                IpcMessage::GetCredentialResponse {
+                    username,
+                    denied_reason,
+                    ..
+                } => {
+                    assert_eq!(username, None, "no delivery without a verifiable origin");
+                    assert_eq!(denied_reason.as_deref(), Some("origin-unverified"));
+                }
+                other => panic!("wrong response: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn listing_and_totp_are_gated_the_same_way() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let list = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ListDomainCredentials {
+                    base_domain: "example.com".to_string(),
+                    page_url: Some("http://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match list {
+            IpcMessage::ListDomainCredentialsResponse {
+                credentials,
+                denied_reason,
+                ..
+            } => {
+                assert!(credentials.is_empty());
+                assert_eq!(denied_reason.as_deref(), Some("insecure-http"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        let totp = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetTotpCode {
+                    domain: "example.com".to_string(),
+                    page_url: Some("http://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match totp {
+            IpcMessage::GetTotpCodeResponse {
+                code,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(code, None);
+                assert_eq!(denied_reason.as_deref(), Some("insecure-http"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        // HTTPS listing passes the gate and returns the stored match.
+        let list_ok = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ListDomainCredentials {
+                    base_domain: "example.com".to_string(),
+                    page_url: Some("https://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match list_ok {
+            IpcMessage::ListDomainCredentialsResponse {
+                credentials,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(denied_reason, None);
+                assert_eq!(credentials.len(), 1);
+                assert_eq!(credentials[0].username, "user@example.com");
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    /// A LOCKED vault reports locked before the origin gate is consulted
+    /// (UX ordering: the user is told to unlock, then the scheme rule
+    /// applies) — the combination still leaks nothing.
+    #[test]
+    fn locked_vault_reports_locked_before_the_origin_gate() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(h.server.vault.lock());
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    domain: "example.com".to_string(),
+                    page_url: Some("http://example.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match response {
+            IpcMessage::GetCredentialResponse { locked, .. } => {
+                assert_eq!(locked, Some(true));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    // --- WBS-712: the explicit per-site allow-list ---------------------------
+
+    /// Grant → HTTP delivers; sibling host stays denied; revoke → denied
+    /// again. The full default-deny → explicit-allow lifecycle.
+    #[test]
+    fn explicit_http_grant_allows_and_revocation_re_denies() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let get = |harness: &GateHarness| {
+            handle(
+                &rt,
+                &harness.server,
+                envelope(
+                    IpcMessage::GetCredential {
+                        domain: "example.com".to_string(),
+                        page_url: Some("http://example.com/login".to_string()),
+                    },
+                    Some(harness.capability.clone()),
+                ),
+            )
+        };
+
+        // Default deny.
+        match get(&h) {
+            IpcMessage::GetCredentialResponse { denied_reason, .. } => {
+                assert_eq!(denied_reason.as_deref(), Some("insecure-http"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        // Explicit grant (popup path) flips the decision for THIS host.
+        let grant = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GrantSitePermission {
+                    host: "https://example.com/user".to_string(),
+                    allow_insecure: true,
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match grant {
+            IpcMessage::GrantSitePermissionResponse { success, error } => {
+                assert!(success, "grant failed: {error:?}");
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        match get(&h) {
+            IpcMessage::GetCredentialResponse {
+                username,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(denied_reason, None);
+                assert_eq!(username.as_deref(), Some("user@example.com"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        // The grant is EXACT-host: a sibling is still denied.
+        let sibling = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GetCredential {
+                    domain: "github.com".to_string(),
+                    page_url: Some("http://github.com/login".to_string()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match sibling {
+            IpcMessage::GetCredentialResponse { denied_reason, .. } => {
+                assert_eq!(denied_reason.as_deref(), Some("insecure-http"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        // Revocation re-denies immediately.
+        let revoke = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::RevokeSitePermission {
+                    host: "example.com".to_string(),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match revoke {
+            IpcMessage::RevokeSitePermissionResponse {
+                success, removed, ..
+            } => {
+                assert!(success);
+                assert!(removed);
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+        match get(&h) {
+            IpcMessage::GetCredentialResponse { denied_reason, .. } => {
+                assert_eq!(denied_reason.as_deref(), Some("insecure-http"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+
+        // The listing reflects the empty store.
+        let list = handle(
+            &rt,
+            &h.server,
+            envelope(IpcMessage::ListSitePermissions, Some(h.capability.clone())),
+        );
+        match list {
+            IpcMessage::ListSitePermissionsResponse { permissions, .. } => {
+                assert!(permissions.is_empty());
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+    }
+
+    /// Permission management requires the browser-surface gate: without the
+    /// native-host capability, grants are refused.
+    #[test]
+    fn grant_requires_browser_surface_capability() {
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let response = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GrantSitePermission {
+                    host: "example.com".to_string(),
+                    allow_insecure: true,
+                },
+                // No capability presented.
+                None,
+            ),
+        );
+        match response {
+            IpcMessage::GrantSitePermissionResponse { success, error } => {
+                assert!(!success);
+                assert!(error.unwrap_or_default().contains("non-native origin"));
+            }
+            other => panic!("wrong response: {other:?}"),
+        }
+        // And nothing was stored.
+        let store = crate::daemon::site_permissions::SitePermissionStore::load_from_path(
+            &h.permissions_path,
+        )
+        .unwrap();
+        assert!(!store.allows_insecure("example.com"));
     }
 }

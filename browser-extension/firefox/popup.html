@@ -87,6 +87,25 @@
             <span class="settings-label">Vault</span>
             <span class="settings-value settings-value-hint">Managed by local daemon</span>
           </div>
+
+          <div class="settings-section">
+            <h3>Site access</h3>
+            <div class="settings-row">
+              <span class="settings-label" id="siteAccessOrigin">This site</span>
+              <button id="siteAccessToggle" class="btn btn-secondary">Enable</button>
+            </div>
+            <div class="settings-row">
+              <span class="settings-label">Autofill over HTTP</span>
+              <button id="httpAllowBtn" class="btn btn-secondary">Allow</button>
+            </div>
+            <div id="siteGrants"></div>
+            <p class="settings-hint">
+              Autofill over unencrypted HTTP is disabled by default and stays
+              off unless you allow it for one exact site. Only do this for
+              sites you trust on networks you trust.
+            </p>
+          </div>
+
           <p class="settings-hint">
             Credentials are stored locally and encrypted at rest.
             The daemon must be running to use autofill.

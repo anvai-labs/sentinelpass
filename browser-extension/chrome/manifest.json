@@ -8,9 +8,10 @@
     "storage",
     "activeTab",
     "notifications",
-    "nativeMessaging"
+    "nativeMessaging",
+    "scripting"
   ],
-  "host_permissions": [
+  "optional_host_permissions": [
     "http://*/*",
     "https://*/*"
   ],

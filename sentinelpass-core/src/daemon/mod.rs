@@ -6,6 +6,7 @@ pub mod ipc;
 pub mod maintenance;
 pub mod native_messaging;
 pub mod service;
+pub mod site_permissions;
 pub mod transport;
 pub mod vault_state;
 
