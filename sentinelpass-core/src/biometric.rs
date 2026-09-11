@@ -504,8 +504,8 @@ mod windows {
     /// WBS-710: Hello-key (KeyCredentialManager) helpers. The per-vault
     /// TPM/Hello key is sign-only by platform design; the DEK wrap derives
     /// from a Hello-gated signature (see `crate::biometric_hello`).
-    pub(super) mod hello {
-        use super::super::HelloKeySigner;
+    pub(in crate::biometric) mod hello {
+        use crate::biometric_hello::HelloKeySigner;
         use crate::{DatabaseError, PasswordManagerError, Result};
         use windows::core::HSTRING;
         use windows::Security::Credentials::{
@@ -514,7 +514,7 @@ mod windows {
         use windows::Security::Cryptography::CryptographicBuffer;
 
         /// The KeyCredential name for one vault's biometric ref.
-        pub(super) fn credential_name(biometric_ref: &str) -> HSTRING {
+        pub(in crate::biometric) fn credential_name(biometric_ref: &str) -> HSTRING {
             HSTRING::from(format!("sentinelpass.{biometric_ref}"))
         }
 
@@ -543,7 +543,7 @@ mod windows {
         }
 
         fn open_credential(name: &HSTRING) -> Result<KeyCredential> {
-            ensure_com_initialized();
+            super::ensure_com_initialized();
             // FailIfExists on an EXISTING key returns it without recreating.
             let op = KeyCredentialManager::RequestCreateAsync(
                 name,
@@ -573,8 +573,8 @@ mod windows {
         /// (Re)create the vault's Hello key at ENABLE time. ReplaceExisting
         /// discards any stale key from a prior enrollment; the platform
         /// verifies Hello presence as part of creation.
-        pub(super) fn create_for_enable(name: &HSTRING) -> Result<()> {
-            ensure_com_initialized();
+        pub(in crate::biometric) fn create_for_enable(name: &HSTRING) -> Result<()> {
+            super::ensure_com_initialized();
             let op = KeyCredentialManager::RequestCreateAsync(
                 name,
                 KeyCredentialCreationOption::ReplaceExisting,
@@ -595,8 +595,8 @@ mod windows {
         /// Signs via the vault's Hello key. The platform prompts for the
         /// Hello gesture on the private-key operation — that prompt IS the
         /// release gate.
-        pub(super) struct WindowsHelloSigner {
-            pub(super) credential_name: HSTRING,
+        pub(in crate::biometric) struct WindowsHelloSigner {
+            pub(in crate::biometric) credential_name: HSTRING,
         }
 
         impl HelloKeySigner for WindowsHelloSigner {
