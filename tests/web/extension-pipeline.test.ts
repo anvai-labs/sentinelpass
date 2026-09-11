@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
+import * as esbuild from 'esbuild';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,28 @@ describe('extension single-source pipeline (WBS-717)', () => {
     expect(content).not.toMatch(/^\s*export\s/m);
     const firefoxContent = readFileSync(path.join(firefoxDir, 'content.js'), 'utf8');
     expect(firefoxContent).toBe(content);
+  });
+
+  it('rebuilds the bundled content.js byte-exactly (review F6)', async () => {
+    // content.js is esbuild-bundled, not tsc-emitted; pin it with the same
+    // flags scripts/build-extension.mjs uses (esbuild output is
+    // deterministic for a fixed version).
+    const result = await esbuild.build({
+      entryPoints: [path.join(chromeDir, 'content.ts')],
+      bundle: true,
+      format: 'iife',
+      target: 'es2022',
+      write: false,
+      logLevel: 'silent',
+    });
+    const fresh = result.outputFiles[0].contents;
+    const checkedInChrome = readFileSync(path.join(chromeDir, 'content.js'));
+    const checkedInFirefox = readFileSync(path.join(firefoxDir, 'content.js'));
+    expect(
+      sha256(checkedInChrome),
+      'chrome/content.js does not match a fresh esbuild bundle; run `npm run ext:build`'
+    ).toBe(sha256(Buffer.from(fresh)));
+    expect(sha256(checkedInFirefox)).toBe(sha256(Buffer.from(fresh)));
   });
 
   it('rebuilds every checked-in module artifact byte-exactly (canonical pipeline)', () => {

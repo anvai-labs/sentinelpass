@@ -26,6 +26,7 @@ import {
   startDaemonHarness,
   installNativeHostManifest,
   grantInsecureViaHost,
+  isolatedEnv,
   type DaemonHarness,
   CHROME_EXTENSION_ID,
   MASTER_PASSWORD,
@@ -37,6 +38,8 @@ import {
 // exercises every DAEMON-side gate for real. The popup request flow itself
 // remains covered by the popup unit path, not this suite.
 const EXTENSION_PATH = mkdtempSync(path.join('/tmp', 'sp-e2e-ext-'));
+// Evaluated inside the browser/worker contexts where chrome exists.
+declare const chrome: any;
 const popupConsole = new Map<Page, string[]>();
 const workerConsole: string[] = [];
 function consoleLinesFor(page: Page): string[] {
@@ -147,11 +150,7 @@ test.beforeAll(async () => {
       '--no-first-run',
       '--no-default-browser-check',
     ],
-    env: {
-      ...process.env,
-      HOME: harness.homeDir,
-      XDG_RUNTIME_DIR: path.join(harness.homeDir, 'runtime'),
-    },
+    env: isolatedEnv(harness.homeDir),
   });
 
   // Confirm the unpacked extension loaded under the expected stable ID.
@@ -166,6 +165,9 @@ test.afterAll(async () => {
   await harness?.shutdown();
   if (userDataDir) {
     rmSync(userDataDir, { recursive: true, force: true });
+  }
+  if (EXTENSION_PATH) {
+    rmSync(EXTENSION_PATH, { recursive: true, force: true });
   }
 });
 

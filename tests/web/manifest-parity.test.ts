@@ -90,6 +90,22 @@ describe('manifest/native-host parity (WBS-718, SR-CLIENT-004, TD-CLIENT-08)', (
     }
   });
 
+  it('keeps the native-host templates on the same identity contract', () => {
+    const firefoxTemplate = readFileSync(
+      path.join(repoRoot, 'native-host', 'com.passwordmanager.host.firefox.json.template'),
+      'utf8'
+    );
+    const geckoId = firefoxManifest.browser_specific_settings?.gecko?.id;
+    expect(firefoxTemplate).toContain(geckoId);
+    expect(firefoxTemplate).toContain('com.passwordmanager.host');
+
+    const chromeTemplate = readFileSync(
+      path.join(repoRoot, 'native-host', 'com.passwordmanager.host.json.template'),
+      'utf8'
+    );
+    expect(chromeTemplate).toContain('com.passwordmanager.host');
+  });
+
   it('pins one native-host name across the extension and every installed-host source', () => {
     const backgroundSource = readFileSync(
       path.join(repoRoot, 'browser-extension', 'chrome', 'background.ts'),

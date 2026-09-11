@@ -60,6 +60,12 @@ def main() -> int:
             status = code
             break
     if status is None:
+        # Deadline exceeded: kill so the blocking reap below returns (a hung
+        # child must not hang the driver past its timeout — review F12).
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
         done, status = os.waitpid(pid, 0)
 
     # Drain whatever remains buffered on the master side.

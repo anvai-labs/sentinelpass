@@ -239,25 +239,8 @@ impl BiometricManager {
         #[cfg(windows)]
         {
             let mut encoded = Self::read_windows_stored_value(biometric_ref)?;
-
-            // WBS-710: a v1 blob releases through the Hello-gated signature
-            // (the signer's prompt IS the authentication); the wrap key
-            // never exists outside the release call.
-            if let Some(blob) = HelloBoundBlob::decode(&encoded) {
-                encoded.zeroize();
-                let signer = self::windows::hello::WindowsHelloSigner {
-                    credential_name: self::windows::hello::credential_name(biometric_ref),
-                };
-                return release_dek_under_hello(&signer, biometric_ref, &blob);
-            }
-
-            // Legacy pre-710 format: plain base64 DEK. Kept so existing
-            // enrollments keep working; re-enabling upgrades them to the
-            // Hello-bound format. The decode consumes the zeroizing guard.
-            let decoded = Self::decode_vault_dek(&encoded);
+            let dek = Self::windows_dek_from_stored_value(&mut encoded, biometric_ref)?;
             encoded.zeroize();
-            let dek = decoded?;
-
             Ok(dek)
         }
 
@@ -287,21 +270,44 @@ impl BiometricManager {
             // consent prompt runs first (that would double-prompt). Legacy
             // pre-710 enrollments keep the verify-then-read flow.
             #[cfg(windows)]
-            if Self::stored_blob_is_hello_bound(biometric_ref) {
-                return Self::load_vault_dek(biometric_ref);
+            {
+                // ONE read feeding the format decision (review F3: two reads
+                // could see hello-bound then legacy and skip verification).
+                let mut encoded = Self::read_windows_stored_value(biometric_ref)?;
+                if HelloBoundBlob::decode(&encoded).is_some() {
+                    let dek = Self::windows_dek_from_stored_value(&mut encoded, biometric_ref)?;
+                    encoded.zeroize();
+                    return Ok(dek);
+                }
+                encoded.zeroize();
             }
             Self::require_authentication(reason)?;
             Self::load_vault_dek(biometric_ref)
         }
     }
 
-    /// Whether the stored Windows keyring value is a v1 Hello-bound blob.
+    /// Decode + release from an ALREADY-READ Windows keyring value (review
+    /// F3: the format decision and the release consume the same read).
     #[cfg(windows)]
-    fn stored_blob_is_hello_bound(biometric_ref: &str) -> bool {
-        match Self::read_windows_stored_value(biometric_ref) {
-            Ok(value) => HelloBoundBlob::decode(&value).is_some(),
-            Err(_) => false,
+    fn windows_dek_from_stored_value(
+        encoded: &mut String,
+        biometric_ref: &str,
+    ) -> Result<DataEncryptionKey> {
+        // WBS-710: a v1 blob releases through the Hello-gated signature (the
+        // signer's prompt IS the authentication); the wrap key never exists
+        // outside the release call.
+        if let Some(blob) = HelloBoundBlob::decode(encoded) {
+            let signer = self::windows::hello::WindowsHelloSigner {
+                credential_name: self::windows::hello::credential_name(biometric_ref),
+            };
+            return release_dek_under_hello(&signer, biometric_ref, &blob);
         }
+
+        // Legacy pre-710 format: plain base64 DEK. Kept so existing
+        // enrollments keep working; re-enabling upgrades them to the
+        // Hello-bound format.
+        let decoded = Self::decode_vault_dek(encoded);
+        decoded
     }
 
     /// Read the raw Windows keyring value for a biometric ref.
@@ -373,6 +379,11 @@ impl BiometricManager {
                     e
                 ))));
             }
+
+            // WBS-710 review F4: also drop the per-vault TPM/Hello key so a
+            // disable does not orphan it (best-effort; ReplaceExisting on
+            // the next enable reclaims it regardless).
+            self::windows::hello::delete_key(&self::windows::hello::credential_name(biometric_ref));
 
             Ok(())
         }
@@ -567,6 +578,16 @@ mod windows {
             match KeyCredentialManager::IsSupportedAsync() {
                 Ok(op) => op.get().unwrap_or(false),
                 Err(_) => false,
+            }
+        }
+
+        /// Best-effort TPM key deletion on biometric disable (review F4:
+        /// otherwise the per-vault key is orphaned; ReplaceExisting on the
+        /// next enable also reclaims it).
+        pub(in crate::biometric) fn delete_key(name: &HSTRING) {
+            super::ensure_com_initialized();
+            if let Ok(action) = KeyCredentialManager::DeleteAsync(name) {
+                let _ = action.get();
             }
         }
 

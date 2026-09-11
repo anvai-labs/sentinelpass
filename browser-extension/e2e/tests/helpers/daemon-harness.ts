@@ -81,6 +81,25 @@ function requireBinaries(): void {
  * Run a command inside the harness HOME with a pseudo-tty so the CLI's
  * rpassword prompts (echo disabled) receive piped input.
  */
+/**
+ * The ISOLATED environment for every spawned process (daemon, CLI, host,
+ * browser): HOME pins the dirs-crate paths, and the XDG family is
+ * overridden because on Linux the dirs crate PREFERS XDG_CONFIG_HOME /
+ * XDG_DATA_HOME over HOME - without this a Linux developer's real vault
+ * would be touched (review F10).
+ */
+export function isolatedEnv(homeDir: string): Record<string, string> {
+  return {
+    ...process.env,
+    HOME: homeDir,
+    XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
+    XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+    XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+    XDG_CACHE_HOME: path.join(homeDir, '.cache'),
+    XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
+  };
+}
+
 function runWithTty(
   homeDir: string,
   command: string,
@@ -181,7 +200,7 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
   // for the master password at startup unless --start-locked; the harness
   // unlocks through the CLI (the daemon-unlock path) instead.
   const daemonProcess = spawn(DAEMON_BIN, ['--start-locked'], {
-    env: { ...process.env, HOME: homeDir, XDG_RUNTIME_DIR: path.join(homeDir, 'runtime') },
+    env: isolatedEnv(homeDir),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const daemonLog: string[] = [];

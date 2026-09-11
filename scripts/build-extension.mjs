@@ -78,6 +78,13 @@ await esbuild.build({
 
 const digests = new Map();
 for (const target of targets) {
+  // Review F7: remove stale artifacts a previous build left behind (a
+  // renamed/removed module would otherwise keep shipping its old .js).
+  for (const existing of readdirSync(target)) {
+    if (existing.endsWith('.js') && !emitted.includes(existing)) {
+      rmSync(join(target, existing), { force: true });
+    }
+  }
   cpSync(distDir, target, {
     recursive: true,
     filter: (src) => src === distDir || src.endsWith('.js'),
