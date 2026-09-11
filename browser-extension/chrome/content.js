@@ -1,6 +1,8 @@
 // Content script for password field detection and autofill
 import { debugLog, infoLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger.js';
 import { classifyCredentialUrlSecurity, domainMatchesPolicy, normalizeDomainForPolicy } from './save-heuristics.js';
+import { classifyInputField, classifyPasswordForm, isAutofillablePasswordField } from './field-semantics.js';
+import { decideCredentialChoice } from './credential-choice.js';
 function escapeHtml(str) {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(str));
@@ -369,17 +371,20 @@ function trackFormSubmissions() {
             submitted_url: window.location.href,
             timestamp: Date.now(),
             input_method: inputMethod,
-            isNewPassword: isNewPassword
+            isNewPassword: isNewPassword,
+            isPasswordChange: false
         };
         debugLog('[SentinelPass] Submission input method:', inputMethod);
         // Hand the submission to the background worker (WBS-716): no direct
         // session-storage writes from a page context.
         capturePendingLogin(submissionData);
-        // Show save prompt immediately for new password forms
+        // Show save prompt immediately for new password / change forms
         if (isNewPassword) {
+            const isChange = isPasswordChangeForm(form);
+            submissionData.isPasswordChange = isChange;
             debugLog('[SentinelPass] Scheduling save prompt in 500ms...');
             setTimeout(() => {
-                showSavePrompt(username, domain, passwordField.value, submissionData.url);
+                showSavePrompt(username, domain, passwordField.value, submissionData.url, null, isChange);
             }, 500);
         }
         else {
@@ -440,39 +445,64 @@ function trackFormSubmissions() {
         }
     }, true);
 }
-// Detect if form is for new account creation
+// Detect what a form's password fields mean (WBS-714): the page's own
+// autocomplete attributes are the primary signal — `new-password` marks
+// registration/change flows, and an existing (non-empty) current-password
+// paired with a new-password is a password CHANGE. Text heuristics are the
+// fallback for pages that do not declare semantics.
 function isNewPasswordForm(form, passwordField) {
     debugLog('[SentinelPass] Checking if new password form...');
-    // Check for common registration indicators
+    const described = [];
+    for (const field of form.querySelectorAll('input[type="password"]')) {
+        const input = field;
+        described.push({
+            autocomplete: input.getAttribute('autocomplete') || '',
+            type: input.type,
+            name: input.name || '',
+            id: input.id || '',
+            placeholder: input.getAttribute('placeholder') || '',
+            hasValue: Boolean(input.value)
+        });
+    }
+    const kind = classifyPasswordForm(described);
+    debugLog('[SentinelPass] Password form kind (autocomplete signal):', kind);
+    if (kind !== 'login') {
+        return true;
+    }
+    // Fallback for pages without autocomplete signals (legacy heuristic).
     const formText = form.textContent.toLowerCase();
     const formId = (form.id || '').toLowerCase();
     const formAction = (form.action || '').toLowerCase();
-    debugLog('[SentinelPass] Form text sample:', formText.substring(0, 200));
-    debugLog('[SentinelPass] Form ID:', formId);
-    debugLog('[SentinelPass] Form action:', formAction);
-    // Indicators of new account creation
     const newAccountIndicators = [
         'register', 'signup', 'sign-up', 'sign up', 'create account',
         'new account', 'join', 'get started', 'create password'
     ];
-    const hasNewAccountIndicator = newAccountIndicators.some(indicator => formText.includes(indicator) ||
-        formId.includes(indicator) ||
-        formAction.includes(indicator));
-    debugLog('[SentinelPass] Has new account indicator:', hasNewAccountIndicator);
-    // Check if password confirmation field exists (common in registration)
-    const passwordFields = form.querySelectorAll('input[type="password"]');
-    const hasPasswordConfirm = passwordFields.length > 1;
-    debugLog('[SentinelPass] Password fields count:', passwordFields.length);
-    debugLog('[SentinelPass] Has password confirm:', hasPasswordConfirm);
-    // Check if current password field is empty (might be password change)
-    const isNewPassword = hasNewAccountIndicator || hasPasswordConfirm;
-    debugLog('[SentinelPass] Is new password:', isNewPassword);
-    return isNewPassword;
+    const hasNewAccountIndicator = newAccountIndicators.some(indicator => formText.includes(indicator) || formId.includes(indicator) || formAction.includes(indicator));
+    debugLog('[SentinelPass] Has new account indicator (text fallback):', hasNewAccountIndicator);
+    return hasNewAccountIndicator;
+}
+// True when the form is a password CHANGE on an authenticated page:
+// an existing (non-empty) current-password paired with a new-password.
+// Drives the "Update password?" prompt and the change save trigger.
+function isPasswordChangeForm(form) {
+    const described = [];
+    for (const field of form.querySelectorAll('input[type="password"]')) {
+        const input = field;
+        described.push({
+            autocomplete: input.getAttribute('autocomplete') || '',
+            type: input.type,
+            name: input.name || '',
+            id: input.id || '',
+            placeholder: input.getAttribute('placeholder') || '',
+            hasValue: Boolean(input.value)
+        });
+    }
+    return classifyPasswordForm(described) === 'password-change';
 }
 // Show prompt to save credentials. `password` is the PAGE's own field
 // value for the direct (new-password form) path; background-driven prompts
 // pass null + promptId and confirm via the background (review F1).
-function showSavePrompt(username, domain, password, sourceUrl = window.location.href, promptId = null) {
+function showSavePrompt(username, domain, password, sourceUrl = window.location.href, promptId = null, isPasswordChange = false) {
     void (async () => {
         if (await shouldSuppressSavePrompt(domain)) {
             debugLog('[SentinelPass] Suppressing save prompt due to never-save policy');
@@ -530,7 +560,7 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
         header.appendChild(createLockIcon(20, 20));
         const title = document.createElement('span');
         title.className = 'pm-prompt-title';
-        title.textContent = 'Save Password?';
+        title.textContent = isPasswordChange ? 'Update Password?' : 'Save Password?';
         header.appendChild(title);
         const closeBtn = document.createElement('button');
         closeBtn.type = 'button';
@@ -541,7 +571,9 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
         const body = document.createElement('div');
         body.className = 'pm-prompt-body';
         const domainP = document.createElement('p');
-        domainP.textContent = 'SentinelPass detected a new password for ';
+        domainP.textContent = isPasswordChange
+            ? 'SentinelPass detected a password change for '
+            : 'SentinelPass detected a new password for ';
         const domainStrong = document.createElement('strong');
         domainStrong.textContent = domain;
         domainP.appendChild(domainStrong);
@@ -566,7 +598,7 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
         const saveBtn = document.createElement('button');
         saveBtn.type = 'button';
         saveBtn.className = 'pm-prompt-btn pm-prompt-btn-save';
-        saveBtn.textContent = insecurePage ? 'Save anyway' : 'Save';
+        saveBtn.textContent = (isPasswordChange ? 'Update' : 'Save') + (insecurePage ? ' anyway' : '');
         const neverBtn = document.createElement('button');
         neverBtn.type = 'button';
         neverBtn.className = 'pm-prompt-btn pm-prompt-btn-never';
@@ -701,7 +733,7 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
                 void confirmInlineSave(promptId);
             }
             else if (password) {
-                saveCredentials(username, password, domain, sourceUrl);
+                saveCredentials(username, password, domain, sourceUrl, isPasswordChange);
             }
             prompt.remove();
         });
@@ -771,7 +803,7 @@ async function confirmInlineSave(promptId) {
     }
 }
 // Save credentials to vault via native messaging
-async function saveCredentials(username, password, domain, sourceUrl = window.location.href) {
+async function saveCredentials(username, password, domain, sourceUrl = window.location.href, isPasswordChange = false) {
     debugLog('[SentinelPass] saveCredentials called');
     debugLog('[SentinelPass] Sending message to background script...');
     try {
@@ -783,7 +815,7 @@ async function saveCredentials(username, password, domain, sourceUrl = window.lo
                 domain: domain,
                 url: sourceUrl || window.location.href,
                 submitted_url: sourceUrl || window.location.href,
-                save_trigger: 'inline_prompt_button'
+                save_trigger: isPasswordChange ? 'password_change' : 'inline_prompt_button'
             }
         });
         debugLog('[SentinelPass] Received response from background:', redactForLog(response));
@@ -955,46 +987,168 @@ function injectAutofillButton(passwordField, parent) {
     button.style.display = 'none';
     parent.appendChild(button);
 }
-// Request credentials from background script
+// WBS-713: bind the fill to the REQUESTED field (never page-first), and
+// only to fields that are fillable login targets. Falls back to the first
+// visible fillable password field when the requested element went away.
+function bindAutofillTarget(requestedField) {
+    const candidates = Array.from(document.querySelectorAll('input[type="password"]'));
+    const describe = (field) => ({
+        autocomplete: field.getAttribute('autocomplete') || '',
+        type: field.type,
+        name: field.name || '',
+        id: field.id || '',
+        placeholder: field.getAttribute('placeholder') || ''
+    });
+    const visible = (field) => !field.disabled && !field.readOnly && field.offsetParent !== null;
+    if (requestedField && requestedField.isConnected && requestedField.type === 'password'
+        && isAutofillablePasswordField(describe(requestedField))) {
+        return requestedField;
+    }
+    return candidates.find((field) => visible(field) && isAutofillablePasswordField(describe(field))) || null;
+}
+// Fetch the credential for one account and fill the BOUND target field.
+async function fetchAndFillFor(domain, requestId, username, targetField) {
+    const response = await chrome.runtime.sendMessage({
+        type: 'get_credential',
+        domain: domain,
+        request_id: requestId,
+        username: username
+    });
+    debugLog('[SentinelPass] Autofill response:', redactForLog(response));
+    if (typeof response?.error === 'string' && response.error.startsWith('autofill denied:')) {
+        // WBS-711: the daemon refused delivery for this origin (plain HTTP or
+        // an unverifiable context). This is a policy denial, not a no-match.
+        debugLog('[SentinelPass] Autofill denied by daemon origin policy:', response.error);
+        if (response.error.includes('insecure-http')) {
+            showNotification('Autofill is disabled on unencrypted HTTP sites', 'warning');
+        }
+        else {
+            showNotification('Autofill is not available for this page', 'warning');
+        }
+        return;
+    }
+    if (!(response.success && response.data)) {
+        debugLog('[SentinelPass] No credential delivered for', domain);
+        showNotification('No credentials found for this site', 'info');
+        return;
+    }
+    const target = bindAutofillTarget(targetField);
+    if (!target) {
+        showNotification('No fillable password field found', 'warning');
+        return;
+    }
+    fillCredentials(response.data.username, response.data.password, target);
+    let statusMessage = 'Password filled successfully!';
+    const totpResponse = await requestTotpCode(domain, requestId);
+    if (totpResponse?.success && totpResponse.totp_code) {
+        const didFillTotp = fillTotpCode(totpResponse.totp_code);
+        if (didFillTotp) {
+            statusMessage = 'Password and verification code filled!';
+        }
+    }
+    showNotification(statusMessage, 'success');
+}
+// WBS-715: the explicit chooser — multiple matches NEVER silently fill the
+// first. Usernames and titles only; the secret is fetched after the pick.
+function showCredentialChooser(candidates, onPick) {
+    const existing = document.querySelector('.pm-credential-chooser');
+    if (existing) {
+        existing.remove();
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'pm-credential-chooser';
+    overlay.style.cssText = `
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    width: 320px;
+    max-width: calc(100vw - 40px);
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    z-index: 999999;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 12px;
+  `;
+    const title = document.createElement('div');
+    title.textContent = 'Choose an account';
+    title.style.cssText = 'font-weight:600; font-size:14px; margin-bottom:8px;';
+    overlay.appendChild(title);
+    for (const candidate of candidates) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.textContent = candidate.title && candidate.title !== candidate.username
+            ? `${candidate.username} — ${candidate.title}`
+            : candidate.username;
+        row.style.cssText = `
+      display:block; width:100%; text-align:left; margin:4px 0;
+      padding:8px 10px; border:1px solid #e0e0e0; border-radius:6px;
+      background:#f8f9fa; cursor:pointer; font-size:13px;
+    `;
+        row.addEventListener('click', () => {
+            overlay.remove();
+            document.removeEventListener('keydown', onKey, true);
+            onPick(candidate.username);
+        });
+        overlay.appendChild(row);
+    }
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'margin-top:6px; background:none; border:none; color:#5f6368; cursor:pointer; font-size:12px;';
+    cancel.addEventListener('click', () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey, true);
+    });
+    overlay.appendChild(cancel);
+    const onKey = (event) => {
+        if (event.key === 'Escape') {
+            overlay.remove();
+            document.removeEventListener('keydown', onKey, true);
+        }
+    };
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+}
+// Request credentials from background script (WBS-715 flow:
+// list -> explicit choice -> fetch the chosen secret -> fill bound field)
 async function requestAutofill(passwordField) {
     const domain = window.location.hostname;
     const requestId = generateUUID();
     debugLog('[SentinelPass] Requesting autofill for domain:', domain);
     try {
-        const response = await chrome.runtime.sendMessage({
-            type: 'get_credential',
+        const listing = await chrome.runtime.sendMessage({
+            type: 'list_domain_credentials',
             domain: domain,
             request_id: requestId
         });
-        debugLog('[SentinelPass] Autofill response:', redactForLog(response));
-        if (response.success && response.data) {
-            fillCredentials(response.data.username, response.data.password);
-            let statusMessage = 'Password filled successfully!';
-            const totpResponse = await requestTotpCode(domain, requestId);
-            if (totpResponse?.success && totpResponse.totp_code) {
-                const didFillTotp = fillTotpCode(totpResponse.totp_code);
-                if (didFillTotp) {
-                    statusMessage = 'Password and verification code filled!';
-                }
-            }
-            // Show success indicator
-            showNotification(statusMessage, 'success');
-        }
-        else if (typeof response?.error === 'string' && response.error.startsWith('autofill denied:')) {
-            // WBS-711: the daemon refused delivery for this origin (plain HTTP or
-            // an unverifiable context). This is a policy denial, not a no-match.
-            debugLog('[SentinelPass] Autofill denied by daemon origin policy:', response.error);
-            if (response.error.includes('insecure-http')) {
+        if (typeof listing?.error === 'string' && listing.error.startsWith('autofill denied:')) {
+            debugLog('[SentinelPass] Autofill denied by daemon origin policy:', listing.error);
+            if (listing.error.includes('insecure-http')) {
                 showNotification('Autofill is disabled on unencrypted HTTP sites', 'warning');
             }
             else {
                 showNotification('Autofill is not available for this page', 'warning');
             }
+            return;
         }
-        else {
+        const candidates = (listing?.credentials || []).map((entry) => ({
+            username: entry.username,
+            title: entry.title || ''
+        }));
+        const decision = decideCredentialChoice(candidates);
+        if (decision.action === 'none') {
             debugLog('[SentinelPass] No credentials found for', domain);
             showNotification('No credentials found for this site', 'info');
+            return;
         }
+        if (decision.action === 'fill') {
+            await fetchAndFillFor(domain, requestId, decision.username, passwordField);
+            return;
+        }
+        showCredentialChooser(decision.candidates, (username) => {
+            void fetchAndFillFor(domain, generateUUID(), username, passwordField);
+        });
     }
     catch (error) {
         console.error('[SentinelPass] Autofill failed:', error);
@@ -1017,9 +1171,11 @@ async function requestTotpCode(domain, requestId) {
         return null;
     }
 }
-// Fill credentials into form fields
-function fillCredentials(username, password) {
-    const passwordField = document.querySelector('input[type="password"]');
+// Fill credentials into the BOUND target field's form (WBS-713): the
+// requested field is filled, never the page's first password input, and
+// the username lookup is scoped to the same form.
+function fillCredentials(username, password, targetField = null) {
+    const passwordField = targetField || document.querySelector('input[type="password"]');
     if (!passwordField)
         return;
     const contextTimestamp = Date.now();
@@ -1094,27 +1250,30 @@ function fillTotpCode(code) {
     field.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
 }
-// Find username field based on password field location
+// Find username field based on password field location. The page's own
+// autocomplete="username" statement wins (WBS-714); text hints second.
 function findUsernameField(passwordField) {
     const form = passwordField.form;
-    if (form) {
-        // Try to find username in same form
-        let usernameField = form.querySelector('input[type="text"], input[type="email"]');
-        // Look for input with "username", "email", "user" in name/id
-        const inputs = form.querySelectorAll('input[type="text"], input[type="email"]');
-        for (const input of inputs) {
-            const attr = input.name + input.id + input.placeholder + input.autocomplete;
-            if (/user|email|login/i.test(attr)) {
-                usernameField = input;
-                break;
-            }
+    const isUsernameLike = (input) => {
+        if (input.type !== 'text' && input.type !== 'email') {
+            return false;
         }
-        return usernameField;
+        return classifyInputField({
+            autocomplete: input.getAttribute('autocomplete') || '',
+            type: input.type,
+            name: input.name || '',
+            id: input.id || '',
+            placeholder: input.getAttribute('placeholder') || ''
+        }) === 'username';
+    };
+    if (form) {
+        const inputs = Array.from(form.querySelectorAll('input'));
+        return inputs.find(isUsernameLike) || null;
     }
     // Try to find input before password field
     let prev = passwordField.previousElementSibling;
     while (prev) {
-        if (prev.tagName === 'INPUT' && (prev.type === 'text' || prev.type === 'email')) {
+        if (prev.tagName === 'INPUT' && isUsernameLike(prev)) {
             return prev;
         }
         prev = prev.previousElementSibling;

@@ -1283,9 +1283,46 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   over a real vault, grant-requires-capability negative, 86-case vitest suite
   green.
 - **WBS-713 — Validated site/frame/form/field binding.** SR-CLIENT-003, SR-EXT-002,
-  TD-CLIENT-06. Est 3d.
-- **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06. Est 2d.
-- **WBS-715 — Ambiguity chooser.** TD-CLIENT-06. Est 2d.
+  TD-CLIENT-06.
+  Est 3d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — SITE binding: the
+  daemon delivers only to the scheme-validated host parsed from the
+  browser-provided URL (WBS-711). FRAME binding: cross-origin iframe
+  requests stay default-denied in the background
+  (validateSenderDomainContext) and the claimed domain must equal the
+  frame host. FORM/FIELD binding: the fill targets the REQUESTED field
+  (the one whose autofill button was clicked), verified still-connected +
+  fillable (login semantics via the field classifier), falling back to the
+  first visible fillable field — never the page-first querySelector — and
+  the username lookup is scoped to the same form. Pure decision logic in
+  shared modules (`field-semantics.ts`, `credential-choice.ts`) with unit
+  suites; artifacts byte-parity; typecheck + 105 vitest cases green.
+- **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the page's own
+  `autocomplete` attribute is the primary field signal
+  (`username`/`email`/`current-password`/`new-password`/`one-time-code`;
+  text hints only break ties; `autocomplete="off"` is deliberately ignored
+  for password fields per browser convention). Autofill targets
+  current-password fields only — new-password fields are never silently
+  filled. Password-CHANGE pairs (existing filled current-password +
+  new-password) are recognized as a form class: the inline prompt reads
+  "Update Password?" / "Update", the notification text matches, and the
+  save carries `save_trigger: 'password_change'`. Text heuristics remain
+  only as a fallback for pages that declare nothing (and two un-attributed
+  password fields now classify as login, not guessed new-account). 13-case
+  pure suite for the classifier + form kinds.
+- **WBS-715 — Ambiguity chooser.** TD-CLIENT-06.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — autofill flow is now
+  list -> explicit choice -> fetch: `list_domain_credentials` (origin-bound
+  by 711) feeds a pure decision (zero -> "none" notice; one -> direct
+  fill; multiple -> an explicit chooser overlay listing usernames/titles
+  only, Esc/cancel closes, and the SECRET is requested only after the
+  user picks, via the exact-username filter shipped for the popup Pass
+  fix). A picked username that is not among the candidates never falls
+  back to first-match. Decision logic unit-tested
+  (`credential-choice.test.ts`); popup Pass uses the same disambiguator.
 - **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07.
   Est 2d.
   **Status:** Done (2026-09-10, Phase 5 remainder) — full inventory

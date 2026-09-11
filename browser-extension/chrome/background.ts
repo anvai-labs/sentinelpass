@@ -946,14 +946,15 @@ async function handleSaveNotification(data, sender) {
     });
 
     let createdId = null;
+    const isPasswordChange = data?.isPasswordChange === true;
     try {
       createdId = await createNotification(notificationId, {
-        title: 'SentinelPass - Save Password?',
+        title: isPasswordChange ? 'SentinelPass - Update Password?' : 'SentinelPass - Save Password?',
         message: insecureHttp
-          ? `Save the password for ${data.domain}? WARNING: this page used an unencrypted (HTTP) connection.`
-          : `Do you want to save the password for ${data.domain}?`,
+          ? `${isPasswordChange ? 'Update' : 'Save'} the password for ${data.domain}? WARNING: this page used an unencrypted (HTTP) connection.`
+          : `Do you want to ${isPasswordChange ? 'update' : 'save'} the password for ${data.domain}?`,
         buttons: [
-          { title: insecureHttp ? 'Save anyway' : 'Save' },
+          { title: insecureHttp ? 'Save anyway' : (isPasswordChange ? 'Update' : 'Save') },
           { title: 'Never for this site' }
         ],
         requireInteraction: true,
