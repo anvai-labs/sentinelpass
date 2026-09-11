@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import * as esbuild from 'esbuild';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -45,19 +44,18 @@ describe('extension single-source pipeline (WBS-717)', () => {
     expect(firefoxContent).toBe(content);
   });
 
-  it('rebuilds the bundled content.js byte-exactly (review F6)', async () => {
-    // content.js is esbuild-bundled, not tsc-emitted; pin it with the same
-    // flags scripts/build-extension.mjs uses (esbuild output is
-    // deterministic for a fixed version).
-    const result = await esbuild.build({
-      entryPoints: [path.join(chromeDir, 'content.ts')],
-      bundle: true,
-      format: 'iife',
-      target: 'es2022',
-      write: false,
-      logLevel: 'silent',
+  it('rebuilds the bundled content.js byte-exactly (review F6)', () => {
+    // content.js is esbuild-bundled via the canonical pipeline. The gate
+    // runs the PIPELINE as a subprocess (the same resolution path real
+    // builds use) rather than importing esbuild directly — CI job
+    // contexts vary in which node_modules tree is installed, and the
+    // pipeline's own resolution is the contract under test.
+    const run = spawnSync('npm', ['run', 'ext:build'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
     });
-    const fresh = result.outputFiles[0].contents;
+    expect(run.status, `ext:build failed: ${run.stderr}`).toBe(0);
+    const fresh = readFileSync(path.join(repoRoot, 'browser-extension', 'dist', 'extension', 'content.js'));
     const checkedInChrome = readFileSync(path.join(chromeDir, 'content.js'));
     const checkedInFirefox = readFileSync(path.join(firefoxDir, 'content.js'));
     expect(
