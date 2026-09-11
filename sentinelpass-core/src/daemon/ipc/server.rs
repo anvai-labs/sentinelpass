@@ -1104,6 +1104,7 @@ impl IpcServer {
                                 relay_url: status.relay_url,
                                 last_sync_at: status.last_sync_at,
                                 pending_changes: status.pending_changes,
+                                conflicts: status.conflict_count,
                             },
                         )),
                         Err(e) => ServiceOutcome::from(ServiceError::from(e)),

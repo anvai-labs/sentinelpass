@@ -1056,14 +1056,88 @@ after 408/409 stabilize.
 - **WBS-610 — One bounded paginated path (normal+full).** TD-ROB-06. Est 3d.
 - **WBS-611 — Preserve concurrent alternatives; expose conflicts.** SR-SYNC-005,
   TD-UX-02. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 3) — schema v12
+  `sync_conflicts` (one durable alternative per object, DEK ciphertext
+  stored relay-shaped, re-sealed under the LOCAL identity at resolution);
+  pull-side guard records any mutation (tombstones included) hitting an
+  object with an UNSYNCED local edit (equal-or-greater version; stale
+  blobs keep the lineage skip) and marks `sync_state = 'conflict'`;
+  push-side conflicts mark conflicted instead of adopting; resolvers
+  keep-local (re-version above the peer + CAS re-base) and take-remote
+  (apply the alternative through the normal seal-under-local path); CLI
+  `sync conflict-list` / `conflict-resolve --object-id [--take-remote]`;
+  conflict count surfaced through `SyncStatus` and the daemon service
+  contract (`ServiceSyncStatus.conflicts`, serde default). Evidence:
+  `conflict_preserves_alternatives_and_resolves_keep_local`,
+  `conflict_take_remote_applies_the_alternative`,
+  `tombstone_vs_edit_conflict_is_preserved_and_resolvable`,
+  `take_remote_resurrects_a_locally_deleted_row`. After adversarial
+  review round 1: content applies are RESURRECTION-SAFE (clear the local
+  tombstone — delete-vs-edit races and take-remote resolution can no
+  longer silently no-op into an invisible row); resolutions are atomic
+  (pre-adjust + apply + record removal in ONE transaction — a failed
+  take-remote leaves the row conflicted with the record intact);
+  stale alternatives are purged when the row applies past them; the
+  conflict surface counts stored records OR conflicted rows (whichever
+  is larger) so transient record-less windows stay visible. The relay
+  same-version-rejection half landed with WBS-603 (stage 1).
 - **WBS-612 — Authenticate identity/type/origin/version/epoch/tombstone.** SR-SYNC-004,
   TD-SEC-02. Apply-side rule: pull never applies epoch/registry state below the
   local high-water sidecar — rejected as suspected rollback (ADR-004 rev 4). Est 4d.
+  **Status:** Done (2026-09-10, sync v2 stage 4) — every foreign pulled
+  mutation is authenticated BEFORE application: DEK-derived metadata MAC
+  verification (covering identity, type, versions, epoch, origin,
+  tombstone, payload hash — distinct identity-domain from the ADR-005
+  envelope) plus deterministic mutation-id recomputation; failures are
+  dead-lettered, never applied
+  (`relay_metadata_tamper_is_dead_lettered`). Apply-side epoch rule: a
+  mutation below the LOCAL vault epoch is dead-lettered
+  (`stale_epoch_mutation_is_dead_lettered_on_pull`).
 - **WBS-613 — Version/hash lineage + trusted high-water.** SR-SYNC-004. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 4) — schema v13
+  `sync_metadata.lineage_high_water` (TRUSTED max accepted vault-log
+  cursor; deliberately DISTINCT from the ADR-004 epoch sidecar): a pull
+  whose cursor moves below it is REFUSED fail-closed (relay log reset /
+  vault swap) — local state untouched, re-pairing is the remedy
+  (`lineage_rollback_is_refused_fail_closed`). Folded into the high-water
+  from BOTH the pull cursor and the push-response cursor. Follow-up
+  ticketed from stage-2 review: own-device log entries are skipped by
+  origin — a backup-restored device behind local version should apply
+  them (restore path already neutralizes sync state, ADR-008).
 - **WBS-614 — Device/epoch revocation everywhere.** TD-SEC-05. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stages 1+4) — revocation: the
+  Ed25519 auth middleware checks the device-revoked flag on EVERY request
+  (v1 and v2 alike); epoch: the relay rejects mutations below the vault's
+  forward-only epoch high-water (bounded jump), and the CLIENT dead-letters
+  pulled mutations below its LOCAL vault epoch (apply-side mirror of the
+  ADR-004 rotation revocation). Residual (documented): the relay-side
+  epoch high-water advances on client assertion — authenticated epoch
+  publication (epoch-bound MAC context) remains a later-stage option.
 - **WBS-615 — High-entropy QR bootstrap / reviewed PAKE.** SR-SYNC-006, TD-SEC-07,
   SR-RELAY-002. Est 5d.
+  **Status:** Done (2026-09-10, sync v2 stage 5) — the reviewed CHOICE is
+  the HMAC-challenge protocol (documented per ADR-006's allowance; a PAKE
+  was judged heavy for the coordinated-relay deployment model): pairing
+  uses a 256-bit CSPRNG secret S as the sole root — bootstrap encrypted
+  under HKDF(S); the relay stores ONLY Argon2id(S) + ciphertext, gates
+  retrieval on knowledge of S (POST body, one-use, TTL, exponential
+  attempt-limit backoff); a 6-digit TRANSCRIPT derived from S is shown on
+  both devices purely for human comparison and never encrypts anything.
+  v1 pairing endpoints remain for old clients until WBS-624 retirement.
+  Tests: 256-bit + roundtrip, short-numeric rejection, transcript
+  stability/divergence, bootstrap-id determinism, wrong-secret decryption
+  failure.
 - **WBS-616 — Pairing material in bodies; one-use; transcript-bound.** TD-NET-01. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 5) — pairing material moves
+  in POST bodies only (`/api/v2/pairing/bootstrap` upload — authenticated;
+  `/api/v2/pairing/bootstrap/retrieve` — public + attempt-limited);
+  retrieval is ONE-USE (consumed in the same transaction as the return
+  data) and short-lived (TTL); the transcript (6 digits from the secret,
+  shown on both devices) binds the human side; registration is bound to
+  the pairing via the registration proof, staged relay-side at successful
+  retrieval with a short window and consumed at device registration. The
+  pairing secret is PROMPTED at pair-join — never a command-line argument
+  (TD-NET-01's URL/CLI exposure gone).
 - **WBS-617 — TLS-only, safe redirects, no userinfo (full client rules).** SR-SYNC-007,
   TD-NET-02. Est 2d.
 - **WBS-618 — Proxy-trust config for forwarded IPs.** TD-NET-03. Est 1.5d.

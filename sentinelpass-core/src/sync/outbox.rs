@@ -136,11 +136,11 @@ pub struct AckSummary {
 ///   sent (anything else is a relay misreport and is ignored): the row
 ///   leaves the outbox (`sync_state = 'synced'`, `sync_acked_version = R`).
 /// - `Rejected{VersionConflict{C}}` — the relay's current version is C:
-///   - `C >= R` (our attempted resulting version): the relay is at or
-///     beyond our attempt — the relay state supersedes this row; record
-///     `sync_acked_version = C` and mark it synced. The next PULL brings
-///     the relay's content down (v1-equivalent adoption; full
-///     two-alternative conflict preservation lands with WBS-611).
+///   - `C >= R` (our attempted resulting version): the local edit is
+///     UNSYNCED content — mark the row CONFLICTED (never silently
+///     adopted); the same-run pull records the relay's content as the
+///     durable alternative (`sync_conflicts`) and the user resolves
+///     (WBS-611).
 ///   - `C < R` — our attempt was genuinely rejected while we moved on (a
 ///     local edit, or a lost-response mutation committed and a later edit
 ///     advanced the row): learn `C` into `sync_acked_version` and
@@ -205,6 +205,16 @@ pub fn apply_push_acks(
                     ],
                 )
                 .map_err(DatabaseError::Sqlite)?;
+                // A stored alternative at or below the applied version is
+                // stale — remove it so the conflict surface stays truthful.
+                tx.execute(
+                    "DELETE FROM sync_conflicts WHERE object_id = ?1 AND remote_version <= ?2",
+                    rusqlite::params![
+                        outbox.object_id.to_string(),
+                        resulting_version.as_u64() as i64
+                    ],
+                )
+                .map_err(DatabaseError::Sqlite)?;
                 summary.applied += 1;
             }
             crate::sync::v2::MutationOutcome::Rejected { reason } => match reason {
@@ -213,16 +223,16 @@ pub fn apply_push_acks(
                     let current = current_version.as_u64() as i64;
                     let sent = sent_resulting.as_u64() as i64;
                     if current >= sent {
-                        // The relay is at or beyond our attempt: adopt the
-                        // relay state as the new baseline (the next pull
-                        // reconciles content).
+                        // The relay is at or beyond our attempt: the local
+                        // edit is UNSYNCED content — never silently adopted.
+                        // Mark the row conflicted; the same-run pull records
+                        // the relay's content as the durable alternative and
+                        // the user resolves (WBS-611).
                         tx.execute(
                             &format!(
-                                "UPDATE {table} SET sync_state = 'synced',
-                                 sync_acked_version = MAX(sync_acked_version, ?1),
-                                 last_synced_at = ?2 WHERE sync_id = ?3"
+                                "UPDATE {table} SET sync_state = 'conflict' WHERE sync_id = ?1"
                             ),
-                            rusqlite::params![current, now, outbox.object_id.to_string()],
+                            rusqlite::params![outbox.object_id.to_string()],
                         )
                         .map_err(DatabaseError::Sqlite)?;
                     } else {
@@ -264,6 +274,12 @@ pub fn apply_push_acks(
 
     let mut config = crate::sync::config::SyncConfig::load(&tx)?;
     config.last_push_sequence = server_cursor;
+    // The PUSH-response cursor is a relay CLAIM with no client-side
+    // evidence — it is diagnostic only and MUST NOT advance the trusted
+    // lineage high-water: a >500-entry backlog (multi-chunk push) would
+    // otherwise raise the high-water past the pull cursor and permanently
+    // wedge pulls (stage-4 review). The high-water folds ONLY from
+    // MAC-verified pull observations (see engine pull_changes).
     config.save(&tx)?;
 
     tx.commit().map_err(DatabaseError::Sqlite)?;
@@ -420,8 +436,9 @@ mod tests {
         assert_eq!(a_state, "synced");
         assert_eq!(a_acked, 3, "acked version advanced WITH the mark");
 
-        // b: conflict with relay current 4 >= attempted 2 → adopted baseline
-        // (the next pull reconciles content; WBS-611 adds preservation).
+        // b: conflict with relay current 4 >= attempted 2 → CONFLICTED
+        // (unsynced local content is never silently adopted; the same-run
+        // pull records the relay's content as the alternative — WBS-611).
         let (b_state, b_acked): (String, i64) = db
             .conn()
             .query_row(
@@ -430,11 +447,8 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(
-            b_state, "synced",
-            "a superseding conflict adopts the relay state"
-        );
-        assert_eq!(b_acked, 4, "acked learns the relay's current version");
+        assert_eq!(b_state, "conflict", "a superseding conflict marks the row");
+        assert_eq!(b_acked, 1, "acked is untouched — resolution drives it");
 
         // c: stale-epoch rejection — fully untouched, retries same mutation.
         let (c_state, c_acked): (String, i64) = db
@@ -448,9 +462,16 @@ mod tests {
         assert_eq!(c_state, "pending", "non-conflict rejections stay pending");
         assert_eq!(c_acked, 1, "their acked version is untouched");
 
-        // The checkpoint records the relay cursor diagnostic.
+        // The checkpoint records the relay cursor diagnostic...
         let config = crate::sync::config::SyncConfig::load(db.conn()).unwrap();
         assert_eq!(config.last_push_sequence, 9);
+        // ...and the push cursor MUST NOT raise the trusted lineage
+        // high-water (stage-4 review: a multi-chunk backlog's claimed
+        // cursor would otherwise wedge every future pull).
+        assert_eq!(
+            config.lineage_high_water, 0,
+            "push responses never move the trusted high-water"
+        );
     }
 
     /// A conflict BEHIND our attempt (we edited mid-flight, or a lost
@@ -689,4 +710,61 @@ pub fn purge_dead_letter(conn: &Connection, server_sequence: Option<i64>) -> Res
             .map_err(DatabaseError::Sqlite)?,
     };
     Ok(purged)
+}
+
+/// Count conflict surface (status surfacing, WBS-611): the stored
+/// alternatives OR rows still sitting in the conflict state — the push side
+/// marks rows conflicted BEFORE the same-run pull stores a record, and a
+/// failed pull leaves such rows temporarily record-less; MAX keeps the
+/// surface truthful in both windows.
+pub fn count_sync_conflicts(conn: &Connection) -> Result<u64> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT MAX(a, b) FROM (
+                 SELECT (SELECT COUNT(*) FROM sync_conflicts) AS a,
+                        (SELECT COUNT(*) FROM entries WHERE sync_state = 'conflict') +
+                        (SELECT COUNT(*) FROM ssh_keys WHERE sync_state = 'conflict') +
+                        (SELECT COUNT(*) FROM totp_secrets WHERE sync_state = 'conflict') AS b
+             )",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    Ok(count as u64)
+}
+
+/// The metadata view of one stored conflict alternative (WBS-611).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncConflictRow {
+    pub object_id: String,
+    pub object_type: String,
+    pub remote_version: i64,
+    pub origin_device_id: String,
+    pub is_tombstone: bool,
+    pub received_at: i64,
+}
+
+/// List stored conflict alternatives, oldest first.
+pub fn list_sync_conflicts(conn: &Connection) -> Result<Vec<SyncConflictRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT object_id, object_type, remote_version, origin_device_id, is_tombstone, received_at
+             FROM sync_conflicts ORDER BY received_at ASC, object_id ASC",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SyncConflictRow {
+                object_id: row.get(0)?,
+                object_type: row.get(1)?,
+                remote_version: row.get(2)?,
+                origin_device_id: row.get(3)?,
+                is_tombstone: row.get::<_, i64>(4)? != 0,
+                received_at: row.get(5)?,
+            })
+        })
+        .map_err(DatabaseError::Sqlite)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(DatabaseError::Sqlite)?;
+    Ok(rows)
 }

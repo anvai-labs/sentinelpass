@@ -30,7 +30,17 @@ use tracing::warn;
 /// disposition for pulled mutations that cannot be applied. Every mutation
 /// in a page gets a disposition (applied or dead-lettered) before the pull
 /// cursor may pass it; the table is hard-capped (fail-closed at overflow).
-pub const CURRENT_SCHEMA_VERSION: i32 = 11;
+/// v12 (WBS-611 / ADR-006): `sync_conflicts` — the durable alternative for
+/// a concurrent edit (one per object; the LOCAL side stays in its own row).
+/// A pull that hits a row with an unsynced local edit records the incoming
+/// mutation here instead of silently overwriting (SR-SYNC-005).
+/// v13 (WBS-613 / ADR-006): `sync_metadata.lineage_high_water` — the
+/// TRUSTED sync-lineage high-water (the max relay vault-log cursor this
+/// device ever accepted). Deliberately DISTINCT from the ADR-004 epoch
+/// sidecar (which protects key-material rollback): this column protects
+/// LOG-lineage rollback — a relay whose log moved backwards (reset, vault
+/// swap) is refused fail-closed and requires re-pairing.
+pub const CURRENT_SCHEMA_VERSION: i32 = 13;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -465,7 +475,8 @@ impl Database {
                     last_pull_sequence INTEGER NOT NULL DEFAULT 0,
                     last_sync_at INTEGER,
                     sync_enabled INTEGER NOT NULL DEFAULT 0,
-                    protocol_version INTEGER NOT NULL DEFAULT 0
+                    protocol_version INTEGER NOT NULL DEFAULT 0,
+                    lineage_high_water INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS sync_devices (
@@ -495,6 +506,16 @@ impl Database {
                     object_id TEXT NOT NULL,
                     object_type TEXT NOT NULL,
                     reason TEXT NOT NULL,
+                    received_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sync_conflicts (
+                    object_id TEXT PRIMARY KEY,
+                    object_type TEXT NOT NULL,
+                    remote_version INTEGER NOT NULL,
+                    remote_payload BLOB NOT NULL,
+                    origin_device_id TEXT NOT NULL,
+                    is_tombstone INTEGER NOT NULL DEFAULT 0,
                     received_at INTEGER NOT NULL
                 );",
             )

@@ -758,19 +758,12 @@ enum SyncCommands {
     /// Start pairing (existing device generates code for new device)
     PairStart,
 
-    /// Join sync from a new device using a pairing code
+    /// Join sync from a new device using a v2 pairing secret (WBS-615:
+    /// 256-bit; the secret is prompted, never a command-line argument)
     PairJoin {
         /// Relay server URL
         #[arg(long)]
         relay_url: String,
-
-        /// 6-digit pairing code
-        #[arg(long)]
-        code: String,
-
-        /// Pairing salt (base64) printed by `pair-start`
-        #[arg(long)]
-        salt: String,
     },
 
     /// Disable sync for this vault
@@ -779,6 +772,21 @@ enum SyncCommands {
     /// List dead-lettered sync mutations (unappliable changes kept for
     /// inspection)
     DeadLetterList,
+
+    /// List concurrent-edit conflicts awaiting resolution (WBS-611)
+    ConflictList,
+
+    /// Resolve a concurrent-edit conflict
+    ConflictResolve {
+        /// Object ID from `conflict-list`
+        #[arg(long)]
+        object_id: String,
+
+        /// Apply the REMOTE (peer's) version instead of keeping the local
+        /// edit
+        #[arg(long, default_value_t = false)]
+        take_remote: bool,
+    },
 
     /// Purge dead-lettered sync mutations (one by sequence, or all)
     DeadLetterPurge {

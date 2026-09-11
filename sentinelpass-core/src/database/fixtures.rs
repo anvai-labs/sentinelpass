@@ -31,8 +31,9 @@
 //! release.
 
 use super::migrations::{
-    migrate_v10_to_v11, migrate_v1_to_v2, migrate_v2_to_v3, migrate_v3_to_v4, migrate_v4_to_v5,
-    migrate_v5_to_v6, migrate_v6_to_v7, migrate_v7_to_v8, migrate_v8_to_v9, migrate_v9_to_v10,
+    migrate_v10_to_v11, migrate_v11_to_v12, migrate_v12_to_v13, migrate_v1_to_v2, migrate_v2_to_v3,
+    migrate_v3_to_v4, migrate_v4_to_v5, migrate_v5_to_v6, migrate_v6_to_v7, migrate_v7_to_v8,
+    migrate_v8_to_v9, migrate_v9_to_v10,
 };
 use super::schema::CURRENT_SCHEMA_VERSION;
 use crate::crypto::cipher::{encrypt_entry, encrypt_string, DataEncryptionKey};
@@ -193,6 +194,12 @@ fn migrate_ladder_to(conn: &rusqlite::Connection, target: i32) {
     }
     if target >= 11 {
         migrate_v10_to_v11(conn).unwrap();
+    }
+    if target >= 12 {
+        migrate_v11_to_v12(conn).unwrap();
+    }
+    if target >= 13 {
+        migrate_v12_to_v13(conn).unwrap();
     }
     let version: i32 = conn
         .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
@@ -464,6 +471,18 @@ mod tests {
                 has_object("table", "sync_dead_letter"),
                 fixture.version >= 11,
                 "v{}: bounded dead-letter arrives in v11 (WBS-607)",
+                fixture.version
+            );
+            assert_eq!(
+                has_object("table", "sync_conflicts"),
+                fixture.version >= 12,
+                "v{}: durable conflict alternatives arrive in v12 (WBS-611)",
+                fixture.version
+            );
+            assert_eq!(
+                has_column("sync_metadata", "lineage_high_water"),
+                fixture.version >= 13,
+                "v{}: trusted lineage high-water arrives in v13 (WBS-613)",
                 fixture.version
             );
         }

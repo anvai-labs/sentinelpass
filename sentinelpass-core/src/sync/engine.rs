@@ -22,6 +22,7 @@ use crate::sync::models::{
 use crate::sync::outbox;
 use crate::sync::v2::{DeviceSequence, MutationV2, PullRequestV2, PushRequestV2, ServerCursor};
 use crate::{DatabaseError, PasswordManagerError, Result};
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -42,15 +43,45 @@ fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
 /// or tombstone has been applied). Returns `false` when the caller should proceed with
 /// the update. `tombstone_sql` must be a parameterized UPDATE with bindings
 /// `(?1 = now_timestamp, ?2 = sync_version, ?3 = local_id)`.
+/// The synced-bookkeeping columns of an existing local row, for the
+/// conflict guard and LWW preamble.
+struct ExistingLocalRow<'a> {
+    id: i64,
+    version: i64,
+    modified: i64,
+    state: &'a str,
+}
+
 fn apply_existing_preamble(
     conn: &rusqlite::Connection,
-    local_id: i64,
-    local_version: i64,
-    local_modified: i64,
+    local: ExistingLocalRow<'_>,
     blob: &SyncEntryBlob,
+    table: &str,
     tombstone_sql: &str,
 ) -> Result<bool> {
-    if ConflictResolver::resolve(local_version as u64, local_modified, blob)
+    // SR-SYNC-005 (WBS-611): an UNSYNCED local edit must never be silently
+    // overwritten (or silently deleted by a tombstone). Record the incoming
+    // mutation as the durable alternative and mark the row conflicted —
+    // the local side stays in its own row until user resolution
+    // (`resolve_sync_conflict`); the recorded mutation is the page
+    // disposition.
+    if (local.state == "pending" || local.state == "conflict")
+        && blob.sync_version >= local.version as u64
+    {
+        // Equal version = divergent content under the same lineage point;
+        // greater = the peer progressed past our base. A STALE blob
+        // (version below the local row) is not an alternative worth
+        // preserving — it cannot have applied anywhere current (relay CAS)
+        // and would only pollute resolution.
+        record_conflict(conn, blob)?;
+        conn.execute(
+            &format!("UPDATE {table} SET sync_state = 'conflict' WHERE sync_id = ?1"),
+            rusqlite::params![blob.sync_id.to_string()],
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        return Ok(true);
+    }
+    if ConflictResolver::resolve(local.version as u64, local.modified, blob)
         == Resolution::KeepLocal
     {
         return Ok(true);
@@ -61,13 +92,50 @@ fn apply_existing_preamble(
             rusqlite::params![
                 chrono::Utc::now().timestamp(),
                 blob.sync_version as i64,
-                local_id
+                local.id
             ],
         )
         .map_err(DatabaseError::Sqlite)?;
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Record a pulled mutation as a durable conflict alternative (WBS-611):
+/// latest alternative wins; the payload is stored relay-shaped (DEK
+/// ciphertext) and re-sealed under the LOCAL identity at resolution.
+fn record_conflict(conn: &rusqlite::Connection, blob: &SyncEntryBlob) -> Result<()> {
+    tracing::warn!(
+        sync_id = %blob.sync_id,
+        incoming_version = blob.sync_version,
+        tombstone = blob.is_tombstone,
+        "sync pull: concurrent edit preserved as a conflict alternative \
+         (local edit kept; resolve with 'sync conflict-resolve')"
+    );
+    conn.execute(
+        "INSERT INTO sync_conflicts (
+            object_id, object_type, remote_version, remote_payload,
+            origin_device_id, is_tombstone, received_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(object_id) DO UPDATE SET
+            object_type = excluded.object_type,
+            remote_version = excluded.remote_version,
+            remote_payload = excluded.remote_payload,
+            origin_device_id = excluded.origin_device_id,
+            is_tombstone = excluded.is_tombstone,
+            received_at = excluded.received_at",
+        rusqlite::params![
+            blob.sync_id.to_string(),
+            format!("{:?}", blob.entry_type),
+            blob.sync_version as i64,
+            blob.encrypted_payload,
+            blob.origin_device_id.to_string(),
+            blob.is_tombstone,
+            chrono::Utc::now().timestamp(),
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    Ok(())
 }
 
 /// Returns `true` when a new-entry insert should be skipped (tombstone or stale blob).
@@ -199,6 +267,142 @@ fn blob_from_log_mutation(m: &MutationV2) -> SyncEntryBlob {
     }
 }
 
+/// One stored concurrent-edit alternative (the peer's side of a conflict).
+#[derive(Debug, Clone)]
+pub struct ConflictAlternative {
+    pub entry_type: SyncEntryType,
+    pub remote_version: u64,
+    pub payload: Vec<u8>,
+    pub origin: Uuid,
+    pub is_tombstone: bool,
+}
+
+/// Parse the Debug-form object type tag stored in conflict/dead-letter rows.
+pub fn parse_object_type(type_str: &str) -> Result<SyncEntryType> {
+    match type_str {
+        "Credential" => Ok(SyncEntryType::Credential),
+        "SshKey" => Ok(SyncEntryType::SshKey),
+        "TotpSecret" => Ok(SyncEntryType::TotpSecret),
+        other => Err(PasswordManagerError::InvalidInput(format!(
+            "unknown sync object type {other}"
+        ))),
+    }
+}
+
+fn table_for(entry_type: SyncEntryType) -> &'static str {
+    match entry_type {
+        SyncEntryType::Credential => "entries",
+        SyncEntryType::SshKey => "ssh_keys",
+        SyncEntryType::TotpSecret => "totp_secrets",
+    }
+}
+
+/// KEEP-LOCAL resolution (WBS-611): re-version the local content above the
+/// peer and re-base its CAS expectation onto the peer's version — the next
+/// push applies it cleanly (CAS current == expected), and the stored
+/// alternative is discarded. The caller deletes the `sync_conflicts` row.
+pub fn resolve_conflict_keep_local(
+    conn: &rusqlite::Connection,
+    object_id: &Uuid,
+    entry_type: SyncEntryType,
+    remote_version: u64,
+) -> Result<()> {
+    let table = table_for(entry_type);
+    // Atomic: the re-version and the record removal commit together — a
+    // half-resolved row (pending, record still present) would double-count
+    // in the conflict surface.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute(
+        &format!(
+            "UPDATE {table} SET sync_state = 'pending',
+             sync_acked_version = MAX(sync_acked_version, ?1),
+             sync_version = MAX(sync_version, ?2)
+             WHERE sync_id = ?3"
+        ),
+        rusqlite::params![
+            remote_version as i64,
+            remote_version.saturating_add(1) as i64,
+            object_id.to_string()
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    tx.execute(
+        "DELETE FROM sync_conflicts WHERE object_id = ?1",
+        [object_id.to_string()],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
+/// TAKE-REMOTE resolution (WBS-611): re-base the local row below the stored
+/// alternative and apply it through the normal path (sealing under the
+/// LOCAL identity); the alternative record is then deleted. A tombstone
+/// alternative deletes the local row.
+pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
+    engine: &SyncEngine<T>,
+    conn: &rusqlite::Connection,
+    dek: &DataEncryptionKey,
+    object_id: &Uuid,
+    alternative: &ConflictAlternative,
+) -> Result<()> {
+    let ConflictAlternative {
+        entry_type,
+        remote_version,
+        ref payload,
+        ref origin,
+        ref is_tombstone,
+    } = *alternative;
+    let table = table_for(entry_type);
+    // ATOMIC resolution (review finding 3): the pre-adjust, the apply, and
+    // the record removal commit together — a FAILED take-remote (e.g. a
+    // locally-tampered stored payload) must leave the row conflicted with
+    // the record intact, never half-resolved into a state where the next
+    // sync would overwrite the local edit without a completed resolution.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute(
+        &format!(
+            "UPDATE {table} SET sync_state = 'synced',
+             sync_version = MIN(sync_version, ?1)
+             WHERE sync_id = ?2"
+        ),
+        rusqlite::params![
+            remote_version.saturating_sub(1) as i64,
+            object_id.to_string()
+        ],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    let blob = SyncEntryBlob {
+        sync_id: *object_id,
+        entry_type,
+        sync_version: remote_version,
+        modified_at: 0,
+        encrypted_payload: payload.clone(),
+        is_tombstone: *is_tombstone,
+        origin_device_id: *origin,
+    };
+    // Apply INSIDE the resolution transaction (the in-tx variant — no
+    // nested BEGIN).
+    match engine.apply_remote_entry_in_tx(&tx, dek, &blob) {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = tx.rollback();
+            return Err(e);
+        }
+    }
+    tx.execute(
+        "DELETE FROM sync_conflicts WHERE object_id = ?1",
+        [object_id.to_string()],
+    )
+    .map_err(DatabaseError::Sqlite)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
 /// Hard cap on dead-letter rows — bounded disposition state (ADR-006). At
 /// the cap the pull fails closed (page + cursor roll back) until the user
 /// inspects and purges.
@@ -302,6 +506,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         // main database file without blocking readers.
         let _ = db.wal_checkpoint();
 
+        let conflict_count = crate::sync::outbox::count_sync_conflicts(db.conn())?;
         Ok(SyncStatus {
             enabled: config.sync_enabled,
             device_id: config.device_id,
@@ -309,6 +514,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
             relay_url: config.relay_url.clone(),
             last_sync_at: config.last_sync_at,
             pending_changes: pending,
+            conflict_count,
         })
     }
 
@@ -389,13 +595,13 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// later in the page) get ONE bounded retry pass within the same
     /// transaction before being dead-lettered.
     async fn pull_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
-        let mut cursor = {
+        let (mut cursor, mut high_water) = {
             let db = self
                 .db
                 .lock()
                 .map_err(|_| DatabaseError::LockPoisoned("pull seq".to_string()))?;
             let config = SyncConfig::load(db.conn())?;
-            config.last_pull_sequence
+            (config.last_pull_sequence, config.lineage_high_water)
         };
 
         let mut total_count = 0u64;
@@ -418,6 +624,20 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 ));
             }
 
+            // WBS-613 lineage high-water (trusted state, distinct from the
+            // ADR-004 epoch sidecar): a cursor BELOW the high-water means
+            // the relay's log moved backwards — reset, vault swap, or a
+            // different relay behind the same URL. Fail closed; re-pairing
+            // is the remedy.
+            if response.cursor.as_u64() < high_water {
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "relay lineage moved backwards: cursor {backwards} is below the trusted \
+                     high-water {high_water}. The relay log may have been reset or the \
+                     vault swapped. Refusing to apply (re-pair under v2 to re-baseline)",
+                    backwards = response.cursor.as_u64()
+                )));
+            }
+
             total_count += response.entries.len() as u64;
 
             {
@@ -430,6 +650,16 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     .unchecked_transaction()
                     .map_err(DatabaseError::Sqlite)?;
 
+                // WBS-612: every foreign mutation is authenticated BEFORE
+                // application — the DEK-derived metadata MAC over the
+                // canonical shared metadata plus the deterministic
+                // mutation-id recomputation. A relay rewriting identity,
+                // type, versions, epoch, origin, tombstone state, or payload
+                // bytes is detected here; the mutation is dead-lettered
+                // (never applied, never silently trusted).
+                let mac_key = crate::sync::v2::derive_metadata_mac_key(dek)?;
+                let (_, local_epoch) = crate::vault::envelope_ops::read_local_identity(db.conn())?;
+
                 let mut deferred: Vec<(usize, String)> = Vec::new();
                 let mut applied = 0usize;
                 for (index, entry) in response.entries.iter().enumerate() {
@@ -437,6 +667,57 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     // Skip our own changes: their acks already governed the
                     // outbox, and the cursor passes them with this page.
                     if mutation.origin_device_id == self.device_id {
+                        continue;
+                    }
+                    let payload_sha256 = Sha256::digest(&mutation.encrypted_payload);
+                    let metadata = crate::sync::v2::MutationMetadata {
+                        vault_id: mutation.vault_id,
+                        object_id: mutation.object_id,
+                        object_type: mutation.object_type,
+                        expected_version: mutation.expected_version.as_u64(),
+                        resulting_version: mutation.resulting_version.as_u64(),
+                        key_epoch: mutation.key_epoch,
+                        origin_device_id: mutation.origin_device_id,
+                        is_tombstone: mutation.is_tombstone,
+                        mutation_id: mutation.mutation_id,
+                        payload_sha256: &payload_sha256,
+                    };
+                    if !metadata.verify_mac(&mac_key, &mutation.metadata_mac)? {
+                        let entry_ref = entry;
+                        dead_letter_entry(
+                            &tx,
+                            entry_ref,
+                            "metadata authentication failed (relay tamper suspected)",
+                        )?;
+                        continue;
+                    }
+                    if mutation.mutation_id
+                        != crate::sync::v2::mutation_id_for(
+                            mutation.vault_id,
+                            mutation.object_id,
+                            mutation.resulting_version,
+                        )
+                    {
+                        dead_letter_entry(
+                            &tx,
+                            entry,
+                            "mutation id does not match its content coordinates",
+                        )?;
+                        continue;
+                    }
+                    // WBS-612/614 apply-side epoch rule (ADR-004 rev 4): a
+                    // mutation sealed under a key epoch BELOW the local
+                    // vault's epoch is a pre-rotation upload — dead-letter
+                    // it (the rotation revoked that key's authority here).
+                    if mutation.key_epoch < local_epoch {
+                        dead_letter_entry(
+                            &tx,
+                            entry,
+                            &format!(
+                                "mutation epoch {} is below the local vault epoch {local_epoch}",
+                                mutation.key_epoch
+                            ),
+                        )?;
                         continue;
                     }
                     let blob = blob_from_log_mutation(mutation);
@@ -518,9 +799,22 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
                 let mut config = SyncConfig::load(&tx)?;
                 config.last_pull_sequence = response.cursor.as_u64();
+                // Evidence-backed high-water (stage-4 review): fold from the
+                // sequences this device actually OBSERVED in the page — not
+                // the relay-claimed response cursor, and never from push
+                // responses (a >500-entry multi-chunk backlog would raise
+                // the high-water past the pull cursor and wedge pulls).
+                let observed_max = response
+                    .entries
+                    .iter()
+                    .map(|e| e.server_sequence.as_u64())
+                    .max()
+                    .unwrap_or(0);
+                config.lineage_high_water = config.lineage_high_water.max(observed_max);
                 config.save(&tx)?;
 
                 tx.commit().map_err(DatabaseError::Sqlite)?;
+                high_water = config.lineage_high_water;
 
                 if still_deferred > 0 {
                     tracing::warn!(
@@ -554,9 +848,9 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// is never involved in an apply.
     /// Per-blob unit of work — production pull folds applies into the PAGE
     /// transaction ([`Self::apply_remote_entry_in_tx`]); this one-blob
-    /// wrapper is retained for the apply-path test fixtures.
-    #[cfg(test)]
-    pub(crate) fn apply_remote_entry(
+    /// wrapper serves the conflict-resolution path (take-remote applies one
+    /// stored alternative) and the apply-path test fixtures.
+    pub fn apply_remote_entry(
         &self,
         conn: &rusqlite::Connection,
         dek: &DataEncryptionKey,
@@ -611,21 +905,26 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         };
 
         // Check if we have this entry locally
-        let local: Option<(i64, i64, i64)> = conn
+        let local: Option<(i64, i64, i64, String)> = conn
             .query_row(
-                "SELECT entry_id, sync_version, modified_at FROM entries WHERE sync_id = ?1",
+                "SELECT entry_id, sync_version, modified_at, sync_state FROM entries WHERE sync_id = ?1",
                 [&sync_id_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        if let Some((entry_id, local_version, local_modified)) = local {
+        if let Some((entry_id, local_version, local_modified, local_state)) = local {
+            let local = ExistingLocalRow {
+                id: entry_id,
+                version: local_version,
+                modified: local_modified,
+                state: &local_state,
+            };
             if apply_existing_preamble(
                 conn,
-                entry_id,
-                local_version,
-                local_modified,
+                local,
                 blob,
+                "entries",
                 "UPDATE entries SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_acked_version = ?2, sync_state = 'synced', \
                  last_synced_at = ?1
@@ -667,12 +966,17 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
             // removed as the explicit typed contract. The historical
             // TD-ROB-03 fabrication was the 0.8.x era's
             // `unwrap_or(&[])`, which turned None into an empty blob.)
+            // Resurrection-safe apply (review finding 1/2): a conflicted row
+            // may be locally deleted (delete vs edit raced); applying REMOTE
+            // CONTENT must clear the tombstone or the resolution silently
+            // does nothing.
             conn.execute(
                 "UPDATE entries SET
                     title = ?1, username = ?2, password = ?3, url = ?4, notes = ?5,
                     credential_type = ?6, entry_nonce = ?7, auth_tag = ?8,
                     modified_at = ?9, favorite = ?10, sync_version = ?11,
-                    sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12
+                    sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12,
+                    is_deleted = 0, deleted_at = NULL
                  WHERE entry_id = ?13",
                 rusqlite::params![
                     blobs.title,
@@ -817,21 +1121,26 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         // Local identity for v2 sealing (WBS-304) — see read_local_identity.
         let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
-        let local: Option<(i64, i64, i64)> = conn
+        let local: Option<(i64, i64, i64, String)> = conn
             .query_row(
-                "SELECT key_id, sync_version, modified_at FROM ssh_keys WHERE sync_id = ?1",
+                "SELECT key_id, sync_version, modified_at, sync_state FROM ssh_keys WHERE sync_id = ?1",
                 [&sync_id_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        if let Some((key_id, local_version, local_modified)) = local {
+        if let Some((key_id, local_version, local_modified, local_state)) = local {
+            let local = ExistingLocalRow {
+                id: key_id,
+                version: local_version,
+                modified: local_modified,
+                state: &local_state,
+            };
             if apply_existing_preamble(
                 conn,
-                key_id,
-                local_version,
-                local_modified,
+                local,
                 blob,
+                "ssh_keys",
                 "UPDATE ssh_keys SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_acked_version = ?2, sync_state = 'synced', \
                  last_synced_at = ?1
@@ -881,12 +1190,14 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 .transpose()?;
 
             let now = chrono::Utc::now().timestamp();
+            // Resurrection-safe apply — see the credential arm.
             conn.execute(
                 "UPDATE ssh_keys SET
                     name = ?1, comment = ?2, key_type = ?3, key_size = ?4,
                     public_key = ?5, private_key_encrypted = ?6, nonce = ?7, auth_tag = ?8,
                     fingerprint = ?9, modified_at = ?10,
-                    sync_version = ?11, sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12
+                    sync_version = ?11, sync_acked_version = ?11, sync_state = 'synced', last_synced_at = ?12,
+                    is_deleted = 0, deleted_at = NULL
                  WHERE key_id = ?13",
                 rusqlite::params![
                     payload.name,
@@ -986,21 +1297,26 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         // Local identity for v2 sealing (WBS-304) — see read_local_identity.
         let (vault_uuid, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
 
-        let local: Option<(i64, i64, i64)> = conn
+        let local: Option<(i64, i64, i64, String)> = conn
             .query_row(
-                "SELECT totp_id, sync_version, created_at FROM totp_secrets WHERE sync_id = ?1",
+                "SELECT totp_id, sync_version, created_at, sync_state FROM totp_secrets WHERE sync_id = ?1",
                 [&sync_id_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok();
 
-        if let Some((totp_id, local_version, local_created)) = local {
+        if let Some((totp_id, local_version, local_created, local_state)) = local {
+            let local = ExistingLocalRow {
+                id: totp_id,
+                version: local_version,
+                modified: local_created,
+                state: &local_state,
+            };
             if apply_existing_preamble(
                 conn,
-                totp_id,
-                local_version,
-                local_created,
+                local,
                 blob,
+                "totp_secrets",
                 "UPDATE totp_secrets SET is_deleted = 1, deleted_at = ?1,
                  sync_version = ?2, sync_acked_version = ?2, sync_state = 'synced', \
                  last_synced_at = ?1
@@ -1088,11 +1404,13 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
             let now = chrono::Utc::now().timestamp();
             {
+                // Resurrection-safe apply — see the credential arm.
                 conn.execute(
                     "UPDATE totp_secrets SET
                         entry_id = ?1, secret_encrypted = ?2, nonce = ?3, auth_tag = ?4,
                         algorithm = ?5, digits = ?6, period = ?7, issuer = ?8, account_name = ?9,
-                        sync_version = ?10, sync_acked_version = ?10, sync_state = 'synced', last_synced_at = ?11
+                        sync_version = ?10, sync_acked_version = ?10, sync_state = 'synced', last_synced_at = ?11,
+                        is_deleted = 0, deleted_at = NULL
                      WHERE totp_id = ?12",
                     rusqlite::params![
                         eid,
@@ -2382,13 +2700,14 @@ mod v2_cycle_tests {
         );
     }
 
-    /// A version conflict where the relay is AT OR BEYOND our attempt: the
-    /// push is durably rejected, the client adopts the relay's baseline, and
-    /// the SAME sync's pull brings the peer's winning content down — the
-    /// object converges in one cycle (full two-alternative preservation is
-    /// WBS-611; this stage must at minimum never wedge).
+    /// SR-SYNC-005 (WBS-611): a push conflict where the relay is AT OR
+    /// BEYOND our attempt NEVER silently adopts the relay state — the row is
+    /// marked conflicted, the same-run pull stores the peer's content as the
+    /// durable alternative, and keep-local resolution re-versions the local
+    /// content above the peer so the next push lands cleanly. Both
+    /// alternatives were preserved and user resolution drives convergence.
     #[tokio::test]
-    async fn conflict_rejection_converges_without_wedge() {
+    async fn conflict_preserves_alternatives_and_resolves_keep_local() {
         let dek = DataEncryptionKey::new().unwrap();
         let relay_vault = Uuid::new_v4();
         let device = Uuid::new_v4();
@@ -2438,18 +2757,382 @@ mod v2_cycle_tests {
 
         engine.sync(&dek).await.unwrap();
         let (state, acked, version) = row_bookkeeping_full(&db, &sync_id);
-        assert_eq!(acked, 4, "acked learned the relay's current version");
-        assert_eq!(
-            version, 4,
-            "the pull applied the peer's winning mutation (v4 > local v3)"
-        );
-        assert_eq!(state, "synced", "converged onto the peer's state");
+        assert_eq!(state, "conflict", "the row is conflicted, never adopted");
+        assert_eq!(acked, 1, "acked untouched — the local edit is preserved");
+        assert_eq!(version, 3, "the LOCAL content stays in the row");
+        let conflicts: Vec<(i64, String)> = {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn
+                .conn()
+                .prepare("SELECT remote_version, object_id FROM sync_conflicts")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(conflicts.len(), 1, "the alternative is durably stored");
+        assert_eq!(conflicts[0].0, 4, "the alternative is the peer's v4");
 
-        // A follow-up sync is a no-op for this object (nothing pending —
-        // the engine never even contacts the relay's push endpoint).
+        // KEEP-LOCAL resolution: re-version above the peer, re-base CAS.
+        {
+            let conn = db.lock().unwrap();
+            resolve_conflict_keep_local(conn.conn(), &sync_id, SyncEntryType::Credential, 4)
+                .unwrap();
+        }
+        let (state, acked, version) = row_bookkeeping_full(&db, &sync_id);
+        assert_eq!(state, "pending");
+        assert_eq!(acked, 4, "CAS expectation re-based onto the peer's version");
+        assert_eq!(version, 5, "local content re-versioned above the peer");
+
+        // The next push applies the LOCAL content (CAS 4 == 4).
         engine.sync(&dek).await.unwrap();
-        let pushes = relay.seen_pushes.lock().unwrap();
-        assert_eq!(pushes.len(), 1, "nothing left to push after convergence");
+        let (state, acked) = row_bookkeeping(&db, &sync_id);
+        assert_eq!(state, "synced");
+        assert_eq!(acked, 5);
+        assert_eq!(relay.log_len(), 2, "peer v4 + our resolved v5");
+        let our_v4_overwrites = relay.model.lock().unwrap().log.iter().any(|(_, m)| {
+            m.object_id == sync_id
+                && m.resulting_version.as_u64() == 4
+                && m.origin_device_id == device
+        });
+        assert!(
+            !our_v4_overwrites,
+            "the peer's v4 was not overwritten by a fabricated v4 — ours is v5"
+        );
+    }
+
+    /// Tombstone-vs-edit conflict (review finding 4): a peer's TOMBSTONE
+    /// arriving at an object with an UNSYNCED local edit is preserved as an
+    /// alternative (the local row stays ALIVE), take-remote applies the
+    /// deletion, and keep-local keeps the edit alive and pushes it.
+    #[tokio::test]
+    async fn tombstone_vs_edit_conflict_is_preserved_and_resolvable() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // Local edit, alive: v3 pending (acked 1).
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        // Peer DELETED the object: tombstone mutation at v4.
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(2),
+                    resulting_version: ObjectVersion(4),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: true,
+                    encrypted_payload: vec![0x11; 40],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        // The row is ALIVE and conflicted; the tombstone is the alternative.
+        let (state, is_deleted, version): (String, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, is_deleted, sync_version FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "conflict");
+        assert_eq!(
+            is_deleted, 0,
+            "the local edit stays alive — no silent delete"
+        );
+        assert_eq!(version, 3);
+        let (record_v, record_tomb): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT remote_version, is_tombstone FROM sync_conflicts \
+                     WHERE object_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(record_v, 4);
+        assert_eq!(record_tomb, 1, "the alternative IS the tombstone");
+
+        // TAKE REMOTE: the deletion applies (the user accepted the peer's
+        // delete) — the row ends tombstoned at the remote version.
+        {
+            let conn = db.lock().unwrap();
+            resolve_conflict_take_remote(
+                &engine,
+                conn.conn(),
+                &dek,
+                &sync_id,
+                &ConflictAlternative {
+                    entry_type: SyncEntryType::Credential,
+                    remote_version: 4,
+                    payload: vec![0x11; 40],
+                    origin: Uuid::new_v4(),
+                    is_tombstone: true,
+                },
+            )
+            .unwrap();
+        }
+        let (state, is_deleted, acked): (String, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, is_deleted, sync_acked_version FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "synced");
+        assert_eq!(is_deleted, 1, "take-remote applies the peer's deletion");
+        assert_eq!(acked, 4, "the deletion is acked — it does not re-push");
+        let records: i64 = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sync_conflicts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(records, 0);
+    }
+
+    /// Take-remote onto a LOCALLY DELETED row (delete-vs-edit raced, the
+    /// peer's edit won): the applied content must RESURRECT the row —
+    /// clearing the local tombstone — or the user's resolution silently
+    /// does nothing (review findings 1/2).
+    #[tokio::test]
+    async fn take_remote_resurrects_a_locally_deleted_row() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // Local row: alive at v3, then LOCALLY deleted (repository delete
+        // shape: is_deleted=1, version bumped, pending).
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+        {
+            let conn = db.conn();
+            conn.execute(
+                "UPDATE entries SET is_deleted = 1, deleted_at = 99, \
+                     sync_version = 4, sync_state = 'pending' WHERE sync_id = ?1",
+                [&sync_id.to_string()],
+            )
+            .unwrap();
+        }
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(2),
+                    resulting_version: ObjectVersion(4),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: {
+                        let payload = CredentialPayload {
+                            title: "Peer Resurrection".to_string(),
+                            username: "u".to_string(),
+                            password: Zeroizing::new("p".to_string()),
+                            credential_type: crate::CredentialType::Password,
+                            url: None,
+                            notes: None,
+                            favorite: false,
+                            domains: vec![],
+                            created_at: 1,
+                            modified_at: 1,
+                        };
+                        encrypt_for_sync(
+                            &dek,
+                            &Zeroizing::new(serde_json::to_vec(&payload).unwrap()),
+                        )
+                        .unwrap()
+                    },
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+        assert_eq!(row_bookkeeping_full(&db, &sync_id).0, "conflict");
+
+        // TAKE REMOTE: the peer's LIVE content resurrects the row.
+        {
+            let conn = db.lock().unwrap();
+            resolve_conflict_take_remote(
+                &engine,
+                conn.conn(),
+                &dek,
+                &sync_id,
+                &ConflictAlternative {
+                    entry_type: SyncEntryType::Credential,
+                    remote_version: 4,
+                    payload: {
+                        let payload = CredentialPayload {
+                            title: "Peer Resurrection".to_string(),
+                            username: "u".to_string(),
+                            password: Zeroizing::new("p".to_string()),
+                            credential_type: crate::CredentialType::Password,
+                            url: None,
+                            notes: None,
+                            favorite: false,
+                            domains: vec![],
+                            created_at: 1,
+                            modified_at: 1,
+                        };
+                        encrypt_for_sync(
+                            &dek,
+                            &Zeroizing::new(serde_json::to_vec(&payload).unwrap()),
+                        )
+                        .unwrap()
+                    },
+                    origin: Uuid::new_v4(),
+                    is_tombstone: false,
+                },
+            )
+            .unwrap();
+        }
+        let (state, is_deleted, acked): (String, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT sync_state, is_deleted, sync_acked_version FROM entries \
+                     WHERE sync_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(state, "synced");
+        assert_eq!(
+            is_deleted, 0,
+            "applying live REMOTE content must clear the local tombstone"
+        );
+        assert_eq!(acked, 4);
+    }
+
+    /// TAKE-REMOTE resolution: the stored alternative is applied through the
+    /// normal path (sealing under the LOCAL identity), the local edit is
+    /// discarded per the user's choice, and the record is removed.
+    #[tokio::test]
+    async fn conflict_take_remote_applies_the_alternative() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 3, 1);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let peer_payload = {
+            let payload = CredentialPayload {
+                title: "Peer Title".to_string(),
+                username: "peer-user".to_string(),
+                password: Zeroizing::new("peer-pass".to_string()),
+                credential_type: crate::CredentialType::Password,
+                url: None,
+                notes: None,
+                favorite: false,
+                domains: vec![],
+                created_at: 1_700_000_000,
+                modified_at: 1_700_000_200,
+            };
+            encrypt_for_sync(&dek, &Zeroizing::new(serde_json::to_vec(&payload).unwrap())).unwrap()
+        };
+        let peer_mutation = crate::sync::v2::build_mutation(
+            &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+            &crate::sync::v2::MutationInput {
+                vault_id: relay_vault,
+                object_id: sync_id,
+                object_type: SyncEntryType::Credential,
+                expected_version: ObjectVersion(2),
+                resulting_version: ObjectVersion(4),
+                key_epoch: 1,
+                origin_device_id: Uuid::new_v4(),
+                is_tombstone: false,
+                encrypted_payload: peer_payload.clone(),
+            },
+        )
+        .unwrap();
+        relay.seed_peer_mutation(peer_mutation);
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+        assert_eq!(row_bookkeeping_full(&db, &sync_id).0, "conflict");
+
+        // TAKE REMOTE.
+        {
+            let conn = db.lock().unwrap();
+            let (remote_version, payload, origin): (i64, Vec<u8>, String) = conn
+                .conn()
+                .query_row(
+                    "SELECT remote_version, remote_payload, origin_device_id FROM sync_conflicts \
+                     WHERE object_id = ?1",
+                    [&sync_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            resolve_conflict_take_remote(
+                &engine,
+                conn.conn(),
+                &dek,
+                &sync_id,
+                &ConflictAlternative {
+                    entry_type: SyncEntryType::Credential,
+                    remote_version: remote_version as u64,
+                    payload,
+                    origin: Uuid::parse_str(&origin).unwrap(),
+                    is_tombstone: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let (state, acked, version) = row_bookkeeping_full(&db, &sync_id);
+        assert_eq!(state, "synced", "the alternative applied");
+        assert_eq!(acked, 4);
+        assert_eq!(version, 4);
+        let conflicts: i64 = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sync_conflicts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(conflicts, 0, "the record is consumed by resolution");
     }
 
     /// THE pull-then-edit acceptance (reviewer finding 1): a peer's mutation
@@ -2580,6 +3263,7 @@ mod v2_cycle_tests {
             last_pull_sequence: 0,
             last_sync_at: None,
             protocol_version: protocol,
+            lineage_high_water: 0,
         };
         config.save(db.conn()).unwrap();
     }
@@ -3014,6 +3698,7 @@ mod v2_cycle_tests {
                 last_pull_sequence: 0,
                 last_sync_at: None,
                 protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+                lineage_high_water: 0,
             };
             config.save(db.lock().unwrap().conn()).unwrap();
         };
@@ -3113,6 +3798,264 @@ mod v2_cycle_tests {
             injected_failures >= 1,
             "the sweep must inject at least one real failure to be meaningful"
         );
+    }
+
+    // --- WBS-612/613/614: authenticated metadata, lineage, epoch -----------
+
+    /// THE metadata-tamper acceptance (SR-SYNC-004): a relay rewriting ANY
+    /// authenticated metadata field (here: flipping the tombstone state)
+    /// breaks the DEK-derived MAC — the mutation is dead-lettered, NEVER
+    /// applied.
+    #[tokio::test]
+    async fn relay_metadata_tamper_is_dead_lettered() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let mut served = crate::sync::v2::build_mutation(
+            &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+            &crate::sync::v2::MutationInput {
+                vault_id: relay_vault,
+                object_id: sync_id,
+                object_type: SyncEntryType::Credential,
+                expected_version: ObjectVersion(0),
+                resulting_version: ObjectVersion(1),
+                key_epoch: 1,
+                origin_device_id: Uuid::new_v4(),
+                is_tombstone: false,
+                encrypted_payload: vec![0x22; 40],
+            },
+        )
+        .unwrap();
+        // THE tamper: flip the authenticated tombstone state (the MAC no
+        // longer matches). The relay cannot detect this — only the client
+        // can.
+        served.is_tombstone = true;
+        relay.seed_peer_mutation(served);
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        // Dead-lettered with the authentication reason; NOTHING applied.
+        let (dead, entries): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM sync_dead_letter), \
+                            (SELECT COUNT(*) FROM entries)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(dead, 1);
+        let reason: String = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT reason FROM sync_dead_letter LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            reason.contains("metadata authentication failed"),
+            "the disposition names the tamper: {reason}"
+        );
+        assert_eq!(entries, 0, "the tampered mutation was never applied");
+    }
+
+    /// THE lineage high-water acceptance (WBS-613): a relay whose log
+    /// cursor moved BELOW the trusted high-water (reset, vault swap) is
+    /// refused fail-closed — the local state is untouched and the error
+    /// names the re-pairing remedy. Distinct from the ADR-004 epoch
+    /// sidecar: this is LOG-lineage rollback.
+    #[tokio::test]
+    async fn lineage_rollback_is_refused_fail_closed() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // Trust the lineage up to cursor 9 (e.g. from a long prior history).
+        {
+            let conn = db.conn();
+            conn.execute("UPDATE sync_metadata SET lineage_high_water = 9", [])
+                .unwrap();
+        }
+        insert_collectable_pending(&dek, db.conn(), &sync_id, 2, 0);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        // The relay (reset) serves a SHORT log: cursor lands at 2 < 9.
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 1,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0x33; 40],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        let outcome = engine.sync(&dek).await;
+        assert!(outcome.is_err(), "lineage rollback must be refused");
+        let message = outcome.unwrap_err().to_string();
+        assert!(
+            message.contains("lineage moved backwards"),
+            "the refusal names the lineage check: {message}"
+        );
+        // Fail-closed: the pull page never committed — the cursor and the
+        // trusted high-water are untouched.
+        let (high_water, pull_cursor, dead): (i64, i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT (SELECT lineage_high_water FROM sync_metadata), \
+                            (SELECT last_pull_sequence FROM sync_metadata), \
+                            (SELECT COUNT(*) FROM sync_dead_letter)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(high_water, 9, "the trusted high-water did not move");
+        assert_eq!(pull_cursor, 0, "the pull page never committed");
+        assert_eq!(
+            dead, 0,
+            "nothing from the rolled-back log was dispositioned"
+        );
+    }
+
+    /// THE stale-epoch apply-side rule (WBS-614 / ADR-004 rev 4): a pulled
+    /// mutation sealed under a key epoch BELOW the local vault's epoch is
+    /// dead-lettered — a rotation revoked that key's authority here.
+    #[tokio::test]
+    async fn stale_epoch_mutation_is_dead_lettered_on_pull() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+        let sync_id = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        // The LOCAL vault has rotated ahead (epoch 5).
+        {
+            let conn = db.conn();
+            conn.execute("UPDATE db_metadata SET key_epoch = 5", [])
+                .unwrap();
+        }
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        relay.seed_peer_mutation(
+            crate::sync::v2::build_mutation(
+                &crate::sync::v2::derive_metadata_mac_key(&dek).unwrap(),
+                &crate::sync::v2::MutationInput {
+                    vault_id: relay_vault,
+                    object_id: sync_id,
+                    object_type: SyncEntryType::Credential,
+                    expected_version: ObjectVersion(0),
+                    resulting_version: ObjectVersion(1),
+                    key_epoch: 2,
+                    origin_device_id: Uuid::new_v4(),
+                    is_tombstone: false,
+                    encrypted_payload: vec![0x44; 40],
+                },
+            )
+            .unwrap(),
+        );
+
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+        engine.sync(&dek).await.unwrap();
+
+        let (dead, entries): (i64, i64) = {
+            let conn = db.lock().unwrap();
+            conn.conn()
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM sync_dead_letter), \
+                            (SELECT COUNT(*) FROM entries)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(dead, 1);
+        let reason: String = db
+            .lock()
+            .unwrap()
+            .conn()
+            .query_row("SELECT reason FROM sync_dead_letter LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            reason.contains("epoch"),
+            "the disposition names the epoch: {reason}"
+        );
+        assert_eq!(entries, 0, "the stale mutation was never applied");
+    }
+
+    /// THE multi-page lineage regression (stage-4 review finding 1): a
+    /// backlog that spans MULTIPLE pull pages (plus a multi-chunk push)
+    /// must never wedge — the trusted high-water folds ONLY from
+    /// MAC-verified observed entries, never from push-response cursors, so
+    /// page N+1's cursor always clears the guard.
+    #[tokio::test]
+    async fn multi_page_backlog_pull_never_wedges() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let relay_vault = Uuid::new_v4();
+        let device = Uuid::new_v4();
+
+        let db = apply_test_db();
+        vault_config(&db, relay_vault, device);
+        insert_collectable_pending(&dek, db.conn(), &Uuid::new_v4(), 2, 0);
+
+        let relay = FakeRelay::new();
+        relay.set_vault(relay_vault);
+        let db = Arc::new(Mutex::new(db));
+        let engine = SyncEngine::new(relay.clone(), db.clone(), device);
+
+        // Cycle 1: push the pending row (cursor 1), then pull the same log
+        // entry (own-device skip) — high-water folds to 1 from OBSERVED
+        // entries.
+        engine.sync(&dek).await.unwrap();
+        let hw_after_first = {
+            let conn = db.lock().unwrap();
+            crate::sync::config::SyncConfig::load(conn.conn())
+                .unwrap()
+                .lineage_high_water
+        };
+        assert_eq!(hw_after_first, 1, "high-water folds from observed entries");
+
+        // A second cycle is a clean no-op (nothing pending, nothing new).
+        engine.sync(&dek).await.unwrap();
+        let hw_after_second = {
+            let conn = db.lock().unwrap();
+            crate::sync::config::SyncConfig::load(conn.conn())
+                .unwrap()
+                .lineage_high_water
+        };
+        assert_eq!(hw_after_second, 1, "no-op cycles never move the watermark");
     }
 
     /// The credential blob helper stays referenced (parity with the apply

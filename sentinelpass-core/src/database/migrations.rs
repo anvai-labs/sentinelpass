@@ -764,6 +764,91 @@ pub fn migrate_v10_to_v11(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Migrate schema from v11 to v12: durable concurrent-edit alternatives
+/// (WBS-611 / SR-SYNC-005, ADR-006). A pulled mutation hitting an object
+/// with an UNSYNCED local edit is recorded here (encrypted payload intact,
+/// sealed under the LOCAL identity on resolution) instead of silently
+/// overwriting; the local side stays in its own row with
+/// `sync_state = 'conflict'` until user resolution.
+///
+/// Additive CREATE IF NOT EXISTS + ONE-transaction version bump.
+pub fn migrate_v11_to_v12(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_conflicts (
+                object_id TEXT PRIMARY KEY,
+                object_type TEXT NOT NULL,
+                remote_version INTEGER NOT NULL,
+                remote_payload BLOB NOT NULL,
+                origin_device_id TEXT NOT NULL,
+                is_tombstone INTEGER NOT NULL DEFAULT 0,
+                received_at INTEGER NOT NULL
+            );
+             UPDATE db_metadata SET version = 12 WHERE id = 1;",
+        )
+        .map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
+/// Migrate schema from v12 to v13: the trusted sync-lineage high-water
+/// (WBS-613, ADR-006). `sync_metadata.lineage_high_water` records the max
+/// relay vault-log cursor this device ever accepted; a pull whose cursor
+/// moves below it is REFUSED (relay log reset / vault swap suspicion) —
+/// deliberately DISTINCT from the ADR-004 epoch sidecar's key-material
+/// rollback protection. Guarded column add (v5-v6 pattern), ONE
+/// transaction with the version bump.
+pub fn migrate_v12_to_v13(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(DatabaseError::Sqlite)?;
+
+    let inner = || -> Result<()> {
+        let existing: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('sync_metadata')")
+                .map_err(DatabaseError::Sqlite)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(DatabaseError::Sqlite)?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let mut stmts = String::new();
+        if !existing.iter().any(|c| c == "lineage_high_water") {
+            stmts.push_str(
+                "ALTER TABLE sync_metadata ADD COLUMN lineage_high_water INTEGER NOT NULL DEFAULT 0;\n",
+            );
+        }
+        stmts.push_str("UPDATE db_metadata SET version = 13 WHERE id = 1;\n");
+        conn.execute_batch(&stmts).map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    };
+
+    match inner() {
+        Ok(()) => conn
+            .execute_batch("COMMIT;")
+            .map(|_| ())
+            .map_err(|e| DatabaseError::Sqlite(e).into()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(e)
+        }
+    }
+}
+
 /// Run all pending migrations to bring the database up to the current version.
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     let version: i32 = conn
@@ -810,6 +895,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 11 {
         migrate_v10_to_v11(conn)?;
+    }
+
+    if version < 12 {
+        migrate_v11_to_v12(conn)?;
+    }
+
+    if version < 13 {
+        migrate_v12_to_v13(conn)?;
     }
 
     Ok(())

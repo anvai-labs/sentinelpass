@@ -79,6 +79,11 @@ pub(crate) fn run_cleanup(
     )
     .map_err(|e| e.to_string())?;
     conn.execute(
+        "DELETE FROM pairing_bootstraps_v2 WHERE expires_at < ?1 OR consumed = 1",
+        [now],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
         "DELETE FROM pairing_registration_proofs WHERE expires_at < ?1 OR consumed = 1",
         [now],
     )

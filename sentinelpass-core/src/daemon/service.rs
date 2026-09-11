@@ -438,8 +438,35 @@ impl LiveVaultService<'_> {
                     relay_url: status.relay_url,
                     last_sync_at: status.last_sync_at,
                     pending_changes: status.pending_changes,
+                    conflicts: status.conflict_count,
                 }))
             }
+            VaultOp::SyncConflictList => {
+                let rows = vault.list_sync_conflicts()?;
+                let value = serde_json::to_value(&rows).map_err(|e| {
+                    PasswordManagerError::InvalidInput(format!(
+                        "conflict serialization failed: {e}"
+                    ))
+                })?;
+                Ok(VaultOpResult::Report(value))
+            }
+            #[cfg(feature = "sync")]
+            VaultOp::SyncConflictResolve {
+                ref object_id,
+                take_remote,
+            } => {
+                let object_id = uuid::Uuid::parse_str(object_id).map_err(|_| {
+                    PasswordManagerError::InvalidInput(
+                        "conflict object id must be a UUID".to_string(),
+                    )
+                })?;
+                vault.resolve_sync_conflict(&object_id, *take_remote)?;
+                Ok(VaultOpResult::Ok)
+            }
+            #[cfg(not(feature = "sync"))]
+            VaultOp::SyncConflictResolve { .. } => Err(PasswordManagerError::NotImplemented(
+                "conflict resolution requires the sync feature".to_string(),
+            )),
 
             VaultOp::SyncDeadLetterList => {
                 let rows = vault.list_sync_dead_letter()?;

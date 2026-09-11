@@ -32,10 +32,12 @@ The client engine pushes and pulls over `/api/v2/*`:
   state, the DEK-encrypted payload, and an HMAC-SHA256 MAC (DEK-derived via
   HKDF) over the canonical shared metadata. The MAC is deliberately
   distinct from the ADR-005 per-device storage envelope (which never
-  appears on the wire). Stage-1 status: the MAC is computed, transported,
-  and stored opaquely by the relay; ENFORCEMENT (relay-side presence
-  checks plus client verification on pull-apply) lands with WBS-612/613 —
-  until then the MAC must not be claimed as an active control.
+  appears on the wire). ENFORCED on pull (WBS-612): every foreign
+  mutation is verified — MAC plus deterministic-id recomputation — BEFORE
+  application; a mismatch (relay rewriting identity, type, versions,
+  epoch, origin, tombstone state, or payload bytes) is dead-lettered,
+  never applied. The relay stores the MAC opaquely (it cannot compute or
+  invert it).
 - **Distinct counter types.** `DeviceSequence` (per-device push framing —
   recorded by the relay, never gated on), `ObjectVersion` (per-object CAS
   domain), and `ServerCursor` (relay vault log position) are distinct
@@ -55,9 +57,28 @@ The client engine pushes and pulls over `/api/v2/*`:
   a fresh mutation id.
 - **CAS acceptance.** A mutation applies iff its `expected_version` equals
   the relay's stored current version (0 = create). Same-version overwrites
-  do not exist in v2 — the v1 clock-gamed LWW tie-break is gone. A version
-  conflict is a durable rejection the client resolves by preserving both
-  alternatives (conflict preservation lands in the next stage).
+  do not exist in v2 — the v1 clock-gamed LWW tie-break is gone.
+- **Conflict preservation (WBS-611 / SR-SYNC-005).** A pulled mutation that
+  hits an object with an UNSYNCED local edit is never silently applied (or
+  deleted by a tombstone): it is recorded as a durable alternative in the
+  local `sync_conflicts` table and the row is marked
+  `sync_state = 'conflict'` — both alternatives preserved. Push conflicts
+  mark the row conflicted too; the same-run pull stores the relay's
+  content as the alternative. The user resolves with
+  `sentinelpass sync conflict-list` / `conflict-resolve --object-id <ID>
+  [--take-remote]`: keep-local re-versions the local content above the
+  peer (next push lands via CAS); take-remote applies the stored
+  alternative ATOMICALLY (sealing under the LOCAL identity; a stored
+  TOMBSTONE alternative deletes the row; applying live content over a
+  locally-deleted row RESURRECTS it — a failed resolution rolls back to
+  the conflicted state with the record intact). A stale incoming blob
+  (version below the local row) is not an alternative and is ignored.
+  A stored alternative is purged once the row applies past it. Conflict
+  counts surface through `sync status` (counted as stored records OR
+  conflicted rows, whichever is larger) and the daemon service contract
+  (`ServiceSyncStatus.conflicts`). Bound: ONE alternative per object
+  (latest wins) — N-way conflicts keep the newest peer's content plus
+  the local edit; older peer content remains in the relay's log.
 - **Per-object acknowledgements.** The client's outbox entry is removed only
   by its own `Applied` ack (verified against the version the client
   actually sent), which also advances the object's durable
@@ -70,9 +91,18 @@ The client engine pushes and pulls over `/api/v2/*`:
   structurally impossible.
 - **Stale-epoch gate.** Mutations whose `key_epoch` is below the vault's
   relay-side epoch high-water are rejected (`stale_epoch`); a mutation
-  carrying a higher epoch advances the vault epoch forward-only. Device
-  revocation is enforced by the Ed25519 auth middleware on every request,
-  as in v1.
+  carrying a higher epoch advances the vault epoch forward-only (bounded
+  jump). Apply-side mirror (WBS-614): a pulled mutation below the LOCAL
+  vault epoch is dead-lettered — a rotation revoked that key's authority
+  here. Device revocation is enforced by the Ed25519 auth middleware on
+  every request, as in v1.
+- **Lineage high-water (WBS-613).** The client retains a TRUSTED
+  sync-lineage high-water — the max relay vault-log cursor it ever
+  accepted (`sync_metadata.lineage_high_water`, schema v13). A pull whose
+  cursor moves below it is REFUSED fail-closed (relay log reset, vault
+  swap): local state is untouched and re-pairing is the remedy.
+  Deliberately distinct from the ADR-004 epoch sidecar (which protects
+  key-material rollback, not log-lineage rollback).
 - **Mixed-protocol gate (fail-closed, client side).** A sync configuration
   established before v2 (`sync_metadata.protocol_version != 2`) refuses to
   sync: its relay state lives in the v1 tables, and v2 mutations pushed
@@ -115,7 +145,7 @@ client's next collection).
 |----------|-------|
 | Transport encryption | AES-256-GCM (vault DEK, per-blob random nonce) |
 | Request authentication | Ed25519 signatures over canonical request string |
-| Pairing key derivation | HKDF-SHA256 (6-digit code + random salt) |
+| Pairing key derivation | HKDF-SHA256 (256-bit secret, v2) — the six-digit code path is retired |
 | Conflict resolution | Last-Write-Wins (higher version → higher timestamp → keep local) |
 | Feature gate | `sync` (disabled by default; enables `reqwest`, `hkdf`) |
 | Relay default listen | `127.0.0.1:8743` |
@@ -161,39 +191,38 @@ Device A                           Relay
    │◀─────────────────────────────────│
 ```
 
-### 2. Pair a New Device
+### 2. Pair a New Device (v2)
 
 ```text
 Device A (existing)                Relay                   Device B (new)
    │                                 │                          │
-   │  generate pairing code (6 digits)                          │
-   │  derive pairing_key = HKDF(code, salt)                     │
-   │  encrypt VaultBootstrap with pairing_key                   │
+   │  generate 256-bit secret S                                 │
+   │  bootstrap encrypted under HKDF(S)                         │
+   │  transcript = 6 digits from S (display)                    │
    │                                 │                          │
-   │  POST /pairing/bootstrap        │                          │
-   │  { token, encrypted, salt }     │                          │
-   │────────────────────────────────▶│                          │
+   │  POST /api/v2/pairing/bootstrap {secret, encrypted, proof} │
+   │  (relay stores Argon2id(S) + ciphertext; never the key)    │
    │                                 │                          │
-   │  Display code to user ──────────────────(out of band)────▶│
+   │  secret via QR / out-of-band ───────────────────────────▶ │
+   │  transcript via out-of-band ────────────────────────────▶ │
    │                                 │                          │
-   │                                 │  GET /pairing/bootstrap  │
-   │                                 │◀─────────────────────────│
-   │                                 │  { encrypted, salt }     │
-   │                                 │─────────────────────────▶│
+   │                    POST /api/v2/pairing/bootstrap/retrieve
+   │                    {secret}  (body, never URL; attempt-limited,
+   │                     one-use, TTL 300s; Argon2id-verified)
+   │                                 │── encrypted + proof ────▶│
    │                                 │                          │
-   │                                 │  derive pairing_key      │
-   │                                 │  decrypt VaultBootstrap   │
-   │                                 │  extract: kdf_params,     │
-   │                                 │    wrapped_dek, relay_url │
+   │                          transcript comparison (human)      │
    │                                 │                          │
    │                                 │  POST /devices/register  │
-   │                                 │◀─────────────────────────│
-   │                                 │                          │
+   │                                 │  (secret + proof staged) │
    │                                 │  POST /sync/full-pull    │
-   │                                 │◀─────────────────────────│
-   │                                 │  (all encrypted blobs)   │
-   │                                 │─────────────────────────▶│
 ```
+
+The pairing secret is 256 bits of CSPRNG output — the v1 six-digit code
+(~20 bits, offline-guessable once the bootstrap leaked) is retired. The
+relay never sees the derived key; a six-digit transcript is shown on both
+devices purely for human comparison and never encrypts anything. Pairing
+material moves in POST bodies, never URLs.
 
 ### 3. Incremental Push / Pull
 

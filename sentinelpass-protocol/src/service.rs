@@ -177,6 +177,10 @@ pub struct ServiceSyncStatus {
     pub relay_url: Option<String>,
     pub last_sync_at: Option<i64>,
     pub pending_changes: u64,
+    /// Objects with a stored concurrent-edit alternative awaiting user
+    /// resolution (WBS-611; serde default keeps older clients parsing).
+    #[serde(default)]
+    pub conflicts: u64,
 }
 
 /// Wire DTO for biometric unlock status.
@@ -352,6 +356,18 @@ pub enum VaultOp {
     SyncNow,
     /// List dead-lettered sync mutations (metadata only; WBS-607).
     SyncDeadLetterList,
+    /// List stored concurrent-edit conflicts (metadata only; WBS-611 /
+    /// SR-SYNC-005): the payload VALUES require an unlocked vault and are
+    /// not part of this listing.
+    SyncConflictList,
+    /// Resolve a stored concurrent-edit conflict: `take_remote = false`
+    /// keeps the local content (re-versioned above the peer so the next
+    /// push lands); `true` applies the stored alternative. Requires the
+    /// vault unlocked (take-remote decrypts and re-seals).
+    SyncConflictResolve {
+        object_id: String,
+        take_remote: bool,
+    },
     /// Purge dead-lettered sync mutations: one by server sequence, or all
     /// when `server_sequence` is None. The fail-closed dead-letter bound
     /// requires a supported purge path (raw SQL against the daemon-owned

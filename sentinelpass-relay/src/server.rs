@@ -2,7 +2,7 @@
 
 use crate::app_state::RelayAppState;
 use crate::auth::auth_middleware;
-use crate::handlers::{devices, pairing, sync, sync_v2};
+use crate::handlers::{devices, pairing, pairing_v2, sync, sync_v2};
 use axum::extract::ConnectInfo;
 use axum::middleware;
 use axum::routing::{get, post};
@@ -18,6 +18,10 @@ pub fn build_router(app_state: RelayAppState) -> Router {
     // Authenticated routes
     let authenticated = Router::new()
         .route("/api/v1/pairing/bootstrap", post(pairing::upload_bootstrap))
+        .route(
+            "/api/v2/pairing/bootstrap",
+            post(pairing_v2::upload_bootstrap_v2),
+        )
         .route("/api/v1/devices", get(devices::list_devices))
         .route("/api/v1/devices/{id}/revoke", post(devices::revoke_device))
         .route("/api/v1/sync/push", post(sync::push))
@@ -40,6 +44,10 @@ pub fn build_router(app_state: RelayAppState) -> Router {
         .route(
             "/api/v1/pairing/bootstrap/{token}",
             get(pairing::fetch_bootstrap),
+        )
+        .route(
+            "/api/v2/pairing/bootstrap/retrieve",
+            post(pairing_v2::retrieve_bootstrap_v2),
         )
         .route("/health", get(health))
         .layer(middleware::from_fn_with_state(

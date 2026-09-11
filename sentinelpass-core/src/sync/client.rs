@@ -177,6 +177,50 @@ impl SyncClient {
         })
     }
 
+    /// v2 pairing (WBS-615/616): upload the encrypted bootstrap bound to a
+    /// 256-bit secret. The relay stores only Argon2id(secret).
+    pub async fn upload_bootstrap_v2(
+        &self,
+        secret_b64: &str,
+        encrypted_bootstrap: &[u8],
+        registration_proof: &[u8],
+    ) -> Result<()> {
+        let body = serde_json::json!({
+            "secret": secret_b64,
+            "encrypted_bootstrap": base64::engine::general_purpose::STANDARD
+                .encode(encrypted_bootstrap),
+            "registration_proof": base64::engine::general_purpose::STANDARD
+                .encode(registration_proof),
+        });
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| PasswordManagerError::InvalidInput(e.to_string()))?;
+        self.signed_post("/api/v2/pairing/bootstrap", &body_bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// v2 pairing: retrieve (and consume) the bootstrap by proving knowledge
+    /// of the secret. Returns (encrypted_bootstrap, registration_proof).
+    /// Material moves in the POST body — never in a URL (WBS-616).
+    pub async fn retrieve_bootstrap_v2(&self, secret_b64: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+        let body = serde_json::json!({ "secret": secret_b64 });
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| PasswordManagerError::InvalidInput(e.to_string()))?;
+        let response = self
+            .signed_post("/api/v2/pairing/bootstrap/retrieve", &body_bytes)
+            .await?;
+        let parsed: serde_json::Value = serde_json::from_slice(&response).map_err(|e| {
+            PasswordManagerError::InvalidInput(format!("invalid retrieve response: {e}"))
+        })?;
+        let encrypted = base64::engine::general_purpose::STANDARD
+            .decode(parsed["encrypted_bootstrap"].as_str().unwrap_or(""))
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("invalid bootstrap: {e}")))?;
+        let proof = base64::engine::general_purpose::STANDARD
+            .decode(parsed["registration_proof"].as_str().unwrap_or(""))
+            .map_err(|e| PasswordManagerError::InvalidInput(format!("invalid proof: {e}")))?;
+        Ok((encrypted, proof))
+    }
+
     /// Full vault push (initial sync).
     pub async fn full_push(&self, entries: &[SyncEntryBlob]) -> Result<PushResponse> {
         let path = "/api/v1/sync/full-push";
@@ -384,5 +428,33 @@ impl SyncTransport for SyncClient {
         request: &'a PullRequestV2,
     ) -> Pin<Box<dyn Future<Output = Result<PullResponseV2>> + Send + 'a>> {
         Box::pin(SyncClient::pull_v2(self, request))
+    }
+}
+
+/// A transport that performs no I/O — for conflict-resolution paths that
+/// only run local applies (take-remote) and never touch the relay.
+pub struct DetachedTransport;
+
+impl SyncTransport for DetachedTransport {
+    fn push_v2<'a>(
+        &'a self,
+        _request: &'a PushRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PushResponseV2>> + Send + 'a>> {
+        Box::pin(async {
+            Err(PasswordManagerError::NotImplemented(
+                "resolution path never pushes".to_string(),
+            ))
+        })
+    }
+
+    fn pull_v2<'a>(
+        &'a self,
+        _request: &'a PullRequestV2,
+    ) -> Pin<Box<dyn Future<Output = Result<PullResponseV2>> + Send + 'a>> {
+        Box::pin(async {
+            Err(PasswordManagerError::NotImplemented(
+                "resolution path never pulls".to_string(),
+            ))
+        })
     }
 }
