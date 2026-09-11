@@ -9,7 +9,8 @@
     "activeTab",
     "notifications",
     "nativeMessaging",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "optional_host_permissions": [
     "http://*/*",

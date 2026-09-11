@@ -9,6 +9,15 @@ import {
   isUsernameMatchOrUnknown,
 } from './save-heuristics.js';
 import { debugLog, infoLog, warnLog, errorLog } from './logger.js';
+import {
+  PENDING_CREDENTIAL_KEY,
+  PENDING_CREDENTIAL_TTL_MS,
+  PENDING_SAVE_PREFIX,
+  PENDING_SAVE_TTL_MS,
+  isSessionSecretExpired,
+  isSessionSecretKey,
+  sessionSecretExpiry
+} from './session-secrets.js';
 
 // Native messaging host configuration
 const HOST_NAME = 'com.passwordmanager.host';
@@ -26,7 +35,6 @@ const SENSITIVE_LOG_KEYS = new Set(['password', 'secret', 'token', 'passphrase',
 const NEVER_SAVE_DOMAINS_KEY = 'neverSaveDomains';
 const SAVE_NOTIFICATION_DEDUP_WINDOW_MS = 4000;
 const PENDING_UNLOCK_RETRY_KEY = 'pendingUnlockRetry';
-const PENDING_UNLOCK_RETRY_TTL_MS = 2 * 60 * 1000;
 const VAULT_LOCKED_NOTIFICATION_PREFIX = 'vault-locked-';
 const recentSaveNotificationRequests = new Map();
 const handledSaveNotifications = new Set();
@@ -282,6 +290,60 @@ function sessionRemove(keys) {
   });
 }
 
+// ── WBS-716 session-secret hygiene ──────────────────────────────────────────
+
+const PURGE_SESSION_SECRETS_ALARM = 'purge-session-secrets';
+
+// One alarm tick per minute: sweep expired session-secret entries. Service
+// workers are ephemeral — timers cannot be relied on, alarms can.
+function sweepExpiredSessionSecrets() {
+  void (async () => {
+    const all = await sessionGet(null);
+    const keys = Object.keys(all || {});
+    const expired = keys.filter((key) => isSessionSecretExpired(key, all[key], Date.now()));
+    if (expired.length > 0) {
+      debugLog('[SentinelPass Background] Sweeping expired session secrets:', expired.length);
+      await sessionRemove(expired);
+    }
+  })();
+}
+
+if (chrome.alarms) {
+  chrome.alarms.create(PURGE_SESSION_SECRETS_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === PURGE_SESSION_SECRETS_ALARM) {
+      sweepExpiredSessionSecrets();
+    }
+  });
+}
+
+// Purge EVERY session-secret entry (vault lock / explicit scrub).
+async function purgeAllSessionSecrets() {
+  const all = await sessionGet(null);
+  const secretKeys = Object.keys(all || {}).filter((key) => isSessionSecretKey(key));
+  if (secretKeys.length > 0) {
+    debugLog('[SentinelPass Background] Purging session secrets on lock:', secretKeys.length);
+    await sessionRemove(secretKeys);
+  }
+}
+
+// Tell every content script to drop in-memory autofill context.
+async function broadcastScrubSecrets() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (typeof tab.id === 'number') {
+        chrome.tabs.sendMessage(tab.id, { type: 'scrub_secrets' }, () => {
+          // Content scripts may not be present — swallow the expected error.
+          void chrome.runtime.lastError;
+        });
+      }
+    }
+  } catch (error) {
+    debugLog('[SentinelPass Background] Scrub broadcast failed:', error);
+  }
+}
+
 function isVaultLockedError(errorMessage) {
   return typeof errorMessage === 'string' && errorMessage.toLowerCase().includes('vault is locked');
 }
@@ -298,7 +360,8 @@ async function queuePendingSaveRetry(data) {
       save_trigger: data?.save_trigger || 'unknown'
     },
     createdAt: Date.now(),
-    expiresAt: Date.now() + PENDING_UNLOCK_RETRY_TTL_MS
+    // WBS-716: bounded retry lifetime, stamped via the shared registry.
+    expiresAt: sessionSecretExpiry(PENDING_UNLOCK_RETRY_KEY, Date.now())
   };
   await sessionSet({ [PENDING_UNLOCK_RETRY_KEY]: pending });
 }
@@ -812,10 +875,13 @@ async function handleSaveNotification(data, sender) {
     // Store credential data keyed to notification ID for button click handling.
     // Do this before creating the notification to avoid races on very fast clicks.
     // The insecure-HTTP flag rides along so the save prompt / toast can warn.
+    // WBS-716: bounded lifetime — swept by the alarm even if the notification
+    // is never acted on.
     const pendingData = {
       ...data,
       insecure_http: insecureHttp,
-      _sender_tab_id: sender?.tab?.id ?? null
+      _sender_tab_id: sender?.tab?.id ?? null,
+      expiresAt: sessionSecretExpiry(storageKey, Date.now())
     };
     chrome.storage.session.set({ [storageKey]: pendingData }, () => {
       if (chrome.runtime.lastError) {
@@ -1055,6 +1121,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleLockVault()
           .then(response => {
             debugLog('[SentinelPass Background] Lock vault response:', redactForLog(response));
+            // WBS-716: a lock clears every pending plaintext payload and
+            // asks content scripts to drop their in-memory autofill context.
+            if (response?.success && response?.unlocked === false) {
+              void purgeAllSessionSecrets().then(() => broadcastScrubSecrets());
+            }
             sendResponse(response);
           })
           .catch(error => {
@@ -1067,6 +1138,75 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           });
         return true;
       }
+
+  if (request.type === 'capture_pending_login') {
+    // WBS-716: the content script hands the captured submission over; the
+    // plaintext now lives ONLY in the (trusted) background worker's session
+    // storage, stamped with the bounded 2FA-page TTL.
+    const validation = validateSenderDomainContext(
+      sender,
+      request.data?.domain || request.data?.url || '',
+      'capture_pending_login'
+    );
+    if (!validation.ok) {
+      console.warn('[SentinelPass Background] Blocked capture_pending_login:', validation.error);
+      sendResponse({ captured: false, error: validation.error });
+      return true;
+    }
+    const stamped = {
+      ...request.data,
+      expiresAt: sessionSecretExpiry(PENDING_CREDENTIAL_KEY, Date.now())
+    };
+    void sessionSet({ [PENDING_CREDENTIAL_KEY]: stamped }).then(() => {
+      sendResponse({ captured: true });
+    });
+    return true;
+  }
+
+  if (request.type === 'resume_pending_login') {
+    // WBS-716: the content script only ASKS; validation, host matching, and
+    // the payload never leave the background worker.
+    void (async () => {
+      const hostname = typeof request.hostname === 'string' ? request.hostname : '';
+      if (!hostname) {
+        sendResponse({ resumed: false });
+        return;
+      }
+      const stored = await sessionGet([PENDING_CREDENTIAL_KEY]);
+      const pending = stored?.[PENDING_CREDENTIAL_KEY];
+      if (!pending) {
+        sendResponse({ resumed: false });
+        return;
+      }
+      const fresh =
+        !isSessionSecretExpired(PENDING_CREDENTIAL_KEY, pending, Date.now()) &&
+        typeof pending.timestamp === 'number' &&
+        Date.now() - pending.timestamp < PENDING_CREDENTIAL_TTL_MS;
+      const sameSite =
+        typeof pending.domain === 'string' &&
+        pending.domain === hostname &&
+        pending.url !== request.href;
+      if (!fresh || !sameSite) {
+        if (!fresh) {
+          debugLog('[SentinelPass Background] Pending login expired; clearing');
+          await sessionRemove([PENDING_CREDENTIAL_KEY]);
+        }
+        sendResponse({ resumed: false });
+        return;
+      }
+      try {
+        // Preserve the inline-first UX for the 2FA-page resume path.
+        const shown = await handleSaveNotification(
+          { ...pending, request_source: 'pending-login-check' },
+          sender
+        );
+        sendResponse({ resumed: shown === true });
+      } finally {
+        await sessionRemove([PENDING_CREDENTIAL_KEY]);
+      }
+    })();
+    return true;
+  }
 
   if (request.type === 'grant_site_permission') {
     // WBS-712: permission management is popup-only — a content script (and

@@ -1258,7 +1258,23 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   TD-CLIENT-06. Est 3d.
 - **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06. Est 2d.
 - **WBS-715 — Ambiguity chooser.** TD-CLIENT-06. Est 2d.
-- **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07. Est 2d.
+- **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — full inventory
+  committed (`browser-extension/chrome/DEBUGGING.md` +
+  `docs/SECRET_LIFETIME_AUDIT.md` §N). Content scripts no longer touch
+  `chrome.storage.session` at all (pre-716 content-script writes were also
+  dead code under MV3's trusted-context default): submissions are captured
+  via `capture_pending_login` and consumed via a boolean-only
+  `resume_pending_login` — plaintext lives ONLY in the background worker,
+  TTL-stamped through a shared pure registry (`session-secrets.ts`: 30 s /
+  2 min / 10 min per payload class), swept by a `chrome.alarms` minute tick
+  (fail-closed: an unstamped secret entry sweeps as expired), purged on
+  vault lock together with a `scrub_secrets` broadcast that clears content
+  scripts' in-memory autofill context (also cleared on `pagehide`).
+  Evidence: registry unit suite (classification, TTL bounds, expiry,
+  fail-closed malformed stamps, sweep list); typecheck + vitest green;
+  artifacts rebuilt byte-parity.
 - **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08. Est 3d.
 - **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.
