@@ -1,6 +1,8 @@
 // Popup script for SentinelPass extension
+import { normalizeDomainForPolicy } from './save-heuristics.js';
 const CLIPBOARD_CLEAR_TIMEOUT_MS = 10_000;
 let currentDomain = '';
+let currentTabUrl = '';
 let allCredentials = [];
 document.addEventListener('DOMContentLoaded', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -10,6 +12,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     catch {
         currentDomain = '';
     }
+    // Browser-provided URL of the active tab — forwarded as `page_url` so the
+    // daemon can scheme-validate autofill delivery (WBS-711).
+    currentTabUrl = typeof tab?.url === 'string' ? tab.url : '';
     setupEventListeners();
     checkVaultStatus();
 });
@@ -25,6 +30,9 @@ function setupEventListeners() {
         showUnlockedView();
     });
     document.getElementById('settingsBackBtn').addEventListener('click', showUnlockedView);
+    // WBS-712 site access controls
+    document.getElementById('siteAccessToggle').addEventListener('click', toggleSiteAccess);
+    document.getElementById('httpAllowBtn').addEventListener('click', allowHttpForSite);
 }
 // ── Vault status ──────────────────────────────────────────────────────────────
 async function checkVaultStatus() {
@@ -54,6 +62,7 @@ async function loadCredentials() {
             type: 'list_domain_credentials',
             domain: currentDomain,
             request_id: generateUUID(),
+            page_url: currentTabUrl,
         });
         const raw = response?.credentials ?? [];
         allCredentials = raw.map(c => ({
@@ -116,7 +125,7 @@ function renderCredentials(credentials) {
         copyPassBtn.className = 'btn-copy';
         copyPassBtn.textContent = 'Pass';
         copyPassBtn.title = 'Copy password';
-        copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain));
+        copyPassBtn.addEventListener('click', () => fetchAndCopyPassword(cred.domain, cred.username));
         actions.appendChild(copyUserBtn);
         actions.appendChild(copyPassBtn);
         item.appendChild(info);
@@ -125,15 +134,23 @@ function renderCredentials(credentials) {
     }
 }
 // Fetch a credential's password at copy-time to avoid holding it in memory.
-async function fetchAndCopyPassword(domain) {
+// The username disambiguates when the daemon's tab-host lookup matches
+// several accounts (WBS-712 review fix F3) — delivery is still bound to the
+// validated tab host, so only rows FOR THIS SITE are addressable.
+async function fetchAndCopyPassword(domain, username) {
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'get_credential',
             domain,
             request_id: generateUUID(),
+            page_url: currentTabUrl,
+            username,
         });
         if (response?.success && response.data?.password) {
             await copyText(response.data.password, 'Password copied');
+        }
+        else if (response?.error === 'vault_locked' || response?.unlocked === false) {
+            showNotification('Vault is locked', 'error');
         }
         else {
             showNotification('Could not retrieve password', 'error');
@@ -206,6 +223,144 @@ function openSettings() {
     const versionEl = document.getElementById('settingsVersion');
     if (versionEl)
         versionEl.textContent = `v${manifest.version}`;
+    void refreshSiteAccess();
+}
+// ── WBS-712 site access ───────────────────────────────────────────────────────
+// The browser permission pattern for the active tab (http/https only).
+function currentOriginPattern() {
+    if (!currentTabUrl)
+        return null;
+    try {
+        const parsed = new URL(currentTabUrl);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+            return null;
+        return `${parsed.origin}/*`;
+    }
+    catch {
+        return null;
+    }
+}
+async function hasBrowserOriginAccess(pattern) {
+    return new Promise((resolve) => {
+        chrome.permissions.contains({ origins: [pattern] }, (granted) => {
+            if (chrome.runtime.lastError) {
+                resolve(false);
+                return;
+            }
+            resolve(granted === true);
+        });
+    });
+}
+async function requestBrowserOriginAccess(pattern, grant) {
+    return new Promise((resolve) => {
+        const done = (result) => {
+            if (chrome.runtime.lastError) {
+                showNotification(chrome.runtime.lastError.message, 'error');
+                resolve(false);
+                return;
+            }
+            resolve(result === true);
+        };
+        if (grant) {
+            chrome.permissions.request({ origins: [pattern] }, (result) => done(result));
+        }
+        else {
+            chrome.permissions.remove({ origins: [pattern] }, (result) => done(result));
+        }
+    });
+}
+function renderSiteGrants(grants) {
+    const container = document.getElementById('siteGrants');
+    container.textContent = '';
+    for (const grant of grants) {
+        const row = document.createElement('div');
+        row.className = 'site-grant';
+        const label = document.createElement('span');
+        label.textContent = grant.host;
+        const revokeBtn = document.createElement('button');
+        revokeBtn.className = 'btn btn-secondary';
+        revokeBtn.textContent = 'Revoke';
+        revokeBtn.addEventListener('click', () => void revokeGrant(grant.host));
+        row.appendChild(label);
+        row.appendChild(revokeBtn);
+        container.appendChild(row);
+    }
+}
+async function refreshSiteAccess() {
+    const originEl = document.getElementById('siteAccessOrigin');
+    const toggleBtn = document.getElementById('siteAccessToggle');
+    const httpBtn = document.getElementById('httpAllowBtn');
+    const pattern = currentOriginPattern();
+    if (originEl) {
+        originEl.textContent = pattern ? currentDomain || 'This site' : 'This site (no web page)';
+    }
+    // HTTP autofill grants stored daemon-side.
+    try {
+        const response = await chrome.runtime.sendMessage({ type: 'list_site_permissions' });
+        renderSiteGrants(response?.permissions ?? []);
+        if (httpBtn) {
+            const normalizedCurrent = normalizeDomainForPolicy(currentDomain);
+            const grantedForSite = normalizedCurrent &&
+                (response?.permissions ?? []).some((p) => p.host === normalizedCurrent);
+            httpBtn.textContent = grantedForSite ? 'Revoke' : 'Allow';
+        }
+    }
+    catch {
+        renderSiteGrants([]);
+    }
+    if (!toggleBtn)
+        return;
+    if (!pattern) {
+        toggleBtn.disabled = true;
+        toggleBtn.textContent = 'N/A';
+        return;
+    }
+    toggleBtn.disabled = false;
+    const granted = await hasBrowserOriginAccess(pattern);
+    toggleBtn.textContent = granted ? 'Remove access' : 'Enable';
+}
+async function toggleSiteAccess() {
+    const pattern = currentOriginPattern();
+    if (!pattern)
+        return;
+    const granted = await hasBrowserOriginAccess(pattern);
+    // chrome.permissions.request needs a user gesture — the button click.
+    const applied = await requestBrowserOriginAccess(pattern, !granted);
+    if (applied) {
+        showNotification(granted ? 'Site access removed' : 'Site access enabled');
+        await refreshSiteAccess();
+    }
+}
+async function allowHttpForSite() {
+    if (!currentDomain)
+        return;
+    const httpBtn = document.getElementById('httpAllowBtn');
+    const isRevoke = httpBtn?.textContent === 'Revoke';
+    const response = await chrome.runtime.sendMessage({
+        type: isRevoke ? 'revoke_site_permission' : 'grant_site_permission',
+        host: currentDomain,
+        allow_insecure: true,
+    });
+    if (response?.success) {
+        showNotification(isRevoke ? 'HTTP autofill disabled for this site' : 'HTTP autofill allowed for this site (not recommended)', isRevoke ? 'success' : 'error');
+        await refreshSiteAccess();
+    }
+    else {
+        showNotification(response?.error ?? 'Permission change failed', 'error');
+    }
+}
+async function revokeGrant(host) {
+    const response = await chrome.runtime.sendMessage({
+        type: 'revoke_site_permission',
+        host,
+    });
+    if (response?.success) {
+        showNotification(`Permission revoked for ${host}`);
+        await refreshSiteAccess();
+    }
+    else {
+        showNotification(response?.error ?? 'Revoke failed', 'error');
+    }
 }
 // ── Lock vault ────────────────────────────────────────────────────────────────
 async function lockVault() {

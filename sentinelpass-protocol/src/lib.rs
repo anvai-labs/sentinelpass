@@ -29,7 +29,7 @@ pub mod windows_frame;
 pub use client::IpcClient;
 pub use envelope::{IpcEnvelope, Origin};
 pub use error::ProtocolError;
-pub use message::{CredentialSummary, ExternalSecretField, IpcMessage};
+pub use message::{CredentialSummary, ExternalSecretField, IpcMessage, SitePermissionSummary};
 pub use paths::{default_ipc_socket_path, default_ipc_token_path, get_config_dir};
 pub use service::{
     ServiceBiometricStatus, ServiceEntity, ServiceEntry, ServiceEntrySummary, ServiceError,

@@ -17,6 +17,9 @@ pub const MSG_GET_TOTP_CODE: &str = "get_totp_code";
 pub const MSG_TOTP_RESPONSE: &str = "totp_response";
 pub const MSG_CHECK_VAULT: &str = "check_vault_status";
 pub const MSG_LOCK_VAULT: &str = "lock_vault";
+pub const MSG_GRANT_SITE_PERMISSION: &str = "grant_site_permission";
+pub const MSG_REVOKE_SITE_PERMISSION: &str = "revoke_site_permission";
+pub const MSG_LIST_SITE_PERMISSIONS: &str = "list_site_permissions";
 pub const MSG_VAULT_STATUS: &str = "vault_status";
 pub const MSG_VAULT_STATUS_RESPONSE: &str = "vault_status_response";
 pub const MSG_LIST_DOMAIN_CREDENTIALS: &str = "list_domain_credentials";
@@ -35,6 +38,17 @@ pub struct NativeMessage {
     pub domain: Option<String>,
     #[serde(rename = "request_id")]
     pub request_id: Option<String>,
+    /// WBS-711: full page URL of the requesting frame, set by the
+    /// extension background from the browser-provided sender URL. The
+    /// daemon parses it and default-denies unsafe origins.
+    #[serde(default)]
+    pub page_url: Option<String>,
+    /// WBS-712: requested permission state for grant_site_permission.
+    #[serde(default)]
+    pub allow_insecure: Option<bool>,
+    /// WBS-712/715: exact-username disambiguator for get_credential.
+    #[serde(default)]
+    pub username: Option<String>,
     #[serde(default)]
     pub data: Option<CredentialData>,
 }
@@ -55,6 +69,15 @@ pub struct NativeResponse {
     pub totp_code: Option<String>,
     pub seconds_remaining: Option<u32>,
     pub credentials: Option<Vec<CredentialData>>,
+    pub site_permissions: Option<Vec<SitePermissionData>>,
+}
+
+/// One per-site permission entry for the popup settings view (WBS-712).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SitePermissionData {
+    pub host: String,
+    pub allow_insecure: bool,
+    pub granted_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +128,11 @@ impl NativeMessagingHost {
         let ipc_msg = match msg_type.as_str() {
             MSG_GET_CREDENTIAL => {
                 if let Some(domain) = message.domain.clone() {
-                    IpcMessage::GetCredential { domain }
+                    IpcMessage::GetCredential {
+                        domain,
+                        page_url: message.page_url.clone(),
+                        username: message.username.clone(),
+                    }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;
                     return Ok(());
@@ -113,7 +140,11 @@ impl NativeMessagingHost {
             }
             MSG_CHECK_CREDENTIAL_EXISTS => {
                 if let Some(domain) = message.domain.clone() {
-                    IpcMessage::GetCredential { domain }
+                    IpcMessage::GetCredential {
+                        domain,
+                        page_url: message.page_url.clone(),
+                        username: message.username.clone(),
+                    }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;
                     return Ok(());
@@ -121,7 +152,10 @@ impl NativeMessagingHost {
             }
             MSG_GET_TOTP_CODE => {
                 if let Some(domain) = message.domain.clone() {
-                    IpcMessage::GetTotpCode { domain }
+                    IpcMessage::GetTotpCode {
+                        domain,
+                        page_url: message.page_url.clone(),
+                    }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;
                     return Ok(());
@@ -149,12 +183,34 @@ impl NativeMessagingHost {
                 if let Some(domain) = message.domain.clone() {
                     IpcMessage::ListDomainCredentials {
                         base_domain: domain,
+                        page_url: message.page_url.clone(),
                     }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;
                     return Ok(());
                 }
             }
+            MSG_GRANT_SITE_PERMISSION => {
+                let allow_insecure = message.allow_insecure.unwrap_or(false);
+                if message.domain.clone().is_none_or(|d| d.trim().is_empty()) {
+                    Self::send_error(request_id, "Missing host parameter")?;
+                    return Ok(());
+                }
+                IpcMessage::GrantSitePermission {
+                    host: message.domain.clone().unwrap_or_default(),
+                    allow_insecure,
+                }
+            }
+            MSG_REVOKE_SITE_PERMISSION => {
+                if message.domain.clone().is_none_or(|d| d.trim().is_empty()) {
+                    Self::send_error(request_id, "Missing host parameter")?;
+                    return Ok(());
+                }
+                IpcMessage::RevokeSitePermission {
+                    host: message.domain.clone().unwrap_or_default(),
+                }
+            }
+            MSG_LIST_SITE_PERMISSIONS => IpcMessage::ListSitePermissions,
             _ => {
                 Self::send_error(request_id, &format!("Unknown message type: {}", msg_type))?;
                 return Ok(());
@@ -172,8 +228,15 @@ impl NativeMessagingHost {
                 username,
                 password,
                 title,
+                denied_reason,
                 ..
             }) => {
+                if let Some(reason) = denied_reason {
+                    // WBS-711: the daemon refused delivery (unsafe or
+                    // unverifiable origin) — distinct from a no-match.
+                    Self::send_error(request_id, &format!("autofill denied: {}", reason))?;
+                    return Ok(());
+                }
                 if msg_type == MSG_CHECK_CREDENTIAL_EXISTS {
                     let exists = username.is_some() && password.is_some();
                     Self::send_exists(request_id, exists)?;
@@ -186,8 +249,13 @@ impl NativeMessagingHost {
             Ok(IpcMessage::GetTotpCodeResponse {
                 code,
                 seconds_remaining,
+                denied_reason,
                 ..
             }) => {
+                if let Some(reason) = denied_reason {
+                    Self::send_error(request_id, &format!("autofill denied: {}", reason))?;
+                    return Ok(());
+                }
                 if let Some(code) = code {
                     let seconds_remaining = seconds_remaining.unwrap_or(0);
                     Self::send_totp_code(request_id, code, seconds_remaining)?;
@@ -221,13 +289,66 @@ impl NativeMessagingHost {
                     Self::send_vault_status(request_id, unlocked)?;
                 }
             }
-            Ok(IpcMessage::ListDomainCredentialsResponse { credentials, .. }) => {
-                if msg_type == MSG_LIST_DOMAIN_CREDENTIALS {
+            Ok(IpcMessage::ListDomainCredentialsResponse {
+                credentials,
+                denied_reason,
+                ..
+            }) => {
+                if let Some(reason) = denied_reason {
+                    Self::send_error(request_id, &format!("autofill denied: {}", reason))?;
+                } else if msg_type == MSG_LIST_DOMAIN_CREDENTIALS {
                     Self::send_credential_list(request_id, credentials)?;
                 } else {
                     Self::send_error(
                         request_id,
                         "Unexpected ListDomainCredentialsResponse for non-list request",
+                    )?;
+                }
+            }
+            Ok(IpcMessage::GrantSitePermissionResponse { success, error }) => {
+                if msg_type == MSG_GRANT_SITE_PERMISSION {
+                    Self::send_action_status(
+                        request_id,
+                        MSG_CREDENTIAL_RESPONSE,
+                        success,
+                        None,
+                        error,
+                    )?;
+                } else {
+                    Self::send_error(
+                        request_id,
+                        "Unexpected GrantSitePermissionResponse for non-grant request",
+                    )?;
+                }
+            }
+            Ok(IpcMessage::RevokeSitePermissionResponse {
+                success,
+                removed,
+                error,
+            }) => {
+                if msg_type == MSG_REVOKE_SITE_PERMISSION {
+                    Self::send_action_status(
+                        request_id,
+                        MSG_CREDENTIAL_RESPONSE,
+                        success,
+                        None,
+                        error,
+                    )?;
+                    let _ = removed; // popup refreshes its list instead
+                } else {
+                    Self::send_error(
+                        request_id,
+                        "Unexpected RevokeSitePermissionResponse for non-revoke request",
+                    )?;
+                }
+            }
+            Ok(IpcMessage::ListSitePermissionsResponse { permissions, .. }) => {
+                if msg_type == MSG_LIST_SITE_PERMISSIONS {
+                    Self::send_site_permissions(request_id, permissions)?;
+                } else {
+                    Self::send_error(
+                        request_id,
+                        "Unexpected ListSitePermissionsResponse for non-list request",
                     )?;
                 }
             }
@@ -303,6 +424,7 @@ impl NativeMessagingHost {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
         Self::write_response(&response)
     }
@@ -331,6 +453,7 @@ impl NativeMessagingHost {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
         Self::write_response(&response)
     }
@@ -349,6 +472,7 @@ impl NativeMessagingHost {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
         Self::write_response(&response)
     }
@@ -380,6 +504,38 @@ impl NativeMessagingHost {
             totp_code: None,
             seconds_remaining: None,
             credentials: Some(credential_data),
+            site_permissions: None,
+        };
+        Self::write_response(&response)
+    }
+
+    /// Send per-site permission list response (WBS-712)
+    pub fn send_site_permissions(
+        request_id: String,
+        permissions: Vec<crate::daemon::ipc::SitePermissionSummary>,
+    ) -> Result<(), String> {
+        let entries: Vec<SitePermissionData> = permissions
+            .into_iter()
+            .map(|p| SitePermissionData {
+                host: p.host,
+                allow_insecure: p.allow_insecure,
+                granted_at: p.granted_at,
+            })
+            .collect();
+
+        let response = NativeResponse {
+            version: PROTOCOL_VERSION,
+            msg_type: MSG_CREDENTIAL_RESPONSE.to_string(),
+            request_id,
+            success: true,
+            data: None,
+            error: None,
+            unlocked: None,
+            exists: None,
+            totp_code: None,
+            seconds_remaining: None,
+            credentials: None,
+            site_permissions: Some(entries),
         };
         Self::write_response(&response)
     }
@@ -398,6 +554,7 @@ impl NativeMessagingHost {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
         Self::write_response(&response)
     }
@@ -420,6 +577,7 @@ impl NativeMessagingHost {
             totp_code: Some(totp_code),
             seconds_remaining: Some(seconds_remaining),
             credentials: None,
+            site_permissions: None,
         };
         Self::write_response(&response)
     }
@@ -444,6 +602,7 @@ impl NativeMessagingHost {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
         Self::write_response(&response)
     }
@@ -519,6 +678,7 @@ mod tests {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -545,6 +705,7 @@ mod tests {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -567,6 +728,7 @@ mod tests {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -588,6 +750,7 @@ mod tests {
             totp_code: None,
             seconds_remaining: None,
             credentials: None,
+            site_permissions: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -609,6 +772,7 @@ mod tests {
             totp_code: Some("123456".to_string()),
             seconds_remaining: Some(15),
             credentials: None,
+            site_permissions: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();

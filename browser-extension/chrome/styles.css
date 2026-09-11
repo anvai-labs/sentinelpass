@@ -421,3 +421,30 @@ footer {
 .credentials-list::-webkit-scrollbar-thumb:hover {
   background: #bdc1c6;
 }
+
+/* WBS-712 site access section */
+.settings-section {
+  border-top: 1px solid var(--border, #e0e0e0);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.settings-section h3 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.settings-section .settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.site-grant {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 0;
+}

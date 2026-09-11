@@ -14,6 +14,7 @@ pub use sentinelpass_protocol::{
 pub use sentinelpass_protocol::{
     default_ipc_socket_path, default_ipc_token_path, load_ipc_token, load_or_create_ipc_token,
     CredentialSummary, ExternalSecretField, IpcClient, IpcEnvelope, IpcMessage, ProtocolError,
+    SitePermissionSummary,
 };
 
 use crate::{AuditEventType, AuditLogger};
@@ -865,6 +866,8 @@ mod tests {
                 client
                     .send(IpcMessage::GetCredential {
                         domain: "example.com".to_string(),
+                        page_url: Some("https://example.com/login".to_string()),
+                        username: None,
                     })
                     .await
                     .unwrap()

@@ -176,3 +176,27 @@ export function buildSaveNotificationRequestKey(data) {
     const passwordLength = typeof data?.password === 'string' ? data.password.length : 0;
     return `${domain}|${username}|${url}|len:${passwordLength}`;
 }
+/**
+ * Resolve the `page_url` the daemon will scheme-validate for AUTOFILL
+ * delivery (WBS-711).
+ *
+ * The daemon binds credential delivery to the host of this URL, so it must
+ * be a BROWSER-provided value, never a content-script-claimed string:
+ *
+ * - Content-script senders: the caller passes the validated sender URL
+ *   (browser-provided); any requested value is IGNORED, so a compromised
+ *   page cannot claim another origin.
+ * - Popup senders have no sender URL — the popup passes the active tab's
+ *   `tab.url` (same browser-provided trust level as its domain use today).
+ *
+ * Returns null when no browser-provided URL exists; the daemon then fails
+ * closed with `origin-unverified`.
+ */
+export function autofillPageUrlForDaemon(requestedPageUrl, senderUrl, trustedPopup) {
+    if (!trustedPopup) {
+        return typeof senderUrl === 'string' && senderUrl.trim() !== '' ? senderUrl : null;
+    }
+    return typeof requestedPageUrl === 'string' && requestedPageUrl.trim() !== ''
+        ? requestedPageUrl
+        : null;
+}

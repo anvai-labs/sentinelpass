@@ -1,5 +1,6 @@
 // Background service worker for Password Manager Extension
 import {
+  autofillPageUrlForDaemon,
   classifyCredentialUrlSecurity,
   domainMatchesPolicy,
   normalizeCredentialUrl,
@@ -8,6 +9,16 @@ import {
   isUsernameMatchOrUnknown,
 } from './save-heuristics.js';
 import { debugLog, infoLog, warnLog, errorLog } from './logger.js';
+import {
+  PENDING_CREDENTIAL_KEY,
+  PENDING_CREDENTIAL_TTL_MS,
+  PENDING_INLINE_PREFIX,
+  PENDING_SAVE_PREFIX,
+  PENDING_SAVE_TTL_MS,
+  isSessionSecretExpired,
+  isSessionSecretKey,
+  sessionSecretExpiry
+} from './session-secrets.js';
 
 // Native messaging host configuration
 const HOST_NAME = 'com.passwordmanager.host';
@@ -25,7 +36,6 @@ const SENSITIVE_LOG_KEYS = new Set(['password', 'secret', 'token', 'passphrase',
 const NEVER_SAVE_DOMAINS_KEY = 'neverSaveDomains';
 const SAVE_NOTIFICATION_DEDUP_WINDOW_MS = 4000;
 const PENDING_UNLOCK_RETRY_KEY = 'pendingUnlockRetry';
-const PENDING_UNLOCK_RETRY_TTL_MS = 2 * 60 * 1000;
 const VAULT_LOCKED_NOTIFICATION_PREFIX = 'vault-locked-';
 const recentSaveNotificationRequests = new Map();
 const handledSaveNotifications = new Set();
@@ -75,6 +85,18 @@ function isPopupSender(sender): boolean {
   // sender.id === chrome.runtime.id is already enforced above, so !sender.tab is
   // sufficient to identify our own popup/options pages on both Chrome and Firefox.
   return !sender.tab;
+}
+
+// WBS-711 review fix F2: content-script payloads never supply stored or
+// validated URLs — the browser-provided frame URL is authoritative for
+// anything the daemon parses (page_url) or stores (canonical save URL).
+// Popup senders keep their own values (they save arbitrary entries by
+// design and have no meaningful frame URL).
+function withSenderProvenance(data, sender) {
+  if (isPopupSender(sender) || !sender?.url) {
+    return data;
+  }
+  return { ...data, url: sender.url, submitted_url: sender.url };
 }
 
 function normalizeHostForSenderValidation(value) {
@@ -166,7 +188,16 @@ async function isCredentialUnchanged(data) {
   }
 
   try {
-    const response = await handleGetCredential(data.domain, generateRequestId());
+    const response = await handleGetCredential(
+      data.domain,
+      generateRequestId(),
+      // Browser-provided URL (the dispatch layer overwrites payload URLs
+      // with sender.url — review F2); a delivery denial here only means
+      // the unchanged-check cannot run (fail-safe: the save proceeds as a
+      // duplicate upsert).
+      data?.submitted_url || data?.url || null,
+      undefined
+    );
     if (!response?.success || !response?.data?.password) {
       return false;
     }
@@ -274,6 +305,74 @@ function sessionRemove(keys) {
   });
 }
 
+// ── WBS-716 session-secret hygiene ──────────────────────────────────────────
+
+const PURGE_SESSION_SECRETS_ALARM = 'purge-session-secrets';
+
+// One alarm tick per minute: sweep expired session-secret entries, and
+// clear everything if the vault was locked OUTSIDE this extension (daemon
+// auto-lock, CLI, UI — native messaging has no push channel, review F5).
+function sweepExpiredSessionSecrets() {
+  void (async () => {
+    const all = await sessionGet(null);
+    const keys = Object.keys(all || {});
+    const expired = keys.filter((key) => isSessionSecretExpired(key, all[key], Date.now()));
+    if (expired.length > 0) {
+      debugLog('[SentinelPass Background] Sweeping expired session secrets:', expired.length);
+      await sessionRemove(expired);
+    }
+
+    if (Object.keys(all || {}).some((key) => isSessionSecretKey(key))) {
+      try {
+        const status = await handleCheckVaultStatus();
+        if (status.success && !status.unlocked) {
+          debugLog('[SentinelPass Background] Vault locked externally; purging pending secrets');
+          await purgeAllSessionSecrets();
+          await broadcastScrubSecrets();
+        }
+      } catch (error) {
+        debugLog('[SentinelPass Background] Locked-state check failed:', error);
+      }
+    }
+  })();
+}
+
+if (chrome.alarms) {
+  chrome.alarms.create(PURGE_SESSION_SECRETS_ALARM, { periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === PURGE_SESSION_SECRETS_ALARM) {
+      sweepExpiredSessionSecrets();
+    }
+  });
+}
+
+// Purge EVERY session-secret entry (vault lock / explicit scrub).
+async function purgeAllSessionSecrets() {
+  const all = await sessionGet(null);
+  const secretKeys = Object.keys(all || {}).filter((key) => isSessionSecretKey(key));
+  if (secretKeys.length > 0) {
+    debugLog('[SentinelPass Background] Purging session secrets on lock:', secretKeys.length);
+    await sessionRemove(secretKeys);
+  }
+}
+
+// Tell every content script to drop in-memory autofill context.
+async function broadcastScrubSecrets() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (typeof tab.id === 'number') {
+        chrome.tabs.sendMessage(tab.id, { type: 'scrub_secrets' }, () => {
+          // Content scripts may not be present — swallow the expected error.
+          void chrome.runtime.lastError;
+        });
+      }
+    }
+  } catch (error) {
+    debugLog('[SentinelPass Background] Scrub broadcast failed:', error);
+  }
+}
+
 function isVaultLockedError(errorMessage) {
   return typeof errorMessage === 'string' && errorMessage.toLowerCase().includes('vault is locked');
 }
@@ -290,7 +389,8 @@ async function queuePendingSaveRetry(data) {
       save_trigger: data?.save_trigger || 'unknown'
     },
     createdAt: Date.now(),
-    expiresAt: Date.now() + PENDING_UNLOCK_RETRY_TTL_MS
+    // WBS-716: bounded retry lifetime, stamped via the shared registry.
+    expiresAt: sessionSecretExpiry(PENDING_UNLOCK_RETRY_KEY, Date.now())
   };
   await sessionSet({ [PENDING_UNLOCK_RETRY_KEY]: pending });
 }
@@ -403,13 +503,36 @@ function requestInlineSavePrompt(tabId, data) {
     return Promise.resolve(false);
   }
 
+  // WBS-716 review fix F1: the FULL payload (including the password) stays
+  // in the background under a one-time prompt id; the content script's
+  // inline prompt receives only display fields and confirms by id. The
+  // held entry is TTL-stamped and swept like every other session secret.
+  const promptId = generateRequestId();
+  const storageKey = `${PENDING_INLINE_PREFIX}${promptId}`;
+  void sessionSet({
+    [storageKey]: {
+      ...data,
+      expiresAt: sessionSecretExpiry(storageKey, Date.now())
+    }
+  });
+
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, {
       type: 'show_inline_save_prompt',
-      data
+      data: {
+        username: data?.username || '',
+        domain: data?.domain || '',
+        url: data?.url || '',
+        submitted_url: data?.submitted_url || '',
+        request_source: data?.request_source || 'inline_prompt',
+        insecure_http: data?.insecure_http === true,
+        promptId
+      }
     }, (response) => {
       if (chrome.runtime.lastError) {
         console.error('[SentinelPass Background] Failed sending inline save prompt message:', chrome.runtime.lastError.message);
+        // The prompt never appeared — drop the held payload immediately.
+        void sessionRemove([storageKey]);
         resolve(false);
         return;
       }
@@ -469,14 +592,19 @@ async function addNeverSaveDomain(domainOrUrl) {
 }
 
 // Handle get_credential request
-async function handleGetCredential(domain, requestId) {
+async function handleGetCredential(domain, requestId, pageUrl, username) {
   debugLog('[SentinelPass Background] handleGetCredential called for domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'get_credential',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      // WBS-711: browser-provided page URL; the daemon scheme-validates it
+      // and default-denies unsafe origins.
+      page_url: pageUrl || undefined,
+      // WBS-712/715: exact-username disambiguator (popup per-row Pass).
+      username: username || undefined
     });
 
     debugLog('[SentinelPass Background] Got credential response from native host:', redactForLog(response));
@@ -491,14 +619,15 @@ async function handleGetCredential(domain, requestId) {
 }
 
 // Handle list_domain_credentials request
-async function handleListDomainCredentials(domain, requestId) {
+async function handleListDomainCredentials(domain, requestId, pageUrl) {
   debugLog('[SentinelPass Background] handleListDomainCredentials called for base domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'list_domain_credentials',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Got domain credentials response from native host:', response?.credentials?.length || 0, 'credentials');
@@ -514,14 +643,15 @@ async function handleListDomainCredentials(domain, requestId) {
 }
 
 // Handle get_totp_code request
-async function handleGetTotpCode(domain, requestId) {
+async function handleGetTotpCode(domain, requestId, pageUrl) {
   debugLog('[SentinelPass Background] handleGetTotpCode called for domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'get_totp_code',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Got TOTP response from native host:', redactForLog(response));
@@ -619,13 +749,14 @@ async function handleSaveCredential(data) {
 }
 
 // Handle check_credential_exists request
-async function handleCheckCredentialExists(domain) {
+async function handleCheckCredentialExists(domain, pageUrl) {
   debugLog('[SentinelPass Background] handleCheckCredentialExists called for domain:', domain);
 
   try {
     const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
       type: 'check_credential_exists',
-      domain: domain
+      domain: domain,
+      page_url: pageUrl || undefined
     });
 
     debugLog('[SentinelPass Background] Credential exists check result:', redactForLog(response));
@@ -680,6 +811,59 @@ async function handleLockVault() {
       unlocked: true,
       error: error.message
     };
+  }
+}
+
+// ── WBS-712 per-site autofill permissions (popup-only surface) ──────────────
+
+// Handle grant_site_permission request (popup settings view). The daemon
+// normalizes the host and stores an EXACT-host grant; https never needs one.
+async function handleGrantSitePermission(host, allowInsecure) {
+  debugLog('[SentinelPass Background] handleGrantSitePermission for host:', host);
+  if (!host || typeof host !== 'string') {
+    return { success: false, error: 'Missing host' };
+  }
+  try {
+    const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
+      type: 'grant_site_permission',
+      domain: host,
+      allow_insecure: allowInsecure === true
+    });
+    return { success: response?.success === true, error: response?.error || null };
+  } catch (error) {
+    console.error('[SentinelPass Background] Error granting site permission:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Handle revoke_site_permission request (popup settings view).
+async function handleRevokeSitePermission(host) {
+  debugLog('[SentinelPass Background] handleRevokeSitePermission for host:', host);
+  if (!host || typeof host !== 'string') {
+    return { success: false, error: 'Missing host' };
+  }
+  try {
+    const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
+      type: 'revoke_site_permission',
+      domain: host
+    });
+    return { success: response?.success === true, error: response?.error || null };
+  } catch (error) {
+    console.error('[SentinelPass Background] Error revoking site permission:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+// Handle list_site_permissions request (popup settings view).
+async function handleListSitePermissions() {
+  try {
+    const response = await chrome.runtime.sendNativeMessage(HOST_NAME, {
+      type: 'list_site_permissions'
+    });
+    return { success: response?.success === true, permissions: response?.site_permissions || [] };
+  } catch (error) {
+    console.error('[SentinelPass Background] Error listing site permissions:', error);
+    return { success: false, permissions: [], error: error.message };
   }
 }
 
@@ -745,10 +929,13 @@ async function handleSaveNotification(data, sender) {
     // Store credential data keyed to notification ID for button click handling.
     // Do this before creating the notification to avoid races on very fast clicks.
     // The insecure-HTTP flag rides along so the save prompt / toast can warn.
+    // WBS-716: bounded lifetime — swept by the alarm even if the notification
+    // is never acted on.
     const pendingData = {
       ...data,
       insecure_http: insecureHttp,
-      _sender_tab_id: sender?.tab?.id ?? null
+      _sender_tab_id: sender?.tab?.id ?? null,
+      expiresAt: sessionSecretExpiry(storageKey, Date.now())
     };
     chrome.storage.session.set({ [storageKey]: pendingData }, () => {
       if (chrome.runtime.lastError) {
@@ -824,7 +1011,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleGetCredential(request.domain, request.request_id)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    const username = typeof request.username === 'string' ? request.username : undefined;
+    handleGetCredential(request.domain, request.request_id, pageUrl, username)
           .then(response => {
             debugLog('[SentinelPass Background] Get credential response:', redactForLog(response));
             sendResponse(response);
@@ -849,7 +1042,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleListDomainCredentials(request.domain, request.request_id)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleListDomainCredentials(request.domain, request.request_id, pageUrl)
           .then(response => {
             debugLog('[SentinelPass Background] List domain credentials response:', response?.data?.length || 0, 'credentials');
             sendResponse(response);
@@ -873,7 +1071,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sendResponse({ success: false, error: validation.error });
       return true;
     }
-    handleGetTotpCode(request.domain, request.request_id)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleGetTotpCode(request.domain, request.request_id, pageUrl)
           .then(response => {
             debugLog('[SentinelPass Background] Get TOTP response:', redactForLog(response));
             sendResponse(response);
@@ -905,7 +1108,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleSaveCredential(request.data)
+    handleSaveCredential(withSenderProvenance(request.data, sender))
           .then(response => {
             debugLog('[SentinelPass Background] Save credential response:', redactForLog(response));
             sendResponse(response);
@@ -930,7 +1133,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
       }
     }
-    handleCheckCredentialExists(request.domain)
+    const pageUrl = autofillPageUrlForDaemon(
+      request.page_url,
+      sender.url,
+      isPopupSender(sender)
+    );
+    handleCheckCredentialExists(request.domain, pageUrl)
           .then(exists => {
               debugLog('[SentinelPass Background] Credential exists:', exists);
               sendResponse({ exists: exists });
@@ -968,6 +1176,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleLockVault()
           .then(response => {
             debugLog('[SentinelPass Background] Lock vault response:', redactForLog(response));
+            // WBS-716: a lock clears every pending plaintext payload and
+            // asks content scripts to drop their in-memory autofill context.
+            if (response?.success && response?.unlocked === false) {
+              void purgeAllSessionSecrets().then(() => broadcastScrubSecrets());
+            }
             sendResponse(response);
           })
           .catch(error => {
@@ -980,6 +1193,140 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           });
         return true;
       }
+
+  if (request.type === 'inline_save_confirm') {
+    // WBS-716 review fix F1: the inline prompt confirms by one-time id;
+    // the password never travels to (or from) the content script.
+    const promptId = typeof request.promptId === 'string' ? request.promptId : '';
+    if (!promptId) {
+      sendResponse({ success: false, error: 'Missing prompt id' });
+      return true;
+    }
+    void (async () => {
+      const storageKey = `${PENDING_INLINE_PREFIX}${promptId}`;
+      const stored = await sessionGet([storageKey]);
+      const payload = stored?.[storageKey];
+      if (!payload || isSessionSecretExpired(storageKey, payload, Date.now())) {
+        await sessionRemove([storageKey]);
+        sendResponse({ success: false, error: 'Save prompt expired' });
+        return;
+      }
+      try {
+        const result = await handleSaveCredential({
+          ...payload,
+          save_trigger: 'inline_prompt_confirm'
+        });
+        sendResponse(result);
+      } finally {
+        await sessionRemove([storageKey]);
+      }
+    })();
+    return true;
+  }
+
+  if (request.type === 'capture_pending_login') {
+    // WBS-716: the content script hands the captured submission over; the
+    // plaintext now lives ONLY in the (trusted) background worker's session
+    // storage, stamped with the bounded 2FA-page TTL.
+    const validation = validateSenderDomainContext(
+      sender,
+      request.data?.domain || request.data?.url || '',
+      'capture_pending_login'
+    );
+    if (!validation.ok) {
+      console.warn('[SentinelPass Background] Blocked capture_pending_login:', validation.error);
+      sendResponse({ captured: false, error: validation.error });
+      return true;
+    }
+    const stamped = {
+      ...withSenderProvenance(request.data, sender),
+      expiresAt: sessionSecretExpiry(PENDING_CREDENTIAL_KEY, Date.now())
+    };
+    void sessionSet({ [PENDING_CREDENTIAL_KEY]: stamped }).then(() => {
+      sendResponse({ captured: true });
+    });
+    return true;
+  }
+
+  if (request.type === 'resume_pending_login') {
+    // WBS-716: the content script only ASKS; validation, host matching, and
+    // the payload never leave the background worker.
+    void (async () => {
+      const hostname = typeof request.hostname === 'string' ? request.hostname : '';
+      if (!hostname) {
+        sendResponse({ resumed: false });
+        return;
+      }
+      const stored = await sessionGet([PENDING_CREDENTIAL_KEY]);
+      const pending = stored?.[PENDING_CREDENTIAL_KEY];
+      if (!pending) {
+        sendResponse({ resumed: false });
+        return;
+      }
+      const fresh =
+        !isSessionSecretExpired(PENDING_CREDENTIAL_KEY, pending, Date.now()) &&
+        typeof pending.timestamp === 'number' &&
+        Date.now() - pending.timestamp < PENDING_CREDENTIAL_TTL_MS;
+      const sameSite =
+        typeof pending.domain === 'string' &&
+        pending.domain === hostname &&
+        pending.url !== request.href;
+      if (!fresh || !sameSite) {
+        if (!fresh) {
+          debugLog('[SentinelPass Background] Pending login expired; clearing');
+          await sessionRemove([PENDING_CREDENTIAL_KEY]);
+        }
+        sendResponse({ resumed: false });
+        return;
+      }
+      try {
+        // Preserve the inline-first UX for the 2FA-page resume path.
+        const shown = await handleSaveNotification(
+          { ...pending, request_source: 'pending-login-check' },
+          sender
+        );
+        sendResponse({ resumed: shown === true });
+      } finally {
+        await sessionRemove([PENDING_CREDENTIAL_KEY]);
+      }
+    })();
+    return true;
+  }
+
+  if (request.type === 'grant_site_permission') {
+    // WBS-712: permission management is popup-only — a content script (and
+    // therefore any page) must not be able to move the permission store.
+    if (!isPopupSender(sender)) {
+      console.warn('[SentinelPass Background] Blocked grant_site_permission from non-popup sender');
+      sendResponse({ success: false, error: 'permission changes are popup-only' });
+      return true;
+    }
+    handleGrantSitePermission(request.host, request.allow_insecure)
+      .then(response => sendResponse(response));
+    return true;
+  }
+
+  if (request.type === 'revoke_site_permission') {
+    if (!isPopupSender(sender)) {
+      console.warn('[SentinelPass Background] Blocked revoke_site_permission from non-popup sender');
+      sendResponse({ success: false, error: 'permission changes are popup-only' });
+      return true;
+    }
+    handleRevokeSitePermission(request.host)
+      .then(response => sendResponse(response));
+    return true;
+  }
+
+  if (request.type === 'list_site_permissions') {
+    if (!isPopupSender(sender)) {
+      console.warn('[SentinelPass Background] Blocked list_site_permissions from non-popup sender');
+      sendResponse({ success: false, permissions: [], error: 'permission changes are popup-only' });
+      return true;
+    }
+    handleListSitePermissions()
+      .then(response => sendResponse(response));
+    return true;
+  }
 
   if (request.type === 'save_prompt_outcome') {
     const outcome = request.data?.outcome || 'unknown';
@@ -1003,7 +1350,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'request_save_notification') {
     debugLog('[SentinelPass Background] Handling request_save_notification');
-    handleSaveNotification(request.data, sender)
+    handleSaveNotification(withSenderProvenance(request.data, sender), sender)
           .then(result => {
               debugLog('[SentinelPass Background] Save notification result:', result);
               sendResponse({ success: result });

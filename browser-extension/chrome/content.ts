@@ -268,8 +268,14 @@ function init() {
   // Track form submissions for password saving
   trackFormSubmissions();
 
-  // Check for pending credentials from previous page
-  checkPendingCredentials();
+  // Resume any pending login prompt from a previous page (background-held)
+  resumePendingLogin();
+
+  // WBS-716: scrub in-memory autofill context on page exit and on an
+  // explicit vault-lock broadcast from the background worker.
+  window.addEventListener('pagehide', () => {
+    lastAutofillContext = null;
+  });
 
   // Listen for messages from background script
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -280,23 +286,31 @@ function init() {
     if (request.type === 'trigger_autofill') {
       performAutofill();
     }
+    if (request.type === 'scrub_secrets') {
+      debugLog('Scrubbing in-memory autofill context (vault lock)');
+      lastAutofillContext = null;
+    }
     if (request.type === 'fill_credentials') {
       fillCredentials(request.username, request.password);
     }
     if (request.type === 'show_inline_save_prompt') {
+      // WBS-716 review fix F1: this prompt is a REFERENCE to a payload held
+      // by the background worker (promptId). No password crosses this
+      // boundary in either direction; confirming sends the id, and the
+      // background performs the save itself.
       const payload = request.data || {};
       const username = payload.username || '';
-      const password = payload.password || '';
       const domain = payload.domain || window.location.hostname;
       const sourceUrl = payload.submitted_url || payload.url || window.location.href;
+      const promptId = typeof payload.promptId === 'string' ? payload.promptId : '';
 
-      if (!password) {
-        sendResponse({ success: false, error: 'Missing password for inline save prompt' });
+      if (!promptId) {
+        sendResponse({ success: false, error: 'Missing prompt id for inline save prompt' });
         return false;
       }
 
-      infoLog('Showing inline save prompt fallback');
-      showSavePrompt(username, domain, password, sourceUrl);
+      infoLog('Showing inline save prompt fallback (background-held payload)');
+      showSavePrompt(username, domain, null, sourceUrl, promptId);
       sendResponse({ success: true });
       return true;
     }
@@ -305,8 +319,12 @@ function init() {
   infoLog('Initialization complete');
 }
 
-// Check if there's a pending credential from a previous page login
-function checkPendingCredentials() {
+// Ask the background whether a captured login should resume its save
+// prompt on this page (WBS-716). The content script never touches the
+// pending-credential payload: it is stored, validated (host match + TTL),
+// and consumed ENTIRELY inside the background worker, so plaintext never
+// round-trips back to a page context.
+function resumePendingLogin() {
   // Check if we're in a valid context (not an iframe/blank page)
   if (window.location.protocol === 'about:' || window.location.protocol === 'data:') {
     debugLog('Skipping pending credentials check in restricted context');
@@ -320,46 +338,41 @@ function checkPendingCredentials() {
   }
 
   try {
-    chrome.storage.session.get(['pendingCredential'], (result) => {
+    chrome.runtime.sendMessage({
+      type: 'resume_pending_login',
+      hostname: window.location.hostname,
+      href: window.location.href
+    }, (response) => {
       if (chrome.runtime.lastError) {
-        errorLog('Storage access error:', chrome.runtime.lastError.message);
+        debugLog('Resume pending login failed:', chrome.runtime.lastError.message);
         return;
       }
-
-      if (result && result.pendingCredential) {
-        const pending = result.pendingCredential;
-        const age = Date.now() - pending.timestamp;
-
-        debugLog('Found pending login, age:', age, 'ms');
-        debugLog('Pending domain (sanitized):', sanitizeHostname(pending.domain));
-        debugLog('Current domain (sanitized):', sanitizeHostname(window.location.hostname));
-
-        // Only show prompt if less than 30 seconds old and on a different page
-        if (age < 30000 && window.location.hostname === pending.domain && window.location.href !== pending.url) {
-          void (async () => {
-            if (await shouldSuppressSavePrompt(pending.domain || pending.url || '')) {
-              debugLog('Skipping pending save notification due to never-save policy');
-              chrome.storage.session.remove('pendingCredential');
-              return;
-            }
-
-            infoLog('Successful login detected, showing save notification...');
-
-            // Request notification
-            debugLog('[SentinelPass] ========== SENDING NOTIFICATION FROM 2FA PAGE ==========');
-            requestPersistentSaveNotification(pending, 'pending-login-check', () => {
-              // Clear the pending login regardless of callback result.
-              chrome.storage.session.remove('pendingCredential');
-            });
-          })();
-        } else if (age >= 30000) {
-          debugLog('[SentinelPass] Clearing stale pending login');
-          chrome.storage.session.remove('pendingCredential');
-        }
+      if (response && response.resumed) {
+        infoLog('Successful login detected, save notification shown by background');
       }
     });
   } catch (error) {
-    debugLog('[SentinelPass] Error checking pending credentials:', error.message);
+    debugLog('[SentinelPass] Error resuming pending login:', error.message);
+  }
+}
+
+// Hand a captured submission to the background worker for session-scoped
+// storage (WBS-716): the background stamps a bounded TTL and holds the
+// plaintext in the extension process only.
+function capturePendingLogin(submissionData) {
+  try {
+    chrome.runtime.sendMessage({
+      type: 'capture_pending_login',
+      data: submissionData
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        debugLog('Pending login capture failed:', chrome.runtime.lastError.message);
+      } else if (response && response.captured) {
+        debugLog('[SentinelPass] Pending login captured by background');
+      }
+    });
+  } catch (error) {
+    debugLog('[SentinelPass] Pending login capture exception:', error.message);
   }
 }
 
@@ -417,9 +430,9 @@ function trackFormSubmissions() {
 
     debugLog('[SentinelPass] Submission input method:', inputMethod);
 
-    chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
-      debugLog('[SentinelPass] Stored credentials in session storage');
-    });
+    // Hand the submission to the background worker (WBS-716): no direct
+    // session-storage writes from a page context.
+    capturePendingLogin(submissionData);
 
     // Show save prompt immediately for new password forms
     if (isNewPassword) {
@@ -477,18 +490,8 @@ function trackFormSubmissions() {
     debugLog('[SentinelPass] Button click - capturing credentials immediately');
     debugLog('[SentinelPass] Domain:', submissionData.domain);
 
-    // Store in session storage
-    try {
-      chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
-        if (chrome.runtime.lastError) {
-          debugLog('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
-        } else {
-          debugLog('[SentinelPass] Stored credentials from button click');
-        }
-      });
-    } catch (error) {
-      debugLog('[SentinelPass] Storage exception:', error.message);
-    }
+    // Hand the submission to the background worker (WBS-716)
+    capturePendingLogin(submissionData);
     // Request notification IMMEDIATELY - no delays
     if (!submissionData.isNewPassword) {
       void (async () => {
@@ -545,8 +548,10 @@ function isNewPasswordForm(form, passwordField) {
   return isNewPassword;
 }
 
-// Show prompt to save credentials
-function showSavePrompt(username, domain, password, sourceUrl = window.location.href) {
+// Show prompt to save credentials. `password` is the PAGE's own field
+// value for the direct (new-password form) path; background-driven prompts
+// pass null + promptId and confirm via the background (review F1).
+function showSavePrompt(username, domain, password, sourceUrl = window.location.href, promptId = null) {
   void (async () => {
     if (await shouldSuppressSavePrompt(domain)) {
       debugLog('[SentinelPass] Suppressing save prompt due to never-save policy');
@@ -798,7 +803,11 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     reportOnce('save_clicked', {
       usernamePresent: Boolean(username)
     });
-    saveCredentials(username, password, domain, sourceUrl);
+    if (promptId) {
+      void confirmInlineSave(promptId);
+    } else if (password) {
+      saveCredentials(username, password, domain, sourceUrl);
+    }
     prompt.remove();
   });
 
@@ -837,6 +846,35 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
       }
     }, 30000);
   })();
+}
+
+// Confirm a background-held inline prompt by id (review F1): the save is
+// performed entirely in the background worker; we only surface the result.
+async function confirmInlineSave(promptId) {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'inline_save_confirm',
+      promptId
+    });
+
+    if (response?.success) {
+      if (response.unchanged) {
+        showNotification('Password already up to date', 'info');
+      } else if (response.insecure_http) {
+        showNotification('Password saved, but this site used unencrypted HTTP', 'warning');
+      } else {
+        showNotification('Password saved successfully!', 'success');
+      }
+    } else if (response?.code === 'vault_locked') {
+      showNotification('Vault locked. Unlock SentinelPass app, then submit the login again.', 'warning');
+    } else {
+      console.error('[SentinelPass] Inline save confirm failed:', response?.error);
+      showNotification('Failed to save: ' + (response?.error || 'Unknown error'), 'error');
+    }
+  } catch (error) {
+    console.error('[SentinelPass] Inline save confirm error:', error);
+    showNotification('Failed to save password', 'error');
+  }
 }
 
 // Save credentials to vault via native messaging
@@ -986,14 +1024,8 @@ function monitorPasswordField(passwordField) {
     debugLog('[SentinelPass] Username detected:', Boolean(submissionData.username));
     debugLog('[SentinelPass] Submission input method:', inputMethod);
 
-    // Store in session storage (cleared when browser closes — no plaintext on disk)
-    chrome.storage.session.set({ 'pendingCredential': submissionData }, () => {
-      if (chrome.runtime.lastError) {
-        debugLog('[SentinelPass] Storage error:', chrome.runtime.lastError.message);
-      } else {
-        debugLog('[SentinelPass] Credentials stored in session storage');
-      }
-    });
+    // Hand the submission to the background worker (WBS-716)
+    capturePendingLogin(submissionData);
 
     // Request notification immediately
     if (!submissionData.isNewPassword) {
@@ -1090,6 +1122,15 @@ async function requestAutofill(passwordField) {
 
       // Show success indicator
       showNotification(statusMessage, 'success');
+    } else if (typeof response?.error === 'string' && response.error.startsWith('autofill denied:')) {
+      // WBS-711: the daemon refused delivery for this origin (plain HTTP or
+      // an unverifiable context). This is a policy denial, not a no-match.
+      debugLog('[SentinelPass] Autofill denied by daemon origin policy:', response.error);
+      if (response.error.includes('insecure-http')) {
+        showNotification('Autofill is disabled on unencrypted HTTP sites', 'warning');
+      } else {
+        showNotification('Autofill is not available for this page', 'warning');
+      }
     } else {
       debugLog('[SentinelPass] No credentials found for', domain);
       showNotification('No credentials found for this site', 'info');

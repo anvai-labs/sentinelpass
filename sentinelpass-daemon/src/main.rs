@@ -70,6 +70,11 @@ async fn main() -> Result<()> {
     // WBS-505: provision the native-host installation capability on every
     // start (mint-once; the host presents the 0600 secret file and the
     // daemon verifies it for browser-surface operations).
+    if let Err(e) = sentinelpass_core::daemon::site_permissions::ensure_store_file(
+        &sentinelpass_core::daemon::site_permissions::default_store_path(),
+    ) {
+        tracing::warn!("site permission store unavailable: {}", e);
+    }
     if let Err(e) = sentinelpass_core::daemon::ensure_native_host_capability() {
         error!("Native-host capability provisioning failed: {}", e);
         // Non-zero exit: a refusal must never look like a clean start

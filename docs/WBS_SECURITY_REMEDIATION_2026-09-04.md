@@ -1217,15 +1217,100 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   removed entirely. Known residual (documented): frontend-timed expiry is
   throttled in hidden webviews — backend timer is the tracked follow-up.
 - **WBS-710 — Windows Hello-bound key release.** TD-CLIENT-04, SR-CLIENT (biometric
-  parity). Est 3d.
+  parity).
+  Est 3d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the Windows DEK wrap
+  for biometric unlock is now bound to a per-vault TPM/Hello
+  `KeyCredentialManager` key: enable creates the key (ReplaceExisting;
+  platform verifies Hello presence), draws a random 32-byte challenge,
+  signs it twice (the Hello prompt), REFUSES enable unless both signatures
+  are byte-identical (RSASSA-PKCS1-v1_5 determinism self-check — a
+  randomizing platform fails closed before anything is stored), seals the
+  DEK under `HKDF-SHA256(signature, ref-bound)`, and verifies a full
+  release round-trip before persisting. The stored keyring value is now a
+  NON-SECRET blob; release requires a FRESH Hello-gated signature over the
+  stored challenge (the sign prompt IS the authentication — no separate
+  UserConsentVerifier double-prompt), and the GCM tag authenticates the
+  derived wrap key, so a refused gesture, wrong key, cross-vault ref, or
+  tampered blob all fail closed (master-password fallback). Legacy
+  pre-710 base64-DEK enrollments keep working (verify-then-read) and are
+  upgraded by re-enabling. Chosen primitive is the platform's DOCUMENTED
+  surface: passport keys are sign-only (NCryptDecrypt is undocumented),
+  so the release gate is the signature itself. Evidence: platform-free
+  orchestration unit suite (10 cases: roundtrip, cross-ref, refused
+  gesture, wrong key, tampered blob, non-deterministic refusal,
+  unsupported refusal, legacy/version decode, KDF binding) + the WinRT
+  call surface type-checked for x86_64-pc-windows-msvc against
+  windows 0.61 (KeyCredentialManager/KeyCredential/CryptographicBuffer);
+  runtime Hello verification rides the Windows CI matrix like the rest
+  of the named-pipe FFI. Honest residual: determinism relies on
+  RSA-PKCS1-v1_5 (self-checked at every enable, so platform drift fails
+  enable, not unlock).
 - **WBS-711 — Default-deny HTTP autofill.** SR-CLIENT-003, SR-EXT-002, TD-CLIENT-05.
   Est 2d.
-- **WBS-712 — Optional/requested site permissions.** TD-CLIENT-05. Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the daemon's
+  browser-surface handlers (GetCredential, GetTotpCode, ListDomainCredentials)
+  now carry a `page_url` (the browser-provided sender URL, never a
+  content-script-claimed value) and a WHATWG origin gate: `https:` delivers,
+  bound to the parsed host (the claimed `domain` no longer drives the lookup);
+  plain `http:` is refused (`insecure-http`) — WBS-706's consent covered SAVE,
+  this covers AUTOFILL delivery; missing/unparseable/non-web URLs are refused
+  (`origin-unverified`) — fail-closed, and a valid capability does NOT bypass
+  the scheme gate. Denials carry a typed `denied_reason` to the extension
+  (distinct toast vs no-match). Negative evidence: 9-case daemon gate suite
+  incl. handler-level tests over a real unlocked vault (http denied with
+  capability present, missing-URL denied, delivery bound to URL host not the
+  claimed domain, TOTP+listing gated identically, locked-vault ordering) and
+  extension-side resolution tests (claimed URL ignored for content senders).
+  Allow-listing arrives with WBS-712's per-site permissions.
+- **WBS-712 — Optional/requested site permissions.** TD-CLIENT-05.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — two layers. (1) DAEMON
+  allow-list for the 711 denial: `site_permissions.json` (0600) next to the
+  capability store holds EXACT-host `allow_insecure` grants (normalized with
+  the vault's `normalize_host`; no suffix matching — a grant for
+  `example.com` covers neither `sub.example.com` nor `evil-example.com`);
+  Grant/Revoke/List IPC messages ride the same native-host capability gate
+  (non-browser senders refused, tested); a missing/unreadable store stays
+  deny. Extension popup settings gain a Site access section: browser origin
+  access enable/remove (`optional_host_permissions` + `scripting` replace the
+  blanket install-time `host_permissions`; Firefox `strict_min_version`
+  raised to 128 for MV3 optional host permissions) plus explicit
+  "Autofill over HTTP" allow/revoke per site — permission CHANGES are
+  popup-only by design (content-script requests refused in the background).
+  Tests: store unit suite (default-deny, exact-host isolation, revocation
+  durability, 0600 mode), handler-level grant→deliver/revoke→deny lifecycle
+  over a real vault, grant-requires-capability negative, 86-case vitest suite
+  green.
 - **WBS-713 — Validated site/frame/form/field binding.** SR-CLIENT-003, SR-EXT-002,
   TD-CLIENT-06. Est 3d.
 - **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06. Est 2d.
 - **WBS-715 — Ambiguity chooser.** TD-CLIENT-06. Est 2d.
-- **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07. Est 2d.
+- **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — full inventory
+  committed (`browser-extension/chrome/DEBUGGING.md` +
+  `docs/SECRET_LIFETIME_AUDIT.md` §N). Content scripts no longer touch
+  `chrome.storage.session` at all (pre-716 content-script writes were also
+  dead code under MV3's trusted-context default): submissions are captured
+  via `capture_pending_login` and consumed via a boolean-only
+  `resume_pending_login` — plaintext lives ONLY in the background worker,
+  TTL-stamped through a shared pure registry (`session-secrets.ts`: 30 s /
+  2 min / 10 min per payload class), swept by a `chrome.alarms` minute tick
+  (fail-closed: an unstamped secret entry sweeps as expired), purged on
+  vault lock together with a `scrub_secrets` broadcast that clears content
+  scripts' in-memory autofill context (also cleared on `pagehide`).
+  Evidence: registry unit suite (classification, TTL bounds, expiry,
+  fail-closed malformed stamps, sweep list); typecheck + vitest green;
+  artifacts rebuilt byte-parity. Adversarial-review round 1 fixes: the
+  background-driven inline prompt no longer ships the payload (incl. the
+  password) to the content script — it holds it under a TTL-stamped
+  one-time `pendingInlinePrompt:<id>` key and the prompt confirms by id
+  (`inline_save_confirm`); content-script save/notification/capture
+  payloads get their URLs overwritten with the browser sender URL
+  (provenance enforcement, not convention); the minute alarm now also
+  purges + scrubs when the vault was locked OUTSIDE the extension (daemon
+  auto-lock/CLI/UI have no push channel).
 - **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08. Est 3d.
 - **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.

@@ -181,3 +181,24 @@ Legend: **YES** = zeroized on drop; **NO** = dropped unzeroized;
   outputs are user-requested exports — recommend a future audit row).
 - Swap/memory-locking protections: `mlock`/`memsec` was removed deliberately;
   nothing here claims residual-memory immunity beyond `Drop`-time zeroization.
+
+## N. Browser extension — `browser-extension/` (WBS-716, TD-CLIENT-07)
+
+Scope: the extension is a separate process boundary from the daemon; the
+same honesty rules apply. Secrets here are held in the background service
+worker (trusted context) with bounded lifetimes, NEVER in content scripts.
+
+| Location | Content | Bounded? | Evidence |
+|---|---|---|---|
+| `chrome.storage.session` `pendingCredential` | captured submission (username+password) | YES — 30 s `expiresAt` stamp | `session-secrets.ts` registry; `capture_pending_login`/`resume_pending_login` handlers in `background.ts`; alarm sweep + vault-lock purge; unit suite `tests/web/session-secrets.test.ts` (incl. fail-closed unstamped entries) |
+| `chrome.storage.session` `pendingSaveCredential:*` | per-notification save payload | YES — 10 min stamp, same sweep | `background.ts` `handleSaveNotification` |
+| `chrome.storage.session` `pendingUnlockRetry` | locked-vault retry payload | YES — 2 min stamp | `background.ts` `queuePendingSaveRetry` |
+| content script `lastAutofillContext` | autofill reuse marker (username+password, memory) | YES — 10 min timeout, `pagehide`, `scrub_secrets` broadcast on lock | `content.ts` |
+| popup `allCredentials` | usernames/titles for current site, no passwords | popup lifetime | `popup.ts` (copy-time password fetch) |
+| `chrome.storage.local` policy keys | domains only | N/A | — |
+
+WBS-716 change: content scripts no longer write or read
+`chrome.storage.session` at all (the pre-716 content-script writes were
+also functionally broken under MV3's trusted-context default); every
+plaintext payload is background-held, TTL-stamped, alarm-swept, and
+purged on vault lock.
