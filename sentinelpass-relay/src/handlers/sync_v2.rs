@@ -1488,6 +1488,36 @@ pub async fn migration_claim(
         .transaction()
         .map_err(|e| RelayError::Database(e.to_string()))?;
 
+    // ONE claim per origin vault (ADR-006) — this guard PRECEDES the
+    // ownership check: a successful claim MOVES the claimant's device row
+    // to the fresh vault, so a second claim from the same device would
+    // otherwise surface as a misleading ownership BadRequest instead of
+    // the authoritative-claim Conflict. The INSERT below remains the
+    // race-safe arbiter (ON CONFLICT DO NOTHING).
+    let already_claimed: Option<String> = tx
+        .query_row(
+            "SELECT claimed_by FROM migration_claims WHERE origin_vault_id = ?1",
+            [&origin],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| RelayError::Database(e.to_string()))?;
+    if let Some(claimed_by) = already_claimed {
+        tracing::warn!(
+            origin = %origin,
+            claimed_by = %claimed_by,
+            "duplicate authoritative claim refused"
+        );
+        return Err(RelayError::Conflict(format!(
+            "origin vault already re-baselined by device {claimed_by}; \
+             re-onboard through that device's v2 pairing instead"
+        )));
+    }
+
     // The claimant must be a registered device OF THE ORIGIN VAULT (the
     // v1-era relay vault being migrated away from).
     let claimant_vault: String = tx
@@ -1533,16 +1563,11 @@ pub async fn migration_claim(
         )));
     }
 
-    // THE CLAIMANT'S DEVICE ROW MOVES: push/pull derive the vault from the
-    // devices table, so the authority's binding must follow the claim or
-    // the migration can never complete (review finding 1).
-    tx.execute(
-        "UPDATE devices SET vault_id = ?1 WHERE device_id = ?2",
-        rusqlite::params![&new_vault_str, device_id.to_string()],
-    )
-    .map_err(|e| RelayError::Database(e.to_string()))?;
-
-    // Fresh vault scaffolding for the re-baseline.
+    // Fresh vault scaffolding for the re-baseline. MUST precede the
+    // device-row move: devices.vault_id carries a FOREIGN KEY to
+    // vaults(vault_id) enforced under PRAGMA foreign_keys = ON (the
+    // stage-2 atomicity hardening) — repointing the device before the
+    // vault row exists fails the constraint.
     tx.execute(
         "INSERT INTO vaults (vault_id, created_at) VALUES (?1, ?2)",
         rusqlite::params![&new_vault_str, now],
@@ -1557,6 +1582,14 @@ pub async fn migration_claim(
         "INSERT INTO vault_epochs (vault_id, key_epoch, updated_at) VALUES (?1, 1, ?2)
          ON CONFLICT(vault_id) DO NOTHING",
         rusqlite::params![&new_vault_str, now],
+    )?;
+
+    // THE CLAIMANT'S DEVICE ROW MOVES: push/pull derive the vault from the
+    // devices table, so the authority's binding must follow the claim or
+    // the migration can never complete (review finding 1).
+    tx.execute(
+        "UPDATE devices SET vault_id = ?1 WHERE device_id = ?2",
+        rusqlite::params![&new_vault_str, device_id.to_string()],
     )
     .map_err(|e| RelayError::Database(e.to_string()))?;
 
