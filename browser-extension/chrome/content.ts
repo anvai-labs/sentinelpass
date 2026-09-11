@@ -1519,7 +1519,7 @@ function findTotpField() {
   ];
 
   for (const selector of exactSelectors) {
-    const field = document.querySelector<HTMLInputElement>(selector);
+    const field = document.querySelector(selector) as HTMLInputElement | null;
     if (field && !field.disabled && !field.readOnly) {
       return field;
     }
