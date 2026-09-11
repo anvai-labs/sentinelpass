@@ -1381,6 +1381,30 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   YOUR_EXTENSION_ID_HERE placeholder, forbidding Chrome).
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.
   Est 4d.
+  **Status:** Done (2026-09-11, Phase 5 remainder) — REAL-backend E2E
+  (`browser-extension/e2e/tests/daemon-autofill.spec.ts` + harness): an
+  ISOLATED installation (temp HOME / XDG_RUNTIME_DIR — every path the
+  daemon, CLI, native host, and Chromium derive is confined to a temp dir)
+  with the REAL daemon (`--start-locked`, unlocked through the CLI), REAL
+  native host (manifest installed into the Playwright profile; stable
+  unpacked extension ID asserted), and real Chromium. Flows: HTTPS autofill
+  fills the bound field; HTTP default-deny shows the typed 711 toast; after
+  a host-driven exact-site grant (WBS-712; driven through the REAL host
+  stdio protocol because Chrome's optional-permission prompt is not
+  Playwright-automatable) the same page delivers through the explicit
+  chooser; the chooser (closed shadow root, trusted-input picks) fills the
+  picked account; a login submit is captured into background-held,
+  TTL-stamped session state; a registration submit's inline Save writes
+  through the daemon (verified via the CLI against the same vault); a
+  locked vault delivers nothing. Found + fixed by building this suite: the
+  content script never injected under ESM emit (classic-script bundling,
+  WBS-717), a top-level-const-after-bootstrap crash killed init on form
+  pages, the firefox gecko ID drift (WBS-718), popup-as-tab senders were
+  misclassified, and install.ps1's empty ExtensionId default. Firefox E2E
+  remains an honest gap (Playwright cannot load extensions in stock
+  Firefox) — documented; Firefox consumes the same byte-parity artifacts,
+  daemon gates, and unit suites. CI: extension-e2e.yml now builds the
+  daemon/host/CLI and runs this suite under xvfb.
 
 ## 9. Phase 6 — mobile (WBS-800, release 0.12 beta)
 

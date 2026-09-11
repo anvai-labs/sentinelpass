@@ -6,6 +6,10 @@ on:
     paths:
       - "browser-extension/chrome/**"
       - "browser-extension/e2e/**"
+      - "sentinelpass-daemon/**"
+      - "sentinelpass-host/**"
+      - "sentinelpass-cli/**"
+      - "sentinelpass-core/src/daemon/**"
       - ".github/workflows/extension-e2e.yml"
 
 jobs:
@@ -30,6 +34,12 @@ jobs:
             package-lock.json
             browser-extension/e2e/package-lock.json
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@98c114866a2cc9b03d0a70d1ebafcb3d5071e757
+
       - name: Install root web dependencies
         run: npm ci
 
@@ -51,8 +61,11 @@ jobs:
         run: npx playwright install chromium
 
       - name: Install xvfb (X Virtual Framebuffer)
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb libssl-dev
 
-      - name: Run extension browser e2e tests
+      - name: Build daemon, host, and CLI (real-backend E2E)
+        run: cargo build --locked -p sentinelpass-daemon -p sentinelpass-host -p sentinelpass-cli
+
+      - name: Run extension browser e2e tests (daemon + native host + browser)
         working-directory: browser-extension/e2e
         run: xvfb-run --auto-servernum npm run test:e2e
