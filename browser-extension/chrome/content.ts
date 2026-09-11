@@ -402,7 +402,7 @@ function trackFormSubmissions() {
 
   // Listen for form submissions
   document.addEventListener('submit', (e) => {
-    const form = e.target;
+    const form = e.target instanceof HTMLFormElement ? e.target : null;
     if (!form) {
       debugLog('[SentinelPass] Form submission: no form target');
       return;
@@ -480,8 +480,9 @@ function trackFormSubmissions() {
 
   // Also listen for button clicks in forms (for JavaScript-based submissions)
   document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Element)) return;
     const button = e.target.closest('button[type="submit"], input[type="submit"], button:not([type])');
-    if (!button) return;
+    if (!(button instanceof HTMLButtonElement || button instanceof HTMLInputElement)) return;
 
     const form = button.form;
     if (!form) return;
@@ -1518,7 +1519,7 @@ function findTotpField() {
   ];
 
   for (const selector of exactSelectors) {
-    const field = document.querySelector(selector);
+    const field = document.querySelector<HTMLInputElement>(selector);
     if (field && !field.disabled && !field.readOnly) {
       return field;
     }

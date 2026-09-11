@@ -499,7 +499,7 @@
   function trackFormSubmissions() {
     debugLog("[SentinelPass] Setting up form submission tracking...");
     document.addEventListener("submit", (e) => {
-      const form = e.target;
+      const form = e.target instanceof HTMLFormElement ? e.target : null;
       if (!form) {
         debugLog("[SentinelPass] Form submission: no form target");
         return;
@@ -556,8 +556,9 @@
       }
     }, true);
     document.addEventListener("click", (e) => {
+      if (!(e.target instanceof Element)) return;
       const button = e.target.closest('button[type="submit"], input[type="submit"], button:not([type])');
-      if (!button) return;
+      if (!(button instanceof HTMLButtonElement || button instanceof HTMLInputElement)) return;
       const form = button.form;
       if (!form) return;
       const passwordField = selectCaptureTarget(form);

@@ -1497,9 +1497,9 @@ chrome.notifications.onClosed.addListener((notificationId) => {
     }
 
     chrome.storage.session.get([storageKey], (result) => {
-      const pending = result ? result[storageKey] : null;
-      const domain = pending?.domain || 'unknown';
-      const tabId = Number.isInteger(pending?._sender_tab_id) ? pending._sender_tab_id : null;
+      const pending = result ? (result[storageKey] as Record<string, unknown> | undefined) : null;
+      const domain = (pending?.domain as string) || 'unknown';
+      const tabId = Number.isInteger(pending?._sender_tab_id) ? (pending._sender_tab_id as number) : null;
 
       if (tabId !== null) {
         void requestInlineSavePrompt(tabId, pending).then((inlineShown) => {
