@@ -318,7 +318,9 @@ export function grantInsecureViaHost(homeDir: string, host: string): void {
     !combined.includes('"type":"credential_response"') ||
     !combined.includes('"success":true')
   ) {
-    throw new Error(`host grant failed: ${combined.slice(0, 600)}`);
+    throw new Error(
+      `host grant failed: ${combined.slice(0, 4000)}\n--- daemon log ---\n${daemonLog.join('')}`
+    );
   }
 }
 
