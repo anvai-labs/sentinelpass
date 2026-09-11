@@ -34,19 +34,37 @@ async fn v1_retirement_middleware(
 }
 
 pub fn build_router(app_state: RelayAppState) -> Router {
-    // v1 routes (WBS-624): mounted ONLY behind the retirement gate — 410
-    // Gone by default; `allow_v1 = true` opens a bounded migration window.
-    let v1 = Router::new()
+    // v1 AUTHENTICATED routes (WBS-624): gate OUTERMOST, auth UNDER it — a
+    // retired v1 route answers 410 before auth even runs; with
+    // `allow_v1 = true` (bounded migration window) auth still applies.
+    let v1_authenticated = Router::new()
         .route("/api/v1/pairing/bootstrap", post(pairing::upload_bootstrap))
-        .route("/api/v1/devices/register", post(devices::register_device))
         .route("/api/v1/sync/push", post(sync::push))
         .route("/api/v1/sync/pull", post(sync::pull))
         .route("/api/v1/sync/full-push", post(sync::full_push))
         .route("/api/v1/sync/full-pull", post(sync::full_pull))
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            v1_retirement_middleware,
+        ));
+
+    // v1 PUBLIC routes (register + bootstrap fetch): rate-limited, then
+    // gated. Device registration is PROTOCOL-NEUTRAL — the v2 path
+    // (/api/v2/devices/register) below serves v2 clients ungated.
+    let v1_public = Router::new()
+        .route("/api/v1/devices/register", post(devices::register_device))
         .route(
             "/api/v1/pairing/bootstrap/{token}",
             get(pairing::fetch_bootstrap),
         )
+        .layer(middleware::from_fn_with_state(
+            app_state.clone(),
+            public_rate_limit_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             v1_retirement_middleware,
@@ -73,6 +91,10 @@ pub fn build_router(app_state: RelayAppState) -> Router {
 
     // Unauthenticated routes (v2 + management)
     let public = Router::new()
+        // Device registration is protocol-neutral and load-bearing for v2
+        // onboarding (sync_now preflight, pair-join) — NOT gated by the v1
+        // retirement. Self-gating: existing vaults require a pairing proof.
+        .route("/api/v2/devices/register", post(devices::register_device))
         .route(
             "/api/v2/pairing/bootstrap/retrieve",
             post(pairing_v2::retrieve_bootstrap_v2),
@@ -84,7 +106,8 @@ pub fn build_router(app_state: RelayAppState) -> Router {
         ));
 
     Router::new()
-        .merge(v1)
+        .merge(v1_authenticated)
+        .merge(v1_public)
         .merge(authenticated)
         .merge(public)
         .layer(TraceLayer::new_for_http())
@@ -169,6 +192,8 @@ fn effective_client_ip(peer_ip: &str, xff: Option<&str>, trusted_proxies: &[Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RelayConfig;
+    use crate::storage::RelayStorage;
 
     #[tokio::test]
     async fn health_returns_structured_relay_status() {
@@ -177,6 +202,49 @@ mod tests {
         assert_eq!(response.status, "ok");
         assert_eq!(response.service, "sentinelpass-relay");
         assert_eq!(response.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// WBS-624: retired v1 routes answer 410 Gone (BEFORE auth — a request
+    /// without credentials still gets the 410, not 401), while the v2
+    /// register path is reachable.
+    #[tokio::test]
+    async fn retired_v1_routes_answer_gone_and_v2_register_is_live() {
+        use tower::util::ServiceExt;
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let app = build_router(state);
+
+        // POST /api/v1/sync/push with NO credentials: 410 (gate) — not 401
+        // (which would mean auth ran first) and not 404 (route mounted).
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sync/push")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::GONE);
+
+        // POST /api/v2/devices/register with no credentials: passes the
+        // retirement path (4xx for the empty body — the route is LIVE).
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/devices/register")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            axum::http::StatusCode::GONE,
+            "v2 register is live"
+        );
     }
 
     /// WBS-618 / TD-NET-03: forwarded IPs are trusted ONLY from configured

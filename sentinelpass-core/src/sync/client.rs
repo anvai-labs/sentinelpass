@@ -107,7 +107,7 @@ impl SyncClient {
         pairing_token: Option<&str>,
         registration_proof: Option<&[u8]>,
     ) -> Result<()> {
-        let path = "/api/v1/devices/register";
+        let path = "/api/v2/devices/register";
         let mut body = serde_json::Map::new();
         body.insert("device_id".to_string(), serde_json::json!(self.device_id));
         body.insert("device_name".to_string(), serde_json::json!(device_name));

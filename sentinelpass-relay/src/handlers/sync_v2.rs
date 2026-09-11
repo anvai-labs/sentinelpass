@@ -30,10 +30,11 @@ use uuid::Uuid;
 
 /// Maximum mutations accepted per v2 push request.
 pub const MAX_MUTATIONS_PER_PUSH: usize = 500;
-// Per-entry payload cap: the configured request-body limit (one consistent
-// limit set, TD-NET-06) — a body that passes the global body-limit layer
-// cannot contain an entry larger than it. Sanity floor of 1 KiB guards a
-// misconfigured zero/near-zero body limit.
+// TD-NET-06: the per-entry payload size is bounded by the GLOBAL
+// request-body limit layer (max_payload_size) — one consistent limit set.
+// The request body is base64 (~1.37x decoded), so the decoded payload is
+// always smaller than the bounded body. RelayConfig::validate rejects a
+// zero body limit.
 /// A mutation may not jump an object's version by more than this (sanity
 /// bound; legitimate clients advance by small steps per push).
 const MAX_VERSION_STEP: u64 = 10_000;
@@ -1379,18 +1380,27 @@ mod tests {
         let first_vault = first.new_vault_id;
         assert_ne!(first_vault, Uuid::nil());
 
-        // Scaffolding exists for the fresh vault. (Guard scoped — the next
-        // handler call re-acquires the storage mutex.)
-        let counter: i64 = {
+        // Scaffolding exists for the fresh vault AND the claimant's device
+        // row MOVED to it (review finding 1: push/pull derive the vault
+        // from the devices table — without the move the migration can
+        // never complete).
+        {
             let conn = state.storage.conn().unwrap();
-            conn.query_row(
-                "SELECT current_sequence FROM sequence_counters WHERE vault_id = ?1",
-                [&first_vault.to_string()],
-                |r| r.get(0),
-            )
-            .unwrap()
-        };
-        assert_eq!(counter, 0);
+            let (counter, device_vault): (i64, String) = conn
+                .query_row(
+                    "SELECT (SELECT current_sequence FROM sequence_counters WHERE vault_id = ?1), \
+                            (SELECT vault_id FROM devices WHERE device_id = ?2)",
+                    rusqlite::params![&first_vault.to_string(), device_id.to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(counter, 0);
+            assert_eq!(
+                device_vault,
+                first_vault.to_string(),
+                "the claimant's device row must follow the claim"
+            );
+        }
 
         // A second authoritative claim for the same origin is refused.
         let second = migration_claim(
@@ -1478,13 +1488,20 @@ pub async fn migration_claim(
         .transaction()
         .map_err(|e| RelayError::Database(e.to_string()))?;
 
-    // The claimant must be a registered device.
-    tx.query_row(
-        "SELECT 1 FROM devices WHERE device_id = ?1",
-        [device_id.to_string()],
-        |row| row.get::<_, i64>(0),
-    )
-    .map_err(|_| RelayError::NotFound("Device not found".to_string()))?;
+    // The claimant must be a registered device OF THE ORIGIN VAULT (the
+    // v1-era relay vault being migrated away from).
+    let claimant_vault: String = tx
+        .query_row(
+            "SELECT vault_id FROM devices WHERE device_id = ?1",
+            [device_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|_| RelayError::NotFound("Device not found".to_string()))?;
+    if claimant_vault != origin {
+        return Err(RelayError::BadRequest(
+            "claimant device does not belong to the origin vault".into(),
+        ));
+    }
 
     // ONE claim per origin vault (ADR-006: a second authoritative claim is
     // refused — the insert conflicts on the primary key).
@@ -1497,18 +1514,33 @@ pub async fn migration_claim(
         )
         .map_err(|e| RelayError::Database(e.to_string()))?;
     if inserted == 0 {
-        let (existing_vault, existing_claim): (String, String) = tx
+        let existing_claim: String = tx
             .query_row(
-                "SELECT new_vault_id, claimed_by FROM migration_claims WHERE origin_vault_id = ?1",
+                "SELECT claimed_by FROM migration_claims WHERE origin_vault_id = ?1",
                 [&origin],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .map_err(|e| RelayError::Database(e.to_string()))?;
+        // The fresh vault id is deliberately NOT in the response (log only).
+        tracing::warn!(
+            origin = %origin,
+            claimed_by = %existing_claim,
+            "duplicate authoritative claim refused"
+        );
         return Err(RelayError::Conflict(format!(
-            "origin vault already re-baselined by device {existing_claim} onto vault {existing_vault}; \
+            "origin vault already re-baselined by device {existing_claim}; \
              re-onboard through that device's v2 pairing instead"
         )));
     }
+
+    // THE CLAIMANT'S DEVICE ROW MOVES: push/pull derive the vault from the
+    // devices table, so the authority's binding must follow the claim or
+    // the migration can never complete (review finding 1).
+    tx.execute(
+        "UPDATE devices SET vault_id = ?1 WHERE device_id = ?2",
+        rusqlite::params![&new_vault_str, device_id.to_string()],
+    )
+    .map_err(|e| RelayError::Database(e.to_string()))?;
 
     // Fresh vault scaffolding for the re-baseline.
     tx.execute(

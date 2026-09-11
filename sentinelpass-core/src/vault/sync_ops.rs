@@ -535,6 +535,15 @@ impl VaultManager {
             .unchecked_transaction()
             .map_err(DatabaseError::Sqlite)?;
 
+        // Stale lineage state is PURGED (stage-7 review): conflict
+        // alternatives and dead-letters belong to the abandoned lineage —
+        // keeping them would let take-remote regress post-migration data
+        // and count pre-migration debris against the dead-letter cap.
+        tx.execute("DELETE FROM sync_conflicts", [])
+            .map_err(DatabaseError::Sqlite)?;
+        tx.execute("DELETE FROM sync_dead_letter", [])
+            .map_err(DatabaseError::Sqlite)?;
+
         for table in ["entries", "ssh_keys", "totp_secrets"] {
             tx.execute(
                 &format!(
