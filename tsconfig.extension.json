@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "types": ["chrome"],
+    "skipLibCheck": true,
+    "allowJs": false,
+    "strict": false,
+    "noImplicitAny": false,
+    "rootDir": "browser-extension/chrome",
+    "outDir": "browser-extension/dist/extension"
+  },
+  "include": ["browser-extension/chrome/*.ts"],
+  "exclude": ["browser-extension/e2e/**"]
+}

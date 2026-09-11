@@ -9,6 +9,7 @@
   "scripts": {
     "web:build": "tsc -p tsconfig.web.json && node scripts/postprocess-web-build.mjs",
     "web:typecheck": "tsc -p tsconfig.web.json --noEmit",
+    "ext:build": "node scripts/build-extension.mjs",
     "test:ts": "vitest run --coverage",
     "test:ts:watch": "vitest"
   },
