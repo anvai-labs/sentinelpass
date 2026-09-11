@@ -1363,7 +1363,22 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   targets, and byte-exact reproduction through a fresh pipeline build.
   Verified: the pipeline reproduces the previously checked-in artifacts
   byte-for-byte (zero diff at introduction).
-- **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
+- **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08.
+  Est 1.5d.
+  **Status:** Done (2026-09-11, Phase 5 remainder) —
+  `tests/web/manifest-parity.test.ts` runs with the unit suite (CI: test:ts):
+  chrome/firefox manifests must agree on version/name/permissions/host
+  permissions/content scripts; the Chrome stable ID is DERIVED from the
+  manifest key (SHA-256 → a-p) and must appear in install.sh, install.ps1,
+  and the Tauri registration; ONE firefox gecko ID must appear in the
+  manifest and all three native-host sources; the host name
+  `com.passwordmanager.host` must match across the extension source, the
+  manifest template, both installers, and the Tauri constant. The gate
+  found and this commit fixes two live drifts: the firefox manifest gecko
+  ID (`@sentinelpass.org`) did not match the ID every native-host source
+  allows (`@localhost` — Firefox native messaging was dead), and
+  install.ps1 defaulted `$ExtensionId` to empty (a default run wrote the
+  YOUR_EXTENSION_ID_HERE placeholder, forbidding Chrome).
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.
   Est 4d.
 

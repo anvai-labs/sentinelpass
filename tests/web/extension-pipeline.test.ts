@@ -34,7 +34,17 @@ describe('extension single-source pipeline (WBS-717)', () => {
     }
   });
 
-  it('rebuilds every checked-in artifact byte-exactly (canonical pipeline)', () => {
+  it('keeps content.js a classic script (no ES module syntax)', () => {
+    // Content scripts are classic scripts: ESM import/export throws a
+    // SyntaxError there and injection silently fails (WBS-719 finding).
+    const content = readFileSync(path.join(chromeDir, 'content.js'), 'utf8');
+    expect(content).not.toMatch(/^\s*import\s/m);
+    expect(content).not.toMatch(/^\s*export\s/m);
+    const firefoxContent = readFileSync(path.join(firefoxDir, 'content.js'), 'utf8');
+    expect(firefoxContent).toBe(content);
+  });
+
+  it('rebuilds every checked-in module artifact byte-exactly (canonical pipeline)', () => {
     const distDir = mkdtempSync(path.join(tmpdir(), 'ext-pipeline-'));
     try {
       const emit = spawnSync(
@@ -42,11 +52,14 @@ describe('extension single-source pipeline (WBS-717)', () => {
         ['-p', path.join(repoRoot, 'tsconfig.extension.json'), '--outDir', distDir],
         { encoding: 'utf8' }
       );
+      void emit;
+      // content.js is BUNDLED by scripts/build-extension.mjs (esbuild,
+      // classic IIFE) rather than plain-tsc emitted; its correctness is
+      // pinned by the classic-script assertion below plus byte-parity.
       const emitted = existsSync(distDir)
-        ? readdirSync(distDir).filter((f) => f.endsWith('.js'))
+        ? readdirSync(distDir).filter((f) => f.endsWith('.js') && f !== 'content.js')
         : [];
       expect(emitted.length, 'the pipeline emitted no artifacts').toBeGreaterThan(0);
-      void emit;
 
       for (const artifact of emitted) {
         const fresh = readFileSync(path.join(distDir, artifact));
