@@ -265,6 +265,17 @@ if (document.readyState === 'loading') {
 function init() {
   infoLog('Extension initializing...');
 
+  try {
+    initSteps();
+  } catch (error) {
+    // A failed init must never be silent: without this log the extension
+    // appears healthy while autofill and save capture are dead (WBS-719
+    // E2E finding).
+    console.error('[SentinelPass] Extension initialization failed:', error);
+  }
+}
+
+function initSteps() {
   // Observe DOM changes for dynamically added forms
   observeDOMChanges();
 
@@ -296,9 +307,6 @@ function init() {
       debugLog('Scrubbing in-memory autofill context (vault lock)');
       lastAutofillContext = null;
     }
-    if (request.type === 'fill_credentials') {
-      fillCredentials(request.username, request.password);
-    }
     if (request.type === 'show_inline_save_prompt') {
       // WBS-716 review fix F1: this prompt is a REFERENCE to a payload held
       // by the background worker (promptId). No password crosses this
@@ -316,7 +324,7 @@ function init() {
       }
 
       infoLog('Showing inline save prompt fallback (background-held payload)');
-      showSavePrompt(username, domain, null, sourceUrl, promptId);
+      showSavePrompt(username, domain, null, sourceUrl, promptId, payload.isPasswordChange === true);
       sendResponse({ success: true });
       return true;
     }
@@ -398,7 +406,7 @@ function trackFormSubmissions() {
     debugLog('[SentinelPass] Form action:', form.action);
     debugLog('[SentinelPass] Form ID:', form.id);
 
-    const passwordField = form.querySelector('input[type="password"]');
+    const passwordField = selectCaptureTarget(form);
     if (!passwordField) {
       debugLog('[SentinelPass] No password field found in form');
       return;
@@ -419,7 +427,9 @@ function trackFormSubmissions() {
     // Detect if this is a new password or password change
     const domain = window.location.hostname;
     const isNewPassword = isNewPasswordForm(form, passwordField);
+    const isPasswordChange = isNewPassword && isPasswordChangeForm(form);
     debugLog('[SentinelPass] Is new password form:', isNewPassword);
+    debugLog('[SentinelPass] Is password change form:', isPasswordChange);
 
     // Store credentials in session storage (persists across navigation)
     const inputMethod = detectInputMethod(username, passwordField.value, domain);
@@ -432,7 +442,7 @@ function trackFormSubmissions() {
       timestamp: Date.now(),
       input_method: inputMethod,
       isNewPassword: isNewPassword,
-      isPasswordChange: false
+      isPasswordChange: isPasswordChange
     };
 
     debugLog('[SentinelPass] Submission input method:', inputMethod);
@@ -443,11 +453,9 @@ function trackFormSubmissions() {
 
     // Show save prompt immediately for new password / change forms
     if (isNewPassword) {
-      const isChange = isPasswordChangeForm(form);
-      submissionData.isPasswordChange = isChange;
       debugLog('[SentinelPass] Scheduling save prompt in 500ms...');
       setTimeout(() => {
-        showSavePrompt(username, domain, passwordField.value, submissionData.url, null, isChange);
+        showSavePrompt(username, domain, passwordField.value, submissionData.url, null, isPasswordChange);
       }, 500);
     } else {
       // For login forms, send to background for persistent notification
@@ -472,17 +480,20 @@ function trackFormSubmissions() {
     const form = button.form;
     if (!form) return;
 
-    const passwordField = form.querySelector('input[type="password"]');
+    const passwordField = selectCaptureTarget(form);
     if (!passwordField || !passwordField.value) return;
 
     debugLog('[SentinelPass] Submit button clicked in form with password field');
 
-    // Get credentials IMMEDIATELY - no delays
+    // Get credentials IMMEDIATELY - no delays (review F2: the captured
+    // field is the NEW password on change/registration shapes, and the
+    // change flag is set BEFORE the payload is serialized).
     const usernameField = findUsernameField(passwordField);
     const domain = window.location.hostname;
 
     const submittedUsername = usernameField ? usernameField.value : '';
     const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
+    const isNewPassword = isNewPasswordForm(form, passwordField);
     const submissionData = {
       username: submittedUsername,
       password: passwordField.value,
@@ -491,7 +502,8 @@ function trackFormSubmissions() {
       submitted_url: window.location.href,
       timestamp: Date.now(),
       input_method: inputMethod,
-      isNewPassword: isNewPasswordForm(form, passwordField)
+      isNewPassword: isNewPassword,
+      isPasswordChange: isNewPassword && isPasswordChangeForm(form)
     };
 
     debugLog('[SentinelPass] Submission input method:', inputMethod);
@@ -515,6 +527,41 @@ function trackFormSubmissions() {
     }
   }, true);
 }
+
+// WBS-714 review fix F2: pick the field whose value is the credential the
+// user just typed, per form kind. Login -> the filled current-password
+// field; change/new-account -> the LAST non-empty new-password field (the
+// replacement password), never the old/current field.
+function selectCaptureTarget(form) {
+  const fields: HTMLInputElement[] = Array.from(
+    form.querySelectorAll('input[type="password"]')
+  ) as HTMLInputElement[];
+  if (fields.length === 0) {
+    return null;
+  }
+  const described = fields.map((field) => ({
+    ...describeField(field),
+    hasValue: Boolean(field.value)
+  }));
+  const kind = classifyPasswordForm(described);
+  if (kind === 'login') {
+    return fields.find((field, index) => described[index].hasValue) || fields[0];
+  }
+  const newPasswords = fields.filter(
+    (field, index) => classifyInputField(described[index]) === 'new-password' || kind === 'new-account'
+  );
+  const pool = newPasswords.length > 0 ? newPasswords : fields;
+  for (let i = pool.length - 1; i >= 0; i -= 1) {
+    if (pool[i].value) {
+      return pool[i];
+    }
+  }
+  return pool[pool.length - 1];
+}
+
+// Forms already instrumented for the submit-button mousedown capture
+// (one listener per form, not per field — review F2).
+const mousedownInstrumentedForms = new WeakSet();
 
 // Detect what a form's password fields mean (WBS-714): the page's own
 // autocomplete attributes are the primary signal — `new-password` marks
@@ -830,7 +877,10 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     prompt.remove();
   });
 
-  saveBtn.addEventListener('click', () => {
+  saveBtn.addEventListener('click', (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
     debugLog('[SentinelPass] Save button clicked!');
     window.removeEventListener('beforeunload', onBeforeUnload);
     reportOnce('save_clicked', {
@@ -844,7 +894,10 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     prompt.remove();
   });
 
-  neverBtn.addEventListener('click', () => {
+  neverBtn.addEventListener('click', (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
     debugLog('[SentinelPass] Never button clicked');
     window.removeEventListener('beforeunload', onBeforeUnload);
     reportOnce('no_save_never_for_site');
@@ -860,7 +913,10 @@ function showSavePrompt(username, domain, password, sourceUrl = window.location.
     prompt.remove();
   });
 
-  notNowBtn.addEventListener('click', () => {
+  notNowBtn.addEventListener('click', (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
     debugLog('[SentinelPass] Not now button clicked');
     window.removeEventListener('beforeunload', onBeforeUnload);
     reportOnce('no_save_not_now');
@@ -1002,7 +1058,10 @@ function detectAndInjectButtons() {
   });
 }
 
-// Monitor password field and store credentials as user types
+// Monitor a password field's FORM for submit-button captures. ONE
+// mousedown listener per form (review F2): the captured field is selected
+// at event time, so multi-field change forms capture the NEW password
+// exactly once.
 function monitorPasswordField(passwordField) {
   debugLog('[SentinelPass] monitorPasswordField called');
 
@@ -1011,6 +1070,10 @@ function monitorPasswordField(passwordField) {
     debugLog('[SentinelPass] No form found for password field');
     return;
   }
+  if (mousedownInstrumentedForms.has(form)) {
+    return;
+  }
+  mousedownInstrumentedForms.add(form);
 
   debugLog('[SentinelPass] Form found:', form.action || form.id || 'unnamed');
 
@@ -1022,13 +1085,13 @@ function monitorPasswordField(passwordField) {
   }
 
   debugLog('[SentinelPass] Submit button found, setting up mousedown listener');
-  debugLog('[SentinelPass] Submit button text:', submitButton.textContent || submitButton.value);
 
   // Use mousedown on submit button (fires before click and before navigation)
   submitButton.addEventListener('mousedown', (e) => {
     debugLog('[SentinelPass] Mousedown fired!');
 
-    if (!passwordField.value) {
+    const passwordField = selectCaptureTarget(form);
+    if (!passwordField || !passwordField.value) {
       debugLog('Password field is empty, skipping');
       return;
     }
@@ -1041,6 +1104,7 @@ function monitorPasswordField(passwordField) {
 
     const submittedUsername = usernameField ? usernameField.value : '';
     const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
+    const isNewPassword = isNewPasswordForm(form, passwordField);
     const submissionData = {
       username: submittedUsername,
       password: passwordField.value,
@@ -1049,7 +1113,8 @@ function monitorPasswordField(passwordField) {
       submitted_url: window.location.href,
       timestamp: Date.now(),
       input_method: inputMethod,
-      isNewPassword: isNewPasswordForm(form, passwordField)
+      isNewPassword: isNewPassword,
+      isPasswordChange: isNewPassword && isPasswordChangeForm(form)
     };
 
     debugLog('[SentinelPass] Captured credentials on mousedown');
@@ -1099,8 +1164,11 @@ function injectAutofillButton(passwordField, parent) {
     button.style.cssText = AUTOFILL_BUTTON_STYLE;
   });
 
-  // Click handler
+  // Click handler (review F5: only real user clicks launch autofill)
   button.addEventListener('click', (e) => {
+    if (!e.isTrusted) {
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     requestAutofill(passwordField);
@@ -1128,22 +1196,63 @@ function injectAutofillButton(passwordField, parent) {
 // WBS-713: bind the fill to the REQUESTED field (never page-first), and
 // only to fields that are fillable login targets. Falls back to the first
 // visible fillable password field when the requested element went away.
-function bindAutofillTarget(requestedField) {
-  const candidates = Array.from(document.querySelectorAll('input[type="password"]'));
-  const describe = (field) => ({
+function describeField(field) {
+  return {
     autocomplete: field.getAttribute('autocomplete') || '',
     type: field.type,
     name: field.name || '',
     id: field.id || '',
     placeholder: field.getAttribute('placeholder') || ''
-  });
-  const visible = (field) => !field.disabled && !field.readOnly && field.offsetParent !== null;
+  };
+}
 
-  if (requestedField && requestedField.isConnected && requestedField.type === 'password'
-      && isAutofillablePasswordField(describe(requestedField))) {
-    return requestedField;
+// Rendered geometry beats offsetParent (fixed-position fields have a null
+// offsetParent yet are visible — adversarial review F10).
+function isRenderedField(field) {
+  if (field.disabled || field.readOnly) {
+    return false;
   }
-  return candidates.find((field) => visible(field) && isAutofillablePasswordField(describe(field))) || null;
+  const rect = field.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+// WBS-714 review fix F9: a SINGLE password field marked new-password on an
+// otherwise login-shaped form is the well-known anti-autofill mislabel; an
+// explicit click there still fills. Real registration/change shapes
+// (multiple fields, filled current-password) are refused.
+function newPasswordFillAllowed(form) {
+  const fields: HTMLInputElement[] = Array.from(
+    form.querySelectorAll('input[type="password"]')
+  ) as HTMLInputElement[];
+  if (fields.length <= 1) {
+    return true;
+  }
+  const described = fields.map((field) => ({
+    ...describeField(field),
+    hasValue: Boolean(field.value)
+  }));
+  return classifyPasswordForm(described) === 'login';
+}
+
+function bindAutofillTarget(requestedField) {
+  const candidates = Array.from(document.querySelectorAll('input[type="password"]'));
+  const visible = (field) => isRenderedField(field) && isAutofillablePasswordField(describeField(field));
+
+  if (requestedField && requestedField.isConnected && requestedField.type === 'password') {
+    const described = describeField(requestedField);
+    if (isAutofillablePasswordField(described)) {
+      return requestedField;
+    }
+    // Explicit user request on a new-password-marked field: only fill when
+    // the surrounding form is otherwise a plain login (review F9).
+    if (classifyInputField(described) === 'new-password'
+        && requestedField.form
+        && newPasswordFillAllowed(requestedField.form)) {
+      return requestedField;
+    }
+    return null;
+  }
+  return candidates.find((field) => visible(field) && isAutofillablePasswordField(describeField(field))) || null;
 }
 
 // Fetch the credential for one account and fill the BOUND target field.
@@ -1177,13 +1286,19 @@ async function fetchAndFillFor(domain, requestId, username, targetField) {
 
   const target = bindAutofillTarget(targetField);
   if (!target) {
-    showNotification('No fillable password field found', 'warning');
+    showNotification(
+      'No fillable password field (new-password fields are not autofilled)',
+      'warning'
+    );
     return;
   }
   fillCredentials(response.data.username, response.data.password, target);
 
   let statusMessage = 'Password filled successfully!';
-  const totpResponse = await requestTotpCode(domain, requestId);
+  // Review F4: the TOTP must belong to the SAME account that was picked —
+  // otherwise a second TOTP-bearing account's code could be paired with
+  // the wrong password.
+  const totpResponse = await requestTotpCode(domain, requestId, username);
   if (totpResponse?.success && totpResponse.totp_code) {
     const didFillTotp = fillTotpCode(totpResponse.totp_code);
     if (didFillTotp) {
@@ -1195,32 +1310,54 @@ async function fetchAndFillFor(domain, requestId, username, targetField) {
 
 // WBS-715: the explicit chooser — multiple matches NEVER silently fill the
 // first. Usernames and titles only; the secret is fetched after the pick.
+//
+// WBS-715 review fix F5: the account list renders inside a CLOSED shadow
+// root so the hostile page can neither read the candidate usernames out of
+// the DOM nor restyle/overlay-bait the rows; every pick requires a TRUSTED
+// event (synthetic .click() from page scripts is refused).
 function showCredentialChooser(candidates, onPick) {
-  const existing = document.querySelector('.pm-credential-chooser');
-  if (existing) {
-    existing.remove();
-  }
+  document.querySelector('.pm-credential-chooser-host')?.remove();
 
-  const overlay = document.createElement('div');
-  overlay.className = 'pm-credential-chooser';
-  overlay.style.cssText = `
+  const host = document.createElement('div');
+  host.className = 'pm-credential-chooser-host';
+  host.style.cssText = `
     position: fixed;
     top: 20px;
     right: 20px;
     width: 320px;
     max-width: calc(100vw - 40px);
+    z-index: 2147483647;
+    all: initial;
+  `;
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
     background: white;
     border-radius: 8px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-    z-index: 999999;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     padding: 12px;
   `;
+  shadow.appendChild(overlay);
+
+  const close = () => {
+    host.remove();
+    document.removeEventListener('keydown', onKey, true);
+  };
 
   const title = document.createElement('div');
   title.textContent = 'Choose an account';
-  title.style.cssText = 'font-weight:600; font-size:14px; margin-bottom:8px;';
+  title.style.cssText = 'font-weight:600; font-size:14px; margin-bottom:8px; color:#202124;';
   overlay.appendChild(title);
+
+  const trustedPick = (event, username) => {
+    if (!event.isTrusted) {
+      debugLog('[SentinelPass] Refusing untrusted chooser event');
+      return;
+    }
+    close();
+    onPick(username);
+  };
 
   for (const candidate of candidates) {
     const row = document.createElement('button');
@@ -1231,13 +1368,9 @@ function showCredentialChooser(candidates, onPick) {
     row.style.cssText = `
       display:block; width:100%; text-align:left; margin:4px 0;
       padding:8px 10px; border:1px solid #e0e0e0; border-radius:6px;
-      background:#f8f9fa; cursor:pointer; font-size:13px;
+      background:#f8f9fa; cursor:pointer; font-size:13px; color:#202124;
     `;
-    row.addEventListener('click', () => {
-      overlay.remove();
-      document.removeEventListener('keydown', onKey, true);
-      onPick(candidate.username);
-    });
+    row.addEventListener('click', (event) => trustedPick(event, candidate.username));
     overlay.appendChild(row);
   }
 
@@ -1245,21 +1378,22 @@ function showCredentialChooser(candidates, onPick) {
   cancel.type = 'button';
   cancel.textContent = 'Cancel';
   cancel.style.cssText = 'margin-top:6px; background:none; border:none; color:#5f6368; cursor:pointer; font-size:12px;';
-  cancel.addEventListener('click', () => {
-    overlay.remove();
-    document.removeEventListener('keydown', onKey, true);
+  cancel.addEventListener('click', (event) => {
+    if (!event.isTrusted) {
+      return;
+    }
+    close();
   });
   overlay.appendChild(cancel);
 
   const onKey = (event) => {
-    if (event.key === 'Escape') {
-      overlay.remove();
-      document.removeEventListener('keydown', onKey, true);
+    if (event.isTrusted && event.key === 'Escape') {
+      close();
     }
   };
   document.addEventListener('keydown', onKey, true);
 
-  document.body.appendChild(overlay);
+  document.body.appendChild(host);
 }
 
 // Request credentials from background script (WBS-715 flow:
@@ -1313,13 +1447,15 @@ async function requestAutofill(passwordField) {
   }
 }
 
-// Request current TOTP code from background script.
-async function requestTotpCode(domain, requestId) {
+// Request current TOTP code from background script, bound to the account
+// chosen for the password fill (review F4).
+async function requestTotpCode(domain, requestId, username) {
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'get_totp_code',
       domain: domain,
-      request_id: requestId
+      request_id: requestId,
+      username: username
     });
 
     debugLog('[SentinelPass] TOTP response:', redactForLog(response));
@@ -1454,11 +1590,12 @@ function findUsernameField(passwordField) {
   return null;
 }
 
-// Perform autofill from keyboard shortcut
+// Perform autofill from keyboard shortcut (WBS-713: same binding rules —
+// the binder picks the first visible fillable field; review F7).
 function performAutofill() {
-  const passwordField = document.querySelector('input[type="password"]');
-  if (passwordField) {
-    requestAutofill(passwordField);
+  const target = bindAutofillTarget(null);
+  if (target) {
+    requestAutofill(target);
   } else {
     showNotification('No password field found on this page', 'info');
   }

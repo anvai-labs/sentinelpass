@@ -526,6 +526,7 @@ function requestInlineSavePrompt(tabId, data) {
         submitted_url: data?.submitted_url || '',
         request_source: data?.request_source || 'inline_prompt',
         insecure_http: data?.insecure_http === true,
+        isPasswordChange: data?.isPasswordChange === true,
         promptId
       }
     }, (response) => {
@@ -643,7 +644,7 @@ async function handleListDomainCredentials(domain, requestId, pageUrl) {
 }
 
 // Handle get_totp_code request
-async function handleGetTotpCode(domain, requestId, pageUrl) {
+async function handleGetTotpCode(domain, requestId, pageUrl, username) {
   debugLog('[SentinelPass Background] handleGetTotpCode called for domain:', domain);
 
   try {
@@ -651,7 +652,9 @@ async function handleGetTotpCode(domain, requestId, pageUrl) {
       type: 'get_totp_code',
       domain: domain,
       request_id: requestId,
-      page_url: pageUrl || undefined
+      page_url: pageUrl || undefined,
+      // Review F4: bound to the SAME account whose password was filled.
+      username: username || undefined
     });
 
     debugLog('[SentinelPass Background] Got TOTP response from native host:', redactForLog(response));
@@ -690,7 +693,9 @@ async function handleSaveCredential(data) {
         password: data.password,
         title: data.domain || data.url || 'Unknown', // Backward compatibility
         url: canonicalUrl
-      }
+      },
+      // Provenance of the save (extension-computed; the daemon logs it).
+      save_trigger: typeof data.save_trigger === 'string' ? data.save_trigger : undefined
     });
 
     debugLog('[SentinelPass Background] Native host response:', redactForLog(response));
@@ -1077,7 +1082,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sender.url,
       isPopupSender(sender)
     );
-    handleGetTotpCode(request.domain, request.request_id, pageUrl)
+    const totpUsername = typeof request.username === 'string' ? request.username : undefined;
+    handleGetTotpCode(request.domain, request.request_id, pageUrl, totpUsername)
           .then(response => {
             debugLog('[SentinelPass Background] Get TOTP response:', redactForLog(response));
             sendResponse(response);

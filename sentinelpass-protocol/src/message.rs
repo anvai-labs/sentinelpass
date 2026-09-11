@@ -85,6 +85,10 @@ pub enum IpcMessage {
         domain: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         page_url: Option<String>,
+        /// WBS-715 review fix F4: exact-username disambiguator so the TOTP
+        /// belongs to the SAME account whose password was filled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
     },
     GetTotpCodeResponse {
         code: Option<String>,
@@ -99,6 +103,11 @@ pub enum IpcMessage {
         username: String,
         password: String,
         url: Option<String>,
+        /// Extension-computed save provenance ('inline_prompt_button',
+        /// 'notification_button', 'password_change', ...), logged by the
+        /// daemon. serde default keeps pre-714 hosts wire-compatible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_trigger: Option<String>,
     },
     SaveCredentialResponse {
         success: bool,
