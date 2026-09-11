@@ -201,7 +201,7 @@ impl BiometricManager {
                 credential_name: credential_name.clone(),
             };
             let blob =
-                seal_dek_under_hello(&signer, credential_name.to_string(), &biometric_ref, dek)?;
+                seal_dek_under_hello(&signer, &credential_name.to_string(), &biometric_ref, dek)?;
 
             let entry =
                 keyring::Entry::new(BIOMETRIC_SERVICE_NAME, &biometric_ref).map_err(|e| {
