@@ -87,11 +87,6 @@ typedef struct SPBridgeInfo {
 } SPBridgeInfo;
 
 /**
- * Handle to Drive sync manager (C FFI)
- */
-typedef uintptr_t DriveSyncCHandle;
-
-/**
  * FFI-safe entry representation
  */
 typedef struct SPEntry {
@@ -115,11 +110,6 @@ typedef struct SPEntrySummary {
   const char *username;
   bool favorite;
 } SPEntrySummary;
-
-/**
- * Handle to iCloud sync manager (opaque pointer)
- */
-typedef uintptr_t ICloudSyncHandle;
 
 /**
  * FFI-safe password analysis result
@@ -156,63 +146,6 @@ typedef struct SPTotpCode {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
-
-#if defined(__ANDROID__)
-/**
- * Initialize Drive sync (JNI)
- *
- * # Safety
- * - `env` must be a valid JNI environment pointer
- * - `_ctx` is the Android context (unused in Rust)
- * - `device_id` is a JNI string reference
- *
- * Returns a handle to the sync manager
- */
-jlong Java_com_sentinelpass_DriveSync_nativeInit(JNIEnv env, jobject _ctx, jstring device_id);
-#endif
-
-#if defined(__ANDROID__)
-/**
- * Prepare sync files for upload (JNI)
- *
- * # Safety
- * - `env` must be a valid JNI environment pointer
- * - `json_blobs` is a JNI string reference (JSON array of SyncEntryBlob)
- *
- * Returns a JSON string of DriveFile objects
- */
-jstring Java_com_sentinelpass_DriveSync_nativePrepareUpload(JNIEnv env,
-                                                            jobject _obj,
-                                                            jlong _handle,
-                                                            jstring json_blobs);
-#endif
-
-#if defined(__ANDROID__)
-/**
- * Process downloaded sync files (JNI)
- *
- * # Safety
- * - `env` must be a valid JNI environment pointer
- * - `json_files` is a JNI string reference (JSON array of DriveFile)
- *
- * Returns a JSON string of SyncEntryBlob objects
- */
-jstring Java_com_sentinelpass_DriveSync_nativeProcessDownload(JNIEnv env,
-                                                              jobject _obj,
-                                                              jlong _handle,
-                                                              jstring json_files);
-#endif
-
-#if defined(__ANDROID__)
-/**
- * Update sync state after successful sync (JNI)
- */
-jint Java_com_sentinelpass_DriveSync_nativeUpdateState(JNIEnv _env,
-                                                       jobject _obj,
-                                                       jlong _handle,
-                                                       jlong last_sync,
-                                                       jstring page_token);
-#endif
 
 enum SPErrorCode sp_biometric_has_key(SPVaultHandle handle, bool *out_has_key);
 
@@ -252,42 +185,6 @@ enum SPErrorCode sp_bridge_negotiate(uint32_t client_abi_version, struct SPBridg
  * `len` is a caller bug. Never call this on buffers the caller allocated.
  */
 void sp_bytes_free(const uint8_t *ptr, uintptr_t len);
-
-/**
- * Initialize Drive sync (C FFI)
- *
- * # Safety
- * - `device_id` must be a valid null-terminated UTF-8 string
- * - `out_handle` must point to valid memory
- */
-int sp_drive_sync_init(const char *device_id, DriveSyncCHandle *out_handle);
-
-/**
- * Prepare sync files for upload (C FFI)
- *
- * # Safety
- * - `json_blobs` must be a valid null-terminated UTF-8 string (JSON array of SyncEntryBlob)
- * - `out_json` must be either null or point to valid memory for output
- */
-int sp_drive_sync_prepare_upload(DriveSyncCHandle _handle, const char *json_blobs, char **out_json);
-
-/**
- * Process downloaded sync files (C FFI)
- *
- * # Safety
- * - `json_files` must be a valid null-terminated UTF-8 string (JSON array of DriveFile)
- * - `out_json` must be either null or point to valid memory for output
- */
-int sp_drive_sync_process_download(DriveSyncCHandle _handle,
-                                   const char *json_files,
-                                   char **out_json);
-
-/**
- * Update sync state after successful sync (C FFI)
- */
-int sp_drive_sync_update_state(DriveSyncCHandle _handle,
-                               int64_t last_sync,
-                               const char *_page_token);
 
 /**
  * Add a new entry
@@ -343,47 +240,20 @@ enum SPErrorCode sp_entry_search(SPVaultHandle handle,
                                  uintptr_t *out_count);
 
 /**
- * Initialize iCloud sync
+ * Update an existing entry (WBS-807: ATOMIC update).
  *
- * # Safety
- * - `device_id` must be a valid null-terminated UTF-8 string
- * - `container_name` can be null (uses default)
- * - `out_handle` must point to valid memory
+ * A null argument means "leave this field unchanged"; a non-null empty
+ * string clears `url`/`notes`. One call, one transaction — the caller never
+ * needs delete-then-add (which would lose history and race concurrent
+ * readers).
  */
-int32_t sp_icloud_sync_init(const char *device_id,
-                            const char *container_name,
-                            ICloudSyncHandle *out_handle);
-
-/**
- * Prepare sync records for upload
- *
- * # Safety
- * - `json_blobs` must be a valid null-terminated UTF-8 string (JSON array of SyncEntryBlob)
- * - `out_json` must be either null or point to valid memory for output
- * - Returns a JSON string that must be freed with `sp_string_free`
- */
-int32_t sp_icloud_sync_prepare_upload(ICloudSyncHandle handle,
-                                      const char *json_blobs,
-                                      char **out_json);
-
-/**
- * Process downloaded sync records
- *
- * # Safety
- * - `json_records` must be a valid null-terminated UTF-8 string (JSON array of CloudKitRecord)
- * - `out_json` must be either null or point to valid memory for output
- * - Returns a JSON string that must be freed with `sp_string_free`
- */
-int32_t sp_icloud_sync_process_download(ICloudSyncHandle handle,
-                                        const char *json_records,
-                                        char **out_json);
-
-/**
- * Update sync state after successful sync
- */
-int32_t sp_icloud_sync_update_state(ICloudSyncHandle handle,
-                                    int64_t last_sync,
-                                    uint64_t server_sequence);
+enum SPErrorCode sp_entry_update(SPVaultHandle handle,
+                                 const char *entry_id,
+                                 const char *title,
+                                 const char *username,
+                                 const char *password,
+                                 const char *url,
+                                 const char *notes);
 
 /**
  * Check password strength
@@ -406,40 +276,9 @@ enum SPErrorCode sp_password_generate(uintptr_t length,
 void sp_string_free(const char *ptr);
 
 /**
- * Apply downloaded entries (entries_json is JSON string)
- */
-enum SPErrorCode sp_sync_apply_entries(SPVaultHandle handle,
-                                       const uint8_t *entries_json,
-                                       uintptr_t entries_len,
-                                       uint64_t *out_applied);
-
-/**
- * Collect entries pending sync (returns JSON bytes)
- */
-enum SPErrorCode sp_sync_collect_pending(SPVaultHandle handle,
-                                         const uint8_t **out_bytes,
-                                         uintptr_t *out_len);
-
-/**
  * Get sync status
  */
 enum SPErrorCode sp_sync_get_status(SPVaultHandle handle, struct SyncStatus *out_status);
-
-/**
- * Prepare entries for CloudKit upload (returns JSON bytes of CloudKit records)
- */
-enum SPErrorCode sp_sync_prepare_cloudkit(SPVaultHandle handle,
-                                          const char *device_id,
-                                          const uint8_t **out_bytes,
-                                          uintptr_t *out_len);
-
-/**
- * Prepare entries for Google Drive upload (returns JSON bytes of Drive files)
- */
-enum SPErrorCode sp_sync_prepare_drive(SPVaultHandle handle,
-                                       const char *device_id,
-                                       const uint8_t **out_bytes,
-                                       uintptr_t *out_len);
 
 /**
  * Generate TOTP code

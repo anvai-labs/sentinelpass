@@ -243,6 +243,34 @@ class VaultBridge(private val context: Context) {
         }
     }
 
+    /**
+     * Update an existing entry (WBS-807: ATOMIC — one native call, one
+     * vault write). A `null` field is left unchanged; an empty `url`/`notes`
+     * clears that field. Replaces the old delete-then-add workaround in
+     * [com.sentinelpass.data.VaultState], which lost entry history and could
+     * race concurrent readers.
+     */
+    suspend fun updateEntry(
+        entryId: String,
+        title: String? = null,
+        username: String? = null,
+        password: String? = null,
+        url: String? = null,
+        notes: String? = null
+    ): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val result = nativeUpdateEntry(
+                    nativeHandle, entryId, title, username, password, url, notes
+                )
+                result == ErrorCode.SUCCESS.value
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update entry", e)
+                false
+            }
+        }
+    }
+
     // ==========================================================================
     // TOTP
     // ==========================================================================
@@ -418,6 +446,16 @@ class VaultBridge(private val context: Context) {
     private external fun nativeDeleteEntry(
         handle: Long,
         entryId: String
+    ): Int
+
+    private external fun nativeUpdateEntry(
+        handle: Long,
+        entryId: String,
+        title: String?,
+        username: String?,
+        password: String?,
+        url: String?,
+        notes: String?
     ): Int
 
     private external fun nativeGenerateTotp(

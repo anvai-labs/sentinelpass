@@ -16,7 +16,9 @@ cpp_compat = true
 [defines]
 "target_os = ios" = "IOS_PLATFORM"
 "target_os = android" = "ANDROID_PLATFORM"
-"feature = jni" = "__ANDROID__"
+# The JNI surface is Kotlin's contract (jni.rs, feature-gated at the module
+# level), not part of the C header: since WBS-807 removed the un-gated
+# drive/icloud modules, no `feature = jni` items leak into generated bindings.
 
 [export]
 # The declared C ABI surface (Rust item names; [export.rename] maps types).
@@ -39,6 +41,7 @@ include = [
     "sp_entry_get_by_id",
     "sp_entry_list_all",
     "sp_entry_search",
+    "sp_entry_update",
     "sp_totp_generate_code",
     "sp_password_generate",
     "sp_password_check_strength",
@@ -51,11 +54,6 @@ include = [
     "sp_entry_free",
     "sp_entry_list_free",
     "sp_sync_get_status",
-    "sp_sync_collect_pending",
-    "sp_sync_apply_entries",
-    # Removed under WBS-807 (ADR-009 rev 2: relay-only mobile sync).
-    "sp_sync_prepare_cloudkit",
-    "sp_sync_prepare_drive",
     "sp_string_free",
     "sp_bytes_free",
 ]

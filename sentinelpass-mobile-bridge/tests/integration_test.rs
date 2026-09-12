@@ -14,10 +14,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use sentinelpass_mobile_bridge::{
     sp_biometric_has_key, sp_bridge_info, sp_entry_add, sp_entry_delete, sp_entry_get_by_id,
-    sp_entry_list_all, sp_entry_search, sp_password_check_strength, sp_password_generate,
-    sp_string_free, sp_sync_get_status, sp_totp_generate_code, sp_vault_destroy, sp_vault_init,
-    sp_vault_is_unlocked, sp_vault_lock, BridgeInfo, Entry, ErrorCode, EntrySummary,
-    PasswordAnalysis, SyncStatus, TotpCode, VaultHandle,
+    sp_entry_list_all, sp_entry_search, sp_entry_update, sp_password_check_strength,
+    sp_password_generate, sp_string_free, sp_sync_get_status, sp_totp_generate_code,
+    sp_vault_destroy, sp_vault_init, sp_vault_is_unlocked, sp_vault_lock, BridgeInfo, Entry,
+    EntrySummary, ErrorCode, PasswordAnalysis, SyncStatus, TotpCode, VaultHandle,
 };
 
 static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -68,7 +68,9 @@ impl TestVault {
             )
         };
         assert_eq!(code, ErrorCode::Success, "entry add must succeed");
-        let id = unsafe { CStr::from_ptr(id_ptr) }.to_string_lossy().into_owned();
+        let id = unsafe { CStr::from_ptr(id_ptr) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { sp_string_free(id_ptr) };
         id
     }
@@ -171,7 +173,11 @@ fn vault_reopen_requires_master_password() {
     let mut handle: VaultHandle = 0;
     assert_eq!(
         unsafe {
-            sp_vault_init(cstr(path.to_str().unwrap()).as_ptr(), cstr(MASTER).as_ptr(), &mut handle)
+            sp_vault_init(
+                cstr(path.to_str().unwrap()).as_ptr(),
+                cstr(MASTER).as_ptr(),
+                &mut handle,
+            )
         },
         ErrorCode::Success
     );
@@ -196,7 +202,11 @@ fn vault_reopen_requires_master_password() {
     let mut good: VaultHandle = 0;
     assert_eq!(
         unsafe {
-            sp_vault_init(cstr(path.to_str().unwrap()).as_ptr(), cstr(MASTER).as_ptr(), &mut good)
+            sp_vault_init(
+                cstr(path.to_str().unwrap()).as_ptr(),
+                cstr(MASTER).as_ptr(),
+                &mut good,
+            )
         },
         ErrorCode::Success
     );
@@ -235,6 +245,41 @@ fn entry_lifecycle_add_get_update_search_delete() {
     assert_eq!(
         unsafe { CStr::from_ptr(entry.password) }.to_string_lossy(),
         "hunter2secret"
+    );
+
+    // ATOMIC update (WBS-807): only the title changes; nulls leave the rest
+    // untouched; the entry id is preserved (no delete-then-add churn).
+    assert_eq!(
+        unsafe {
+            sp_entry_update(
+                v.handle,
+                cstr(&id).as_ptr(),
+                cstr("alpha-renamed").as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        ErrorCode::Success
+    );
+    assert_eq!(
+        unsafe { sp_entry_get_by_id(v.handle, cstr(&id).as_ptr(), &mut entry) },
+        ErrorCode::Success
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(entry.title) }.to_string_lossy(),
+        "alpha-renamed"
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(entry.password) }.to_string_lossy(),
+        "hunter2secret",
+        "null password must be unchanged"
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(entry.id) }.to_string_lossy(),
+        id,
+        "atomic update must preserve entry identity"
     );
 
     // List sees it; search finds it by title.
@@ -310,7 +355,10 @@ fn generator_and_strength_surfaces_validate_inputs() {
         unsafe { sp_password_generate(129, false, &mut pw) },
         ErrorCode::InvalidParam
     );
-    assert_eq!(unsafe { sp_password_generate(32, true, &mut pw) }, ErrorCode::Success);
+    assert_eq!(
+        unsafe { sp_password_generate(32, true, &mut pw) },
+        ErrorCode::Success
+    );
     let generated = unsafe { CStr::from_ptr(pw) }.to_string_lossy().into_owned();
     assert_eq!(generated.len(), 32);
     unsafe { sp_string_free(pw) };
@@ -361,7 +409,10 @@ fn totp_and_sync_surfaces_report_expected_states() {
         unsafe { sp_sync_get_status(v.handle, &mut status) },
         ErrorCode::Success
     );
-    assert!(!status.enabled, "sync must default to disabled until relay sync v2 is wired (ADR-006/ADR-009)");
+    assert!(
+        !status.enabled,
+        "sync must default to disabled until relay sync v2 is wired (ADR-006/ADR-009)"
+    );
     unsafe { sp_string_free(status.device_id) };
 
     let mut has_key = true;

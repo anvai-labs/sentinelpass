@@ -17,7 +17,11 @@
 // - `nativeGenerateTotp` returns `"<code>,<seconds_remaining>"`.
 // - `nativeCheckStrength` returns `"<score>,<description>"`.
 
+// JNI env/handle parameters are part of the fixed JNI signature even when an
+// export's body doesn't use them; `unused_mut` fires for `mut env` on exports
+// that never touch the env. Both are signature-stability noise, not dead code.
 #![allow(unused_variables)]
+#![allow(unused_mut)]
 
 #[cfg(feature = "jni")]
 use crate::bridge;
@@ -368,6 +372,82 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeDeleteEntry(
         };
 
         result_to_code(bridge::bridge_entry_delete(handle as u64, &id_str))
+    })
+}
+
+/// ATOMIC entry update (WBS-807). A null Kotlin `String?` leaves the field
+/// unchanged; an empty string clears `url`/`notes`. Replaces the
+/// delete-then-add workaround in VaultState (TD-MOB-04).
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeUpdateEntry(
+    mut env: JNIEnv,
+    this: JObject,
+    handle: jlong,
+    entry_id: JString,
+    title: JString,
+    username: JString,
+    password: JString,
+    url: JString,
+    notes: JString,
+) -> jint {
+    catch_jni(ErrorCode::Unknown as jint, || {
+        let id_str = match jstring_to_string(&mut env, entry_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam as jint,
+        };
+
+        // null = unchanged; present = set (empty clears url/notes).
+        let title_opt = if title.is_null() {
+            None
+        } else {
+            match jstring_to_string(&mut env, title) {
+                Ok(s) => Some(s),
+                Err(c) => return c as jint,
+            }
+        };
+        let username_opt = if username.is_null() {
+            None
+        } else {
+            match jstring_to_string(&mut env, username) {
+                Ok(s) => Some(s),
+                Err(c) => return c as jint,
+            }
+        };
+        let password_opt = if password.is_null() {
+            None
+        } else {
+            match jstring_to_string(&mut env, password) {
+                Ok(s) => Some(s),
+                Err(c) => return c as jint,
+            }
+        };
+        let url_opt = if url.is_null() {
+            None
+        } else {
+            match jstring_to_string(&mut env, url) {
+                Ok(s) => Some(s),
+                Err(c) => return c as jint,
+            }
+        };
+        let notes_opt = if notes.is_null() {
+            None
+        } else {
+            match jstring_to_string(&mut env, notes) {
+                Ok(s) => Some(s),
+                Err(c) => return c as jint,
+            }
+        };
+
+        result_to_code(bridge::bridge_entry_update(
+            handle as u64,
+            &id_str,
+            title_opt.as_deref(),
+            username_opt.as_deref(),
+            password_opt.as_deref(),
+            url_opt.as_deref(),
+            notes_opt.as_deref(),
+        ))
     })
 }
 
