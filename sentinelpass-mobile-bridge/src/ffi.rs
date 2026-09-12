@@ -111,6 +111,12 @@ fn string_to_c(s: &str) -> *const c_char {
 /// under `Layout::array::<u8>(len)`, so `sp_bytes_free(ptr, bytes.len())`
 /// deallocates with the EXACT layout used here — no `Vec::leak`/layout
 /// mismatch. Returns null on allocation failure.
+///
+/// Currently unused (the WBS-807 placeholder removal left no byte-buffer
+/// producer) but retained as the ONLY sanctioned producer shape for future
+/// buffer exports (authenticated backup, WBS-827) so the ownership contract
+/// stays single-proven.
+#[allow(dead_code)]
 fn bytes_to_c_buffer(bytes: &[u8]) -> *const u8 {
     if bytes.is_empty() {
         return ptr::null();
@@ -439,6 +445,70 @@ pub unsafe extern "C" fn sp_entry_get_by_id(
     })
 }
 
+/// Update an existing entry (WBS-807: ATOMIC update).
+///
+/// A null argument means "leave this field unchanged"; a non-null empty
+/// string clears `url`/`notes`. One call, one transaction — the caller never
+/// needs delete-then-add (which would lose history and race concurrent
+/// readers).
+#[no_mangle]
+pub unsafe extern "C" fn sp_entry_update(
+    handle: VaultHandle,
+    entry_id: *const c_char,
+    title: *const c_char,
+    username: *const c_char,
+    password: *const c_char,
+    url: *const c_char,
+    notes: *const c_char,
+) -> ErrorCode {
+    catch_panic(|| {
+        let id_str = match c_to_string(entry_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        // null = unchanged; present = set (empty clears url/notes).
+        let opt = |p: *const c_char| -> Result<Option<String>, ErrorCode> {
+            if p.is_null() {
+                Ok(None)
+            } else {
+                c_to_string(p).map(Some)
+            }
+        };
+
+        let title_opt = match opt(title) {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+        let username_opt = match opt(username) {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+        let password_opt = match opt(password) {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+        let url_opt = match opt(url) {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+        let notes_opt = match opt(notes) {
+            Ok(v) => v,
+            Err(c) => return c,
+        };
+
+        result_to_code(bridge::bridge_entry_update(
+            handle,
+            &id_str,
+            title_opt.as_deref(),
+            username_opt.as_deref(),
+            password_opt.as_deref(),
+            url_opt.as_deref(),
+            notes_opt.as_deref(),
+        ))
+    })
+}
+
 /// List all entries
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_list_all(
@@ -747,123 +817,6 @@ pub unsafe extern "C" fn sp_sync_get_status(
     })
 }
 
-/// Collect entries pending sync (returns JSON bytes)
-#[no_mangle]
-pub unsafe extern "C" fn sp_sync_collect_pending(
-    handle: VaultHandle,
-    out_bytes: *mut *const u8,
-    out_len: *mut usize,
-) -> ErrorCode {
-    catch_panic(|| {
-        if out_bytes.is_null() || out_len.is_null() {
-            return ErrorCode::InvalidParam;
-        }
-
-        match bridge::bridge_sync_collect_pending(handle) {
-            Ok(bytes) => {
-                let buf = bytes_to_c_buffer(&bytes);
-                if buf.is_null() && !bytes.is_empty() {
-                    return ErrorCode::OutOfMemory;
-                }
-                *out_len = bytes.len();
-                *out_bytes = buf;
-                ErrorCode::Success
-            }
-            Err(e) => e.to_error_code(),
-        }
-    })
-}
-
-/// Apply downloaded entries (entries_json is JSON string)
-#[no_mangle]
-pub unsafe extern "C" fn sp_sync_apply_entries(
-    handle: VaultHandle,
-    entries_json: *const u8,
-    entries_len: usize,
-    out_applied: *mut u64,
-) -> ErrorCode {
-    catch_panic(|| {
-        if entries_json.is_null() || entries_len == 0 || out_applied.is_null() {
-            return ErrorCode::InvalidParam;
-        }
-
-        let slice = std::slice::from_raw_parts(entries_json, entries_len);
-        match bridge::bridge_sync_apply_entries(handle, slice) {
-            Ok(applied) => {
-                *out_applied = applied;
-                ErrorCode::Success
-            }
-            Err(e) => e.to_error_code(),
-        }
-    })
-}
-
-/// Prepare entries for CloudKit upload (returns JSON bytes of CloudKit records)
-#[no_mangle]
-pub unsafe extern "C" fn sp_sync_prepare_cloudkit(
-    handle: VaultHandle,
-    device_id: *const c_char,
-    out_bytes: *mut *const u8,
-    out_len: *mut usize,
-) -> ErrorCode {
-    catch_panic(|| {
-        if out_bytes.is_null() || out_len.is_null() {
-            return ErrorCode::InvalidParam;
-        }
-
-        let device_id_str = match c_to_string(device_id) {
-            Ok(s) => s,
-            Err(_) => return ErrorCode::InvalidParam,
-        };
-
-        match bridge::bridge_sync_prepare_cloudkit(handle, &device_id_str) {
-            Ok(bytes) => {
-                let buf = bytes_to_c_buffer(&bytes);
-                if buf.is_null() && !bytes.is_empty() {
-                    return ErrorCode::OutOfMemory;
-                }
-                *out_len = bytes.len();
-                *out_bytes = buf;
-                ErrorCode::Success
-            }
-            Err(e) => e.to_error_code(),
-        }
-    })
-}
-
-/// Prepare entries for Google Drive upload (returns JSON bytes of Drive files)
-#[no_mangle]
-pub unsafe extern "C" fn sp_sync_prepare_drive(
-    handle: VaultHandle,
-    device_id: *const c_char,
-    out_bytes: *mut *const u8,
-    out_len: *mut usize,
-) -> ErrorCode {
-    catch_panic(|| {
-        if out_bytes.is_null() || out_len.is_null() {
-            return ErrorCode::InvalidParam;
-        }
-
-        let device_id_str = match c_to_string(device_id) {
-            Ok(s) => s,
-            Err(_) => return ErrorCode::InvalidParam,
-        };
-
-        match bridge::bridge_sync_prepare_drive(handle, &device_id_str) {
-            Ok(bytes) => {
-                let buf = bytes_to_c_buffer(&bytes);
-                if buf.is_null() && !bytes.is_empty() {
-                    return ErrorCode::OutOfMemory;
-                }
-                *out_len = bytes.len();
-                *out_bytes = buf;
-                ErrorCode::Success
-            }
-            Err(e) => e.to_error_code(),
-        }
-    })
-}
-
 // ============================================================================
 // Memory Management (WBS-804: single proven ownership contract)
 // ============================================================================
@@ -1004,15 +957,11 @@ mod abi_contract_tests {
         "sp_entry_get_by_id",
         "sp_entry_list_all",
         "sp_entry_search",
+        "sp_entry_update",
         "sp_password_check_strength",
         "sp_password_generate",
         "sp_string_free",
-        "sp_sync_apply_entries",
-        "sp_sync_collect_pending",
         "sp_sync_get_status",
-        // Removed under WBS-807 (ADR-009 rev 2: relay-only mobile sync).
-        "sp_sync_prepare_cloudkit",
-        "sp_sync_prepare_drive",
         "sp_totp_generate_code",
         "sp_vault_destroy",
         "sp_vault_init",
@@ -1283,27 +1232,79 @@ mod ownership_tests {
     }
 
     #[test]
-    fn byte_buffer_roundtrip_then_sp_bytes_free() {
-        let (dir, handle) = temp_vault();
-        add_entry(handle, "buffered");
-
-        let mut buf: *const u8 = std::ptr::null();
-        let mut len: usize = 0;
-        let code = unsafe { sp_sync_collect_pending(handle, &mut buf, &mut len) };
-        assert_eq!(code, ErrorCode::Success);
-        assert!(!buf.is_null());
-        assert!(len > 0);
-
-        // Buffer content must be readable up to len (caller side).
+    fn sp_bytes_free_releases_bridge_shaped_buffers() {
+        // No current export produces out-byte-buffers (WBS-807 removed the
+        // placeholder sync paths), so exercise the sanctioned release path
+        // against a buffer allocated exactly the way `bytes_to_c_buffer`
+        // (the only sanctioned producer shape, retained for WBS-827 backup)
+        // allocates: alloc under Layout::array::<u8>(len).
+        let len = 37usize;
+        let layout = alloc::Layout::array::<u8>(len).unwrap();
+        let buf = unsafe {
+            let dst = alloc::alloc(layout);
+            assert!(!dst.is_null());
+            std::ptr::write_bytes(dst, 0xAB, len);
+            dst as *const u8
+        };
         let slice = unsafe { std::slice::from_raw_parts(buf, len) };
-        assert!(!slice.is_empty());
-
+        assert_eq!(slice[0], 0xAB);
         // The single sanctioned release path, with the SAME len.
         unsafe { sp_bytes_free(buf, len) };
-        assert!(
-            bridge::bridge_vault_destroy(handle).is_ok(),
-            "destroy must succeed"
+    }
+
+    #[test]
+    fn sp_entry_update_atomic_partial_fields() {
+        let (dir, handle) = temp_vault();
+        let id = add_entry(handle, "before");
+
+        // Update ONLY the title; null = unchanged elsewhere.
+        let code = unsafe {
+            sp_entry_update(
+                handle,
+                cstr(&id).as_ptr(),
+                cstr("after").as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(code, ErrorCode::Success);
+
+        let mut entry = Entry {
+            id: std::ptr::null(),
+            title: std::ptr::null(),
+            username: std::ptr::null(),
+            password: std::ptr::null(),
+            url: std::ptr::null(),
+            notes: std::ptr::null(),
+            created_at: 0,
+            modified_at: 0,
+            favorite: false,
+        };
+        assert_eq!(
+            unsafe { sp_entry_get_by_id(handle, cstr(&id).as_ptr(), &mut entry) },
+            ErrorCode::Success
         );
+        assert_eq!(
+            unsafe { CStr::from_ptr(entry.title) }.to_string_lossy(),
+            "after"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(entry.password) }.to_string_lossy(),
+            "secret-password",
+            "null password must be unchanged"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(entry.username) }.to_string_lossy(),
+            "user",
+            "null username must be unchanged"
+        );
+
+        // Same entry id preserved (no delete-then-add identity churn).
+        assert_eq!(unsafe { CStr::from_ptr(entry.id) }.to_string_lossy(), id);
+
+        assert!(bridge::bridge_vault_destroy(handle).is_ok());
         let _ = std::fs::remove_dir_all(dir);
     }
 

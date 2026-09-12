@@ -1478,7 +1478,24 @@ Shared (801–807):
   NotFound/InvalidInput flattened into `VaultLocked` — fixed in the same
   change (precise core→bridge error mapping; residual core errors now
   surface as Unknown, not VaultLocked).
-- **807** atomic update + placeholder removal (TD-MOB-03/04) 3d.
+- **807** atomic update + placeholder removal (TD-MOB-03/04) 3d —
+  **Status:** Done (2026-09-11, Phase 6 M1). REMOVED per ADR-009 rev 2
+  (relay-only mobile sync, ADR-006): `src/drive.rs` (666 ln) + `src/icloud.rs`
+  (432 ln), the `sp_sync_prepare_cloudkit` / `sp_sync_prepare_drive` exports,
+  the file-sync placeholder exports `sp_sync_collect_pending` /
+  `sp_sync_apply_entries` (both serialized plaintext entry titles into fake
+  "sync blobs" — the collect path even leaked titles over the shape a host
+  app treats as uploadable), the Kotlin `DriveService.kt` + the three Google
+  Drive SDK dependencies + their Apache-HTTP packaging excludes, and the now
+  unused bridge deps (uuid, base64, anyhow, lazy_static). `bridge_sync_get_status`
+  kept as an honest disabled-stub (comment no longer claims iCloud/Drive);
+  MOBILE_DESIGN.md + iOS_BUILD_GUIDE.md carry supersession banners.
+  ATOMIC UPDATE (TD-MOB-04): `sp_entry_update` (C) / `nativeUpdateEntry`
+  (JNI, null = unchanged) exported; Kotlin `VaultBridge.updateEntry` +
+  `VaultState.updateEntry` rewritten from delete-then-add to one atomic call
+  (entry identity/history preserved). Also: crate gained the `rlib` target
+  type needed for test linkage; `sp_bytes_free` retained as the sanctioned
+  byte-buffer release path for WBS-827 backup exports.
 
 Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d; **811** all-ABI JNI
 CI (TD-MOB-01, TV-007) 2d; **812** Keystore-bound platform slot (TD-MOB-03,

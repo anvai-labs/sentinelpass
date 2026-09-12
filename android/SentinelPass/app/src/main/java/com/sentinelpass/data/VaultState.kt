@@ -205,7 +205,10 @@ class VaultState private constructor(private val context: Context) : ViewModel()
     }
 
     /**
-     * Update entry (delete + add for now)
+     * Update entry atomically (WBS-807): one native call via
+     * [VaultBridge.updateEntry] — replaces the previous delete-then-add
+     * workaround that lost entry history (created/entry id) and could race
+     * concurrent readers (TD-MOB-04).
      */
     fun updateEntry(
         id: String,
@@ -218,19 +221,21 @@ class VaultState private constructor(private val context: Context) : ViewModel()
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
 
-            val result = withContext(Dispatchers.IO) {
-                // Delete old entry
-                vaultBridge?.deleteEntry(id)
-                // Add updated entry
-                vaultBridge?.addEntry(title, username, password, url, notes)
-            }
+            val result = vaultBridge?.updateEntry(
+                entryId = id,
+                title = title,
+                username = username,
+                password = password,
+                url = url,
+                notes = notes
+            )
 
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
-                error = if (result == null) "Failed to update entry" else null
+                error = if (result != true) "Failed to update entry" else null
             )
 
-            if (result != null) {
+            if (result == true) {
                 loadEntries()
             }
         }

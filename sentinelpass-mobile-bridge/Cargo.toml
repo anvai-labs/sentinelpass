@@ -17,38 +17,30 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [features]
 default = []
-jni = ["dep:jni", "dep:lazy_static"]
+jni = ["dep:jni"]
 ios = []
 
 [dependencies]
 sentinelpass-core = { path = "../sentinelpass-core" }
 
-# Serialization
+# Serialization (JNI wire DTOs)
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Encoding
-base64 = { workspace = true }
-
 # Error handling
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 # Secret hygiene (WBS-804: biometric key buffers zeroize on drop)
 zeroize = { workspace = true }
 
 # JNI (Android)
 jni = { version = "0.21", optional = true }
-lazy_static = { version = "1.4", optional = true }
 
 # Logging
 tracing = { workspace = true }
 
 # Time
 chrono = { workspace = true }
-
-# UUID
-uuid = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.26"
