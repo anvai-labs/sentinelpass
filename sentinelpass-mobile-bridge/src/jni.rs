@@ -605,6 +605,75 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeSlotHasBlob(
 }
 
 // ============================================================================
+// Authenticated Backup - JNI (WBS-827: ADR-008 .spbackup bundles)
+// ============================================================================
+
+/// Create an authenticated .spbackup bundle from the UNLOCKED vault.
+/// Returns the summary JSON (non-secret metadata) or null on failure.
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBackupCreate(
+    mut env: JNIEnv,
+    this: JObject,
+    handle: jlong,
+    output_path: JString,
+) -> jstring {
+    catch_jni(std::ptr::null_mut(), || {
+        let out_s = match jstring_to_string(&mut env, output_path) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+
+        match crate::backup::bridge_backup_create(handle as u64, &out_s) {
+            Ok(summary) => string_to_jstring(&mut env, &summary).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Restore a .spbackup bundle (STATIC, offline — destroy open handles for
+/// the target path first). Returns the report JSON or null on failure.
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBackupRestore(
+    mut env: JNIEnv,
+    this: JObject,
+    vault_path: JString,
+    bundle_path: JString,
+    master_password: JString,
+    allow_replace: jboolean,
+    allow_epoch_rewind: jboolean,
+    disable_sync: jboolean,
+) -> jstring {
+    catch_jni(std::ptr::null_mut(), || {
+        let path_s = match jstring_to_string(&mut env, vault_path) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let bundle_s = match jstring_to_string(&mut env, bundle_path) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let pw_s = match jstring_to_string(&mut env, master_password) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+
+        match crate::backup::bridge_backup_restore(
+            &path_s,
+            &bundle_s,
+            &pw_s,
+            allow_replace != 0,
+            allow_epoch_rewind != 0,
+            disable_sync != 0,
+        ) {
+            Ok(report) => string_to_jstring(&mut env, &report).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+// ============================================================================
 // Password Generation - JNI
 // ============================================================================
 

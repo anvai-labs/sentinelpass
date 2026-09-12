@@ -26,6 +26,7 @@
 		A1000017 /* KeychainSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000018 /* KeychainSlot.swift */; };
 		A1000018 /* Pasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000019 /* Pasteboard.swift */; };
 		A1000019 /* VaultFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000020 /* VaultFile.swift */; };
+		A1000022 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000023 /* BackupService.swift */; };
 		A1000020 /* LocalAuthentication.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000031 /* LocalAuthentication.framework */; };
 		A1000021 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A2000032 /* Security.framework */; };
 		A1000022 /* SentinelPassCredential.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A3000002 /* SentinelPassCredential.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -83,6 +84,7 @@
 		A2000018 /* KeychainSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainSlot.swift; sourceTree = "<group>"; };
 		A2000019 /* Pasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Pasteboard.swift; sourceTree = "<group>"; };
 		A2000020 /* VaultFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultFile.swift; sourceTree = "<group>"; };
+		A2000023 /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
 		A2000021 /* CredentialProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialProviderViewController.swift; sourceTree = "<group>"; };
 		A2000022 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A2000023 /* SentinelPass.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SentinelPass.entitlements; sourceTree = "<group>"; };
@@ -180,6 +182,7 @@
 				A2000018 /* KeychainSlot.swift */,
 				A2000019 /* Pasteboard.swift */,
 				A2000020 /* VaultFile.swift */,
+				A2000023 /* BackupService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -311,6 +314,7 @@
 				A1000017 /* KeychainSlot.swift in Sources */,
 				A1000018 /* Pasteboard.swift in Sources */,
 				A1000019 /* VaultFile.swift in Sources */,
+				A1000022 /* BackupService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -350,6 +350,52 @@ class VaultBridge(private val context: Context) {
     }
 
     // ==========================================================================
+    // Authenticated Backup (WBS-827)
+    // ==========================================================================
+
+    /**
+     * Create an authenticated .spbackup bundle from the UNLOCKED vault.
+     * Refuses to overwrite an existing output. Returns the summary JSON
+     * (non-secret metadata) or null on failure.
+     */
+    suspend fun backupCreate(outputPath: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeBackupCreate(nativeHandle, outputPath)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create backup", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Restore a .spbackup bundle (STATIC, offline). CALLER CONTRACT: destroy
+     * every open handle for [vaultPath] first — the restore replaces the
+     * target. Returns the report JSON or null on failure.
+     */
+    suspend fun backupRestore(
+        vaultPath: String,
+        bundlePath: String,
+        masterPassword: String,
+        allowReplace: Boolean = false,
+        allowEpochRewind: Boolean = false,
+        disableSync: Boolean = true
+    ): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeBackupRestore(
+                    vaultPath, bundlePath, masterPassword,
+                    allowReplace, allowEpochRewind, disableSync
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restore backup", e)
+                null
+            }
+        }
+    }
+
+    // ==========================================================================
     // TOTP
     // ==========================================================================
 
@@ -511,6 +557,20 @@ class VaultBridge(private val context: Context) {
     ): Long
 
     private external fun nativeSlotHasBlob(blobJson: String): Boolean
+
+    private external fun nativeBackupCreate(
+        handle: Long,
+        outputPath: String
+    ): String?
+
+    private external fun nativeBackupRestore(
+        vaultPath: String,
+        bundlePath: String,
+        masterPassword: String,
+        allowReplace: Boolean,
+        allowEpochRewind: Boolean,
+        disableSync: Boolean
+    ): String?
 
     private external fun nativeGenerateTotp(
         handle: Long,

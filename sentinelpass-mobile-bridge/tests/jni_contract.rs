@@ -308,7 +308,7 @@ fn every_jni_export_is_panic_contained() {
         rest = after;
     }
     assert!(
-        checked >= 18,
-        "parsed {checked} exports — parser desynced from jni.rs (expected >= 18)"
+        checked >= 20,
+        "parsed {checked} exports — parser desynced from jni.rs (expected >= 20)"
     );
 }
