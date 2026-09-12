@@ -48,11 +48,16 @@ let package = Package(
                 .linkedLibrary("sentinelpass_mobile_bridge_ios_sim"),
             ]
         ),
-        // Test target
+        // Test target (WBS-828): real bridge-contract XCTests over the C
+        // ABI, executed on an iOS simulator via
+        // xcodebuild test -scheme SentinelPass-Package (CI: ios.yml).
         .testTarget(
             name: "SentinelPassTests",
-            dependencies: ["SentinelPassApp"],
-            path: "SentinelPassTests"
+            dependencies: ["sentinelpass"],
+            path: "SentinelPassTests",
+            linkerSettings: [
+                .linkedLibrary("sentinelpass_mobile_bridge_ios_sim"),
+            ]
         ),
     ]
 )
