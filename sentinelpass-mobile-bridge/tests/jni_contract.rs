@@ -278,3 +278,37 @@ fn rust_exports_no_undeclared_jni_symbols() {
         );
     }
 }
+
+/// WBS-805: every JNI export body must run inside `catch_jni` — a Rust panic
+/// unwinding through an `extern "system"` frame aborts the JVM. Parsed from
+/// source so a new export cannot skip containment.
+#[test]
+fn every_jni_export_is_panic_contained() {
+    let src = rust_source();
+    let export_region = src
+        .split("#[cfg(all(test, feature = \"jni\"))]")
+        .next()
+        .expect("export region");
+    let needle = "pub extern \"system\" fn ";
+    let mut checked = 0usize;
+    let mut rest = export_region;
+    while let Some(pos) = rest.find(needle) {
+        let after = &rest[pos + needle.len()..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let brace = after.find('{').expect("export body brace");
+        let first_stmt = after[brace + 1..].trim_start();
+        assert!(
+            first_stmt.starts_with("catch_jni("),
+            "JNI export `{name}` is not panic-contained (body must open with catch_jni)"
+        );
+        checked += 1;
+        rest = after;
+    }
+    assert!(
+        checked >= 15,
+        "parsed {checked} exports — parser desynced from jni.rs"
+    );
+}

@@ -22,6 +22,9 @@ pub enum ErrorCode {
     Sync = -12,
     OutOfMemory = -13,
     AbiUnsupported = -14,
+    /// A Rust panic was contained at the FFI/JNI boundary (WBS-805). The
+    /// operation did NOT complete; out-params are undefined.
+    Panic = -15,
     Unknown = -99,
 }
 
@@ -45,6 +48,7 @@ impl fmt::Display for ErrorCode {
             ErrorCode::AbiUnsupported => {
                 write!(f, "ABI version not supported by this bridge build")
             }
+            ErrorCode::Panic => write!(f, "Internal panic contained at the bridge boundary"),
             ErrorCode::Unknown => write!(f, "Unknown error"),
         }
     }

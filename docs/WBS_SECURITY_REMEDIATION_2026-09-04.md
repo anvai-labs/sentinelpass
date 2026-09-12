@@ -1455,7 +1455,16 @@ Shared (801–807):
   zeroize-on-drop pass (M1 containment; M2 removes the in-process map
   entirely). Round-trip ownership tests cover every free path against a real
   vault; double-destroy/use-after-destroy refused.
-- **805** FFI panic containment 1.5d.
+- **805** FFI panic containment 1.5d —
+  **Status:** Done (2026-09-11, Phase 6 M1). Every C ABI export runs inside
+  `catch_panic` (errors → `ErrorCode::Panic = -15`, mirrored in the Kotlin
+  enum and generated header) and every JNI export inside `catch_jni`
+  (default-return; a panic through an `extern "system"` frame would abort
+  the JVM). Contained panics are logged via `tracing` and never unwind into
+  Swift/ObjC/JVM; out-params are documented undefined after a contained
+  panic (ownership rule 8). Pinned by source-parsing tests
+  (`every_c_export_is_panic_contained`, `every_jni_export_is_panic_contained`)
+  so a new export cannot skip containment, plus wrapper unit tests.
 - **806** lifecycle/invalid-handle tests 2d.
 - **807** atomic update + placeholder removal (TD-MOB-03/04) 3d.
 

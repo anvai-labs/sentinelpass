@@ -86,6 +86,27 @@ fn result_to_code<T>(result: Result<T, crate::error::BridgeError>) -> jint {
     }
 }
 
+/// WBS-805 panic containment: a Rust panic unwinding through an
+/// `extern "system"` JNI frame aborts the host process. Every JNI export body
+/// runs inside this wrapper; a contained panic is logged and surfaces as the
+/// caller-side failure convention (0 / null / `ErrorCode::Unknown`) — never
+/// as an abort. Out-params written before the panic must be treated as
+/// undefined by the caller.
+fn catch_jni<T>(default: T, op: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(op)) {
+        Ok(v) => v,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("<non-string panic payload>");
+            tracing::error!(target: "mobile_bridge", "contained panic at JNI boundary: {detail}");
+            default
+        }
+    }
+}
+
 // ============================================================================
 // ABI Negotiation - JNI (WBS-803)
 // ============================================================================
@@ -98,7 +119,9 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeAbiVersion(
     env: JNIEnv,
     this: JObject,
 ) -> jint {
-    crate::abi::ABI_VERSION as jint
+    catch_jni(ErrorCode::Unknown as jint, || {
+        crate::abi::ABI_VERSION as jint
+    })
 }
 
 // ============================================================================
@@ -115,20 +138,22 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeInit(
     vault_path: JString,
     master_password: JString,
 ) -> jlong {
-    let path = match jstring_to_string(&mut env, vault_path) {
-        Ok(p) => p,
-        Err(_) => return 0,
-    };
+    catch_jni(0, || {
+        let path = match jstring_to_string(&mut env, vault_path) {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
 
-    let password = match jstring_to_string(&mut env, master_password) {
-        Ok(p) => p,
-        Err(_) => return 0,
-    };
+        let password = match jstring_to_string(&mut env, master_password) {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
 
-    match bridge::bridge_vault_init(&path, &password) {
-        Ok(handle) => handle as jlong,
-        Err(_) => 0,
-    }
+        match bridge::bridge_vault_init(&path, &password) {
+            Ok(handle) => handle as jlong,
+            Err(_) => 0,
+        }
+    })
 }
 
 /// Destroy the vault handle. Deterministic: safe to call once per handle;
@@ -140,7 +165,9 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeDestroy(
     this: JObject,
     handle: jlong,
 ) {
-    let _ = bridge::bridge_vault_destroy(handle as u64);
+    catch_jni((), || {
+        let _ = bridge::bridge_vault_destroy(handle as u64);
+    })
 }
 
 #[no_mangle]
@@ -150,10 +177,12 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeIsUnlocked(
     this: JObject,
     handle: jlong,
 ) -> jboolean {
-    match bridge::bridge_vault_is_unlocked(handle as u64) {
-        Ok(true) => 1,
-        Ok(false) | Err(_) => 0,
-    }
+    catch_jni(0, || {
+        match bridge::bridge_vault_is_unlocked(handle as u64) {
+            Ok(true) => 1,
+            Ok(false) | Err(_) => 0,
+        }
+    })
 }
 
 #[no_mangle]
@@ -163,7 +192,9 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeLock(
     this: JObject,
     handle: jlong,
 ) -> jint {
-    result_to_code(bridge::bridge_vault_lock(handle as u64))
+    catch_jni(ErrorCode::Unknown as jint, || {
+        result_to_code(bridge::bridge_vault_lock(handle as u64))
+    })
 }
 
 // ============================================================================
@@ -182,38 +213,40 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeAddEntry(
     url: JString,
     notes: JString,
 ) -> jstring {
-    let title_str = match jstring_to_string(&mut env, title) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let username_str = match jstring_to_string(&mut env, username) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let password_str = match jstring_to_string(&mut env, password) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let url_str = match jstring_to_string(&mut env, url) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let notes_str = match jstring_to_string(&mut env, notes) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
+    catch_jni(std::ptr::null_mut(), || {
+        let title_str = match jstring_to_string(&mut env, title) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let username_str = match jstring_to_string(&mut env, username) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let password_str = match jstring_to_string(&mut env, password) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let url_str = match jstring_to_string(&mut env, url) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let notes_str = match jstring_to_string(&mut env, notes) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
-    match bridge::bridge_entry_add(
-        handle as u64,
-        &title_str,
-        &username_str,
-        &password_str,
-        &url_str,
-        &notes_str,
-    ) {
-        Ok(entry_id) => string_to_jstring(&mut env, &entry_id).unwrap_or(std::ptr::null_mut()),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match bridge::bridge_entry_add(
+            handle as u64,
+            &title_str,
+            &username_str,
+            &password_str,
+            &url_str,
+            &notes_str,
+        ) {
+            Ok(entry_id) => string_to_jstring(&mut env, &entry_id).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Get an entry as JSON matching the Kotlin `Entry` model (or null).
@@ -225,31 +258,33 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeGetEntry(
     handle: jlong,
     entry_id: JString,
 ) -> jstring {
-    let id_str = match jstring_to_string(&mut env, entry_id) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
+    catch_jni(std::ptr::null_mut(), || {
+        let id_str = match jstring_to_string(&mut env, entry_id) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
-    match bridge::bridge_entry_get(handle as u64, &id_str) {
-        Ok(entry) => {
-            let wire = EntryWire {
-                id: entry.entry_id.map(|v| v.to_string()),
-                title: &entry.title,
-                username: &entry.username,
-                password: &entry.password,
-                url: entry.url.as_deref(),
-                notes: entry.notes.as_deref(),
-                created_at: Some(entry.created_at.to_rfc3339()),
-                modified_at: Some(entry.modified_at.to_rfc3339()),
-                favorite: entry.favorite,
-            };
-            match serde_json::to_string(&wire) {
-                Ok(json) => string_to_jstring(&mut env, &json).unwrap_or(std::ptr::null_mut()),
-                Err(_) => std::ptr::null_mut(),
+        match bridge::bridge_entry_get(handle as u64, &id_str) {
+            Ok(entry) => {
+                let wire = EntryWire {
+                    id: entry.entry_id.map(|v| v.to_string()),
+                    title: &entry.title,
+                    username: &entry.username,
+                    password: &entry.password,
+                    url: entry.url.as_deref(),
+                    notes: entry.notes.as_deref(),
+                    created_at: Some(entry.created_at.to_rfc3339()),
+                    modified_at: Some(entry.modified_at.to_rfc3339()),
+                    favorite: entry.favorite,
+                };
+                match serde_json::to_string(&wire) {
+                    Ok(json) => string_to_jstring(&mut env, &json).unwrap_or(std::ptr::null_mut()),
+                    Err(_) => std::ptr::null_mut(),
+                }
             }
+            Err(_) => std::ptr::null_mut(),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
 }
 
 /// List entries as a JSON array of Kotlin `EntrySummary` (or null).
@@ -260,24 +295,26 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeListEntries(
     this: JObject,
     handle: jlong,
 ) -> jstring {
-    match bridge::bridge_entry_list(handle as u64) {
-        Ok(summaries) => {
-            let wire: Vec<EntrySummaryWire<'_>> = summaries
-                .iter()
-                .map(|s| EntrySummaryWire {
-                    id: s.entry_id.to_string(),
-                    title: &s.title,
-                    username: &s.username,
-                    favorite: s.favorite,
-                })
-                .collect();
-            match serde_json::to_string(&wire) {
-                Ok(json) => string_to_jstring(&mut env, &json).unwrap_or(std::ptr::null_mut()),
-                Err(_) => std::ptr::null_mut(),
+    catch_jni(std::ptr::null_mut(), || {
+        match bridge::bridge_entry_list(handle as u64) {
+            Ok(summaries) => {
+                let wire: Vec<EntrySummaryWire<'_>> = summaries
+                    .iter()
+                    .map(|s| EntrySummaryWire {
+                        id: s.entry_id.to_string(),
+                        title: &s.title,
+                        username: &s.username,
+                        favorite: s.favorite,
+                    })
+                    .collect();
+                match serde_json::to_string(&wire) {
+                    Ok(json) => string_to_jstring(&mut env, &json).unwrap_or(std::ptr::null_mut()),
+                    Err(_) => std::ptr::null_mut(),
+                }
             }
+            Err(_) => std::ptr::null_mut(),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
 }
 
 /// Search entries as a JSON array of Kotlin `EntrySummary` (or null).
@@ -289,29 +326,31 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeSearchEntries(
     handle: jlong,
     query: JString,
 ) -> jstring {
-    let query_str = match jstring_to_string(&mut env, query) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
+    catch_jni(std::ptr::null_mut(), || {
+        let query_str = match jstring_to_string(&mut env, query) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
-    match bridge::bridge_entry_search(handle as u64, &query_str) {
-        Ok(summaries) => {
-            let wire: Vec<EntrySummaryWire<'_>> = summaries
-                .iter()
-                .map(|s| EntrySummaryWire {
-                    id: s.entry_id.to_string(),
-                    title: &s.title,
-                    username: &s.username,
-                    favorite: s.favorite,
-                })
-                .collect();
-            match serde_json::to_string(&wire) {
-                Ok(json) => string_to_jstring(&mut env, &json).unwrap_or(std::ptr::null_mut()),
-                Err(_) => std::ptr::null_mut(),
+        match bridge::bridge_entry_search(handle as u64, &query_str) {
+            Ok(summaries) => {
+                let wire: Vec<EntrySummaryWire<'_>> = summaries
+                    .iter()
+                    .map(|s| EntrySummaryWire {
+                        id: s.entry_id.to_string(),
+                        title: &s.title,
+                        username: &s.username,
+                        favorite: s.favorite,
+                    })
+                    .collect();
+                match serde_json::to_string(&wire) {
+                    Ok(json) => string_to_jstring(&mut env, &json).unwrap_or(std::ptr::null_mut()),
+                    Err(_) => std::ptr::null_mut(),
+                }
             }
+            Err(_) => std::ptr::null_mut(),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
 }
 
 #[no_mangle]
@@ -322,12 +361,14 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeDeleteEntry(
     handle: jlong,
     entry_id: JString,
 ) -> jint {
-    let id_str = match jstring_to_string(&mut env, entry_id) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam as jint,
-    };
+    catch_jni(ErrorCode::Unknown as jint, || {
+        let id_str = match jstring_to_string(&mut env, entry_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam as jint,
+        };
 
-    result_to_code(bridge::bridge_entry_delete(handle as u64, &id_str))
+        result_to_code(bridge::bridge_entry_delete(handle as u64, &id_str))
+    })
 }
 
 // ============================================================================
@@ -343,18 +384,20 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeGenerateTotp(
     handle: jlong,
     entry_id: JString,
 ) -> jstring {
-    let id_str = match jstring_to_string(&mut env, entry_id) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
+    catch_jni(std::ptr::null_mut(), || {
+        let id_str = match jstring_to_string(&mut env, entry_id) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
-    match bridge::bridge_totp_generate_code(handle as u64, &id_str) {
-        Ok(totp_info) => {
-            let formatted = format!("{},{}", totp_info.code, totp_info.seconds_remaining);
-            string_to_jstring(&mut env, &formatted).unwrap_or(std::ptr::null_mut())
+        match bridge::bridge_totp_generate_code(handle as u64, &id_str) {
+            Ok(totp_info) => {
+                let formatted = format!("{},{}", totp_info.code, totp_info.seconds_remaining);
+                string_to_jstring(&mut env, &formatted).unwrap_or(std::ptr::null_mut())
+            }
+            Err(_) => std::ptr::null_mut(),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
 }
 
 // ============================================================================
@@ -370,13 +413,15 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeGeneratePassword(
     length: jint,
     include_symbols: jboolean,
 ) -> jstring {
-    let length = length as usize;
-    let symbols = include_symbols != 0;
+    catch_jni(std::ptr::null_mut(), || {
+        let length = length as usize;
+        let symbols = include_symbols != 0;
 
-    match bridge::bridge_password_generate(length, symbols) {
-        Ok(password) => string_to_jstring(&mut env, &password).unwrap_or(std::ptr::null_mut()),
-        Err(_) => std::ptr::null_mut(),
-    }
+        match bridge::bridge_password_generate(length, symbols) {
+            Ok(password) => string_to_jstring(&mut env, &password).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Returns `"<score>,<description>"` — the format VaultBridge.kt parses.
@@ -388,22 +433,24 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeCheckStrength(
     handle: jlong,
     password: JString,
 ) -> jstring {
-    let password_str = match jstring_to_string(&mut env, password) {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
+    catch_jni(std::ptr::null_mut(), || {
+        let password_str = match jstring_to_string(&mut env, password) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
 
-    match bridge::bridge_password_check_strength(&password_str) {
-        Ok(analysis) => {
-            let result = format!(
-                "{},{}",
-                analysis.strength.score(),
-                analysis.strength.as_str()
-            );
-            string_to_jstring(&mut env, &result).unwrap_or(std::ptr::null_mut())
+        match bridge::bridge_password_check_strength(&password_str) {
+            Ok(analysis) => {
+                let result = format!(
+                    "{},{}",
+                    analysis.strength.score(),
+                    analysis.strength.as_str()
+                );
+                string_to_jstring(&mut env, &result).unwrap_or(std::ptr::null_mut())
+            }
+            Err(_) => std::ptr::null_mut(),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
 }
 
 // ============================================================================
@@ -421,10 +468,12 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBiometricHasKey(
     this: JObject,
     handle: jlong,
 ) -> jboolean {
-    match bridge::bridge_biometric_has_key(handle as u64) {
-        Ok(true) => 1,
-        Ok(false) | Err(_) => 0,
-    }
+    catch_jni(0, || {
+        match bridge::bridge_biometric_has_key(handle as u64) {
+            Ok(true) => 1,
+            Ok(false) | Err(_) => 0,
+        }
+    })
 }
 
 #[no_mangle]
@@ -434,7 +483,9 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBiometricRemoveKe
     this: JObject,
     handle: jlong,
 ) -> jint {
-    result_to_code(bridge::bridge_biometric_remove_key(handle as u64))
+    catch_jni(ErrorCode::Unknown as jint, || {
+        result_to_code(bridge::bridge_biometric_remove_key(handle as u64))
+    })
 }
 
 #[no_mangle]
@@ -444,7 +495,9 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBiometricUnlock(
     this: JObject,
     handle: jlong,
 ) -> jint {
-    result_to_code(bridge::bridge_biometric_unlock(handle as u64))
+    catch_jni(ErrorCode::Unknown as jint, || {
+        result_to_code(bridge::bridge_biometric_unlock(handle as u64))
+    })
 }
 
 #[cfg(all(test, feature = "jni"))]
