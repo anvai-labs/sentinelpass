@@ -340,7 +340,9 @@ jobs:
   # crates.io semantics, noted rather than worked around.
   crates-publish:
     name: Publish sentinelpass-protocol to crates.io
-    needs: setup
+    # WBS-901: publishing is irreversible (a yank is permanent) — it waits
+    # for the tag-time security audits the same way the GitHub release does.
+    needs: [setup, security-audit, npm-audit-root, npm-audit-e2e]
     if: >-
       ${{ needs.setup.outputs.is-release == 'true' &&
           github.event_name == 'push' &&
@@ -381,11 +383,19 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p sentinelpass-protocol --locked
 
-  # Create GitHub release and upload assets
+  # Create GitHub release and upload assets. WBS-901: the release REQUIRES
+  # the tag-time security gates — a failed audit aborts the release here,
+  # before anything is published.
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [setup, bundle-smoke, native-installer-smoke]
+    needs:
+      - setup
+      - bundle-smoke
+      - native-installer-smoke
+      - security-audit
+      - npm-audit-root
+      - npm-audit-e2e
     if: needs.setup.outputs.is-release == 'true'
     permissions:
       contents: write
@@ -556,3 +566,88 @@ jobs:
   # (update-sentinelpass.yml there); this workflow no longer touches the tap.
   # The push-based job this replaces failed on every release: it committed to
   # main directly, which the tap's checks-only branch protection rejects.
+
+  # ---- WBS-901: tag-time security gates -----------------------------------
+  # security.yml is PR-triggered only, so a tag push previously reached the
+  # `release` job with NO dependency scan at all. These three jobs re-run the
+  # PR gate's audits at tag time and the `release` job now REQUIRES them —
+  # a red audit blocks the release instead of being invisible.
+  #
+  # Design notes:
+  # - Gated on `is-release` (tag pushes and dispatch-on-a-v*-tag) so PR
+  #   preflight runs do NOT double-run the same audits security.yml already
+  #   runs on the PR (the `release` job skips on those runs anyway, so the
+  #   skip state of its needs is consistent).
+  # - Trivy is deliberately NOT repeated here: its DB download is the
+  #   expensive job, and its vuln findings for shipped languages are already
+  #   covered by cargo audit + npm audit below.
+  # - Audit POLICY is the governed .cargo/audit.toml (WBS-909) — no inline
+  #   ignores. A HIGH/CRITICAL advisory with no governed exception fails the
+  #   tag and blocks the release (register: docs/DEPENDENCY_EXCEPTIONS.md).
+  # - These jobs produce no PR check runs, so ci-gate.yml's expectation
+  #   table is unaffected (the Gate is PR-only; tag runs have no Gate).
+  security-audit:
+    name: Release Security Audit (RustSec)
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@55ed588c2f0e092949af25ad4c5873185e476b5c # cargo-audit
+      - name: Run cargo audit (governed policy)
+        run: cargo audit
+
+  npm-audit-root:
+    name: Release Security Audit (npm root)
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Run npm audit (high+)
+        # Same registry-flake retry as security.yml.
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1
+
+  npm-audit-e2e:
+    name: Release Security Audit (npm extension e2e)
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: browser-extension/e2e/package-lock.json
+      - name: Install e2e dependencies
+        working-directory: browser-extension/e2e
+        run: npm ci
+      - name: Run npm audit (high+)
+        working-directory: browser-extension/e2e
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1
