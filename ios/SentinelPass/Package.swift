@@ -16,7 +16,11 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
-        // Native C library target
+        // Native C library target: module.modulemap + include/sentinelpass_bridge.h.
+        // The header is a copy of the generated contract under
+        // sentinelpass-mobile-bridge/include (ADR-009); the static library
+        // itself is NOT committed — populate SentinelPass/Native/libs with
+        // build-ios.sh before linking.
         .systemLibrary(
             name: "sentinelpass",
             path: "SentinelPass/Native"
@@ -26,7 +30,7 @@ let package = Package(
             name: "SentinelPassApp",
             dependencies: ["sentinelpass"],
             path: "SentinelPass",
-            exclude: ["Info.plist", "Native"],
+            exclude: ["Info.plist", "Native", "SentinelPass.entitlements"],
             sources: [
                 "SentinelPassApp.swift",
                 "ContentView.swift",
@@ -37,8 +41,11 @@ let package = Package(
             resources: [
                 .process("Assets.xcassets"),
             ],
+            // The module map carries no `link` directive (per-SDK library
+            // names differ), so SPM links the simulator static library here.
+            // Library search path: SentinelPass/Native/libs (script-populated).
             linkerSettings: [
-                .unsafeFlags(["-LSentinelPass/Native/libs", "-lsentinelpass_mobile_bridge_ios_sim"])
+                .linkedLibrary("sentinelpass_mobile_bridge_ios_sim"),
             ]
         ),
         // Test target
