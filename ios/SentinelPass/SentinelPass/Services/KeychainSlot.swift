@@ -19,7 +19,19 @@ import sentinelpass
 /// The at-rest store is the Keychain item itself: no secret ever lands in
 /// UserDefaults, files, or pasteboard. On release, the 32 recovered bytes
 /// cross into the bridge ONCE via `sp_slot_open_with_dek` (FFI rule 1:
-/// borrowed, never retained) and the local copy is zeroized immediately.
+/// borrowed, never retained); the bridge-side buffer is zeroized after the
+/// call, and the FFI now THROWS on failure instead of returning success
+/// unconditionally (integration review M1).
+/// Errors surfaced by the platform-slot release path (integration review M1:
+/// the old closure dropped both the ErrorCode and the registered handle).
+struct SlotError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+    static func ffiFailure(_ message: String) -> SlotError {
+        SlotError(message: message)
+    }
+}
+
 enum KeychainSlot {
 
     static let service = "com.sentinelpass.vault-slot"
@@ -35,7 +47,7 @@ enum KeychainSlot {
     static func storeDek(_ dek: Data) -> String? {
         guard dek.count == 32 else { return "DEK must be 32 bytes" }
 
-        SecItemDelete(query()) // idempotent replace
+        SecItemDelete(query() as CFDictionary) // idempotent replace
 
         var accessError: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(
@@ -89,7 +101,7 @@ enum KeychainSlot {
     @discardableResult
     static func unlock(
         vaultPath: String,
-        openWithDek: (String, Data) -> Void = openWithDekViaBridge
+        openWithDek: (String, Data) throws -> String? = openWithDekViaBridge
     ) -> String? {
         var item: CFTypeRef?
         var query = self.query()
@@ -110,30 +122,41 @@ enum KeychainSlot {
         guard let data = item as? Data else {
             return "keychain item was not data"
         }
-        defer {
-            // Caller-side zeroization of the borrowed copy (FFI rule 1).
-            var mutable = data
-            mutable.resetBytes(in: 0..<mutable.count)
-        }
 
         guard data.count == 32 else {
             return "keychain DEK has invalid length"
         }
 
-        openWithDek(vaultPath, data)
-        return nil
+        // Errors from the FFI must SURFACE: the old default closure dropped
+        // both the ErrorCode and the registered handle (integration review
+        // M1 — FFI rule 7 violation + a registry leak per attempt).
+        do {
+            return try openWithDek(vaultPath, data)
+        } catch let slotError {
+            return "slot release failed: \(slotError)"
+        }
     }
 
-    private static func openWithDekViaBridge(vaultPath: String, dek: Data) {
+    private static func openWithDekViaBridge(vaultPath: String, dek: Data) throws -> String? {
         #if canImport(sentinelpass)
         let source = "iOS Keychain slot"
-        // FFI rule 1: borrowed for the duration of the call only.
-        dek.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            guard let base = raw.baseAddress else { return }
-            vaultPath.withCString { pathC in
-                source.withCString { sourceC in
-                    var handle: SPVaultHandle = 0
-                    _ = sp_slot_open_with_dek(
+        // FFI rule 1: borrowed for the duration of the call only. The DEK
+        // buffer is zeroized HERE after the call — the caller's Data is
+        // copy-on-write, so resetting a copy there would be cosmetic; THIS
+        // is the buffer the bridge read.
+        defer {
+            dek.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+                raw.resetBytes(in: 0..<raw.count)
+            }
+        }
+        return try dek.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String? in
+            guard let base = raw.baseAddress else {
+                throw SlotError.ffiFailure("DEK buffer had no base address")
+            }
+            var handle: SPVaultHandle = 0
+            let code = dek.withCString { sourceC in
+                vaultPath.withCString { pathC in
+                    sp_slot_open_with_dek(
                         pathC,
                         base.assumingMemoryBound(to: UInt8.self),
                         dek.count,
@@ -142,7 +165,21 @@ enum KeychainSlot {
                     )
                 }
             }
+            // FFI rule 7: a registered handle MUST be destroyed — the vault
+            // is released immediately (this call only installs the DEK into
+            // the app's vault state), so nothing leaks per attempt.
+            if handle != 0 {
+                sp_vault_destroy(handle)
+            }
+            guard code == SPErrorCode_Success else {
+                throw SlotError.ffiFailure(
+                    "sp_slot_open_with_dek failed with code \(code.rawValue)"
+                )
+            }
+            return nil
         }
+        #else
+        return "platform slot requires the sentinelpass native module"
         #endif
     }
 

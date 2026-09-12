@@ -91,6 +91,26 @@ fn decode_hex_32(input: &str, what: &str) -> BridgeResult<Vec<u8>> {
     Ok(raw)
 }
 
+/// Decode a hex signature with a MINIMUM length floor (not exact): real
+/// platform signatures are large (RSA-2048 PKCS1 = 256 bytes; ECDSA P-384 ≈
+/// 96-104) while the old 32-byte bound fit only test HMACs and rejected
+/// every real device signature (integration review B1). The determinism
+/// self-check still requires sig_a == sig_b byte-for-byte, so the floor
+/// loses no enforcement.
+fn decode_hex_signature(input: &str, what: &str) -> BridgeResult<Vec<u8>> {
+    let bytes = hex::decode(input)
+        .map_err(|e| BridgeError::InvalidParam(format!("{what} must be hex: {e}")))?;
+    if bytes.len() < MIN_SIGNATURE_BYTES {
+        return Err(BridgeError::InvalidParam(format!(
+            "{what} must be at least {MIN_SIGNATURE_BYTES} bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes)
+}
+
+const MIN_SIGNATURE_BYTES: usize = 64;
+
 /// Seal the vault's DEK under the platform signature (ENABLE).
 ///
 /// `challenge_hex` is the challenge the host signed; `sig_a_hex`/`sig_b_hex`
@@ -109,8 +129,8 @@ pub fn bridge_slot_seal(
     binding: &str,
 ) -> BridgeResult<String> {
     let challenge = decode_hex_32(challenge_hex, "challenge")?;
-    let sig_a = decode_hex_32(sig_a_hex, "sig_a")?;
-    let sig_b = decode_hex_32(sig_b_hex, "sig_b")?;
+    let sig_a = decode_hex_signature(sig_a_hex, "sig_a")?;
+    let sig_b = decode_hex_signature(sig_b_hex, "sig_b")?;
 
     // Deterministic-scheme check on the host-supplied pair. Inside the seal
     // the CapturedSigner replays sig_a, so this is the only place a
@@ -242,7 +262,7 @@ pub fn bridge_slot_open_with_dek(
 mod tests {
     use super::*;
     use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+    use sha2::Sha512;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -256,7 +276,9 @@ mod tests {
 
     impl FakePlatform {
         fn sign(&self, data: &[u8]) -> Vec<u8> {
-            let mut mac = Hmac::<Sha256>::new_from_slice(&self.root).unwrap();
+            // 64-byte output: above MIN_SIGNATURE_BYTES, like every real
+            // platform signature scheme (RSA-2048 = 256, P-384 ≈ 104).
+            let mut mac = Hmac::<Sha512>::new_from_slice(&self.root).unwrap();
             mac.update(data);
             mac.finalize().into_bytes().to_vec()
         }

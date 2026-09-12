@@ -332,7 +332,14 @@ class VaultState private constructor(private val context: Context) : ViewModel()
                     val challenge = slotJson.decodeFromString<SlotBlob>(blob).challengeHex
                     val sig = BiometricKeystore.signHex(activity, challenge, "Unlock SentinelPass")
                         ?: return@withContext false
-                    vaultBridge?.slotUnlock(binding, blob, sig, binding) == true
+                    // The session vaultBridge is ALWAYS null here (biometric
+                    // unlock runs from the LOCKED state — the bridge instance
+                    // only exists between create/unlock and lock). Construct
+                    // a fresh bridge for the release call; the native side
+                    // opens the vault and registers a live handle from the
+                    // released DEK.
+                    val bridge = VaultBridge(context)
+                    bridge.slotUnlock(binding, blob, sig, binding) == true
                 } catch (e: Exception) {
                     android.util.Log.e("VaultState", "Slot unlock failed", e)
                     false

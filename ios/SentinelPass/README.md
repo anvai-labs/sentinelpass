@@ -121,7 +121,6 @@ The app uses `VaultBridge` class to communicate with the Rust mobile bridge via 
 
 ## Future Enhancements
 
-- iCloud sync integration
 - AutoFill integration with iOS Password AutoFill
 - Web browser integration with Safari extension
 - Import from other password managers (1Password, LastPass, Bitwarden)
