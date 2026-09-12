@@ -13,23 +13,32 @@ struct SettingsView: View {
     @EnvironmentObject private var biometricAuth: BiometricAuth
     @State private var showingConfirmDeleteVault = false
     @State private var showingExportOptions = false
+    @State private var keychainSlotEnrolled = false
 
     var body: some View {
         NavigationStack {
             List {
                 // Security Section
                 Section {
-                    if biometricAuth.isAvailable {
-                        Toggle("Biometric Unlock", isOn: $biometricEnabled)
-                            .onChange(of: biometricEnabled) { _, newValue in
-                                Task {
-                                    if newValue {
-                                        try? await vaultState.enableBiometric()
-                                    } else {
-                                        try? await vaultState.disableBiometric()
-                                    }
-                                }
-                            }
+                    // WBS-821: platform Keychain slot status. Enrollment
+                    // (sealing the current vault DEK into the slot) needs a
+                    // DEK export that the bridge ABI does not yet provide —
+                    // it ships in M4. An enrolled slot unlocks via
+                    // biometric/passcode-gated keychain read on the lock
+                    // screen.
+                    HStack {
+                        Label("Keychain Slot", systemImage: "key.horizontal")
+                        Spacer()
+                        Text(keychainSlotEnrolled ? "Enrolled" : "Not enrolled")
+                            .foregroundStyle(keychainSlotEnrolled ? .green : .secondary)
+                    }
+                    if keychainSlotEnrolled {
+                        Button(role: .destructive) {
+                            vaultState.disableKeychainSlot()
+                            keychainSlotEnrolled = vaultState.hasKeychainSlot()
+                        } label: {
+                            Label("Remove Keychain Slot", systemImage: "key.slash")
+                        }
                     }
 
                     Button {
@@ -105,6 +114,9 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .onAppear {
+                keychainSlotEnrolled = vaultState.hasKeychainSlot()
+            }
             .confirmationDialog("Delete Vault", isPresented: $showingConfirmDeleteVault, titleVisibility: .visible) {
                 Button("Delete Vault", role: .destructive) {
                     deleteVault()
@@ -118,8 +130,6 @@ struct SettingsView: View {
             }
         }
     }
-
-    @State private var biometricEnabled = false
 
     private func lockVault() {
         vaultState.lockVault()
