@@ -1431,7 +1431,17 @@ Shared (801–807):
   nativeSyncGetStatus/CollectPending/ApplyEntries/PrepareDrive), dead
   JNI_VAULT_REGISTRY pass-through deleted. Pinned by tests/jni_contract.rs
   (name set + arity + type/return mapping, both directions, host-runnable).
-- **803** ABI/feature negotiation 2d.
+- **803** ABI/feature negotiation 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). `src/abi.rs` single source of
+  truth (`ABI_VERSION=1`, `MIN_SUPPORTED_ABI_VERSION=1`); C ABI gains
+  `sp_bridge_info` + `sp_bridge_negotiate` (fills `SPBridgeInfo` even on
+  refusal so consumers can report the mismatch) and `ErrorCode::AbiUnsupported
+  = -14`; JNI gains `nativeAbiVersion` with the Kotlin facade handshaking in
+  its init block (exact-match, fail-closed via `IllegalStateException`).
+  Feature flags fail closed: `FEATURE_PLATFORM_KEYSTORE` /
+  `FEATURE_RELAY_SYNC_V2` are declared vocabulary but never advertised until
+  WBS-812/821 and the mobile sync v2 wiring land (a prompt is not a
+  cryptographic authorization — ADR-009). Pinned by abi.rs + ffi.rs tests.
 - **804** ownership + zeroizing destroy (TD-MOB-09) 2d.
 - **805** FFI panic containment 1.5d.
 - **806** lifecycle/invalid-handle tests 2d.

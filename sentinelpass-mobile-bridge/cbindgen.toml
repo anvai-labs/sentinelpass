@@ -23,6 +23,7 @@ cpp_compat = true
 # Must list every exported function and FFI-safe type in src/ffi.rs.
 include = [
     "VaultHandle",
+    "BridgeInfo",
     "Entry",
     "EntrySummary",
     "TotpCode",
@@ -45,6 +46,8 @@ include = [
     "sp_biometric_has_key",
     "sp_biometric_remove_key",
     "sp_biometric_unlock",
+    "sp_bridge_info",
+    "sp_bridge_negotiate",
     "sp_sync_get_status",
     "sp_sync_collect_pending",
     "sp_sync_apply_entries",
@@ -58,6 +61,7 @@ include = [
 [export.rename]
 # Rename Rust types to C-compatible names
 "VaultHandle" = "SPVaultHandle"
+"BridgeInfo" = "SPBridgeInfo"
 "Entry" = "SPEntry"
 "EntrySummary" = "SPEntrySummary"
 "TotpCode" = "SPTotpCode"

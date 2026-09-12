@@ -88,6 +88,80 @@ fn result_to_code<T>(result: Result<T, crate::error::BridgeError>) -> ErrorCode 
 }
 
 // ============================================================================
+// ABI / Feature Negotiation (WBS-803)
+// ============================================================================
+
+/// ABI/feature description reported to consumers (WBS-803).
+#[repr(C)]
+pub struct BridgeInfo {
+    pub abi_version: u32,
+    pub min_supported_abi_version: u32,
+    pub feature_flags: u32,
+    /// Must be zero; reserved for future growth so the struct can gain
+    /// fields without breaking consumers that zero-initialize it.
+    pub reserved: u32,
+}
+
+/// Report this build's ABI version and feature flags.
+///
+/// Ownership: `out_info` is written by the callee; no allocation is
+/// performed and nothing needs freeing.
+#[no_mangle]
+pub unsafe extern "C" fn sp_bridge_info(out_info: *mut BridgeInfo) -> ErrorCode {
+    if out_info.is_null() {
+        return ErrorCode::InvalidParam;
+    }
+    let info = crate::abi::abi_info();
+    *out_info = BridgeInfo {
+        abi_version: info.abi_version,
+        min_supported_abi_version: info.min_supported_abi_version,
+        feature_flags: info.feature_flags,
+        reserved: 0,
+    };
+    ErrorCode::Success
+}
+
+/// Negotiate a consumer's ABI version against this build (WBS-803).
+///
+/// `client_abi_version` is the ABI the caller was built against. On success
+/// (`Success`) the versions are compatible and `out_info` describes this
+/// build; the caller must feature-test `feature_flags` before using optional
+/// capabilities. On `AbiUnsupported` the caller MUST refuse to operate; the
+/// header contract is versioned as one unit, so an unsupported consumer
+/// cannot assume any other symbol's signature. `out_info` (if non-null) is
+/// filled even on failure so the caller can report the mismatch.
+#[no_mangle]
+pub unsafe extern "C" fn sp_bridge_negotiate(
+    client_abi_version: u32,
+    out_info: *mut BridgeInfo,
+) -> ErrorCode {
+    if out_info.is_null() {
+        return ErrorCode::InvalidParam;
+    }
+    match crate::abi::negotiate(client_abi_version) {
+        Ok(info) => {
+            *out_info = BridgeInfo {
+                abi_version: info.abi_version,
+                min_supported_abi_version: info.min_supported_abi_version,
+                feature_flags: info.feature_flags,
+                reserved: 0,
+            };
+            ErrorCode::Success
+        }
+        Err(e) => {
+            let info = crate::abi::abi_info();
+            *out_info = BridgeInfo {
+                abi_version: info.abi_version,
+                min_supported_abi_version: info.min_supported_abi_version,
+                feature_flags: info.feature_flags,
+                reserved: 0,
+            };
+            e.to_error_code()
+        }
+    }
+}
+
+// ============================================================================
 // Vault Management
 // ============================================================================
 
@@ -668,6 +742,7 @@ pub unsafe extern "C" fn sp_bytes_free(ptr: *const u8, len: usize) {
 
 #[cfg(test)]
 mod abi_contract_tests {
+    use super::{sp_bridge_info, sp_bridge_negotiate, BridgeInfo, ErrorCode};
     use std::fs;
     use std::path::PathBuf;
 
@@ -709,6 +784,8 @@ mod abi_contract_tests {
     /// kept in lockstep with cbindgen.toml `[export] include`.
     const DECLARED_C_ABI: &[&str] = &[
         "sp_biometric_has_key",
+        "sp_bridge_info",
+        "sp_bridge_negotiate",
         "sp_biometric_remove_key",
         "sp_biometric_set_key",
         "sp_biometric_unlock",
@@ -768,5 +845,65 @@ mod abi_contract_tests {
             header.contains("} SPErrorCode;"),
             "generated header must declare the SPErrorCode enum type"
         );
+    }
+
+    #[test]
+    fn sp_bridge_info_reports_abi_and_flags() {
+        let mut info = BridgeInfo {
+            abi_version: 0,
+            min_supported_abi_version: 0,
+            feature_flags: 0,
+            reserved: 1,
+        };
+        let code = unsafe { sp_bridge_info(&mut info) };
+        assert_eq!(code, ErrorCode::Success);
+        assert_eq!(info.abi_version, crate::abi::ABI_VERSION);
+        assert_eq!(
+            info.min_supported_abi_version,
+            crate::abi::MIN_SUPPORTED_ABI_VERSION
+        );
+        assert_eq!(info.reserved, 0, "reserved must be zeroed by the callee");
+    }
+
+    #[test]
+    fn sp_bridge_info_rejects_null() {
+        let code = unsafe { sp_bridge_info(std::ptr::null_mut()) };
+        assert_eq!(code, ErrorCode::InvalidParam);
+    }
+
+    #[test]
+    fn sp_bridge_negotiate_round_trip() {
+        let mut info = BridgeInfo {
+            abi_version: 0,
+            min_supported_abi_version: 0,
+            feature_flags: 0,
+            reserved: 0,
+        };
+        let code = unsafe { sp_bridge_negotiate(crate::abi::ABI_VERSION, &mut info) };
+        assert_eq!(code, ErrorCode::Success);
+        assert_eq!(info.abi_version, crate::abi::ABI_VERSION);
+    }
+
+    #[test]
+    fn sp_bridge_negotiate_rejects_mismatch_but_reports_info() {
+        let mut info = BridgeInfo {
+            abi_version: 0,
+            min_supported_abi_version: 0,
+            feature_flags: 0,
+            reserved: 0,
+        };
+        let code = unsafe { sp_bridge_negotiate(crate::abi::ABI_VERSION + 1, &mut info) };
+        assert_eq!(code, ErrorCode::AbiUnsupported);
+        assert_eq!(
+            info.abi_version,
+            crate::abi::ABI_VERSION,
+            "out_info must describe this build even on refusal"
+        );
+    }
+
+    #[test]
+    fn sp_bridge_negotiate_rejects_null() {
+        let code = unsafe { sp_bridge_negotiate(crate::abi::ABI_VERSION, std::ptr::null_mut()) };
+        assert_eq!(code, ErrorCode::InvalidParam);
     }
 }

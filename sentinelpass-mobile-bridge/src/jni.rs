@@ -87,6 +87,21 @@ fn result_to_code<T>(result: Result<T, crate::error::BridgeError>) -> jint {
 }
 
 // ============================================================================
+// ABI Negotiation - JNI (WBS-803)
+// ============================================================================
+
+/// ABI contract version of this build. VaultBridge.kt handshakes in its init
+/// block and refuses to operate on a mismatch (fail closed).
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeAbiVersion(
+    env: JNIEnv,
+    this: JObject,
+) -> jint {
+    crate::abi::ABI_VERSION as jint
+}
+
+// ============================================================================
 // Vault Management - JNI
 // ============================================================================
 
