@@ -1419,7 +1419,18 @@ Shared (801–807):
   `declared_abi_matches_ffi_surface` + `header_declares_every_export` tests;
   android.yml/ios.yml integration jobs now regenerate + diff the header
   (drift = red) and `clang -fsyntax-only` it.
-- **802** JNI contract (TD-MOB-02) 2d.
+- **802** JNI contract (TD-MOB-02) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). One contract:
+  Kotlin `com.sentinelpass.VaultBridge` owns the declarations; Rust renamed to
+  `Java_com_sentinelpass_VaultBridge_*` (was `VaultManager_*` — unresolvable),
+  receiver typed as instance `JObject`, arity fixed (nativeGeneratePassword /
+  nativeCheckStrength now take the Kotlin-declared handle), wire formats fixed
+  (Entry/EntrySummary JNI wire DTOs matching the Kotlin models — the old
+  serde-pass-through dropped `id`; TOTP now returns `code,seconds`), Rust-side
+  undeclared placeholder natives removed (nativeBiometricSetKey,
+  nativeSyncGetStatus/CollectPending/ApplyEntries/PrepareDrive), dead
+  JNI_VAULT_REGISTRY pass-through deleted. Pinned by tests/jni_contract.rs
+  (name set + arity + type/return mapping, both directions, host-runnable).
 - **803** ABI/feature negotiation 2d.
 - **804** ownership + zeroizing destroy (TD-MOB-09) 2d.
 - **805** FFI panic containment 1.5d.

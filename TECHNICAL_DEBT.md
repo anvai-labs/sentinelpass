@@ -342,7 +342,7 @@ ADR-003 through ADR-010.
 | ID | Gap | Required outcome | Target | Status |
 |----|-----|------------------|--------|--------|
 | TD-MOB-01 | Android CI omits JNI and JNI-enabled Rust currently fails | Build every Android ABI with JNI and fail on symbol/signature mismatch | 0.12 | Open |
-| TD-MOB-02 | Kotlin `VaultBridge` declarations do not match Rust `VaultManager` exports | One generated class/package/signature contract | 0.12 | Open |
+| TD-MOB-02 | Kotlin `VaultBridge` declarations do not match Rust `VaultManager` exports | One generated class/package/signature contract | 0.12 | Closed 2026-09-11 (WBS-802): Rust exports renamed to `Java_com_sentinelpass_VaultBridge_*`, arity/wire-format mismatches fixed, undeclared Rust extras trimmed; contract pinned both directions by `tests/jni_contract.rs` and the compiled-artifact symbol check lands with WBS-811 |
 | TD-MOB-03 | Android biometric/sync/autofill contain placeholders | Keystore-bound slot, real sync v2, complete AutofillService | 0.12 | Open |
 | TD-MOB-04 | Android update is delete-then-add and handle lifecycle can leak | Atomic update and deterministic destroy | 0.12 | Open |
 | TD-MOB-05 | Android lifecycle/privacy/network/backup policy is incomplete | Lock/privacy cover, cleartext deny, verified backup allowlist/no-backup | 0.12 | Open |
