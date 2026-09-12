@@ -86,7 +86,7 @@ jobs:
           # remain. Fail-closed: a missing or stale symbol fails the job
           # before the artifact can reach the app build.
           set -euo pipefail
-          EXPECTED="nativeAbiVersion nativeInit nativeDestroy nativeIsUnlocked nativeLock nativeAddEntry nativeGetEntry nativeListEntries nativeSearchEntries nativeDeleteEntry nativeUpdateEntry nativeGenerateTotp nativeGeneratePassword nativeCheckStrength nativeSlotChallenge nativeSlotHasBlob nativeSlotSeal nativeSlotUnlock"
+          EXPECTED="nativeAbiVersion nativeInit nativeDestroy nativeIsUnlocked nativeLock nativeAddEntry nativeGetEntry nativeListEntries nativeSearchEntries nativeDeleteEntry nativeUpdateEntry nativeGenerateTotp nativeGeneratePassword nativeCheckStrength nativeSlotChallenge nativeSlotHasBlob nativeSlotSeal nativeSlotUnlock nativeBackupCreate nativeBackupRestore"
           STALE_RE="Java_com_sentinelpass_(VaultManager|DriveSync)_"
           for so in \
             target/aarch64-linux-android/release/libsentinelpass_mobile_bridge.so \
@@ -104,7 +104,7 @@ jobs:
               llvm-nm -D --defined-only "$so" | grep -E "$STALE_RE"
               exit 1
             fi
-            echo "all 18 VaultBridge JNI symbols present, no stale symbols"
+            echo "all 20 VaultBridge JNI symbols present, no stale symbols"
           done
 
       - name: Organize JNI libraries for Android
