@@ -28,6 +28,7 @@ pub(crate) fn record_error(err: &BridgeError) {
 
 /// The detail (if any) recorded by the most recent failed bridge call on
 /// the calling thread.
+#[cfg(feature = "jni")]
 pub fn bridge_last_error() -> Option<String> {
     LAST_ERROR.with(|slot| slot.borrow().clone())
 }
