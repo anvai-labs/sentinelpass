@@ -4,17 +4,22 @@
 //
 //  Vault lock/unlock screen
 //
+//  WBS-821/823: when a Keychain platform slot is enrolled, unlock goes
+//  through KeychainSlot → sp_slot_open_with_dek. The biometric prompt is
+//  raised BY the keychain item read (kSecAccessControlBiometryCurrentSet) —
+//  the release IS the authorization; this screen only surfaces the result.
+//
 
 import SwiftUI
 
 @available(iOS 17.0, macOS 14.0, *)
 struct LockView: View {
     @EnvironmentObject private var vaultState: VaultState
-    @EnvironmentObject private var biometricAuth: BiometricAuth
     @State private var masterPassword: String = ""
     @State private var showingError: Bool = false
     @State private var errorMessage: String = ""
     @State private var isAuthenticating: Bool = false
+    @State private var keychainSlotAvailable: Bool = false
     @FocusState private var isPasswordFieldFocused: Bool
 
     var body: some View {
@@ -41,21 +46,23 @@ struct LockView: View {
 
                 Spacer()
 
-                // Biometric Button
-                if biometricAuth.isAvailable {
+                // Keychain-slot unlock (the OS prompts biometric/passcode
+                // for the keychain item read itself).
+                if keychainSlotAvailable {
                     Button {
-                        authenticateWithBiometric()
+                        unlockWithKeychainSlot()
                     } label: {
                         HStack {
-                            Image(systemName: biometricAuth.biometricType == .faceID ? "face.id" : "touchid")
-                            Text("Unlock with \(biometricAuth.biometricType == .faceID ? "Face ID" : "Touch ID")")
+                            Image(systemName: "faceid")
+                            Text("Unlock with Keychain")
                         }
                         .frame(maxWidth: .infinity)
                         .padding()
                         .background(.ultraThinMaterial)
                         .clipShape(.capsule)
                     }
-                    .disabled(isAuthenticating)
+                    .disabled(isAuthenticating || vaultState.isLoading)
+                    .padding(.horizontal)
                 }
 
                 // Password Field
@@ -112,7 +119,8 @@ struct LockView: View {
                 Text(errorMessage)
             }
             .onAppear {
-                checkBiometricAndAttempt()
+                keychainSlotAvailable = vaultState.hasKeychainSlot()
+                checkKeychainSlotAndAttempt()
             }
         }
     }
@@ -134,32 +142,44 @@ struct LockView: View {
         }
     }
 
-    private func checkBiometricAndAttempt() {
+    /// Offer the slot once at screen appearance: if a slot is enrolled,
+    /// trigger the OS-gated read right away (matches the previous
+    /// auto-attempt biometric behavior). A user refusal fails CLOSED and
+    /// is silent — the master password field remains the fallback.
+    private func checkKeychainSlotAndAttempt() {
+        guard keychainSlotAvailable, !isAuthenticating else { return }
         Task {
-            let hasBiometric = await vaultState.hasBiometricKey()
-            if hasBiometric && biometricAuth.isAvailable {
-                // Attempt biometric unlock automatically
-                authenticateWithBiometric()
+            do {
+                isAuthenticating = true
+                try await vaultState.unlockWithKeychainSlot()
+                isAuthenticating = false
+            } catch let error as VaultError {
+                isAuthenticating = false
+                // Refused/cancelled gestures stay silent (fail closed);
+                // real failures surface.
+                if case .slotUnlockFailed(let message) = error,
+                   message == KeychainSlot.slotUnavailableSentinel {
+                    return
+                }
+                errorMessage = error.localizedDescription
+                showingError = true
+            } catch {
+                isAuthenticating = false
             }
         }
     }
 
-    private func authenticateWithBiometric() {
+    private func unlockWithKeychainSlot() {
         isAuthenticating = true
 
         Task {
-            let authenticated = await biometricAuth.authenticate()
-            if authenticated {
-                do {
-                    try await vaultState.unlockWithBiometric()
-                    isAuthenticating = false
-                } catch {
-                    isAuthenticating = false
-                    errorMessage = "Biometric unlock failed. Please use master password."
-                    showingError = true
-                }
-            } else {
+            do {
+                try await vaultState.unlockWithKeychainSlot()
                 isAuthenticating = false
+            } catch {
+                isAuthenticating = false
+                errorMessage = error.localizedDescription
+                showingError = true
             }
         }
     }
