@@ -302,17 +302,50 @@ pub fn create_owner_only_file(path: &Path) -> Result<std::fs::File, SensitivePat
     Ok(file)
 }
 
-/// Get the platform-specific data directory for storing application data
+/// Mobile-sandbox override (WBS-818 CI / ADR-009 hosts): Android and iOS
+/// app sandboxes have no $HOME or XDG variables, so the `dirs` fallback
+/// chain below collapses to a read-only "." (the process CWD) and vault
+/// create/open fails before any key derivation. The mobile bridge sets
+/// this to the vault's parent directory (the app-private files dir) so the
+/// data and audit directories land INSIDE the sandbox. Desktop hosts never
+/// set it and are unaffected.
+static BASE_DIR_OVERRIDE: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Set the platform base directory (see [`BASE_DIR_OVERRIDE`]). The
+/// directory need not exist yet; creating it (owner-only) remains the
+/// caller's next step via the ensure_* helpers.
+pub fn set_base_dir(dir: PathBuf) {
+    let mut slot = BASE_DIR_OVERRIDE
+        .write()
+        .expect("platform base-dir lock poisoned");
+    if slot.is_none() {
+        *slot = Some(dir);
+    }
+}
+
+/// The override when set, otherwise the desktop fallback chain.
+fn resolve_base(fallback: PathBuf) -> PathBuf {
+    BASE_DIR_OVERRIDE
+        .read()
+        .expect("platform base-dir lock poisoned")
+        .clone()
+        .unwrap_or(fallback)
+}
+
+/// Get the platform-specific data directory for storing application data.
 ///
-/// Returns:
-/// - Windows: %APPDATA%\PasswordManager
+/// Honors [`set_base_dir`] when a host has overridden the base (mobile
+/// sandboxes); otherwise resolves the desktop fallback chain:
+/// - Windows: %APPDATA%\PasswordManager (LOCALAPPDATA)
 /// - macOS: ~/Library/Application Support/PasswordManager
-/// - Linux/Other: ~/.config/passwordmanager
+/// - Linux/Other: ~/.local/share/passwordmanager
 pub fn get_data_dir() -> PathBuf {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::data_dir)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".data")))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = resolve_base(
+        dirs::data_local_dir()
+            .or_else(dirs::data_dir)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".data")))
+            .unwrap_or_else(|| PathBuf::from(".")),
+    );
 
     base.join("PasswordManager")
 }
@@ -324,10 +357,12 @@ pub fn get_data_dir() -> PathBuf {
 /// - macOS: ~/Library/Application Support/PasswordManager
 /// - Linux/Other: ~/.config/passwordmanager
 pub fn get_config_dir() -> PathBuf {
-    let base = dirs::config_dir()
-        .or_else(dirs::data_dir)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = resolve_base(
+        dirs::config_dir()
+            .or_else(dirs::data_dir)
+            .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+            .unwrap_or_else(|| PathBuf::from(".")),
+    );
 
     base.join("PasswordManager")
 }
@@ -678,5 +713,30 @@ mod tests {
         assert_eq!(verify_owner_only_mode(&file).unwrap(), 0o600);
         #[cfg(not(unix))]
         assert_eq!(verify_owner_only_mode(&file).unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod base_dir_override_tests {
+    use super::*;
+
+    /// WBS-818: the mobile-sandbox override must redirect BOTH platform
+    /// directories (data — fatal in create — and config/audit) into the
+    /// app-private base, and set-once semantics must hold.
+    #[test]
+    fn base_dir_override_redirects_data_and_config_dirs() {
+        let base =
+            std::env::temp_dir().join(format!("sp_base_dir_override_{}", std::process::id()));
+        set_base_dir(base.clone());
+
+        assert_eq!(get_data_dir(), base.join("PasswordManager"));
+        assert_eq!(get_config_dir(), base.join("PasswordManager"));
+
+        // Ensure helpers now succeed INSIDE the override (they would fail
+        // on the Android fallback "." under a read-only CWD).
+        ensure_data_dir().expect("ensure_data_dir under override");
+        ensure_audit_log_dir().expect("ensure_audit_log_dir under override");
+        assert!(base.join("PasswordManager").exists());
+        assert!(base.join("PasswordManager/audit").exists());
     }
 }

@@ -2,6 +2,7 @@
 
 use crate::error::{BridgeError, BridgeResult};
 use sentinelpass_core::vault::{CredentialType, Entry, EntrySummary, VaultManager};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,6 +12,25 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// On mobile, we typically have only one vault per device, but we use
 /// handles to support future multi-vault scenarios and testing.
 static VAULT_REGISTRY: OnceLock<Mutex<VaultRegistry>> = OnceLock::new();
+
+thread_local! {
+    /// Last failure detail for the most recent bridge call on this thread
+    /// (WBS-818 CI diagnosis): the handle-returning JNI functions cannot
+    /// carry an error code, so hosts read this instead of guessing.
+    /// Best-effort diagnostics only — never a security boundary, and it
+    /// must never contain secret material (messages are path/io shaped).
+    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn record_error(err: &BridgeError) {
+    LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(err.to_string()));
+}
+
+/// The detail (if any) recorded by the most recent failed bridge call on
+/// the calling thread.
+pub fn bridge_last_error() -> Option<String> {
+    LAST_ERROR.with(|slot| slot.borrow().clone())
+}
 
 pub(crate) fn get_registry() -> &'static Mutex<VaultRegistry> {
     VAULT_REGISTRY.get_or_init(|| Mutex::new(VaultRegistry::new()))
@@ -58,10 +78,32 @@ pub fn bridge_vault_init(vault_path: &str, master_password: &str) -> BridgeResul
 
     let vault_exists = Path::new(vault_path).exists();
 
-    let vault = if vault_exists {
-        VaultManager::open(vault_path, master_password.as_bytes())?
+    // WBS-818: route core's platform dirs (data/audit) into the vault's
+    // parent — the app-private files directory. Android/iOS sandboxes have
+    // no $HOME/XDG, so core's desktop fallback chain collapses to a
+    // read-only "." under the process CWD and create/open fails with
+    // EROFS before any key derivation (reproduced on the API-36 emulator:
+    // 'IO error: Read-only file system (os error 30)').
+    if let Some(parent) = Path::new(vault_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            sentinelpass_core::platform::set_base_dir(parent.to_path_buf());
+        }
+    }
+
+    let result = if vault_exists {
+        VaultManager::open(vault_path, master_password.as_bytes())
     } else {
-        VaultManager::create(vault_path, master_password.as_bytes())?
+        VaultManager::create(vault_path, master_password.as_bytes())
+    };
+    // WBS-818 diagnostics: record the core error verbatim BEFORE the
+    // BridgeError conversion so hosts can read the real failure.
+    let vault = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let bridge_err = BridgeError::from(e);
+            record_error(&bridge_err);
+            return Err(bridge_err);
+        }
     };
 
     let mut registry = get_registry()
