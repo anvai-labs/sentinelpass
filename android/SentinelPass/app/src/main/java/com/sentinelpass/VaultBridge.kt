@@ -34,6 +34,15 @@ class VaultBridge(private val context: Context) {
 
     private var nativeHandle: Long = 0
 
+    /**
+     * Detail of the most recent failed bridge call (see [nativeLastError]).
+     * Populated on failures of handle-returning operations such as
+     * [initVault]; surfacing this is what made the WBS-818 CI failure
+     * diagnosable.
+     */
+    var lastError: String? = null
+        private set
+
     init {
         val abiVersion = nativeAbiVersion()
         if (abiVersion != EXPECTED_ABI_VERSION) {
@@ -85,8 +94,11 @@ class VaultBridge(private val context: Context) {
                 val handle = nativeInit(vaultPath, masterPassword)
                 if (handle != 0L) {
                     nativeHandle = handle
+                    lastError = null
                     true
                 } else {
+                    lastError = nativeLastError()
+                    Log.e(TAG, "initVault failed: $lastError")
                     false
                 }
             } catch (e: Exception) {
@@ -485,6 +497,13 @@ class VaultBridge(private val context: Context) {
      * Checked against [EXPECTED_ABI_VERSION] in the instance init block.
      */
     private external fun nativeAbiVersion(): Int
+
+    /**
+     * Detail of the most recent failed bridge call on this thread (WBS-818
+     * diagnostics; additive — no ABI bump). Null when the last call
+     * succeeded. DIAGNOSTIC ONLY — never a control-flow secret.
+     */
+    private external fun nativeLastError(): String?
 
     private external fun nativeInit(
         vaultPath: String,

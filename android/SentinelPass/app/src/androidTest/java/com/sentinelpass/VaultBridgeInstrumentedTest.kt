@@ -58,6 +58,16 @@ class VaultBridgeInstrumentedTest {
         bridge = VaultBridge(context)
     }
 
+    /**
+     * WBS-818 diagnosis helper: the handle-returning natives return 0/null
+     * on failure and the detail lives in [VaultBridge.lastError] — surface
+     * it in the assertion message so a red CI run is diagnosable (the first
+     * emulator run failed with bare asserts and zero diagnosis).
+     */
+    private fun assertWithDetail(condition: Boolean, what: String) {
+        assertTrue("$what — bridge lastError=${bridge.lastError}", condition)
+    }
+
     @After
     fun tearDown() {
         // Safe on a never-unlocked or already-locked bridge: the native call
@@ -88,32 +98,44 @@ class VaultBridgeInstrumentedTest {
 
     @Test
     fun initVault_createsVaultInTheTempFilesDir_andReportsUnlocked() = runBlocking {
-        assertTrue(bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD))
-        assertTrue(bridge.isUnlocked())
-        assertTrue(vaultFile.exists())
+        assertWithDetail(
+            bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD),
+            "initVault must create + unlock the vault"
+        )
+        assertWithDetail(bridge.isUnlocked(), "vault must report unlocked after initVault")
+        assertTrue("vault file must exist after initVault", vaultFile.exists())
     }
 
     @Test
     fun lockVault_locksState_andVaultReopensWithSamePassword() = runBlocking {
-        assertTrue(bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD))
+        assertWithDetail(
+            bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD),
+            "initVault must create + unlock the vault"
+        )
 
         // WBS-804 semantics: locking ALSO destroys the native handle
         // (nativeDestroy), so a lock/unlock cycle cannot leak registry
         // entries or open SQLite handles.
-        assertTrue(bridge.lockVault())
-        assertFalse(bridge.isUnlocked())
+        assertWithDetail(bridge.lockVault(), "lockVault must lock + release the handle")
+        assertFalse("vault must report locked after lockVault", bridge.isUnlocked())
 
         // Re-opening proves the file is intact and the destroyed handle
         // was fully released (a second init would fail on a still-held
         // exclusive vault, and a wrong-password init would return false).
-        assertTrue(bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD))
-        assertTrue(bridge.isUnlocked())
+        assertWithDetail(
+            bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD),
+            "re-open with the same password must succeed"
+        )
+        assertWithDetail(bridge.isUnlocked(), "re-opened vault must report unlocked")
     }
 
     @Test
     fun initVault_rejectsWrongPassword() = runBlocking {
-        assertTrue(bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD))
-        assertTrue(bridge.lockVault())
+        assertWithDetail(
+            bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD),
+            "initVault must create + unlock the vault"
+        )
+        assertWithDetail(bridge.lockVault(), "lockVault must succeed before the wrong-password attempt")
 
         // The bridge instance already dropped its handle; use a fresh one
         // for the wrong-password attempt against the same file.
@@ -122,8 +144,11 @@ class VaultBridgeInstrumentedTest {
         try {
             // Copy the encrypted vault so the original stays pristine.
             vaultFile.copyTo(otherFile, overwrite = true)
-            assertFalse(other.initVault(otherFile.absolutePath, "definitely-not-it"))
-            assertFalse(other.isUnlocked())
+            assertFalse(
+                "wrong-password initVault must be refused (other.lastError=${other.lastError})",
+                other.initVault(otherFile.absolutePath, "definitely-not-it")
+            )
+            assertFalse("wrong-password vault must not report unlocked", other.isUnlocked())
         } finally {
             other.lockVault()
             otherFile.delete()
@@ -136,7 +161,10 @@ class VaultBridgeInstrumentedTest {
 
     @Test
     fun entryCrud_addGetListUpdateDelete_roundTrip() = runBlocking {
-        assertTrue(bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD))
+        assertWithDetail(
+            bridge.initVault(vaultFile.absolutePath, MASTER_PASSWORD),
+            "initVault must create + unlock the vault before CRUD"
+        )
 
         val id = bridge.addEntry(
             title = "Example",

@@ -132,6 +132,24 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeAbiVersion(
 // Vault Management - JNI
 // ============================================================================
 
+/// Detail of the most recent failed bridge call on this thread (WBS-818
+/// diagnostics; additive ABI — no version bump). Null when the last call
+/// succeeded. Diagnostic only — never a security boundary.
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeLastError(
+    mut env: JNIEnv,
+    this: JObject,
+) -> jstring {
+    catch_jni(
+        std::ptr::null_mut(),
+        || match crate::bridge::bridge_last_error() {
+            Some(detail) => string_to_jstring(&mut env, &detail).unwrap_or(std::ptr::null_mut()),
+            None => std::ptr::null_mut(),
+        },
+    )
+}
+
 /// Create a new vault or unlock an existing one. Returns the vault handle
 /// (non-zero) on success, 0 on failure.
 #[no_mangle]
