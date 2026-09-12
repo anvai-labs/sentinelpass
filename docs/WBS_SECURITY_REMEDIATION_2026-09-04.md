@@ -1497,8 +1497,23 @@ Shared (801–807):
   type needed for test linkage; `sp_bytes_free` retained as the sanctioned
   byte-buffer release path for WBS-827 backup exports.
 
-Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d; **811** all-ABI JNI
-CI (TD-MOB-01, TV-007) 2d; **812** Keystore-bound platform slot (TD-MOB-03,
+Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). JNI-enabled Rust builds/tests/
+  clippy-clean (`--features jni` verified on host and in android.yml's
+  integration job — the baseline state was 3× E0308 in drive.rs and zero CI
+  coverage); the type errors died with WBS-802's contract rewrite and
+  WBS-807's drive.rs removal. TD-MOB-01's CI half lands in 811.
+  **811** all-ABI JNI
+  CI (TD-MOB-01, TV-007) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). android.yml mobile-bridge now
+  builds ALL THREE app ABIs (arm64-v8a, armeabi-v7a, x86_64 — armeabi-v7a
+  was missing entirely) WITH `--features jni` and fails closed on a
+  llvm-nm symbol check: all 17 `Java_com_sentinelpass_VaultBridge_*`
+  symbols must exist in every `.so`, and any stale
+  `VaultManager`/`DriveSync` symbol fails the job. scripts/build-android.sh
+  (build-all.yml path) gets the same `--features jni` + symbol check on its
+  NDK-r29 ABI set; android/build-libs.sh already matched.
+  **812** Keystore-bound platform slot (TD-MOB-03,
 SR-MOBILE-002) 4d; **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
 FR-MOBILE-001) 5d; **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d; **815**
 cleartext deny 1d; **816** backup policy (TD-MOB-05) 2d; **817** permission trim 0.5d;

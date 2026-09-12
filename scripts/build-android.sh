@@ -112,9 +112,10 @@ fi
 
 for target in "${ANDROID_TARGETS[@]}"; do
     if rustc --print target-list | grep -q "^$target\$"; then
-        log_info "Building for $target..."
+        log_info "Building for $target (with JNI feature)..."
         cargo build --package sentinelpass-mobile-bridge \
             --target "$target" \
+            --features jni \
             $CARGO_FLAGS
     else
         log_warning "Target $target not available, skipping"
@@ -122,6 +123,54 @@ for target in "${ANDROID_TARGETS[@]}"; do
 done
 
 log_success "Mobile bridge built"
+
+# ============================================================================
+# Verify JNI symbols (WBS-811)
+# ============================================================================
+
+# Every built .so must export the full com.sentinelpass.VaultBridge JNI
+# surface and no stale VaultManager/DriveSync symbols. Find llvm-nm from the
+# NDK (or PATH).
+find_llvm_nm() {
+    if command -v llvm-nm >/dev/null 2>&1; then
+        command -v llvm-nm
+        return 0
+    fi
+    for root in "$ANDROID_NDK_ROOT" "$ANDROID_NDK_HOME" "$HOME/Library/Android/sdk/ndk/"*/*; do
+        if [ -n "$root" ] && [ -x "$root/toolchains/llvm/prebuilt"/*/bin/llvm-nm ] 2>/dev/null; then
+            ls "$root/toolchains/llvm/prebuilt"/*/bin/llvm-nm | head -1
+            return 0
+        fi
+    done
+    echo ""
+}
+
+EXPECTED_SYMBOLS="nativeAbiVersion nativeInit nativeDestroy nativeIsUnlocked nativeLock nativeAddEntry nativeGetEntry nativeListEntries nativeSearchEntries nativeDeleteEntry nativeUpdateEntry nativeGenerateTotp nativeGeneratePassword nativeCheckStrength nativeBiometricHasKey nativeBiometricRemoveKey nativeBiometricUnlock"
+
+NM_BIN="$(find_llvm_nm)"
+if [ -z "$NM_BIN" ]; then
+    log_warning "llvm-nm not found — skipping JNI symbol verification"
+else
+    log_info "Verifying Java_* symbols in built .so files..."
+    for target in "${ANDROID_TARGETS[@]}"; do
+        SO="target/$target/$BUILD_TYPE/libsentinelpass_mobile_bridge.so"
+        if [ ! -f "$SO" ]; then
+            log_error "missing $SO"
+            exit 1
+        fi
+        for m in $EXPECTED_SYMBOLS; do
+            if ! "$NM_BIN" -D --defined-only "$SO" | grep -q "Java_com_sentinelpass_VaultBridge_${m}\$"; then
+                log_error "$SO is missing JNI symbol Java_com_sentinelpass_VaultBridge_$m"
+                exit 1
+            fi
+        done
+        if "$NM_BIN" -D --defined-only "$SO" | grep -Eq "Java_com_sentinelpass_(VaultManager|DriveSync)_"; then
+            log_error "$SO exports stale (pre-WBS-802) VaultManager/DriveSync symbols"
+            exit 1
+        fi
+        log_success "$target: all 17 VaultBridge JNI symbols present, no stale symbols"
+    done
+fi
 
 # ============================================================================
 # Prepare JNI Libraries
