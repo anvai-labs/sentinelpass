@@ -48,6 +48,8 @@ include = [
     "sp_biometric_unlock",
     "sp_bridge_info",
     "sp_bridge_negotiate",
+    "sp_entry_free",
+    "sp_entry_list_free",
     "sp_sync_get_status",
     "sp_sync_collect_pending",
     "sp_sync_apply_entries",

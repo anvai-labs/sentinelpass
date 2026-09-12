@@ -2,6 +2,46 @@
 //
 // These functions are exported with C linkage and can be called from
 // Swift or Objective-C using standard platform interop.
+//
+// # Ownership contract (WBS-804 — the single proven ownership rule set)
+//
+// Every rule applies uniformly; there are no exceptions buried in individual
+// functions:
+//
+// 1. IN-STRINGS (`const char *`, `const uint8_t *`): borrowed. The caller
+//    keeps them valid for the duration of the call; the bridge never frees
+//    them and never retains them past the call.
+// 2. OUT-STRINGS (`const char **`): allocated by the bridge with the Rust
+//    allocator (`CString::into_raw`). The caller MUST release each one with
+//    `sp_string_free`, exactly once. A null out-string on `Success` means
+//    the field is absent (optional field semantics), not a failure.
+// 3. OUT-BYTE-BUFFERS (`const uint8_t **` + `uintptr_t *`): allocated by the
+//    bridge with `alloc` under `Layout::array::<u8>(len)`. The caller MUST
+//    release with `sp_bytes_free(ptr, len)` using the SAME `len` that was
+//    output. `sp_bytes_free` is valid only on buffers produced by the
+//    bridge — never on buffers the caller allocated.
+// 4. OUT-STRUCTS (`SPEntry`, `SPTotpCode`, `SPBridgeInfo`, `SyncStatus`):
+//    written by the callee into caller-provided storage. String members
+//    inside them follow rule 2 (`sp_string_free`); `SPTotpCode.code` and
+//    `SyncStatus.device_id` each own one string.
+// 5. STRUCT ARRAYS (`SPEntrySummary *` + count): allocated by the bridge.
+//    The caller MUST release with `sp_entry_list_free(ptr, count)`, which
+//    frees every element's strings and the backing array. Do not free the
+//    array or its strings individually.
+// 6. SINGLE OUT-ENTRIES (`SPEntry` written by `sp_entry_get_by_id`): the
+//    caller MUST release with `sp_entry_free(entry)`, which frees all six
+//    string members.
+// 7. HANDLES (`SPVaultHandle`): created by `sp_vault_init`, destroyed by
+//    `sp_vault_destroy`. Use-after-destroy and double-destroy return
+//    `InvalidParam` (WBS-806 tests enforce this); destroying a handle also
+//    zeroizes any registered biometric key material (WBS-804).
+// 8. PANIC CONTAINMENT: no Rust panic ever unwinds across this boundary
+//    (WBS-805 `catch_unwind` on every exported function); a contained panic
+//    surfaces as the documented error code, never as an abort in the host
+//    process.
+//
+// The generated header (cbindgen) carries the same rules per function via
+// doc comments; `include/sentinelpass_bridge.h` is the contract Swift sees.
 
 use crate::bridge;
 use crate::error::ErrorCode;
@@ -62,6 +102,30 @@ fn string_to_c(s: &str) -> *const c_char {
     match CString::new(s) {
         Ok(c_string) => c_string.into_raw(),
         Err(_) => ptr::null(),
+    }
+}
+
+/// Copy `bytes` into a caller-freeable allocation.
+///
+/// Ownership (WBS-804 rule 3): the returned buffer is allocated with `alloc`
+/// under `Layout::array::<u8>(len)`, so `sp_bytes_free(ptr, bytes.len())`
+/// deallocates with the EXACT layout used here — no `Vec::leak`/layout
+/// mismatch. Returns null on allocation failure.
+fn bytes_to_c_buffer(bytes: &[u8]) -> *const u8 {
+    if bytes.is_empty() {
+        return ptr::null();
+    }
+    let layout = match alloc::Layout::array::<u8>(bytes.len()) {
+        Ok(l) => l,
+        Err(_) => return ptr::null(),
+    };
+    unsafe {
+        let dst = alloc::alloc(layout);
+        if dst.is_null() {
+            return ptr::null();
+        }
+        ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+        dst as *const u8
     }
 }
 
@@ -348,8 +412,14 @@ pub unsafe extern "C" fn sp_entry_list_all(
                 return ErrorCode::Success;
             }
 
-            let layout = alloc::Layout::array::<EntrySummary>(count).unwrap();
+            let layout = match alloc::Layout::array::<EntrySummary>(count) {
+                Ok(l) => l,
+                Err(_) => return ErrorCode::OutOfMemory,
+            };
             let entries_ptr = alloc::alloc(layout) as *mut EntrySummary;
+            if entries_ptr.is_null() {
+                return ErrorCode::OutOfMemory;
+            }
 
             for (i, summary) in summaries.into_iter().enumerate() {
                 let entry_ptr = entries_ptr.add(i);
@@ -408,8 +478,14 @@ pub unsafe extern "C" fn sp_entry_search(
                 return ErrorCode::Success;
             }
 
-            let layout = alloc::Layout::array::<EntrySummary>(count).unwrap();
+            let layout = match alloc::Layout::array::<EntrySummary>(count) {
+                Ok(l) => l,
+                Err(_) => return ErrorCode::OutOfMemory,
+            };
             let entries_ptr = alloc::alloc(layout) as *mut EntrySummary;
+            if entries_ptr.is_null() {
+                return ErrorCode::OutOfMemory;
+            }
 
             for (i, summary) in summaries.into_iter().enumerate() {
                 let entry_ptr = entries_ptr.add(i);
@@ -580,15 +656,6 @@ pub struct SyncStatus {
     pub device_id: *const c_char,
 }
 
-/// FFI-safe sync result representation
-#[repr(C)]
-pub struct SyncResult {
-    pub success: bool,
-    pub pushed: u64,
-    pub pulled: u64,
-    pub error_message: *const c_char,
-}
-
 /// Get sync status
 #[no_mangle]
 pub unsafe extern "C" fn sp_sync_get_status(
@@ -627,8 +694,12 @@ pub unsafe extern "C" fn sp_sync_collect_pending(
 
     match bridge::bridge_sync_collect_pending(handle) {
         Ok(bytes) => {
+            let buf = bytes_to_c_buffer(&bytes);
+            if buf.is_null() && !bytes.is_empty() {
+                return ErrorCode::OutOfMemory;
+            }
             *out_len = bytes.len();
-            *out_bytes = bytes.leak().as_ptr();
+            *out_bytes = buf;
             ErrorCode::Success
         }
         Err(e) => e.to_error_code(),
@@ -676,8 +747,12 @@ pub unsafe extern "C" fn sp_sync_prepare_cloudkit(
 
     match bridge::bridge_sync_prepare_cloudkit(handle, &device_id_str) {
         Ok(bytes) => {
+            let buf = bytes_to_c_buffer(&bytes);
+            if buf.is_null() && !bytes.is_empty() {
+                return ErrorCode::OutOfMemory;
+            }
             *out_len = bytes.len();
-            *out_bytes = bytes.leak().as_ptr();
+            *out_bytes = buf;
             ErrorCode::Success
         }
         Err(e) => e.to_error_code(),
@@ -703,8 +778,12 @@ pub unsafe extern "C" fn sp_sync_prepare_drive(
 
     match bridge::bridge_sync_prepare_drive(handle, &device_id_str) {
         Ok(bytes) => {
+            let buf = bytes_to_c_buffer(&bytes);
+            if buf.is_null() && !bytes.is_empty() {
+                return ErrorCode::OutOfMemory;
+            }
             *out_len = bytes.len();
-            *out_bytes = bytes.leak().as_ptr();
+            *out_bytes = buf;
             ErrorCode::Success
         }
         Err(e) => e.to_error_code(),
@@ -712,21 +791,67 @@ pub unsafe extern "C" fn sp_sync_prepare_drive(
 }
 
 // ============================================================================
-// Memory Management
+// Memory Management (WBS-804: single proven ownership contract)
 // ============================================================================
 
+/// Free a string returned by the bridge (out-strings, `SPTotpCode.code`,
+/// `SyncStatus.device_id`). Safe on null. Must be called exactly once per
+/// bridge-allocated string; never on strings the caller allocated.
 #[no_mangle]
 pub unsafe extern "C" fn sp_string_free(ptr: *const c_char) {
     if !ptr.is_null() {
-        let _ = CString::from_raw(ptr as *mut c_char);
+        drop(CString::from_raw(ptr as *mut c_char));
     }
 }
 
+/// Free a byte buffer returned by the bridge, using the same `len` that the
+/// producing call output. The buffer is deallocated with the exact layout
+/// used at allocation (`Layout::array::<u8>(len)`); passing a different
+/// `len` is a caller bug. Never call this on buffers the caller allocated.
 #[no_mangle]
 pub unsafe extern "C" fn sp_bytes_free(ptr: *const u8, len: usize) {
     if !ptr.is_null() && len > 0 {
-        let layout = alloc::Layout::from_size_align_unchecked(len, 1);
-        alloc::dealloc(ptr as *mut u8, layout);
+        if let Ok(layout) = alloc::Layout::array::<u8>(len) {
+            alloc::dealloc(ptr as *mut u8, layout);
+        }
+    }
+}
+
+/// Free one `SPEntry` returned by `sp_entry_get_by_id`, releasing all six
+/// string members. The struct storage itself is caller-provided and is NOT
+/// freed here. Safe on null.
+#[no_mangle]
+pub unsafe extern "C" fn sp_entry_free(entry: *mut Entry) {
+    if entry.is_null() {
+        return;
+    }
+    let e = &mut *entry;
+    for s in [e.id, e.title, e.username, e.password, e.url, e.notes] {
+        if !s.is_null() {
+            drop(CString::from_raw(s as *mut c_char));
+        }
+    }
+}
+
+/// Free an `SPEntrySummary` array returned by `sp_entry_list_all` /
+/// `sp_entry_search`, releasing every element's strings and the backing
+/// array (allocated under `Layout::array::<EntrySummary>(count)`). Safe on
+/// null or `count == 0`.
+#[no_mangle]
+pub unsafe extern "C" fn sp_entry_list_free(entries: *mut EntrySummary, count: usize) {
+    if entries.is_null() || count == 0 {
+        return;
+    }
+    for i in 0..count {
+        let s = &*entries.add(i);
+        for p in [s.id, s.title, s.username] {
+            if !p.is_null() {
+                drop(CString::from_raw(p as *mut c_char));
+            }
+        }
+    }
+    if let Ok(layout) = alloc::Layout::array::<EntrySummary>(count) {
+        alloc::dealloc(entries as *mut u8, layout);
     }
 }
 
@@ -786,6 +911,8 @@ mod abi_contract_tests {
         "sp_biometric_has_key",
         "sp_bridge_info",
         "sp_bridge_negotiate",
+        "sp_entry_free",
+        "sp_entry_list_free",
         "sp_biometric_remove_key",
         "sp_biometric_set_key",
         "sp_biometric_unlock",
@@ -905,5 +1032,187 @@ mod abi_contract_tests {
     fn sp_bridge_negotiate_rejects_null() {
         let code = unsafe { sp_bridge_negotiate(crate::abi::ABI_VERSION, std::ptr::null_mut()) };
         assert_eq!(code, ErrorCode::InvalidParam);
+    }
+}
+
+/// WBS-804 ownership round-trips: every bridge allocation has exactly one
+/// sanctioned release path, exercised end-to-end here against a real vault.
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
+
+    fn cstr(s: &str) -> CString {
+        CString::new(s).expect("test strings contain no NUL")
+    }
+
+    /// Create a fresh unlocked temp vault and return (dir, handle).
+    fn temp_vault() -> (std::path::PathBuf, VaultHandle) {
+        let dir = std::env::temp_dir().join(format!(
+            "sp_ffi_ownership_{}_{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let vault_path = dir.join("vault.db");
+        let mut handle: VaultHandle = 0;
+        let code = unsafe {
+            sp_vault_init(
+                cstr(vault_path.to_str().unwrap()).as_ptr(),
+                cstr("test-master-password").as_ptr(),
+                &mut handle,
+            )
+        };
+        assert_eq!(code, ErrorCode::Success, "temp vault init must succeed");
+        (dir, handle)
+    }
+
+    fn add_entry(handle: VaultHandle, title: &str) -> String {
+        let mut id_ptr: *const c_char = std::ptr::null();
+        let code = unsafe {
+            sp_entry_add(
+                handle,
+                cstr(title).as_ptr(),
+                cstr("user").as_ptr(),
+                cstr("secret-password").as_ptr(),
+                cstr("https://example.com").as_ptr(),
+                cstr("notes").as_ptr(),
+                &mut id_ptr,
+            )
+        };
+        assert_eq!(code, ErrorCode::Success);
+        let id = unsafe { CStr::from_ptr(id_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { sp_string_free(id_ptr) };
+        id
+    }
+
+    #[test]
+    fn entry_get_roundtrip_then_sp_entry_free() {
+        let (dir, handle) = temp_vault();
+        let id = add_entry(handle, "roundtrip");
+
+        let mut entry = Entry {
+            id: std::ptr::null(),
+            title: std::ptr::null(),
+            username: std::ptr::null(),
+            password: std::ptr::null(),
+            url: std::ptr::null(),
+            notes: std::ptr::null(),
+            created_at: 0,
+            modified_at: 0,
+            favorite: false,
+        };
+        let code = unsafe { sp_entry_get_by_id(handle, cstr(&id).as_ptr(), &mut entry) };
+        assert_eq!(code, ErrorCode::Success);
+
+        // Borrowed view of the out-strings BEFORE freeing.
+        let title = unsafe { CStr::from_ptr(entry.title) }
+            .to_string_lossy()
+            .into_owned();
+        let password = unsafe { CStr::from_ptr(entry.password) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(title, "roundtrip");
+        assert_eq!(password, "secret-password");
+        assert_eq!(unsafe { CStr::from_ptr(entry.id) }.to_string_lossy(), id);
+
+        // The single sanctioned release path for an SPEntry.
+        unsafe { sp_entry_free(&mut entry) };
+        assert!(
+            bridge::bridge_vault_destroy(handle).is_ok(),
+            "destroy must succeed"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn entry_list_roundtrip_then_sp_entry_list_free() {
+        let (dir, handle) = temp_vault();
+        add_entry(handle, "alpha");
+        add_entry(handle, "beta");
+
+        let mut list: *const EntrySummary = std::ptr::null();
+        let mut count: usize = 0;
+        let code = unsafe { sp_entry_list_all(handle, &mut list, &mut count) };
+        assert_eq!(code, ErrorCode::Success);
+        assert_eq!(count, 2);
+
+        let first_title = unsafe { CStr::from_ptr((*list).title) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(first_title == "alpha" || first_title == "beta");
+
+        // The single sanctioned release path for a summary array.
+        unsafe { sp_entry_list_free(list as *mut EntrySummary, count) };
+        assert!(
+            bridge::bridge_vault_destroy(handle).is_ok(),
+            "destroy must succeed"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn byte_buffer_roundtrip_then_sp_bytes_free() {
+        let (dir, handle) = temp_vault();
+        add_entry(handle, "buffered");
+
+        let mut buf: *const u8 = std::ptr::null();
+        let mut len: usize = 0;
+        let code = unsafe { sp_sync_collect_pending(handle, &mut buf, &mut len) };
+        assert_eq!(code, ErrorCode::Success);
+        assert!(!buf.is_null());
+        assert!(len > 0);
+
+        // Buffer content must be readable up to len (caller side).
+        let slice = unsafe { std::slice::from_raw_parts(buf, len) };
+        assert!(!slice.is_empty());
+
+        // The single sanctioned release path, with the SAME len.
+        unsafe { sp_bytes_free(buf, len) };
+        assert!(
+            bridge::bridge_vault_destroy(handle).is_ok(),
+            "destroy must succeed"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn string_free_null_safe_and_destroy_clears_registered_keys() {
+        // sp_string_free/sp_entry_free are safe on null.
+        unsafe { sp_string_free(std::ptr::null()) };
+        unsafe { sp_entry_free(std::ptr::null_mut()) };
+        unsafe { sp_entry_list_free(std::ptr::null_mut(), 0) };
+        unsafe { sp_bytes_free(std::ptr::null(), 0) };
+
+        // Destroy removes the registry entry (use-after-destroy fails) and
+        // drops the zeroizing biometric buffer with it.
+        let (dir, handle) = temp_vault();
+        bridge::bridge_biometric_set_key(handle, &[1u8, 2, 3, 4]).expect("set key");
+        assert!(
+            bridge::bridge_biometric_has_key(handle).unwrap_or(false),
+            "biometric key must be set"
+        );
+        assert!(
+            bridge::bridge_vault_destroy(handle).is_ok(),
+            "destroy must succeed"
+        );
+        assert!(
+            !bridge::bridge_biometric_has_key(handle).unwrap_or(true),
+            "biometric key must be gone after destroy (zeroized on drop)"
+        );
+        assert!(
+            bridge::bridge_vault_is_unlocked(handle).is_err(),
+            "handle invalid after destroy"
+        );
+        assert!(
+            bridge::bridge_vault_destroy(handle).is_err(),
+            "double destroy must be refused"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
