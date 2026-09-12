@@ -18,8 +18,8 @@
 
 use crate::bridge::{get_registry, VaultHandle};
 use crate::error::{BridgeError, BridgeResult};
-use sentinelpass_core::vault::VaultManager;
 use sentinelpass_core::vault::backup_ops::RestoreOptions;
+use sentinelpass_core::vault::VaultManager;
 use std::path::Path;
 
 /// Create an authenticated `.spbackup` bundle from the unlocked vault at
@@ -27,7 +27,9 @@ use std::path::Path;
 /// as JSON (entries count, bytes, backup id — non-secret metadata).
 pub fn bridge_backup_create(handle: VaultHandle, output_path: &str) -> BridgeResult<String> {
     if output_path.is_empty() {
-        return Err(BridgeError::InvalidParam("output_path cannot be empty".into()));
+        return Err(BridgeError::InvalidParam(
+            "output_path cannot be empty".into(),
+        ));
     }
 
     let registry = get_registry()
