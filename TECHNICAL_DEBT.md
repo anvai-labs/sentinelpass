@@ -349,7 +349,7 @@ ADR-003 through ADR-010.
 | TD-MOB-06 | iOS biometric state is process-local and unlock is unimplemented | Keychain access-control platform slot surviving restart | 0.12 | Open |
 | TD-MOB-07 | iOS lacks scene lock/privacy cover and safe pasteboard behavior | Lifecycle lock/cover and local-only expiring pasteboard | 0.12 | Open |
 | TD-MOB-08 | iOS export/delete/backup/Credential Provider are incomplete | Authenticated backup/restore and Credential Provider | 0.12 | Open |
-| TD-MOB-09 | Duplicate Swift bridges and FFI buffers lack one proven ownership/zeroization contract | Generated ABI, one bridge, panic containment, zeroizing free | 0.12 | Open |
+| TD-MOB-09 | Duplicate Swift bridges and FFI buffers lack one proven ownership/zeroization contract | Generated ABI, one bridge, panic containment, zeroizing free | 0.12 | In Progress — WBS-801 Done 2026-09-11 (generated ABI: cbindgen include-list synced, header pinned by contract tests + CI drift check); 804/805/820 remain |
 | TD-MOB-10 | Mobile CI does not demonstrate functional native behavior | Simulator/device unlock/CRUD/update/lock/process-death/autofill tests | 0.12 | Open |
 
 ### P1 -- Release and supply chain

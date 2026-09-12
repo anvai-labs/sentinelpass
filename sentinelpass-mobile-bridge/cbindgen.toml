@@ -1,4 +1,14 @@
-# cbindgen configuration for iOS header generation
+# cbindgen configuration for the SentinelPass mobile C ABI (WBS-801)
+#
+# This file is the declared binding generator (ADR-009 rev 2): the checked-in
+# header `include/sentinelpass_bridge.h` is build-generated from it by
+# build.rs. CI regenerates and diffs the header on every mobile-bridge change
+# (drift check), so this config + src/ffi.rs are the single source of truth.
+#
+# NOTE: `[export] include` is ADDITIVE in cbindgen (it names items that must be
+# exported in addition to auto-detected `#[no_mangle] pub extern "C"` items).
+# It is kept in lockstep with the real export surface and pinned by the
+# `header_declares_every_export` test in src/ffi.rs.
 
 language = "C"
 cpp_compat = true
@@ -9,20 +19,21 @@ cpp_compat = true
 "feature = jni" = "__ANDROID__"
 
 [export]
-# Explicitly list items to export
+# The declared C ABI surface (Rust item names; [export.rename] maps types).
+# Must list every exported function and FFI-safe type in src/ffi.rs.
 include = [
-    "SPVaultHandle",
-    "SPEntry",
-    "SPEntrySummary",
-    "SPTotpCode",
-    "SPPasswordAnalysis",
-    "SPErrorCode",
+    "VaultHandle",
+    "Entry",
+    "EntrySummary",
+    "TotpCode",
+    "PasswordAnalysis",
+    "SyncStatus",
+    "ErrorCode",
     "sp_vault_init",
     "sp_vault_destroy",
     "sp_vault_is_unlocked",
     "sp_vault_lock",
     "sp_entry_add",
-    "sp_entry_update",
     "sp_entry_delete",
     "sp_entry_get_by_id",
     "sp_entry_list_all",
@@ -33,6 +44,13 @@ include = [
     "sp_biometric_set_key",
     "sp_biometric_has_key",
     "sp_biometric_remove_key",
+    "sp_biometric_unlock",
+    "sp_sync_get_status",
+    "sp_sync_collect_pending",
+    "sp_sync_apply_entries",
+    # Removed under WBS-807 (ADR-009 rev 2: relay-only mobile sync).
+    "sp_sync_prepare_cloudkit",
+    "sp_sync_prepare_drive",
     "sp_string_free",
     "sp_bytes_free",
 ]
@@ -48,7 +66,7 @@ include = [
 
 [fn]
 # Function naming conventions
-rename_args = "PascalCase"
+rename_args = "None"
 
 # Sort by name
 sort_by = "Name"

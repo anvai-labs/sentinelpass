@@ -655,3 +655,118 @@ pub unsafe extern "C" fn sp_bytes_free(ptr: *const u8, len: usize) {
         alloc::dealloc(ptr as *mut u8, layout);
     }
 }
+
+// ============================================================================
+// ABI contract tests (WBS-801)
+// ============================================================================
+//
+// The cbindgen-generated header (`include/sentinelpass_bridge.h`, produced by
+// build.rs from cbindgen.toml) is the single C ABI contract consumed by Swift.
+// These tests pin the header to the real export surface so the contract can
+// never drift silently; CI additionally regenerates the header and fails on
+// any diff.
+
+#[cfg(test)]
+mod abi_contract_tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn header_text() -> String {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("include")
+            .join("sentinelpass_bridge.h");
+        fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "generated header missing at {:?}: {} (build.rs writes it on every build)",
+                path, e
+            )
+        })
+    }
+
+    /// Extract the names of all `extern "C" fn` exports defined in this file.
+    fn ffi_export_names() -> Vec<String> {
+        let src = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ffi.rs"))
+            .expect("ffi.rs source readable");
+        let mut names = Vec::new();
+        for line in src.lines() {
+            if let Some(idx) = line.find("extern \"C\" fn ") {
+                let rest = &line[idx + "extern \"C\" fn ".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The declared C ABI contract: every function exported to Swift. Must be
+    /// kept in lockstep with cbindgen.toml `[export] include`.
+    const DECLARED_C_ABI: &[&str] = &[
+        "sp_biometric_has_key",
+        "sp_biometric_remove_key",
+        "sp_biometric_set_key",
+        "sp_biometric_unlock",
+        "sp_bytes_free",
+        "sp_entry_add",
+        "sp_entry_delete",
+        "sp_entry_get_by_id",
+        "sp_entry_list_all",
+        "sp_entry_search",
+        "sp_password_check_strength",
+        "sp_password_generate",
+        "sp_string_free",
+        "sp_sync_apply_entries",
+        "sp_sync_collect_pending",
+        "sp_sync_get_status",
+        // Removed under WBS-807 (ADR-009 rev 2: relay-only mobile sync).
+        "sp_sync_prepare_cloudkit",
+        "sp_sync_prepare_drive",
+        "sp_totp_generate_code",
+        "sp_vault_destroy",
+        "sp_vault_init",
+        "sp_vault_is_unlocked",
+        "sp_vault_lock",
+    ];
+
+    #[test]
+    fn declared_abi_matches_ffi_surface() {
+        let mut declared: Vec<String> = DECLARED_C_ABI.iter().map(|s| s.to_string()).collect();
+        declared.sort();
+        assert_eq!(
+            ffi_export_names(),
+            declared,
+            "src/ffi.rs exports and the declared C ABI contract (DECLARED_C_ABI / cbindgen.toml) diverged; update both together"
+        );
+    }
+
+    #[test]
+    fn header_declares_every_export() {
+        let header = header_text();
+        for name in ffi_export_names() {
+            assert!(
+                header.contains(&format!("{}(", name)),
+                "generated header does not declare exported symbol `{}` — the C ABI contract drifted; rebuild to regenerate include/sentinelpass_bridge.h and commit it",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn header_declares_sp_error_code() {
+        let header = header_text();
+        assert!(
+            header.contains("SPErrorCode_InvalidParam"),
+            "generated header must declare the SPErrorCode enum"
+        );
+        assert!(
+            header.contains("} SPErrorCode;"),
+            "generated header must declare the SPErrorCode enum type"
+        );
+    }
+}
