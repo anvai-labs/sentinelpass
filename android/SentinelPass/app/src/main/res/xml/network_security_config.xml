@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WBS-815: deny cleartext traffic globally (ADR-006 — the relay is
+     HTTPS-only). Deliberately NO loopback/dev override on mobile: a debug
+     escape hatch in a network security config would ship in the APK. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>
