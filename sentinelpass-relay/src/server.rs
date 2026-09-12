@@ -271,4 +271,40 @@ mod tests {
         );
         assert_eq!(effective_client_ip("10.0.0.9", None, trusted), "10.0.0.9");
     }
+
+    /// TD-NET-06 (context for the enforcement point): the body-limit layer
+    /// does NOT pre-read bodies — a request WITHOUT credentials is refused
+    /// 401 by auth before any byte is consumed, whatever its size. The
+    /// per-entry payload cap therefore binds at the AUTHENTICATED bounded
+    /// body read (`auth_middleware` → `to_bytes(.., max_payload_size)`),
+    /// which is exactly where an oversized push dies before any handler or
+    /// storage runs. See `auth::tests::oversized_authenticated_body_is_
+    /// refused_before_any_handler`.
+    #[tokio::test]
+    async fn unauthenticated_oversized_body_is_refused_without_reading() {
+        use axum::http::StatusCode;
+        use tower::util::ServiceExt;
+
+        let mut cfg = RelayConfig::default();
+        cfg.max_payload_size = 1024; // tiny limit so the test stays cheap
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), cfg);
+        let app = build_router(state);
+
+        let oversized = "x".repeat(8 * 1024);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/sync/push")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "no credentials: refused before the body is read (no 413, no processing)"
+        );
+    }
 }

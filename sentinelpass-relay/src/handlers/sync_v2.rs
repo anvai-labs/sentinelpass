@@ -684,6 +684,76 @@ mod tests {
         extensions
     }
 
+    /// TD-NET-06: pins the folded "per-entry payload cap == global body
+    /// limit" consistency claim by arithmetic. The body limit bounds the
+    /// ENCODED request; standard base64 strictly SHRINKS on decode
+    /// (decoded = 3/4 of the encoded character count, padding included), so
+    /// a payload that survives a body bounded at `max_payload_size` decodes
+    /// to strictly less than the limit. If the wire encoding ever changes
+    /// to something that expands, or a separate (larger) payload cap is
+    /// introduced, this test breaks first.
+    #[test]
+    fn per_entry_payload_decode_is_strictly_smaller_than_the_body_limit() {
+        let limit = RelayConfig::default().max_payload_size;
+        assert!(limit >= 64, "test expects a realistic body limit");
+
+        for raw in [0usize, 1, 2, 3, 64, 1024, limit / 2, limit] {
+            let encoded = STANDARD.encode(vec![0u8; raw]);
+            let decoded = STANDARD
+                .decode(&encoded)
+                .expect("STANDARD-encoded bytes must decode");
+
+            // 3/4 shrink ratio with padding slack (raw == decoded.len()).
+            assert_eq!(decoded.len(), raw);
+            assert!(
+                decoded.len() * 4 <= encoded.len() * 3,
+                "base64 must not expand beyond the documented 3:4 ratio"
+            );
+
+            // The invariant the relay relies on: whatever fits in the
+            // bounded body decodes strictly under the limit.
+            if encoded.len() <= limit {
+                assert!(
+                    decoded.len() < limit,
+                    "payload of {raw} bytes encodes to {} chars (fits the {limit}-byte \
+                     body) but decodes to {} — decoded payload reached the body limit",
+                    encoded.len(),
+                    decoded.len()
+                );
+            }
+        }
+    }
+
+    /// TD-NET-06: `validate_shape` itself imposes NO separate payload cap —
+    /// the caps are (a) the body-limit layer (bounded request) and (b) the
+    /// mutation-count limit (bounded fan-out). This test pins that a
+    /// mutation whose payload is as large as can possibly fit under the
+    /// default body limit passes shape validation (i.e. the claim is
+    /// "cap == body limit", not "cap == some smaller constant").
+    #[test]
+    fn payload_at_the_body_limit_bound_passes_shape_validation() {
+        let limit = RelayConfig::default().max_payload_size;
+        let payload_len = limit * 3 / 4; // decodes to < limit by the ratio test above
+        let mutation = MutationV2 {
+            mutation_id: Uuid::from_u128(1),
+            vault_id: Uuid::from_u128(2),
+            object_id: Uuid::from_u128(3),
+            entry_type: "credential".to_string(),
+            expected_version: 0,
+            resulting_version: 1,
+            key_epoch: 1,
+            origin_device_id: Uuid::from_u128(4),
+            is_tombstone: false,
+            encrypted_payload: STANDARD.encode(vec![0u8; payload_len]),
+            metadata_mac: STANDARD.encode([0u8; 32]),
+        };
+        assert!(
+            validate_shape(&mutation).is_ok(),
+            "a maximal in-limit payload must pass shape validation (the body-limit \
+             layer is the single enforcement point)"
+        );
+    }
+
     /// A vault with one registered device and initialized counters.
     fn setup(state: &RelayAppState) -> (Uuid, String, Uuid) {
         let device_id = Uuid::new_v4();

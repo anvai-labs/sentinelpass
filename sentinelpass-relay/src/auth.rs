@@ -529,4 +529,64 @@ mod tests {
         assert!(!limiter.check("device-a"));
         assert!(limiter.check("device-b"));
     }
+
+    /// TD-NET-06: the per-entry payload cap IS the global body limit. With
+    /// VALID credentials, a body over `max_payload_size` dies in the
+    /// middleware's bounded read (`to_bytes(.., max_payload_size)`) —
+    /// refused before ANY handler, storage write, or per-mutation
+    /// processing runs. This is the enforcement point the folded-limit
+    /// claim in `handlers::sync_v2` relies on (the outer tower-http limit
+    /// layer wraps the same body; it does not pre-read, so auth's bounded
+    /// read is where oversized pushes actually die).
+    #[tokio::test]
+    async fn oversized_authenticated_body_is_refused_before_any_handler() {
+        use axum::body::Body;
+        use axum::http::StatusCode;
+        use tower::util::ServiceExt;
+
+        let mut cfg = RelayConfig::default();
+        cfg.max_payload_size = 1024; // tiny limit so the test stays cheap
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), cfg);
+        let (device_id, secret_key) = setup_test_device(&state);
+
+        let oversized = vec![0x61u8; 8 * 1024]; // 8 KiB against a 1 KiB limit
+        let auth_header = build_auth_header(
+            &secret_key,
+            device_id,
+            Utc::now().timestamp(),
+            &Uuid::new_v4().to_string(),
+            "POST",
+            "/api/v2/sync/push",
+            &oversized,
+        );
+
+        let app = crate::server::build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/sync/push")
+                    .header("Authorization", auth_header)
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "an oversized body must never reach the push handler"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "credentials were valid — the refusal is the bounded body read"
+        );
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the bounded read maps the length-limit failure to BadRequest"
+        );
+    }
 }
