@@ -4,8 +4,10 @@
 
 | Version line | Status |
 | --- | --- |
-| `0.1.x` | Supported (active release testing) |
-| `<0.1` | Unsupported |
+| `0.11.x` | In development on `develop` (no release tagged yet — not supported) |
+| `0.10.x` | Supported (current release line, active release testing) |
+| `0.9.x` | Security fixes only |
+| `<0.9` | Unsupported — upgrade to a supported line |
 
 ## Reporting a Vulnerability
 

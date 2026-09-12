@@ -1,6 +1,6 @@
 # Technical Debt & Roadmap
 
-Last updated: 2026-09-05 (v0.8.2)
+Last updated: 2026-09-11 (0.11 cycle — Phase 7 release assurance)
 
 ---
 
@@ -194,6 +194,7 @@ Every public function in vault.rs has a `///` doc comment. The docs are brief on
 | 2026-09-03 | v0.8.1 | Credential registry (ADR-001) + master-password rotation (ADR-002), single schema v5; adversarial-review fix slice (pair-join epoch threading, biometric epoch-aware unlock, lockout misclassification); CI trigger dedup (drop redundant push:[main,develop]) | #78,#80,#85,#86,#87,#88,#89 |
 | 2026-09-07 | v0.10 (WBS-412/413/708) | File-permission hardening: `platform.rs` owner-only helpers wired at every sensitive creation/open site (vault db+`WAL`/`SHM`, epoch sidecar, IPC token, grants, JSON/CSV/KeePass exports, data/config/audit dirs); typed symlink/type/owner validation (WBS-413); debug-unlock artifacts removed/gated: `unlock_debug_log` release-no-op, unlock-flow `console.log`s dropped from shipped UI bundles | worktree branch |
 | 2026-09-09 | v0.11 | 0.11 cycle: authenticated backup + verified restore (WBS-416/417/418 — `.spbackup` format, HKDF-over-DEK manifest MAC, atomic single-rename restore with fail-closed flags, fault-injection sweeps, v6/v7/v8 fixture restores); desktop hardening (WBS-706/707/709 — WHATWG URL parsing + HTTP consent, least-privilege Tauri capabilities + CSP, native expiring clipboard). Integration adversarial review: zero blockers, 2 Majors fixed (corrupt-live-file restore fallback; Wayland clipboard). Windows lesson: SQLite opens corrupt files lazily — classify treats post-open read failures as unknowable | #126 |
+| 2026-09-11 | v0.11 (WBS-909/910/913) | Phase 7 stage A1: governed dependency-exception lifecycle (TD-REL-04 closed — `.cargo/audit.toml` single audit-policy source with owner/exposure/expiry metadata, full register in `docs/DEPENDENCY_EXCEPTIONS.md`, two dead ignores removed after raw-audit verification, security.yml inline `--ignore` dropped); relay rate-limiter window math clock-injected and both window-reset tests running UNIGNORED on all CI platforms via a forward-only fake clock (TD-REL-06 closed; minute-refill test no longer sleeps); docs reconciliation (SECURITY.md supported versions 0.9/0.10/0.11, matrix baseline → 0.11 + backup row → Implemented per TD-ROB-12, relay/dependency row evidence, CLAUDE.md workflow list corrected, SECURITY_ARCHITECTURE program-phase roadmap + new sync-v2 §12 and desktop-hardening §13 sections + stale SecureBuffer/padding claims fixed) | worktree branch |
 
 ## v0.8.1 Session Log (2026-09-03)
 

@@ -1,9 +1,13 @@
 # PASSWORD MANAGER - SECURITY ARCHITECTURE SPECIFICATION
 
-> **Status Note (2026-09-04):** This document contains a mixture of implemented
+> **Status Note (2026-09-04, updated 2026-09-11):** This document contains a mixture of implemented
 > controls and target-state architecture. The 2026-09-04 review identified new
 > release-blocking work in recovery, authenticated ciphertext context, sync, IPC,
-> mobile, backup, and release assurance. Use
+> mobile, backup, and release assurance. Remediation program Phases 3 (daemon
+> authority, §11), 4 (sync protocol v2, §12), and 5 (desktop hardening, §13)
+> have since landed their implementation stages; sync v2 remains EXPERIMENTAL
+> (not approved for production credentials) and the release-assurance phase
+> (WBS-900) is in progress. Use
 > `docs/SECURITY_STATUS_MATRIX.md` for current implementation evidence and
 > `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md` plus ADR-003 through ADR-010 for
 > the active remediation design. A section in this document must not be treated as a
@@ -215,7 +219,7 @@ For each credential entry:
 Minimum blob size: 29 bytes. Encrypted with vault DEK (AES-256-GCM). Each blob gets a unique random nonce.
 
 **Payload Padding:**
-Plaintext is padded to fixed bucket sizes (256, 512, 1024, 2048, 4096, 8192 bytes) before encryption. Format: `len(8-bytes LE) || data || zero-padding`. This prevents metadata leakage through payload size analysis.
+A padding helper exists (fixed bucket sizes 256–8192 bytes, `len(8-bytes LE) || data || zero-padding`), but it is **NOT used by the production sync path** — payload sizes leak today (TD-NET-07, tracked for 0.11). Do not rely on, or claim, metadata-length protection until the padding profile is integrated and tested.
 
 **Pairing Flow:**
 ```
@@ -506,7 +510,7 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 |----------|------|--------|-------|
 | **Memory** | Zeroization | ✅ | `zeroize` crate on all secrets (`crypto/zero.rs`) |
 | **Memory** | Zeroized buffers | ⚠️ | `zeroize` on drop; memory locking was removed with the unused `memsec` dependency — no swap protection today |
-| **Memory** | No string copies | ✅ | `SecureBuffer` in `crypto/keyring.rs` |
+| **Memory** | Owned secrets in `Zeroizing` | ⚠️ | `Zeroizing` on key/password types (`SecureBuffer`/`crypto/zero.rs` were removed); wire/IPC/export structs still carry `String` secrets in places (SR-CRYPTO-004 sweep pending) |
 | **Timing** | Constant-time compare | ✅ | `subtle` crate for password checks |
 | **Timing** | Fixed delay on auth | 📋 | Not yet implemented |
 | **Brute Force** | Exponential backoff | ⚠️ | Simple backoff, not exponential |
@@ -526,9 +530,32 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 
 ---
 
-## 8. DEVELOPMENT ROADMAP
+## 8. ROADMAP STATUS
 
-> **Progress as of 2026-02-27:** Phases 1-7 substantially complete. Phase 8 (hardening) in progress.
+Two roadmaps exist; do not conflate them.
+
+### 8.1 Security remediation program (authoritative, 2026-09-04 plan)
+
+The phases below are the security remediation program's phases (see
+`docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`, `docs/WBS_SECURITY_REMEDIATION_2026-09-04.md`,
+and ADR-003..010). Per-control evidence lives in `docs/SECURITY_STATUS_MATRIX.md`.
+
+| Program phase | Content | Status |
+|-------|---------|-------|
+| Foundation (WBS-100/200) | Repository hygiene, auditability, baseline docs | ✅ Complete |
+| KDF/envelope/slots (WBS-300/400, ADR-004/005) | Hard KDF bounds, envelope v2 + AAD identity binding, recovery/slot registry, file permissions, audit chain, transactional units of work | ✅ Complete (0.9–0.10) |
+| Authenticated backup (WBS-416/417/418, ADR-008) | `.spbackup` snapshot + MAC-first verified restore | ✅ Complete (0.11, TD-ROB-12 closed) |
+| **Phase 3 — daemon authority (WBS-500s, ADR-007)** | Daemon as sole live DEK owner/writer; application-service IPC boundary; capability gate; exclusive maintenance lock; bounded/session-keyed IPC | ✅ Implementation complete (see §11) |
+| **Phase 4 — sync protocol v2 (WBS-600s, ADR-006)** | CAS mutation protocol, durable idempotency, conflict preservation, authenticated metadata/lineage, epoch gates, high-entropy pairing, v1 retirement | ✅ Implementation complete, 🧪 **Experimental — not approved for production credentials** (see §12) |
+| **Phase 5 — desktop hardening (WBS-700s)** | Autofill origin gate + per-site grants, field/form-bound fill + ambiguity chooser, extension secret TTL/scrub, shared extension pipeline + real-daemon E2E, Windows Hello-bound release | ✅ Complete with documented gates (see §13) |
+| Mobile (WBS-800s, ADR-009) | Android/iOS bridges, platform keystore, autofill | 📋 In parallel stream (0.12) |
+| **Phase 7 — release assurance & 1.0 (WBS-900, ADR-010)** | Tag-time security gates, fuzz targets, SBOM, signing/notarization, drills, exception lifecycle, docs reconciliation | ⚠️ In progress (0.11 → 1.0 RC) |
+
+### 8.2 Historical feature roadmap (2026-02-27 snapshot, superseded for status)
+
+> **Snapshot as of 2026-02-27.** Kept for history; the phase NUMBERS here are
+> the old feature-build phases (SSH, biometrics, …), NOT the remediation
+> program phases above. Claim discipline: see the matrix, not this table.
 
 | Phase | Status | Notes |
 |-------|--------|-------|
@@ -537,74 +564,18 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 | **Phase 3: Browser Extension** | ✅ Complete | Chrome MV3 + Firefox MV2 with sender validation |
 | **Phase 4: SSH Support** | ✅ Complete | Storage, CLI, agent integration implemented |
 | **Phase 5: Biometrics** | ⚠️ Partial | macOS Touch ID + Windows Hello implemented; master password is not stored for biometric unlock |
-| **Phase 6: Advanced Features** | ⚠️ Partial | TOTP ✅, KeePass import 📋, audit log ✅ |
-| **Phase 7: Multi-Device Sync** | ✅ Complete | E2E sync, relay, pairing, Ed25519 all implemented |
-| **Phase 8: Hardening & Testing** | ⚠️ In Progress | Security hardening (Phase 1) complete, audit pending |
-
-### Detailed Breakdown
-
-#### Phase 1: Core Foundation ✅
-1. ✅ Project setup, dependencies
-2. ✅ Crypto module implementation (Argon2id, AES-256-GCM)
-3. ✅ Database schema and migrations (refinery)
-4. ✅ Basic CLI for vault operations
-5. ✅ Unit tests for crypto (276 tests passing)
-
-#### Phase 2: Desktop Client ⚠️
-1. ✅ Tauri UI development
-2. ✅ Vault CRUD operations
-3. ⚠️ Entry management UI (partial)
-4. ⚠️ Search functionality (basic only)
-5. ✅ Clipboard integration
-
-#### Phase 3: Browser Extension ✅
-1. ✅ Native messaging protocol
-2. ✅ Chrome extension (MV3)
-3. ✅ Domain matching logic (daemon-side validation)
-4. ✅ Autofill injection
-5. ✅ Phishing protection (sender URL validation)
-
-#### Phase 4: SSH Support ✅
-1. ✅ SSH key storage (RSA, Ed25519, ECDSA)
-2. ✅ ssh-agent integration
-3. ✅ Key loading functionality
-
-#### Phase 5: Biometrics ⚠️
-1. ✅ macOS Touch ID (LocalAuthentication framework)
-2. ✅ Windows Hello (Windows Credentials API)
-3. ✅ Biometric unlock stores DEK material instead of master password
-4. 📋 Platform-native non-exportable DEK wrapping / enrollment invalidation
-5. 📋 Linux support (planned)
-
-#### Phase 6: Advanced Features ⚠️
-1. ✅ TOTP authenticator (SHA1, SHA256, SHA512)
-2. 📋 KeePass import/export (planned)
-3. ✅ Audit log (encrypted events)
-4. ✅ Firefox extension (MV2)
-
-#### Phase 7: Multi-Device Sync ✅
-1. ✅ E2E encrypted sync engine (push/pull with LWW)
-2. ✅ Relay server (Axum + SQLite, zero-knowledge)
-3. ✅ Device pairing (HKDF-SHA256 + Ed25519)
-4. ✅ Device revocation
-5. ✅ Metadata padding (fixed buckets)
-
-#### Phase 8: Hardening & Testing ⚠️
-1. ✅ Phase 1 security hardening complete (see GAP_REVIEW)
-2. ✅ Relay tests (38 tests)
-3. ✅ Extension debug log gating
-4. ✅ Windows named pipe IPC
-5. 📋 Security audit (planned)
-6. 📋 Penetration testing (planned)
+| **Phase 6: Advanced Features** | ⚠️ Partial | TOTP ✅, KeePass import ✅, audit log ✅ |
+| **Phase 7: Multi-Device Sync** | ✅ Complete (v1) | Superseded by sync v2 (program Phase 4, §12); the v1 LWW engine is retired on the relay (410) |
+| **Phase 8: Hardening & Testing** | ⚠️ In Progress | Continued as the remediation program |
 
 ---
 
 ## 9. COMMON MISTAKES TO AVOID
 
 1. **Never log secrets** - Use safe logging that redacts sensitive data
-2. **Never use `String` for passwords** - Always use `SecureBuffer`
+2. **Never keep passwords in plain `String`s you own** - Use `Zeroizing` for owned secret buffers (`SecureBuffer` was removed with `crypto/zero.rs`); borrowed `&[u8]` is fine with caller-side zeroization
 3. **Never compare passwords with `==`** - Use constant-time compare
-4. **Never store keys in environment variables** - Use locked memory or OS keystore
+4. **Never store keys in environment variables** - Use the OS keystore or wrapped-at-rest key material (memory locking does not exist in this codebase)
 5. **Never reuse nonces** - Always generate random per-entry nonce
 6. **Never skip authentication tag validation** - GCM tag is mandatory
 7. **Never write plaintext to disk** - Even for debugging
@@ -727,3 +698,129 @@ cross-process invariant for the flagged window (ADR-007 migration). The
 daemon does not claim sole-writer authority until the compat env path is
 removed from shipped binaries (1.0); the daemon-owned summary index
 (ADR-005) tolerates no legacy writers, which bounds the window.
+
+## 12. SYNC PROTOCOL V2 (program Phase 4, ADR-006)
+
+> **Status: 🧪 Experimental.** Sync — v1 or v2 — is NOT approved for
+> production credentials. Per-control evidence: `docs/SECURITY_STATUS_MATRIX.md`
+> (Sync rows); user-facing contract: `docs/SYNC.md`.
+
+### 12.1 Correctness model (replaces v1 LWW)
+
+- **CAS, not clocks.** A mutation applies iff its `expected_version` equals
+  the stored current version of its object (0 = create). Same-version /
+  higher-timestamp overwrites — the v1 clock-gameable LWW — do not exist in
+  v2. Version steps and epoch jumps are sanity-bounded.
+- **Deterministic identity.** `mutation_id` is derived from
+  (vault, object, resulting version), so a retry of the SAME edit is
+  idempotent and a different edit can never collide with it.
+- **Durable idempotency.** Every mutation gets a result row committed in the
+  SAME SQLite transaction as the object/log/sequence writes; a duplicate
+  request is replayed its ORIGINAL stored result (aged-out duplicates are
+  re-evaluated by the CAS guard and rejected, never replayed as data).
+- **Ack-gated outbox.** The client removes a pending mutation only after the
+  client-verified `Applied` ack; lost responses complete on retry without
+  wedging.
+- **Conflict preservation.** Concurrent alternatives are stored durably
+  (schema v12 `sync_conflicts`) with keep-local / take-remote resolution
+  surfaced through the service contract and CLI — no silent overwrite.
+- **Typed sequences.** `DeviceSequence`, `ObjectVersion`, and `ServerCursor`
+  are distinct types (no cross-assignable integers).
+
+### 12.2 Authentication, lineage, and epoch gates
+
+- **Authenticated metadata.** Every mutation carries a DEK-derived
+  `metadata_mac` over its routing metadata; the relay verifies the MAC and
+  recomputes the deterministic id on apply — tampered metadata is
+  dead-lettered, never fanned out. The relay cannot compute or invert the
+  MAC (zero-knowledge preserved).
+- **Epoch gates both directions.** The relay rejects mutations below the
+  vault's forward-only epoch high-water (bounded jump so one device cannot
+  brick peers with a huge claim); clients dead-letter pulled mutations below
+  their LOCAL epoch (WBS-614). Rotation therefore revokes stale-DEK sync at
+  both ends.
+- **Device revocation** is checked on every request (Ed25519 middleware).
+- **Transport policy.** Rustls client; `validate_relay_url` (HTTPS, no
+  userinfo, loopback-HTTP dev gate) plus a bounded same-origin redirect
+  policy (max 3 hops, TLS-downgrade and cross-origin refusals, target
+  re-validation; WBS-617). The relay trusts `X-Forwarded-For` ONLY from
+  configured trusted proxies (WBS-618).
+
+### 12.3 Pairing v2
+
+The 256-bit CSPRNG pairing secret is the SOLE root (the old 6-digit code is
+gone from v2): the bootstrap payload is encrypted under HKDF(S), the relay
+stores only Argon2id(S) as a verifier, retrieval is gated on KNOWLEDGE of S
+(POST body, one-use, TTL, attempt-limited backoff), and transcript digits
+exist only for humans to compare. Registration is bound to the pairing via a
+proof staged at retrieval. (ADR-006; v1 endpoints are retired — WBS-624: the
+relay 410-rejects v1 routes by default, an authoritative-device claim mints
+exactly one fresh vault per origin, and clients gate v1-era configs.)
+
+### 12.4 Known residuals (tracked, not claimed)
+
+- Pull pages are not atomic with the cursor; unappliable blobs
+  skip-and-advance (WBS-607 dead-lettering open).
+- Payload padding is not integrated (TD-NET-07); limit-set unification is
+  WBS-621 (TD-NET-06).
+- Chaos fuzzing beyond the deterministic TV-006 three-device model
+  (concurrent-edit resolution, lost-response recovery) remains open — see
+  `fuzz/` for the sync-mutation parser target.
+
+## 13. DESKTOP HARDENING (program Phase 5)
+
+> Per-control evidence: `docs/SECURITY_STATUS_MATRIX.md` rows under
+> Extension/lifecycle. All items below are Implemented unless noted.
+
+### 13.1 Autofill origin gate and per-site grants (WBS-711/712)
+
+- The daemon default-DENIES autofill delivery for plain-HTTP and
+  unverifiable origins: the browser-provided `page_url` is WHATWG-parsed and
+  delivery is bound to the validated host (typed denial reasons; the
+  installation capability does NOT bypass the origin gate).
+- Site access is an explicit, EXACT-host user grant (`site_permissions.json`,
+  0600, popup-only management, immediate revoke); manifests moved to
+  `optional_host_permissions` so installation requests no hosts upfront.
+
+### 13.2 Field/form safety (WBS-713/714/715)
+
+- Fill is bound to the requested field and its form (never page-first),
+  with fillable/visible verification; autocomplete semantics drive field
+  classification (new-password is never silently filled) and password-change
+  pairs surface an Update prompt.
+- Multiple matches surface an explicit username-only chooser with a
+  post-pick exact-username daemon fetch; unknown picks never fall back to a
+  guess; cross-origin frames stay denied by default (documented product
+  decision).
+
+### 13.3 Extension secret lifetime (WBS-716)
+
+Pending payloads live ONLY in the background worker (content scripts hold no
+session secrets), every entry is TTL-stamped (30 s / 2 min / 10 min per
+class) via a tested pure registry, `chrome.alarms` sweeps unstamped/expired
+entries fail-closed, and vault lock purges everything with a content-script
+scrub broadcast. Inventory: `DEBUGGING.md` + `SECRET_LIFETIME_AUDIT.md`.
+
+### 13.4 Shared extension pipeline and cross-boundary E2E (WBS-717/718/719)
+
+- One shared source set and one canonical build pipeline
+  (`scripts/build-extension.mjs`) with byte-parity asserted across targets
+  on every build AND in CI; manifest version/permission parity, the derived
+  stable Chrome ID, and the Firefox gecko ID are pinned by tests.
+- Real-backend Chromium E2E (`daemon-autofill.spec.ts`) drives
+  extension → native host → daemon → vault in an isolated-HOME install:
+  HTTPS fill, HTTP default-deny + host-grant flow, chooser, capture, and
+  locked-vault negatives. Firefox is NOT automatable under Playwright
+  (documented gap); parity rides the byte-parity pipeline gate.
+
+### 13.5 Windows Hello-bound biometric release (WBS-710) — ⚠️ gated
+
+The DEK is sealed under HKDF of a per-vault TPM/Hello KeyCredential
+signature (the release signs a stored challenge; GCM-authenticated,
+non-secret at-rest blob; enable-time determinism self-check; legacy
+verify-then-read migration). LOAD-BEARING UNVERIFIED PREMISE: Microsoft's
+docs describe `RequestSignAsync` as RSA-PSS (randomized) vs community
+RS256/PKCS1 — if PSS, the enable self-check refuses (fail-closed; biometric
+simply unavailable, master-password fallback intact). **HARDWARE VALIDATION
+REQUIRED before shipping this feature**; everything Windows is type-checked,
+never executed.

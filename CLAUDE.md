@@ -448,17 +448,29 @@ sqlite3 ~/Library/Application\ Support/PasswordManager/vault.db ".schema"  # mac
 
 ## CI/CD Pipeline
 
-The project uses GitHub Actions (`.github/workflows/rust.yml`) with 6 jobs:
+Branch protection on `main`/`develop` requires ONLY the **Gate** check from
+`.github/workflows/ci-gate.yml`. The Gate aggregates every other workflow:
+any failing check on the PR head SHA fails it, and it enforces a fail-closed
+expectation table (a diff touching a workflow's paths must see that
+workflow's anchor check green — see the `expect` list in `ci-gate.yml`; keep
+it in sync when adding or renaming PR-triggered workflows or jobs).
+
+`.github/workflows/rust.yml` (Rust CI) runs on every non-docs PR with 6 jobs:
 - **format** - `cargo fmt --all -- --check`
 - **clippy** - `cargo clippy --workspace --all-targets -- -D warnings`
+- **web_tdd** - TypeScript typecheck + Vitest tests with coverage
+- **build** - `cargo build --release --locked` for CLI/daemon/host/UI (matrix: ubuntu/windows/macos)
 - **test** - `cargo test --workspace --verbose` (matrix: ubuntu/windows/macos)
 - **coverage** - Rust LLVM coverage with 50% minimum threshold
-- **web_tdd** - TypeScript typecheck + Vitest tests with coverage
-- **build** - `cargo build --release --workspace` (matrix: ubuntu/windows/macos)
 
-Additional workflows: `release.yml` (tagged builds), `security.yml` (cargo audit), `extension-e2e.yml`, `release-preflight.yml`.
+Other workflows:
+- `security.yml` - cargo audit (policy: `.cargo/audit.toml`, register: `docs/DEPENDENCY_EXCEPTIONS.md`), npm audit (root + extension e2e), Trivy (PR-only)
+- `release.yml` - tag-driven (`v*`) release builds + crates.io publish of `sentinelpass-protocol`; PR runs are preflight only
+- `build-all.yml`, `android.yml`, `ios.yml`, `extension-e2e.yml` - path-filtered PR workflows
+- `chrome-extension-release.yml` - `chrome-v*` tags
+- `public-overflow-runner-smoke.yml` - self-path pushes + manual dispatch
 
-All checks must pass before merging to main branch.
+All checks must pass (via the Gate) before merging to main branch.
 
 ## Git Workflow
 

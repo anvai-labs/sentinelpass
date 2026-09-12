@@ -1,8 +1,8 @@
 # Security Status Matrix
 
-**Last reviewed:** 2026-09-04
+**Last reviewed:** 2026-09-11
 
-**Workspace baseline:** 0.8.0
+**Workspace baseline:** 0.11 (development cycle; last tagged release 0.10.0)
 
 **Plan:** `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`
 
@@ -28,7 +28,7 @@ Status definitions:
 | Metadata confidentiality | Partial | Secret fields encrypted; domain mappings sealed (`domain_mappings.domain_enc` + keyed tag lookups, schema v8, WBS-306); credential registry uses keyed equality/MAC concepts; audit identifier fields opaqued at record time under DEK-derived keys (WBS-414, PR #107 — negative tests prove raw identifiers never appear) | SSH/TOTP metadata (titles, usernames, host labels) still expose identity metadata | 0.10 |
 | Secret memory lifetime | Partial | `Zeroizing` used for selected key/password types | IPC, sync, native messaging, export, FFI, Swift/Kotlin, UI/DOM, and intermediate buffers remain incompletely covered | 0.10 |
 | Audit trail | Implemented | Structured events with credential/registry identity fields opaqued (WBS-414); HMAC-SHA256 hash chain under a DEK-derived key (keyless SHA-256 for locked-period records) with size-bounded rotation, retention pruning, and a public verifier (`verify_audit_chain` → `AuditVerifyReport`, key-bound; WBS-415, PR #107); `AuditKeyLease` scope guard bounds chain-key lifetime (installed on unlock/create, cleared on lock/error) | Verification is library-level only (no CLI/UI surface yet); keyless locked-period records verify structure, not authenticity, by design; chain-key availability during locked-period verification is limited to structural checks | 0.10 |
-| Authenticated portable backup and restore | Planned | Import/export and platform backup scaffolding | No atomic authenticated bundle, historical restore matrix, or routine recovery drill | 0.10 / ADR-008 |
+| Authenticated portable backup and restore | Implemented | TD-ROB-12 closed 2026-09-08 (PR #126): `.spbackup` bundles — VACUUM INTO snapshot, HKDF-over-DEK manifest MAC (constant-time, MAC-first restore), digest/identity/epoch/slot binding, bounds-before-allocation; restore = staged validation + single-rename swap + sequenced sidecar re-baseline with fail-closed flags and the retained `.pre-restore` net; fault-injection sweeps prove complete-old/complete-new; CLI `backup create/restore` under the exclusive maintenance lock | Routine recovery drill and installed-artifact restore drills remain (WBS-905, 1.0); desktop-UI backup flow not built (CLI-only) | 0.10 / ADR-008 |
 | Database migrations | Partial | Schema v7 migrations and tests exist (v6 identity, v7 slot registry; idempotent column adds, BEGIN IMMEDIATE race tolerance) | Envelope-v2 migration, complete historical fixtures, interruption tests, and fail-closed newer-schema behavior are missing | 0.9-0.10 |
 | Transactional multi-table persistence | Partial | SQLite transactions used in selected paths | Sync apply, mappings, registry, cursor/outbox, and relay mutations are not one proven unit of work | 0.10-0.11 |
 | Local external-tool grants | Implemented | `external_secret_access.rs`; daemon/CLI/audit tests | Scoped read/write grant model exists; richer approval UX and IPC peer/capability hardening remain | 0.10 UX |
