@@ -49,6 +49,9 @@ pub struct NativeMessage {
     /// WBS-712/715: exact-username disambiguator for get_credential.
     #[serde(default)]
     pub username: Option<String>,
+    /// Extension-computed save provenance (WBS-714), logged by the daemon.
+    #[serde(default)]
+    pub save_trigger: Option<String>,
     #[serde(default)]
     pub data: Option<CredentialData>,
 }
@@ -155,6 +158,7 @@ impl NativeMessagingHost {
                     IpcMessage::GetTotpCode {
                         domain,
                         page_url: message.page_url.clone(),
+                        username: message.username.clone(),
                     }
                 } else {
                     Self::send_error(request_id, "Missing domain parameter")?;
@@ -171,6 +175,7 @@ impl NativeMessagingHost {
                         password: cred_data.password.clone(),
                         // Prefer explicit URL, fallback to title for older extension payloads.
                         url: cred_data.url.clone().or_else(|| cred_data.title.clone()),
+                        save_trigger: message.save_trigger.clone(),
                     }
                 } else {
                     Self::send_error(request_id, "Missing domain or data parameter")?;

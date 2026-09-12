@@ -6,13 +6,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 
+// WBS-717: the browser-extension .js artifacts are OWNED by
+// `npm run ext:build` (tsconfig.extension.json emit + esbuild bundle) —
+// this postprocess must not re-emit/sanitize them (web:build's tsc emit
+// produced ESM output that silently broke content-script injection).
 const emittedFiles = [
-  'browser-extension/chrome/background.js',
-  'browser-extension/chrome/content.js',
-  'browser-extension/chrome/popup.js',
-  'browser-extension/firefox/background.js',
-  'browser-extension/firefox/content.js',
-  'browser-extension/firefox/popup.js',
   'sentinelpass-ui/app.js',
   'sentinelpass-ui/credential-types.js',
   'sentinelpass-ui/state.js',

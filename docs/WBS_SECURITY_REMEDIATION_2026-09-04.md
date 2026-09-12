@@ -1283,9 +1283,46 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   over a real vault, grant-requires-capability negative, 86-case vitest suite
   green.
 - **WBS-713 — Validated site/frame/form/field binding.** SR-CLIENT-003, SR-EXT-002,
-  TD-CLIENT-06. Est 3d.
-- **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06. Est 2d.
-- **WBS-715 — Ambiguity chooser.** TD-CLIENT-06. Est 2d.
+  TD-CLIENT-06.
+  Est 3d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — SITE binding: the
+  daemon delivers only to the scheme-validated host parsed from the
+  browser-provided URL (WBS-711). FRAME binding: cross-origin iframe
+  requests stay default-denied in the background
+  (validateSenderDomainContext) and the claimed domain must equal the
+  frame host. FORM/FIELD binding: the fill targets the REQUESTED field
+  (the one whose autofill button was clicked), verified still-connected +
+  fillable (login semantics via the field classifier), falling back to the
+  first visible fillable field — never the page-first querySelector — and
+  the username lookup is scoped to the same form. Pure decision logic in
+  shared modules (`field-semantics.ts`, `credential-choice.ts`) with unit
+  suites; artifacts byte-parity; typecheck + 105 vitest cases green.
+- **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the page's own
+  `autocomplete` attribute is the primary field signal
+  (`username`/`email`/`current-password`/`new-password`/`one-time-code`;
+  text hints only break ties; `autocomplete="off"` is deliberately ignored
+  for password fields per browser convention). Autofill targets
+  current-password fields only — new-password fields are never silently
+  filled. Password-CHANGE pairs (existing filled current-password +
+  new-password) are recognized as a form class: the inline prompt reads
+  "Update Password?" / "Update", the notification text matches, and the
+  save carries `save_trigger: 'password_change'`. Text heuristics remain
+  only as a fallback for pages that declare nothing (and two un-attributed
+  password fields now classify as login, not guessed new-account). 13-case
+  pure suite for the classifier + form kinds.
+- **WBS-715 — Ambiguity chooser.** TD-CLIENT-06.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — autofill flow is now
+  list -> explicit choice -> fetch: `list_domain_credentials` (origin-bound
+  by 711) feeds a pure decision (zero -> "none" notice; one -> direct
+  fill; multiple -> an explicit chooser overlay listing usernames/titles
+  only, Esc/cancel closes, and the SECRET is requested only after the
+  user picks, via the exact-username filter shipped for the popup Pass
+  fix). A picked username that is not among the candidates never falls
+  back to first-match. Decision logic unit-tested
+  (`credential-choice.test.ts`); popup Pass uses the same disambiguator.
 - **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07.
   Est 2d.
   **Status:** Done (2026-09-10, Phase 5 remainder) — full inventory
@@ -1311,10 +1348,63 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
   (provenance enforcement, not convention); the minute alarm now also
   purges + scrubs when the vault was locked OUTSIDE the extension (daemon
   auto-lock/CLI/UI have no push channel).
-- **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08. Est 3d.
-- **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
+- **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08.
+  Est 3d.
+  **Status:** Done (2026-09-10/11, Phase 5 remainder) — ONE pipeline and ONE
+  source set. `scripts/build-extension.mjs` compiles the shared TypeScript
+  sources once (repo-local tsc via `tsconfig.extension.json`; the content
+  script is esbuild-BUNDLED into a single classic IIFE — content scripts are
+  classic scripts, and the ES `import` syntax the previous artifacts carried
+  made injection fail silently; discovered by the 719 suite) and copies the
+  artifacts byte-identically into chrome/ and firefox/. The firefox/*.ts
+  copies are DELETED (single source; the stale pre-hardening copies were a
+  live re-introduction trap). Gate: `tests/web/extension-pipeline.test.ts`
+  asserts no per-target .ts sources, byte-parity of every artifact across
+  targets, and byte-exact reproduction through a fresh pipeline build.
+  Verified: the pipeline reproduces the previously checked-in artifacts
+  byte-for-byte (zero diff at introduction).
+- **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08.
+  Est 1.5d.
+  **Status:** Done (2026-09-11, Phase 5 remainder) —
+  `tests/web/manifest-parity.test.ts` runs with the unit suite (CI: test:ts):
+  chrome/firefox manifests must agree on version/name/permissions/host
+  permissions/content scripts; the Chrome stable ID is DERIVED from the
+  manifest key (SHA-256 → a-p) and must appear in install.sh, install.ps1,
+  and the Tauri registration; ONE firefox gecko ID must appear in the
+  manifest and all three native-host sources; the host name
+  `com.passwordmanager.host` must match across the extension source, the
+  manifest template, both installers, and the Tauri constant. The gate
+  found and this commit fixes two live drifts: the firefox manifest gecko
+  ID (`@sentinelpass.org`) did not match the ID every native-host source
+  allows (`@localhost` — Firefox native messaging was dead), and
+  install.ps1 defaulted `$ExtensionId` to empty (a default run wrote the
+  YOUR_EXTENSION_ID_HERE placeholder, forbidding Chrome).
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.
   Est 4d.
+  **Status:** Done (2026-09-11, Phase 5 remainder) — REAL-backend E2E
+  (`browser-extension/e2e/tests/daemon-autofill.spec.ts` + harness): an
+  ISOLATED installation (temp HOME / XDG_RUNTIME_DIR — every path the
+  daemon, CLI, native host, and Chromium derive is confined to a temp dir)
+  with the REAL daemon (`--start-locked`, unlocked through the CLI), REAL
+  native host (manifest installed into the Playwright profile; stable
+  unpacked extension ID asserted), and real Chromium. Flows: HTTPS autofill
+  fills the bound field; HTTP default-deny shows the typed 711 toast; after
+  a host-driven exact-site grant (WBS-712; driven through the REAL host
+  stdio protocol because Chrome's optional-permission prompt is not
+  Playwright-automatable) the same page delivers through the explicit
+  chooser; the chooser (closed shadow root, trusted-input picks) fills the
+  picked account; a login submit is captured into background-held,
+  TTL-stamped session state; a registration submit's inline Save writes
+  through the daemon (verified via the CLI against the same vault); a
+  locked vault delivers nothing. Found + fixed by building this suite: the
+  content script never injected under ESM emit (classic-script bundling,
+  WBS-717), a top-level-const-after-bootstrap crash killed init on form
+  pages, the firefox gecko ID drift (WBS-718), popup-as-tab senders were
+  misclassified, and install.ps1's empty ExtensionId default. Firefox E2E
+  remains an honest gap (Playwright cannot load extensions in stock
+  Firefox) — documented; Firefox consumes the same byte-parity artifacts,
+  daemon gates, and unit suites. CI: extension-e2e.yml now builds the
+  daemon/host/CLI and runs this suite under xvfb.
 
 ## 9. Phase 6 — mobile (WBS-800, release 0.12 beta)
 

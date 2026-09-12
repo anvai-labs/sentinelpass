@@ -241,6 +241,23 @@ impl DaemonVault {
     /// Tries an indexed lookup via `domain_mappings` first, then falls back
     /// to a full entry scan.
     pub async fn get_totp_code(&self, domain: &str) -> Result<Option<TotpCodeResponse>> {
+        self.get_totp_code_for_username(domain, None).await
+    }
+
+    /// TOTP delivery optionally narrowed to ONE exact username
+    /// (case-insensitive) — the account bound to a password fill (WBS-715
+    /// review fix F4): without it, the first TOTP-bearing entry for the
+    /// domain would be delivered regardless of the picked account.
+    pub async fn get_totp_code_for_username(
+        &self,
+        domain: &str,
+        username: Option<&str>,
+    ) -> Result<Option<TotpCodeResponse>> {
+        let username_matches = |candidate: &str| match username {
+            None => true,
+            Some(want) => want.trim().eq_ignore_ascii_case(candidate.trim()),
+        };
+
         let vault_guard = self.vault.lock().await;
         let vault = match vault_guard.as_ref() {
             Some(v) => v,
@@ -252,6 +269,9 @@ impl DaemonVault {
         if let Some(host) = normalize_host(domain) {
             let indexed = vault.find_entries_by_domain(&host)?;
             for entry in &indexed {
+                if !username_matches(&entry.username) {
+                    continue;
+                }
                 if let Some(entry_id) = entry.entry_id {
                     match vault.generate_totp_code(entry_id) {
                         Ok(code) => {

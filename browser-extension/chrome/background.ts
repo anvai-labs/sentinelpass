@@ -76,15 +76,19 @@ function generateRequestId() {
   return `req-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }
 
-// Returns true when the message was sent from this extension's own popup or options
-// page rather than from a content script embedded in a web page. Popup messages are
-// already authenticated (same extension ID) and have no meaningful "sender domain"
-// to validate against, so domain-context checks must be skipped for them.
+// Returns true when the message was sent from this extension's own popup,
+// options page, or ANY of our own extension pages (they may be opened in a
+// tab — popup-as-tab is a supported pattern and site-access management
+// depends on it) rather than from a content script embedded in a web page.
+// Messages from our own pages are already authenticated (same extension ID,
+// and sender.url reflects the actual sending frame — a web page can never
+// present an extension-page URL), so domain-context checks are skipped.
 function isPopupSender(sender): boolean {
-  // Content scripts always have sender.tab; extension pages (popup, options) do not.
-  // sender.id === chrome.runtime.id is already enforced above, so !sender.tab is
-  // sufficient to identify our own popup/options pages on both Chrome and Firefox.
-  return !sender.tab;
+  if (!sender.tab) {
+    return true;
+  }
+  const ownBaseUrl = chrome.runtime.getURL('');
+  return typeof sender.url === 'string' && sender.url.startsWith(ownBaseUrl);
 }
 
 // WBS-711 review fix F2: content-script payloads never supply stored or
@@ -526,6 +530,7 @@ function requestInlineSavePrompt(tabId, data) {
         submitted_url: data?.submitted_url || '',
         request_source: data?.request_source || 'inline_prompt',
         insecure_http: data?.insecure_http === true,
+        isPasswordChange: data?.isPasswordChange === true,
         promptId
       }
     }, (response) => {
@@ -643,7 +648,7 @@ async function handleListDomainCredentials(domain, requestId, pageUrl) {
 }
 
 // Handle get_totp_code request
-async function handleGetTotpCode(domain, requestId, pageUrl) {
+async function handleGetTotpCode(domain, requestId, pageUrl, username) {
   debugLog('[SentinelPass Background] handleGetTotpCode called for domain:', domain);
 
   try {
@@ -651,7 +656,9 @@ async function handleGetTotpCode(domain, requestId, pageUrl) {
       type: 'get_totp_code',
       domain: domain,
       request_id: requestId,
-      page_url: pageUrl || undefined
+      page_url: pageUrl || undefined,
+      // Review F4: bound to the SAME account whose password was filled.
+      username: username || undefined
     });
 
     debugLog('[SentinelPass Background] Got TOTP response from native host:', redactForLog(response));
@@ -690,7 +697,9 @@ async function handleSaveCredential(data) {
         password: data.password,
         title: data.domain || data.url || 'Unknown', // Backward compatibility
         url: canonicalUrl
-      }
+      },
+      // Provenance of the save (extension-computed; the daemon logs it).
+      save_trigger: typeof data.save_trigger === 'string' ? data.save_trigger : undefined
     });
 
     debugLog('[SentinelPass Background] Native host response:', redactForLog(response));
@@ -946,14 +955,15 @@ async function handleSaveNotification(data, sender) {
     });
 
     let createdId = null;
+    const isPasswordChange = data?.isPasswordChange === true;
     try {
       createdId = await createNotification(notificationId, {
-        title: 'SentinelPass - Save Password?',
+        title: isPasswordChange ? 'SentinelPass - Update Password?' : 'SentinelPass - Save Password?',
         message: insecureHttp
-          ? `Save the password for ${data.domain}? WARNING: this page used an unencrypted (HTTP) connection.`
-          : `Do you want to save the password for ${data.domain}?`,
+          ? `${isPasswordChange ? 'Update' : 'Save'} the password for ${data.domain}? WARNING: this page used an unencrypted (HTTP) connection.`
+          : `Do you want to ${isPasswordChange ? 'update' : 'save'} the password for ${data.domain}?`,
         buttons: [
-          { title: insecureHttp ? 'Save anyway' : 'Save' },
+          { title: insecureHttp ? 'Save anyway' : (isPasswordChange ? 'Update' : 'Save') },
           { title: 'Never for this site' }
         ],
         requireInteraction: true,
@@ -1076,7 +1086,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       sender.url,
       isPopupSender(sender)
     );
-    handleGetTotpCode(request.domain, request.request_id, pageUrl)
+    const totpUsername = typeof request.username === 'string' ? request.username : undefined;
+    handleGetTotpCode(request.domain, request.request_id, pageUrl, totpUsername)
           .then(response => {
             debugLog('[SentinelPass Background] Get TOTP response:', redactForLog(response));
             sendResponse(response);
@@ -1486,9 +1497,9 @@ chrome.notifications.onClosed.addListener((notificationId) => {
     }
 
     chrome.storage.session.get([storageKey], (result) => {
-      const pending = result ? result[storageKey] : null;
-      const domain = pending?.domain || 'unknown';
-      const tabId = Number.isInteger(pending?._sender_tab_id) ? pending._sender_tab_id : null;
+      const pending = result ? (result[storageKey] as Record<string, unknown> | undefined) : null;
+      const domain = (pending?.domain as string) || 'unknown';
+      const tabId = Number.isInteger(pending?._sender_tab_id) ? (pending._sender_tab_id as number) : null;
 
       if (tabId !== null) {
         void requestInlineSavePrompt(tabId, pending).then((inlineShown) => {

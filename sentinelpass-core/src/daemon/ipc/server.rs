@@ -969,7 +969,11 @@ impl IpcServer {
                     }
                 }
             }
-            IpcMessage::GetTotpCode { domain, page_url } => {
+            IpcMessage::GetTotpCode {
+                domain,
+                page_url,
+                username,
+            } => {
                 debug!("IPC: GetTotpCode for domain '{}'", domain);
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -1017,7 +1021,11 @@ impl IpcServer {
                     }
                 };
 
-                match self.vault.get_totp_code(&validated_host).await {
+                match self
+                    .vault
+                    .get_totp_code_for_username(&validated_host, username.as_deref())
+                    .await
+                {
                     Ok(Some(code)) => IpcMessage::GetTotpCodeResponse {
                         code: Some(code.code),
                         seconds_remaining: Some(code.seconds_remaining),
@@ -1049,10 +1057,13 @@ impl IpcServer {
                 username,
                 password,
                 url,
+                save_trigger,
             } => {
                 info!(
-                    "IPC: SaveCredential for domain '{}', user '{}'",
-                    domain, username
+                    "IPC: SaveCredential for domain '{}', user '{}', trigger '{}'",
+                    domain,
+                    username,
+                    save_trigger.as_deref().unwrap_or("unknown")
                 );
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -2075,6 +2086,7 @@ mod autofill_origin_gate_tests {
                 IpcMessage::GetTotpCode {
                     domain: "example.com".to_string(),
                     page_url: Some("http://example.com/login".to_string()),
+                    username: None,
                 },
                 Some(h.capability.clone()),
             ),

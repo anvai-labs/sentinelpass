@@ -6,6 +6,7 @@
   "permissions": [
     "storage",
     "activeTab",
+    "tabs",
     "notifications",
     "nativeMessaging",
     "scripting",
@@ -54,7 +55,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "sentinelpass@sentinelpass.org",
+      "id": "sentinelpass@localhost",
       "strict_min_version": "128.0"
     }
   }

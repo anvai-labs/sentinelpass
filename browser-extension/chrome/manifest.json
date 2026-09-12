@@ -7,6 +7,7 @@
   "permissions": [
     "storage",
     "activeTab",
+    "tabs",
     "notifications",
     "nativeMessaging",
     "scripting",

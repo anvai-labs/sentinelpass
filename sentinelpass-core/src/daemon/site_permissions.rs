@@ -174,6 +174,20 @@ impl SitePermissionStore {
 /// set and the file mode is tightened from birth.
 pub fn ensure_store_file(path: &Path) -> Result<()> {
     if !path.exists() {
+        // Fresh-install case: the config dir itself may not exist yet
+        // (isolated HOME, first daemon start) — create it owner-only so
+        // the store file's birth is not refused on a missing parent
+        // (caught by the WBS-719 real-daemon E2E on an empty HOME).
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                crate::platform::create_private_dir(parent).map_err(|e| {
+                    PasswordManagerError::from(DatabaseError::FileIo(format!(
+                        "failed to create the site-permissions directory {}: {e}",
+                        parent.display()
+                    )))
+                })?;
+            }
+        }
         let mut file = create_owner_only_file(path)?;
         use std::io::Write;
         file.write_all(b"{\n  \"permissions\": []\n}")?;
@@ -184,6 +198,26 @@ pub fn ensure_store_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_creates_a_missing_parent_dir() {
+        // Fresh-install case (WBS-719 E2E catch): an empty HOME means the
+        // config dir itself does not exist — the ensure must create it
+        // owner-only instead of refusing, or the daemon cannot start.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("nested").join("site_permissions.json");
+        ensure_store_file(&path).unwrap();
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "parent dir must be 0700");
+        }
+    }
 
     fn temp_store() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::TempDir::new().unwrap();

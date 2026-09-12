@@ -171,6 +171,19 @@ impl InstallationCapabilities {
 pub fn ensure_native_host_capability() -> Result<PathBuf> {
     let secret_path = native_host_capability_path();
     if !secret_path.exists() {
+        // Fresh-install case: create the config dir owner-only before any
+        // store/secret write (WBS-719 E2E catch — an empty isolated HOME
+        // refused the whole daemon start).
+        if let Some(parent) = secret_path.parent() {
+            if !parent.exists() {
+                crate::platform::create_private_dir(parent).map_err(|e| {
+                    PasswordManagerError::from(DatabaseError::FileIo(format!(
+                        "failed to create the capability directory {}: {e}",
+                        parent.display()
+                    )))
+                })?;
+            }
+        }
         let mut store = InstallationCapabilities::load_from_path(&default_store_path())?;
         let secret = store.mint(&default_store_path(), NATIVE_HOST_AUDIENCE, None)?;
         // Write the presented secret 0600 (owner-only from birth, symlink

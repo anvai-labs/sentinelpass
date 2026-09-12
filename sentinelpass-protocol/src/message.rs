@@ -85,6 +85,10 @@ pub enum IpcMessage {
         domain: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         page_url: Option<String>,
+        /// WBS-715 review fix F4: exact-username disambiguator so the TOTP
+        /// belongs to the SAME account whose password was filled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
     },
     GetTotpCodeResponse {
         code: Option<String>,
@@ -99,6 +103,11 @@ pub enum IpcMessage {
         username: String,
         password: String,
         url: Option<String>,
+        /// Extension-computed save provenance ('inline_prompt_button',
+        /// 'notification_button', 'password_change', ...), logged by the
+        /// daemon. serde default keeps pre-714 hosts wire-compatible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_trigger: Option<String>,
     },
     SaveCredentialResponse {
         success: bool,
@@ -626,6 +635,7 @@ mod tests {
             username: "user@example.com".to_string(),
             password: "secure_password".to_string(),
             url: Some("https://example.com".to_string()),
+            save_trigger: Some("password_change".to_string()),
         };
 
         let serialized = serde_json::to_string(&msg).unwrap();
@@ -637,11 +647,13 @@ mod tests {
                 username,
                 password,
                 url,
+                save_trigger,
             } => {
                 assert_eq!(domain, "example.com");
                 assert_eq!(username, "user@example.com");
                 assert_eq!(password, "secure_password");
                 assert_eq!(url, Some("https://example.com".to_string()));
+                assert_eq!(save_trigger.as_deref(), Some("password_change"));
             }
             _ => panic!("Wrong message type"),
         }
@@ -709,6 +721,7 @@ mod tests {
         let msg = IpcMessage::GetTotpCode {
             domain: "example.com".to_string(),
             page_url: Some("https://example.com/login".to_string()),
+            username: None,
         };
 
         let serialized = serde_json::to_string(&msg).unwrap();

@@ -2,7 +2,9 @@
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$ExtensionId = "",
+    # Defaults to the stable ID derived from the manifest key (matches
+    # install.sh); override only when repackaging with a new key.
+    [string]$ExtensionId = "nophfgfiiohedlodfeepjoioljbhggdd",
 
     [Parameter(Mandatory=$false)]
     [string]$BinaryDir = ""

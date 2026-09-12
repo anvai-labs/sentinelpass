@@ -4,9 +4,13 @@
   "type": "module",
   "scripts": {
     "test:e2e": "playwright test --config=playwright.config.ts",
-    "test:e2e:headed": "HEADLESS=0 playwright test --config=playwright.config.ts"
+    "test:e2e:headed": "E2E_HEADED=1 playwright test --config=playwright.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1"
+  },
+  "dependencies": {
+    "@types/node": "22.20.2",
+    "selfsigned": "5.5.0"
   }
 }

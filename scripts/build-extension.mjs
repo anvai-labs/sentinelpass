@@ -10,8 +10,17 @@
 // emits with `tsconfig.extension.json`, and the emitted `.js` files are
 // copied into both target directories. Byte-parity between the two targets
 // is asserted here so Chrome/Firefox cannot drift (TD-CLIENT-08).
+//
+// ONE exception to plain tsc emit: `content.js` is a CONTENT script, and
+// content scripts are CLASSIC scripts — ES module syntax (`import`) throws
+// a SyntaxError and the script silently never runs (WBS-719 discovered the
+// injection had been broken exactly this way). The content entry is
+// therefore BUNDLED with esbuild into a single classic IIFE. The other
+// modules (background service worker, popup) are ES modules by manifest
+// declaration and keep tsc emit.
 
 import { spawnSync } from 'node:child_process';
+import * as esbuild from 'esbuild';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -54,8 +63,28 @@ if (emit.status !== 0) {
   console.warn('[ext:build] warning: tsc reported type diagnostics; run `npm run web:typecheck`.');
 }
 
+// 1b. Bundle the content script into a single classic IIFE: content
+// scripts are classic scripts, and ES `import` syntax throws a
+// SyntaxError there (the injection was silently broken this way — found
+// by the WBS-719 suite).
+await esbuild.build({
+  entryPoints: [join(repoRoot, 'browser-extension', 'chrome', 'content.ts')],
+  bundle: true,
+  format: 'iife',
+  target: 'es2022',
+  outfile: join(distDir, 'content.js'),
+  logLevel: 'silent',
+});
+
 const digests = new Map();
 for (const target of targets) {
+  // Review F7: remove stale artifacts a previous build left behind (a
+  // renamed/removed module would otherwise keep shipping its old .js).
+  for (const existing of readdirSync(target)) {
+    if (existing.endsWith('.js') && !emitted.includes(existing)) {
+      rmSync(join(target, existing), { force: true });
+    }
+  }
   cpSync(distDir, target, {
     recursive: true,
     filter: (src) => src === distDir || src.endsWith('.js'),
