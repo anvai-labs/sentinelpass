@@ -1315,7 +1315,9 @@ extension Notification.Name {
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use sentinelpass_core::vault::VaultManager;
-use sentinelpass_core::crypto::SecureBuffer;
+// Owned secret buffers use `Zeroizing` (`SecureBuffer` was removed with
+// `crypto/zero.rs`); borrowed `&[u8]` is fine with caller-side zeroization.
+use zeroize::Zeroizing;
 
 // Mobile-specific configuration
 const MOBILE_DB_PATH: &str = "sentinelpass_vault.db";

@@ -32,6 +32,12 @@ name: CI Gate
 # copy — GitHub evaluates the PR's workflow YAML for pull_request events.
 # Mitigated by review policy, not YAML: .github/CODEOWNERS + branch
 # protection requiring code-owner review for .github/ changes.
+#
+# Tag pushes are OUT of this gate's model entirely (no PR, no head-SHA
+# checks to poll). Tag-time RELEASE gating therefore lives inside
+# release.yml itself: its `release` and `crates-publish` jobs `needs:` the
+# tag-time security-audit jobs (WBS-901), which produce no PR check runs and
+# so never appear in the expectation table below.
 
 on:
   pull_request:

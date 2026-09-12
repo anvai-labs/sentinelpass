@@ -1,14 +1,40 @@
+# Governed dependency-exception configuration (WBS-909 / TD-REL-04).
+#
+# The full exception register — one row per observed advisory with owner,
+# exposure assessment, expiry, and review note — lives in
+# `docs/DEPENDENCY_EXCEPTIONS.md`. THIS file is the machine-read half and
+# holds ONLY advisories that would fail `cargo audit` (i.e. unfixed
+# vulnerability-class findings). Warning-class findings (unmaintained /
+# unsound / yanked) are deliberately NOT listed here: they do not fail the
+# audit, so ignoring them would only hide accumulating dependency risk from
+# the audit output. They are tracked — with the same owner/expiry discipline —
+# in the register document instead.
+#
+# Rules (enforced by exception review, next review 2026-12-31):
+# - Every `ignore` entry below MUST have a matching register row carrying
+#   owner, exposure assessment, expiry date, and review note.
+# - An entry whose expiry passes without re-approval is removed at the next
+#   review (the audit then fails loudly until a real decision is made).
+# - An entry whose advisory stops firing against Cargo.lock is removed at
+#   the next review (dead exceptions are drift, not safety).
+# - Adding or editing entries requires a PR reviewed by the owner named in
+#   the register row.
+
 [advisories]
-# Tauri transitive advisories pending upstream resolution.
-# Track and remove ignores once dependencies are upgraded.
 ignore = [
-  "RUSTSEC-2021-0145",  # Potential unaligned read (via Tauri dependencies)
-  "RUSTSEC-2023-0071",  # Marvin Attack: rsa timing sidechannel (via Tauri dependencies, no fix available)
-  "RUSTSEC-2024-0370",  # proc-macro-error is unmaintained (via gtk3-macros → tauri)
-  "RUSTSEC-2024-0413",  # gtk-rs GTK3 bindings no longer maintained (via tauri)
-  "RUSTSEC-2024-0429",
-  "RUSTSEC-2025-0080",
-  "RUSTSEC-2025-0098",
-  "RUSTSEC-2025-0100",
-  "RUSTSEC-2026-0037",  # Quinn DoS vulnerability (via tauri → quinn, pending Tauri update to quinn-proto >=0.11.14)
+  # --- WBS-909 governed exception -----------------------------------------
+  # RUSTSEC-2023-0071 — rsa: Marvin Attack (timing sidechannel, RSA decrypt)
+  # owner: core-maintainer | added: 2025 (pre-governance), re-approved 2026-09-11
+  # expiry: 2026-12-31 (quarterly exception review)
+  # exposure: NOT REACHABLE. rsa 0.9.10 is linked via ssh-key 0.6.7 (and a
+  #   direct, currently code-UNUSED sentinelpass-core dependency — removal
+  #   candidate tracked in the register); no code path performs RSA private-
+  #   key decryption through the rsa crate: SSH RSA keygen shells out to
+  #   ssh-keygen, and the ssh-agent path hands keys to the system agent.
+  #   The Marvin side channel requires an in-process RSA decrypt oracle; a
+  #   local-first desktop app with no network RSA surface does not provide
+  #   one. No patched release exists upstream.
+  # review note: re-assess each quarter; remove when ssh-key ships a fixed
+  #   rsa or the advisory is withdrawn.
+  "RUSTSEC-2023-0071",
 ]

@@ -84,7 +84,12 @@ fn upper_value(c: u8) -> Option<u8> {
 }
 
 impl RecoveryKey {
-    /// Generate a fresh 256-bit recovery key from the OS CSPRNG.
+    /// Generate a fresh 256-bit recovery key.
+    ///
+    /// NOTE (TD-SEC-09): currently drawn from `thread_rng()` (ThreadRng —
+    /// CSPRNG-seeded, but NOT the OS CSPRNG directly, despite what an
+    /// earlier version of this comment claimed). Migrating security-
+    /// critical generation to `rand::rngs::OsRng` is tracked as TD-SEC-09.
     pub fn generate() -> Result<Self> {
         use rand::RngCore;
         let mut bytes = Zeroizing::new([0u8; RECOVERY_KEY_BYTES]);
