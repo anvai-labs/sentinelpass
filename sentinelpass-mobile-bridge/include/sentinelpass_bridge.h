@@ -72,6 +72,11 @@ typedef enum SPErrorCode {
 } SPErrorCode;
 
 /**
+ * Vault handle type (opaque u64 for FFI)
+ */
+typedef uint64_t SPVaultHandle;
+
+/**
  * ABI/feature description reported to consumers (WBS-803).
  */
 typedef struct SPBridgeInfo {
@@ -84,11 +89,6 @@ typedef struct SPBridgeInfo {
    */
   uint32_t reserved;
 } SPBridgeInfo;
-
-/**
- * Vault handle type (opaque u64 for FFI)
- */
-typedef uint64_t SPVaultHandle;
 
 /**
  * FFI-safe entry representation
@@ -150,6 +150,31 @@ typedef struct SPTotpCode {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Create an authenticated .spbackup bundle from the UNLOCKED vault at
+ * `handle`. Refuses to overwrite an existing output. Ownership rule 2:
+ * release `out_summary` (JSON, non-secret metadata) with `sp_string_free`.
+ */
+enum SPErrorCode sp_backup_create(SPVaultHandle handle,
+                                  const char *output_path,
+                                  const char **out_summary);
+
+/**
+ * Restore a .spbackup bundle onto `vault_path` (STATIC, offline-exclusive).
+ * CALLER CONTRACT: destroy every open bridge handle for `vault_path` first.
+ * `allow_replace` acknowledges replacing an existing target;
+ * `allow_epoch_rewind` is the ADR-004 rev 4 supervised override;
+ * `disable_sync` acknowledges ADR-008 branch 2 (restored state re-pairs).
+ * Ownership rule 2: release `out_report` (JSON) with `sp_string_free`.
+ */
+enum SPErrorCode sp_backup_restore(const char *vault_path,
+                                   const char *bundle_path,
+                                   const char *master_password,
+                                   bool allow_replace,
+                                   bool allow_epoch_rewind,
+                                   bool disable_sync,
+                                   const char **out_report);
 
 /**
  * Report this build's ABI version and feature flags.

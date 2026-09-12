@@ -39,6 +39,7 @@
 // We use unsafe for FFI boundaries, safety is documented per function
 
 mod abi;
+mod backup;
 mod bridge;
 mod error;
 mod ffi;

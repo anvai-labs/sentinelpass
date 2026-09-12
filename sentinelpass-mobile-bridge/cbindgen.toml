@@ -45,6 +45,8 @@ include = [
     "sp_totp_generate_code",
     "sp_password_generate",
     "sp_password_check_strength",
+    "sp_backup_create",
+    "sp_backup_restore",
     "sp_bridge_info",
     "sp_bridge_negotiate",
     "sp_entry_free",
