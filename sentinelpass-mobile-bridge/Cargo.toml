@@ -11,30 +11,33 @@ keywords.workspace = true
 categories.workspace = true
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# rlib: required so integration tests (tests/) and the workspace can link
+# the bridge; cdylib: Android .so; staticlib: iOS .a.
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [features]
 default = []
-jni = ["dep:jni", "dep:lazy_static"]
+jni = ["dep:jni"]
 ios = []
 
 [dependencies]
 sentinelpass-core = { path = "../sentinelpass-core" }
 
-# Serialization
+# Serialization (JNI wire DTOs)
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Encoding
-base64 = { workspace = true }
+# Hex encoding for slot challenges/signatures (WBS-812/821)
+hex = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
-anyhow = { workspace = true }
+
+# Secret hygiene (WBS-804: biometric key buffers zeroize on drop)
+zeroize = { workspace = true }
 
 # JNI (Android)
 jni = { version = "0.21", optional = true }
-lazy_static = { version = "1.4", optional = true }
 
 # Logging
 tracing = { workspace = true }
@@ -42,8 +45,10 @@ tracing = { workspace = true }
 # Time
 chrono = { workspace = true }
 
-# UUID
-uuid = { workspace = true }
+[dev-dependencies]
+# Slot-test fake platform: deterministic "signatures" (WBS-812/821)
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.26"

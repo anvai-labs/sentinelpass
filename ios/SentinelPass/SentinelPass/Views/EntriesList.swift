@@ -12,7 +12,7 @@ struct EntriesList: View {
     @EnvironmentObject private var vaultState: VaultState
     @State private var searchText = ""
     @State private var showingAddEntry = false
-    @State private var showingEntryDetail: EntryModel?
+    @State private var showingEntryDetail: EntryDetails?
     @State private var filteredEntries: [EntryModel] = []
 
     var body: some View {

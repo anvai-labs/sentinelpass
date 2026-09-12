@@ -91,3 +91,6 @@ browser-extension/chrome/demo-slides.html
 browser-extension/chrome/voiceover-generator.sh
 browser-extension/chrome/package-lock.json
 browser-extension/chrome/package.json
+
+# Scratch working files (never committed — enforced program rule)
+.scratch_*

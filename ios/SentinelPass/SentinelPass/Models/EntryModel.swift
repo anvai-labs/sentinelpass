@@ -2,33 +2,34 @@
 //  EntryModel.swift
 //  SentinelPass
 //
-//  Data models for password entries
+//  UI list models for password entries.
+//
+//  WBS-826: the SwiftData @Model (which carried a PLAINTEXT `password`
+//  column and wired a model container nothing wrote through honestly) is
+//  REMOVED. The vault IS the Rust SQLite database; the Swift layer keeps
+//  only a non-sensitive list MIRROR of what the bridge returns in
+//  `SPEntrySummary`. Full entry data (password/url/notes) flows through
+//  `EntryDetails` (Services/VaultBridge.swift), in memory only, never
+//  persisted by Swift.
 //
 
 import Foundation
-import SwiftData
 import SwiftUI
 
+/// Non-sensitive list-row mirror of a bridge `SPEntrySummary`.
 @available(iOS 17.0, macOS 14.0, *)
-@Model
-final class EntryModel {
-    var id: String
-    var title: String
-    var username: String
-    var password: String?
-    var url: String?
-    var notes: String?
-    var favorite: Bool
-    var createdAt: Date?
-    var modifiedAt: Date?
+struct EntryModel: Identifiable {
+    let id: String
+    let title: String
+    let username: String
+    let favorite: Bool
+    let createdAt: Date?
+    let modifiedAt: Date?
 
     init(
         id: String,
         title: String,
         username: String,
-        password: String? = nil,
-        url: String? = nil,
-        notes: String? = nil,
         favorite: Bool = false,
         createdAt: Date? = nil,
         modifiedAt: Date? = nil
@@ -36,9 +37,6 @@ final class EntryModel {
         self.id = id
         self.title = title
         self.username = username
-        self.password = password
-        self.url = url
-        self.notes = notes
         self.favorite = favorite
         self.createdAt = createdAt
         self.modifiedAt = modifiedAt

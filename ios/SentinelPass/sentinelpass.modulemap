@@ -1,5 +1,0 @@
-module sentinelpass {
-    header "sentinelpass_bridge.h"
-    link "sentinelpass_mobile_bridge"
-    export *
-}

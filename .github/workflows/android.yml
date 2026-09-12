@@ -27,6 +27,7 @@ jobs:
         with:
           targets: |
             aarch64-linux-android
+            armv7-linux-androideabi
             x86_64-linux-android
 
       - name: Setup Rust cache
@@ -49,37 +50,73 @@ jobs:
           ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep -i "armv7\|arm.*androideabi" | head -20
           echo "================================"
 
-      - name: Build JNI libraries
+      - name: Build JNI libraries (all ABIs, --features jni)
         run: |
-          # Set linker and ar environment variables using shell expansion
-          # Use API level 33 which is available in NDK r25c
-          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
-          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
-          export AR_aarch64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          export AR_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          # WBS-811: EVERY Android ABI is built WITH the JNI feature (the
+          # pre-811 job built without it, producing .so files with zero
+          # Java_* symbols — TD-MOB-01). ABI coverage matches the app's
+          # abiFilters: arm64-v8a, armeabi-v7a, x86_64.
+          # API level 33 wrappers are available in NDK r25c.
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          # Set CC environment variables for libsqlite3-sys and other build scripts
-          export CC_aarch64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang"
-          export CC_x86_64_linux_android="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android33-clang"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android33-clang"
+          export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$NDK_BIN/armv7a-linux-androideabi33-clang"
+          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$NDK_BIN/x86_64-linux-android33-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+          export AR_armv7_linux_androideabi="$NDK_BIN/llvm-ar"
+          export AR_x86_64_linux_android="$NDK_BIN/llvm-ar"
+
+          # CC/CFLAGS for libsqlite3-sys and other build scripts
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android33-clang"
+          export CC_armv7_linux_androideabi="$NDK_BIN/armv7a-linux-androideabi33-clang"
+          export CC_x86_64_linux_android="$NDK_BIN/x86_64-linux-android33-clang"
           export CFLAGS_aarch64_linux_android="--target=aarch64-linux-android33"
+          export CFLAGS_armv7_linux_androideabi="--target=armv7a-linux-androideabi33"
           export CFLAGS_x86_64_linux_android="--target=x86_64-linux-android33"
 
-          # Build for each architecture (64-bit only - 32-bit ARM is deprecated)
-          for target in aarch64-linux-android x86_64-linux-android; do
-            cargo build --package sentinelpass-mobile-bridge --target $target --release
+          for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android; do
+            cargo build --package sentinelpass-mobile-bridge --target $target --release --features jni
+          done
+
+      - name: Verify Java_* symbols in every built .so (WBS-811)
+        run: |
+          # The JNI contract (WBS-802): each Kotlin external fun in
+          # com.sentinelpass.VaultBridge must resolve to an exported symbol in
+          # EVERY ABI's .so, and no stale VaultManager/DriveSync symbols may
+          # remain. Fail-closed: a missing or stale symbol fails the job
+          # before the artifact can reach the app build.
+          set -euo pipefail
+          EXPECTED="nativeAbiVersion nativeInit nativeDestroy nativeIsUnlocked nativeLock nativeAddEntry nativeGetEntry nativeListEntries nativeSearchEntries nativeDeleteEntry nativeUpdateEntry nativeGenerateTotp nativeGeneratePassword nativeCheckStrength nativeSlotChallenge nativeSlotHasBlob nativeSlotSeal nativeSlotUnlock nativeBackupCreate nativeBackupRestore"
+          STALE_RE="Java_com_sentinelpass_(VaultManager|DriveSync)_"
+          for so in \
+            target/aarch64-linux-android/release/libsentinelpass_mobile_bridge.so \
+            target/armv7-linux-androideabi/release/libsentinelpass_mobile_bridge.so \
+            target/x86_64-linux-android/release/libsentinelpass_mobile_bridge.so; do
+            echo "=== $so ==="
+            for m in $EXPECTED; do
+              if ! llvm-nm -D --defined-only "$so" | grep -q "Java_com_sentinelpass_VaultBridge_${m}$"; then
+                echo "::error::$so is missing JNI symbol Java_com_sentinelpass_VaultBridge_${m}"
+                exit 1
+              fi
+            done
+            if llvm-nm -D --defined-only "$so" | grep -Eq "$STALE_RE"; then
+              echo "::error::$so exports stale (pre-WBS-802) VaultManager/DriveSync symbols"
+              llvm-nm -D --defined-only "$so" | grep -E "$STALE_RE"
+              exit 1
+            fi
+            echo "all 20 VaultBridge JNI symbols present, no stale symbols"
           done
 
       - name: Organize JNI libraries for Android
         run: |
           # Create jniLibs directory structure for Android
           mkdir -p jniLibs/arm64-v8a
+          mkdir -p jniLibs/armeabi-v7a
           mkdir -p jniLibs/x86_64
 
           # Copy libraries to Android-specific ABI directories
-          # aarch64-linux-android -> arm64-v8a
           cp target/aarch64-linux-android/release/libsentinelpass_mobile_bridge.so jniLibs/arm64-v8a/
-
-          # x86_64-linux-android -> x86_64
+          cp target/armv7-linux-androideabi/release/libsentinelpass_mobile_bridge.so jniLibs/armeabi-v7a/
           cp target/x86_64-linux-android/release/libsentinelpass_mobile_bridge.so jniLibs/x86_64/
 
           # Verify the structure
@@ -277,17 +314,38 @@ jobs:
           ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep -i "armv7\|arm.*androideabi" | head -20
           echo "================================"
 
-      - name: Run integration tests
+      - name: Verify generated C header is in sync (WBS-801)
         run: |
-          # Skip integration tests for cross-compiled Android targets
-          # Android integration tests run in the emulator instead
-          echo "Skipping cross-compiled integration tests - covered by emulator tests"
+          # The checked-in header is build-generated by cbindgen (build.rs).
+          # Regenerate it on the host target and fail if the committed copy
+          # drifted from the declared ABI contract (cbindgen.toml + src/ffi.rs).
+          cargo build --package sentinelpass-mobile-bridge --lib
+          git diff --exit-code -- sentinelpass-mobile-bridge/include/ \
+            || { echo "::error::include/sentinelpass_bridge.h is stale — rebuild the bridge and commit the regenerated header"; exit 1; }
+          echo "Header in sync with cbindgen.toml + src/ffi.rs"
 
-      - name: Test JNI bridge API
+      - name: Verify bridge header compiles
         run: |
-          # Skip JNI bridge API tests for cross-compiled targets
-          # JNI bridge tests run in the Android emulator instead
-          echo "Skipping JNI bridge API tests - covered by emulator tests"
+          # Verify the bridge header (common C ABI) compiles cleanly. Since
+          # WBS-807 removed the un-gated drive/icloud modules, the header
+          # contains no JNI declarations at all — it is pure C ABI.
+          echo '#include "sentinelpass-mobile-bridge/include/sentinelpass_bridge.h"' \
+            | clang -x c -fsyntax-only - && echo "Header compiles OK"
+
+      - name: Run bridge ABI contract tests
+        run: |
+          # Pins the generated header and cbindgen.toml to the real FFI export
+          # surface (WBS-801).
+          cargo test --package sentinelpass-mobile-bridge --lib
+
+      - name: Verify the JNI feature compiles and tests clean (WBS-810)
+        run: |
+          # TD-MOB-01 first half: JNI-enabled Rust MUST build. The jni crate
+          # compiles on any host, so the whole VaultBridge JNI surface is
+          # compiled, clippy-clean, and unit-tested here on the host —
+          # complementing the all-ABI symbol check in the mobile-bridge job.
+          cargo clippy --package sentinelpass-mobile-bridge --lib --tests --features jni -- -D warnings
+          cargo test --package sentinelpass-mobile-bridge --features jni
 
   # Build APK
   build-apk:

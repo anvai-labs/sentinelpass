@@ -1410,14 +1410,219 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
 
 Gate: ADR-009 + WBS-300/400 stable ABI/envelope. **Owner** ME.
 
-Shared (801–807): **WBS-801** generated C ABI (TD-MOB-09, SR-MOBILE-001) 4d;
-**802** JNI contract (TD-MOB-02) 2d; **803** ABI/feature negotiation 2d; **804**
-ownership + zeroizing destroy (TD-MOB-09) 2d; **805** FFI panic containment 1.5d;
-**806** lifecycle/invalid-handle tests 2d; **807** atomic update + placeholder removal
-(TD-MOB-03/04) 3d.
+Shared (801–807):
 
-Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d; **811** all-ABI JNI
-CI (TD-MOB-01, TV-007) 2d; **812** Keystore-bound platform slot (TD-MOB-03,
+- **WBS-801** generated C ABI (TD-MOB-09, SR-MOBILE-001) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M1). `cbindgen.toml` include-list synced
+  to the real export surface (phantom `sp_entry_update` removed; sync/biometric
+  surface declared; snake_case args), generated header tracked and pinned by
+  `declared_abi_matches_ffi_surface` + `header_declares_every_export` tests;
+  android.yml/ios.yml integration jobs now regenerate + diff the header
+  (drift = red) and `clang -fsyntax-only` it.
+- **802** JNI contract (TD-MOB-02) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). One contract:
+  Kotlin `com.sentinelpass.VaultBridge` owns the declarations; Rust renamed to
+  `Java_com_sentinelpass_VaultBridge_*` (was `VaultManager_*` — unresolvable),
+  receiver typed as instance `JObject`, arity fixed (nativeGeneratePassword /
+  nativeCheckStrength now take the Kotlin-declared handle), wire formats fixed
+  (Entry/EntrySummary JNI wire DTOs matching the Kotlin models — the old
+  serde-pass-through dropped `id`; TOTP now returns `code,seconds`), Rust-side
+  undeclared placeholder natives removed (nativeBiometricSetKey,
+  nativeSyncGetStatus/CollectPending/ApplyEntries/PrepareDrive), dead
+  JNI_VAULT_REGISTRY pass-through deleted. Pinned by tests/jni_contract.rs
+  (name set + arity + type/return mapping, both directions, host-runnable).
+- **803** ABI/feature negotiation 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). `src/abi.rs` single source of
+  truth (`ABI_VERSION=1`, `MIN_SUPPORTED_ABI_VERSION=1`); C ABI gains
+  `sp_bridge_info` + `sp_bridge_negotiate` (fills `SPBridgeInfo` even on
+  refusal so consumers can report the mismatch) and `ErrorCode::AbiUnsupported
+  = -14`; JNI gains `nativeAbiVersion` with the Kotlin facade handshaking in
+  its init block (exact-match, fail-closed via `IllegalStateException`).
+  Feature flags fail closed: `FEATURE_PLATFORM_KEYSTORE` /
+  `FEATURE_RELAY_SYNC_V2` are declared vocabulary but never advertised until
+  WBS-812/821 and the mobile sync v2 wiring land (a prompt is not a
+  cryptographic authorization — ADR-009). Pinned by abi.rs + ffi.rs tests.
+- **804** ownership + zeroizing destroy (TD-MOB-09) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). Single proven ownership contract
+  documented at the FFI boundary (8 rules; every producer/free carries its
+  per-function ownership line in the generated header — cbindgen emits Rust
+  doc comments):
+  out-strings via `sp_string_free`, out-byte-buffers via layout-matched
+  `sp_bytes_free` (the `Vec::leak` + unchecked-layout dealloc pairs are gone;
+  buffers now copied under `Layout::array::<u8>`), `sp_entry_free` +
+  `sp_entry_list_free` added for struct/array outputs with OOM-safe
+  allocation (no `unwrap()` panics at the boundary), dead `SyncResult`
+  removed. Registry biometric key material is `Zeroizing<Vec<u8>>` — removed
+  on `bridge_biometric_remove_key` and on `bridge_vault_destroy` with a
+  zeroize-on-drop pass (M1 containment; M2 removes the in-process map
+  entirely). Round-trip ownership tests cover every free path against a real
+  vault; double-destroy/use-after-destroy refused.
+- **805** FFI panic containment 1.5d —
+  **Status:** Done (2026-09-11, Phase 6 M1). Every C ABI export runs inside
+  `catch_panic` (errors → `ErrorCode::Panic = -15`, mirrored in the Kotlin
+  enum and generated header) and every JNI export inside `catch_jni`
+  (default-return; a panic through an `extern "system"` frame would abort
+  the JVM). Contained panics are logged via `tracing` and never unwind into
+  Swift/ObjC/JVM; out-params are documented undefined after a contained
+  panic (ownership rule 8). Pinned by source-parsing tests
+  (`every_c_export_is_panic_contained`, `every_jni_export_is_panic_contained`)
+  so a new export cannot skip containment, plus wrapper unit tests.
+- **806** lifecycle/invalid-handle tests 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). tests/integration_test.rs
+  rewritten against the real exported ABI (the old file asserted 2+2 and
+  imported nothing — the crate had no rlib target, so integration tests
+  could never link; fixed with `crate-type = ["rlib", …]`), covering vault
+  lifecycle (create/lock/reopen/double-destroy/use-after-destroy), entry
+  lifecycle end-to-end, invalid-handle/null-out-param refusals, wrong-
+  password refusal, generator bounds, and sync/biometric defaults. The dead
+  `tests/integration/` dir (never wired via `mod`, gated on the nonexistent
+  `icloud` feature) is deleted. Tests exposed a real mapping defect — core
+  NotFound/InvalidInput flattened into `VaultLocked` — fixed in the same
+  change (precise core→bridge error mapping; residual core errors now
+  surface as Unknown, not VaultLocked).
+- **807** atomic update + placeholder removal (TD-MOB-03/04) 3d —
+  **Status:** Done (2026-09-11, Phase 6 M1). REMOVED per ADR-009 rev 2
+  (relay-only mobile sync, ADR-006): `src/drive.rs` (666 ln) + `src/icloud.rs`
+  (432 ln), the `sp_sync_prepare_cloudkit` / `sp_sync_prepare_drive` exports,
+  the file-sync placeholder exports `sp_sync_collect_pending` /
+  `sp_sync_apply_entries` (both serialized plaintext entry titles into fake
+  "sync blobs" — the collect path even leaked titles over the shape a host
+  app treats as uploadable), the Kotlin `DriveService.kt` + the three Google
+  Drive SDK dependencies + their Apache-HTTP packaging excludes, and the now
+  unused bridge deps (uuid, base64, anyhow, lazy_static). `bridge_sync_get_status`
+  kept as an honest disabled-stub (comment no longer claims iCloud/Drive);
+  MOBILE_DESIGN.md + iOS_BUILD_GUIDE.md carry supersession banners.
+  ATOMIC UPDATE (TD-MOB-04): `sp_entry_update` (C) / `nativeUpdateEntry`
+  (JNI, null = unchanged) exported; Kotlin `VaultBridge.updateEntry` +
+  `VaultState.updateEntry` rewritten from delete-then-add to one atomic call
+  (entry identity/history preserved). Also: crate gained the `rlib` target
+  type needed for test linkage; `sp_bytes_free` retained as the sanctioned
+  byte-buffer release path for WBS-827 backup exports.
+
+Android: **812** Keystore-bound platform slot (TD-MOB-03,
+SR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M2). Signature-KDF slot on the
+  proven Hello orchestration (biometric_hello generalized with an explicit
+  domain salt — MOBILE_SLOT_WRAP_SALT — plus seal_dek_with_challenge /
+  release_dek_from_signature for the split FFI model where the HOST signs
+  and the bridge seals; cross-domain release tests prove a Hello signature
+  cannot unwrap a mobile blob and vice versa). Android: RSA-2048/PKCS1
+  AndroidKeyStore key (deterministic — randomized ECDSA is REFUSED at
+  enable), setUserAuthenticationRequired + setInvalidatedByBiometricEnrollment,
+  signed via BiometricPrompt.CryptoObject (the prompt IS the crypto
+  authorization). At-rest blob is NON-SECRET JSON in app-private file
+  storage (never SharedPreferences). VaultManager::current_dek +
+  open_with_released_dek (shared epoch-guard/registry/audit tail extracted
+  from open_with_biometric). FEATURE_PLATFORM_KEYSTORE now advertised;
+  ABI_VERSION bumped 1→2 (legacy biometric exports removed with the slot —
+  no key material lives in the bridge process at all).
+  **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
+FR-MOBILE-001) 5d —
+  **Status:** Done (2026-09-12, Phase 6 M3). Real fill+save through the
+  bridge: AssistStructure parsing (visible-only, self-fill guard,
+  no-password surfaces skipped) under a hard 3s fill deadline; unlocked ->
+  matched datasets (registrable-domain web matching + confident-only
+  package heuristic, 18 matcher unit tests), locked -> AUTH dataset into a
+  translucent unlock activity; save flow confirm-and-store (web saves
+  persist https://<domain>, app saves persist no URL); SaveInfo for
+  save-back; settingsActivity fixed to MainActivity.
+  **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d —
+  **Status:** Done (2026-09-12, M3). SentinelPassApplication actually
+  REGISTERED (was dead code) with ProcessLifecycleOwner auto-lock
+  (background schedules, foreground cancels — fixes a mid-session fire
+  bug); FLAG_SECURE privacy cover on pause; lock-screen return effect;
+  lifecycle lock goes through lockVault (handle destroyed).
+  **815** cleartext deny 1d —
+  **Status:** Done (2026-09-12, M3): network_security_config.xml
+  cleartextTrafficPermitted=false (no loopback override — it would ship).
+  **816** backup policy (TD-MOB-05) 2d —
+  **Status:** Done (2026-09-12, M3): vault db + SQLite sidecars + slot blob
+  excluded from cloud backup AND device-transfer (slot blob device-bound;
+  vault db rides D2D per accepted decision; prefs excluded — boolean only).
+  **817** permission trim 0.5d —
+  **Status:** Done (2026-09-12, M3): CAMERA + camera feature + CameraX/ZXing
+  deps removed (zero references, no scanner UI); USE_BIOMETRIC/INTERNET
+  kept with reasons; datastore-preferences flagged as unused dep.
+  **818** instrumentation matrix (TD-MOB-10, FR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-12, Phase 6 M4). Real androidTest sources
+  (VaultBridgeInstrumentedTest: 8 tests over the live JNI bridge — ABI
+  handshake, CRUD round-trip, lock/re-open, wrong-password, slot challenge
+  freshness, gated flows Assume-skipped on un-enrolled CI emulators); the
+  emulator-tests matrix (API 29/34 x default/google_apis) is fail-closed
+  and downloads the all-ABI --features jni .so artifacts (811).
+
+iOS: **820** consolidate Swift bridges (TD-MOB-09) 3d; **821** Keychain
+SecAccessControl slot (TD-MOB-06, SR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M2). biometric.rs mod-macos pattern
+  on iOS: the DEK lives in the Keychain under
+  kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly +
+  kSecAccessControlBiometryCurrentSet (+ privateKeyUsage) — the OS refuses
+  the item read without the gesture, which IS the crypto authorization.
+  KeychainSlot.swift implements store/has/delete/unlock and hands the
+  released DEK to the new sp_slot_open_with_dek export (borrowed bytes, FFI
+  rule 1). Shares the core orchestration/tests with 812; the Swift file
+  compiles with the 820 project surgery (M3).
+  **822** file protection + backup
+policy (SR-MOBILE-004) 2d —
+  **Status:** Done (2026-09-12, Phase 6 M3). VaultFile.swift: shared
+  container path (App Group) + NSFileProtectionComplete on the vault db and
+  WAL sidecars + isExcludedFromBackup (best-effort, documented that iOS
+  default is Complete-Until-First-Unlock so failure never downgrades);
+  Info.plist cleaned (bogus keys + armv7 removed).
+  **823** scene lock + cover (TD-MOB-07) 2d —
+  **Status:** Done (2026-09-12, M3): scenePhase privacy cover
+  (ultraThinMaterial) + 5-min background auto-lock matching the daemon
+  default; Keychain-slot unlock wired into LockView (refused gesture fails
+  closed and silent).
+  **824** local expiring pasteboard 1d —
+  **Status:** Done (2026-09-12, M3): all three secret-copy call sites use a
+  30 s expirationDate pasteboard (platform limitation documented: no
+  Universal-Clipboard opt-out exists).
+  **825** Credential Provider (TD-MOB-08, SR-MOBILE-003,
+FR-MOBILE-001) 5d —
+  **Status:** Done (2026-09-12, M3). SentinelPassCredential extension
+  target (com.apple.authentication-services.credential-provider-ui): own
+  VaultBridge on the shared-container vault, master-password unlock, domain
+  filtering with full-list fallback, ASPasswordCredential completion,
+  App Group entitlements on both targets. Compile+link verified against the
+  simulator SDK (xcodebuild itself broken on the dev machine — pre-existing
+  — CI exercises it).
+  **826** remove plaintext persistence models 1d —
+  **Status:** Done (2026-09-12, M3): SwiftData @Model (plaintext
+  password/url/notes) + modelContainer removed; EntryModel is a plain
+  summary-mirror struct; secrets only in in-memory structs.
+  **827** authenticated backup/export (TD-MOB-08) 3d —
+  **Status:** Done (2026-09-12, Phase 6 M4). ADR-008 .spbackup through the
+  bridge: sp_backup_create/sp_backup_restore (panic-contained, ownership
+  rule 2), bridge backup.rs (create refuses overwrite; restore is static/
+  offline with the close-handles-first caller contract; wrong-password,
+  locked-vault, round-trip tests), JNI + Kotlin facade, Swift
+  BackupService. Restore flags map 1:1 to core RestoreOptions
+  (allow_replace / allow_epoch_rewind supervised override / disable_sync).
+  **828** XCTest matrix (TD-MOB-10) 4d —
+  **Status:** Done (2026-09-12, Phase 6 M4). Real bridge-contract XCTests
+  (ABI handshake v2 + fail-closed flags, negotiate accept/refuse, owned-
+  string generate+free, length bounds, slot challenge freshness, blob
+  preflight, null-safe frees) run on an iOS simulator via the SPM package
+  scheme; ios.yml simulator-tests rewritten fail-closed: bridge libs
+  script-generated (ONLY_SIM), app + extension build gates, xcodebuild test
+  fail-closed (the old job swallowed failures with || echo). (TD-MOB-01/02, TV-007) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). JNI-enabled Rust builds/tests/
+  clippy-clean (`--features jni` verified on host and in android.yml's
+  integration job — the baseline state was 3× E0308 in drive.rs and zero CI
+  coverage); the type errors died with WBS-802's contract rewrite and
+  WBS-807's drive.rs removal. TD-MOB-01's CI half lands in 811.
+  **811** all-ABI JNI
+  CI (TD-MOB-01, TV-007) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). android.yml mobile-bridge now
+  builds ALL THREE app ABIs (arm64-v8a, armeabi-v7a, x86_64 — armeabi-v7a
+  was missing entirely) WITH `--features jni` and fails closed on a
+  llvm-nm symbol check: all 17 `Java_com_sentinelpass_VaultBridge_*`
+  symbols must exist in every `.so`, and any stale
+  `VaultManager`/`DriveSync` symbol fails the job. scripts/build-android.sh
+  (build-all.yml path) gets the same `--features jni` + symbol check on its
+  NDK-r29 ABI set; android/build-libs.sh already matched.
+  **812** Keystore-bound platform slot (TD-MOB-03,
 SR-MOBILE-002) 4d; **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
 FR-MOBILE-001) 5d; **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d; **815**
 cleartext deny 1d; **816** backup policy (TD-MOB-05) 2d; **817** permission trim 0.5d;

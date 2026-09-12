@@ -19,12 +19,30 @@ class VaultBridge(private val context: Context) {
         private const val TAG = "VaultBridge"
         private val json = Json { ignoreUnknownKeys = true }
 
+        /**
+         * ABI contract version this Kotlin facade was built against
+         * (WBS-803). Must match the bridge's [crate::abi::ABI_VERSION];
+         * [init] handshakes and fails closed on mismatch rather than
+         * calling across an undefined contract.
+         */
+        private const val EXPECTED_ABI_VERSION = 2
+
         init {
             System.loadLibrary("sentinelpass_mobile_bridge")
         }
     }
 
     private var nativeHandle: Long = 0
+
+    init {
+        val abiVersion = nativeAbiVersion()
+        if (abiVersion != EXPECTED_ABI_VERSION) {
+            throw IllegalStateException(
+                "SentinelPass bridge ABI mismatch: library reports $abiVersion, " +
+                    "app was built for $EXPECTED_ABI_VERSION. Refusing to operate."
+            )
+        }
+    }
 
     // Error codes matching Rust ErrorCode enum
     enum class ErrorCode(val value: Int) {
@@ -42,6 +60,8 @@ class VaultBridge(private val context: Context) {
         TOTP(-11),
         SYNC(-12),
         OUT_OF_MEMORY(-13),
+        ABI_UNSUPPORTED(-14),
+        PANIC(-15),
         UNKNOWN(-99);
 
         companion object {
@@ -96,8 +116,14 @@ class VaultBridge(private val context: Context) {
     suspend fun lockVault(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                val result = nativeLock(nativeHandle)
+                val handle = nativeHandle
+                val result = nativeLock(handle)
                 if (result == ErrorCode.SUCCESS.value) {
+                    // WBS-804 review fix: locking does NOT destroy the native
+                    // vault — destroy the handle explicitly so the registry
+                    // entry and its VaultManager (open SQLite handle) are
+                    // freed instead of leaking on every lock->unlock cycle.
+                    nativeDestroy(handle)
                     nativeHandle = 0
                     true
                 } else {
@@ -223,6 +249,152 @@ class VaultBridge(private val context: Context) {
         }
     }
 
+    /**
+     * Update an existing entry (WBS-807: ATOMIC — one native call, one
+     * vault write). A `null` field is left unchanged; an empty `url`/`notes`
+     * clears that field. Replaces the old delete-then-add workaround in
+     * [com.sentinelpass.data.VaultState], which lost entry history and could
+     * race concurrent readers.
+     */
+    suspend fun updateEntry(
+        entryId: String,
+        title: String? = null,
+        username: String? = null,
+        password: String? = null,
+        url: String? = null,
+        notes: String? = null
+    ): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val result = nativeUpdateEntry(
+                    nativeHandle, entryId, title, username, password, url, notes
+                )
+                result == ErrorCode.SUCCESS.value
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update entry", e)
+                false
+            }
+        }
+    }
+
+    // ==========================================================================
+    // Platform Slot (WBS-812)
+    // ==========================================================================
+
+    /**
+     * Draw a fresh challenge (hex) for the Keystore key to sign. The caller
+     * signs it TWICE through [com.sentinelpass.slot.BiometricKeystore]
+     * (BiometricPrompt.CryptoObject — the prompt IS the crypto
+     * authorization) and passes both signatures back to [slotSeal].
+     */
+    suspend fun slotChallenge(): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeSlotChallenge()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to draw slot challenge", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Seal the unlocked vault's DEK under the Keystore signature pair.
+     * Returns the NON-SECRET at-rest blob (store it in app-private FILE
+     * storage — never SharedPreferences), or null on failure.
+     */
+    suspend fun slotSeal(challenge: String, sigA: String, sigB: String, binding: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeSlotSeal(nativeHandle, challenge, sigA, sigB, binding)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to seal platform slot", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Unlock the vault from the slot blob with a fresh Keystore signature
+     * over the blob's challenge. The vault must be CLOSED. On success the
+     * bridge holds a new unlocked handle and returns true.
+     */
+    suspend fun slotUnlock(vaultPath: String, blobJson: String, sig: String, binding: String): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val handle = nativeSlotUnlock(vaultPath, blobJson, sig, binding)
+                if (handle != 0L) {
+                    nativeHandle = handle
+                    true
+                } else {
+                    false
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to unlock from platform slot", e)
+                false
+            }
+        }
+    }
+
+    /**
+     * Preflight: whether `blobJson` is a recognized v1 slot blob (no key
+     * material involved).
+     */
+    fun slotHasBlob(blobJson: String): Boolean {
+        return try {
+            nativeSlotHasBlob(blobJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to inspect slot blob", e)
+            false
+        }
+    }
+
+    // ==========================================================================
+    // Authenticated Backup (WBS-827)
+    // ==========================================================================
+
+    /**
+     * Create an authenticated .spbackup bundle from the UNLOCKED vault.
+     * Refuses to overwrite an existing output. Returns the summary JSON
+     * (non-secret metadata) or null on failure.
+     */
+    suspend fun backupCreate(outputPath: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeBackupCreate(nativeHandle, outputPath)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to create backup", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Restore a .spbackup bundle (STATIC, offline). CALLER CONTRACT: destroy
+     * every open handle for [vaultPath] first — the restore replaces the
+     * target. Returns the report JSON or null on failure.
+     */
+    suspend fun backupRestore(
+        vaultPath: String,
+        bundlePath: String,
+        masterPassword: String,
+        allowReplace: Boolean = false,
+        allowEpochRewind: Boolean = false,
+        disableSync: Boolean = true
+    ): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeBackupRestore(
+                    vaultPath, bundlePath, masterPassword,
+                    allowReplace, allowEpochRewind, disableSync
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restore backup", e)
+                null
+            }
+        }
+    }
+
     // ==========================================================================
     // TOTP
     // ==========================================================================
@@ -303,57 +475,16 @@ class VaultBridge(private val context: Context) {
         }
     }
 
-    // ==========================================================================
-    // Biometric
-    // ==========================================================================
-
-    /**
-     * Check if biometric key exists
-     */
-    suspend fun hasBiometricKey(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                nativeBiometricHasKey(nativeHandle)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to check biometric key", e)
-                false
-            }
-        }
-    }
-
-    /**
-     * Remove biometric key
-     */
-    suspend fun removeBiometricKey(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val result = nativeBiometricRemoveKey(nativeHandle)
-                result == ErrorCode.SUCCESS.value
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to remove biometric key", e)
-                false
-            }
-        }
-    }
-
-    /**
-     * Unlock with biometric
-     */
-    suspend fun unlockWithBiometric(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val result = nativeBiometricUnlock(nativeHandle)
-                result == ErrorCode.SUCCESS.value
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to unlock with biometric", e)
-                false
-            }
-        }
-    }
 
     // ==========================================================================
     // JNI Declarations
     // ==========================================================================
+
+    /**
+     * ABI contract version reported by the loaded bridge library (WBS-803).
+     * Checked against [EXPECTED_ABI_VERSION] in the instance init block.
+     */
+    private external fun nativeAbiVersion(): Int
 
     private external fun nativeInit(
         vaultPath: String,
@@ -394,6 +525,53 @@ class VaultBridge(private val context: Context) {
         entryId: String
     ): Int
 
+    private external fun nativeUpdateEntry(
+        handle: Long,
+        entryId: String,
+        title: String?,
+        username: String?,
+        password: String?,
+        url: String?,
+        notes: String?
+    ): Int
+
+    // ==========================================================================
+    // Platform Slot (WBS-812: Android Keystore auth-bound DEK wrap)
+    // ==========================================================================
+
+    private external fun nativeSlotChallenge(): String?
+
+    private external fun nativeSlotSeal(
+        handle: Long,
+        challenge: String,
+        sigA: String,
+        sigB: String,
+        binding: String
+    ): String?
+
+    private external fun nativeSlotUnlock(
+        vaultPath: String,
+        blobJson: String,
+        sig: String,
+        binding: String
+    ): Long
+
+    private external fun nativeSlotHasBlob(blobJson: String): Boolean
+
+    private external fun nativeBackupCreate(
+        handle: Long,
+        outputPath: String
+    ): String?
+
+    private external fun nativeBackupRestore(
+        vaultPath: String,
+        bundlePath: String,
+        masterPassword: String,
+        allowReplace: Boolean,
+        allowEpochRewind: Boolean,
+        disableSync: Boolean
+    ): String?
+
     private external fun nativeGenerateTotp(
         handle: Long,
         entryId: String
@@ -410,17 +588,6 @@ class VaultBridge(private val context: Context) {
         password: String
     ): String?
 
-    private external fun nativeBiometricHasKey(
-        handle: Long
-    ): Boolean
-
-    private external fun nativeBiometricRemoveKey(
-        handle: Long
-    ): Int
-
-    private external fun nativeBiometricUnlock(
-        handle: Long
-    ): Int
 }
 
 // ==========================================================================
