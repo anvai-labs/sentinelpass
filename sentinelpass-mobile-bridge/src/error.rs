@@ -21,6 +21,7 @@ pub enum ErrorCode {
     Totp = -11,
     Sync = -12,
     OutOfMemory = -13,
+    AbiUnsupported = -14,
     Unknown = -99,
 }
 
@@ -41,6 +42,9 @@ impl fmt::Display for ErrorCode {
             ErrorCode::Totp => write!(f, "TOTP operation failed"),
             ErrorCode::Sync => write!(f, "Sync operation failed"),
             ErrorCode::OutOfMemory => write!(f, "Out of memory"),
+            ErrorCode::AbiUnsupported => {
+                write!(f, "ABI version not supported by this bridge build")
+            }
             ErrorCode::Unknown => write!(f, "Unknown error"),
         }
     }
@@ -90,6 +94,9 @@ pub enum BridgeError {
     #[error("Not initialized")]
     NotInitialized,
 
+    #[error("ABI unsupported: {0}")]
+    AbiUnsupported(String),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }
@@ -126,6 +133,7 @@ impl BridgeError {
             BridgeError::Biometric(_) => ErrorCode::Biometric,
             BridgeError::Sync(_) => ErrorCode::Sync,
             BridgeError::NotInitialized => ErrorCode::NotInitialized,
+            BridgeError::AbiUnsupported(_) => ErrorCode::AbiUnsupported,
             _ => ErrorCode::Unknown,
         }
     }

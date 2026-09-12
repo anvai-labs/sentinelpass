@@ -19,12 +19,30 @@ class VaultBridge(private val context: Context) {
         private const val TAG = "VaultBridge"
         private val json = Json { ignoreUnknownKeys = true }
 
+        /**
+         * ABI contract version this Kotlin facade was built against
+         * (WBS-803). Must match the bridge's [crate::abi::ABI_VERSION];
+         * [init] handshakes and fails closed on mismatch rather than
+         * calling across an undefined contract.
+         */
+        private const val EXPECTED_ABI_VERSION = 1
+
         init {
             System.loadLibrary("sentinelpass_mobile_bridge")
         }
     }
 
     private var nativeHandle: Long = 0
+
+    init {
+        val abiVersion = nativeAbiVersion()
+        if (abiVersion != EXPECTED_ABI_VERSION) {
+            throw IllegalStateException(
+                "SentinelPass bridge ABI mismatch: library reports $abiVersion, " +
+                    "app was built for $EXPECTED_ABI_VERSION. Refusing to operate."
+            )
+        }
+    }
 
     // Error codes matching Rust ErrorCode enum
     enum class ErrorCode(val value: Int) {
@@ -42,6 +60,7 @@ class VaultBridge(private val context: Context) {
         TOTP(-11),
         SYNC(-12),
         OUT_OF_MEMORY(-13),
+        ABI_UNSUPPORTED(-14),
         UNKNOWN(-99);
 
         companion object {
@@ -354,6 +373,12 @@ class VaultBridge(private val context: Context) {
     // ==========================================================================
     // JNI Declarations
     // ==========================================================================
+
+    /**
+     * ABI contract version reported by the loaded bridge library (WBS-803).
+     * Checked against [EXPECTED_ABI_VERSION] in the instance init block.
+     */
+    private external fun nativeAbiVersion(): Int
 
     private external fun nativeInit(
         vaultPath: String,

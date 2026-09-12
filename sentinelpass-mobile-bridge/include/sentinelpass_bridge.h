@@ -4,6 +4,43 @@
 #include <stdlib.h>
 
 /**
+ * ABI contract version of this build.
+ *
+ * Bump on ANY breaking change to the exported C ABI (signature changes,
+ * struct layout changes, removed symbols) or the JNI contract. Additive,
+ * backward-compatible changes (new symbols, new trailing error codes) do not
+ * require a bump, but a bump must also raise [`MIN_SUPPORTED_ABI_VERSION`]
+ * only when older consumers genuinely cannot interoperate.
+ */
+#define ABI_VERSION 1
+
+/**
+ * Oldest consumer ABI version this bridge can still serve.
+ */
+#define MIN_SUPPORTED_ABI_VERSION 1
+
+/**
+ * Base vault surface (init/lock, entry CRUD, TOTP, password tools).
+ */
+#define FEATURE_BASE (1 << 0)
+
+/**
+ * Platform-keystore biometric slot (Android Keystore / iOS Keychain
+ * SecAccessControl wrapping the DEK). Off until WBS-812/821 land — a
+ * biometric prompt alone must never be reported as sufficient (ADR-009:
+ * a UI prompt authorizes nothing unless it authorizes the cryptographic
+ * operation).
+ */
+#define FEATURE_PLATFORM_KEYSTORE (1 << 1)
+
+/**
+ * Relay-based sync v2 (ADR-006) wired through the bridge. Off until the
+ * mobile sync surface is implemented; the CloudKit/Drive paths are removed
+ * under WBS-807 and must never be advertised.
+ */
+#define FEATURE_RELAY_SYNC_V2 (1 << 2)
+
+/**
  * Error codes that can be returned to mobile platforms
  */
 typedef enum SPErrorCode {
@@ -21,6 +58,7 @@ typedef enum SPErrorCode {
   SPErrorCode_Totp = -11,
   SPErrorCode_Sync = -12,
   SPErrorCode_OutOfMemory = -13,
+  SPErrorCode_AbiUnsupported = -14,
   SPErrorCode_Unknown = -99,
 } SPErrorCode;
 
@@ -28,6 +66,20 @@ typedef enum SPErrorCode {
  * Vault handle type (opaque u64 for FFI)
  */
 typedef uint64_t SPVaultHandle;
+
+/**
+ * ABI/feature description reported to consumers (WBS-803).
+ */
+typedef struct SPBridgeInfo {
+  uint32_t abi_version;
+  uint32_t min_supported_abi_version;
+  uint32_t feature_flags;
+  /**
+   * Must be zero; reserved for future growth so the struct can gain
+   * fields without breaking consumers that zero-initialize it.
+   */
+  uint32_t reserved;
+} SPBridgeInfo;
 
 /**
  * Handle to Drive sync manager (C FFI)
@@ -166,6 +218,27 @@ enum SPErrorCode sp_biometric_set_key(SPVaultHandle handle,
                                       uintptr_t key_data_len);
 
 enum SPErrorCode sp_biometric_unlock(SPVaultHandle handle);
+
+/**
+ * Report this build's ABI version and feature flags.
+ *
+ * Ownership: `out_info` is written by the callee; no allocation is
+ * performed and nothing needs freeing.
+ */
+enum SPErrorCode sp_bridge_info(struct SPBridgeInfo *out_info);
+
+/**
+ * Negotiate a consumer's ABI version against this build (WBS-803).
+ *
+ * `client_abi_version` is the ABI the caller was built against. On success
+ * (`Success`) the versions are compatible and `out_info` describes this
+ * build; the caller must feature-test `feature_flags` before using optional
+ * capabilities. On `AbiUnsupported` the caller MUST refuse to operate; the
+ * header contract is versioned as one unit, so an unsupported consumer
+ * cannot assume any other symbol's signature. `out_info` (if non-null) is
+ * filled even on failure so the caller can report the mismatch.
+ */
+enum SPErrorCode sp_bridge_negotiate(uint32_t client_abi_version, struct SPBridgeInfo *out_info);
 
 void sp_bytes_free(const uint8_t *ptr, uintptr_t len);
 
