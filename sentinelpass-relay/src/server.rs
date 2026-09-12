@@ -285,8 +285,10 @@ mod tests {
         use axum::http::StatusCode;
         use tower::util::ServiceExt;
 
-        let mut cfg = RelayConfig::default();
-        cfg.max_payload_size = 1024; // tiny limit so the test stays cheap
+        let cfg = RelayConfig {
+            max_payload_size: 1024, // tiny limit so the test stays cheap
+            ..RelayConfig::default()
+        };
         let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), cfg);
         let app = build_router(state);
 
