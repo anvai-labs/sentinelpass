@@ -240,6 +240,12 @@ enum SPErrorCode sp_bridge_info(struct SPBridgeInfo *out_info);
  */
 enum SPErrorCode sp_bridge_negotiate(uint32_t client_abi_version, struct SPBridgeInfo *out_info);
 
+/**
+ * Free a byte buffer returned by the bridge, using the same `len` that the
+ * producing call output. The buffer is deallocated with the exact layout
+ * used at allocation (`Layout::array::<u8>(len)`); passing a different
+ * `len` is a caller bug. Never call this on buffers the caller allocated.
+ */
 void sp_bytes_free(const uint8_t *ptr, uintptr_t len);
 
 /**
@@ -295,6 +301,13 @@ enum SPErrorCode sp_entry_add(SPVaultHandle handle,
 enum SPErrorCode sp_entry_delete(SPVaultHandle handle, const char *entry_id);
 
 /**
+ * Free one `SPEntry` returned by `sp_entry_get_by_id`, releasing all six
+ * string members. The struct storage itself is caller-provided and is NOT
+ * freed here. Safe on null.
+ */
+void sp_entry_free(struct SPEntry *entry);
+
+/**
  * Get entry by ID
  */
 enum SPErrorCode sp_entry_get_by_id(SPVaultHandle handle,
@@ -307,6 +320,14 @@ enum SPErrorCode sp_entry_get_by_id(SPVaultHandle handle,
 enum SPErrorCode sp_entry_list_all(SPVaultHandle handle,
                                    const struct SPEntrySummary **out_entries,
                                    uintptr_t *out_count);
+
+/**
+ * Free an `SPEntrySummary` array returned by `sp_entry_list_all` /
+ * `sp_entry_search`, releasing every element's strings and the backing
+ * array (allocated under `Layout::array::<EntrySummary>(count)`). Safe on
+ * null or `count == 0`.
+ */
+void sp_entry_list_free(struct SPEntrySummary *entries, uintptr_t count);
 
 /**
  * Search entries
@@ -372,6 +393,11 @@ enum SPErrorCode sp_password_generate(uintptr_t length,
                                       bool include_symbols,
                                       const char **out_password);
 
+/**
+ * Free a string returned by the bridge (out-strings, `SPTotpCode.code`,
+ * `SyncStatus.device_id`). Safe on null. Must be called exactly once per
+ * bridge-allocated string; never on strings the caller allocated.
+ */
 void sp_string_free(const char *ptr);
 
 /**

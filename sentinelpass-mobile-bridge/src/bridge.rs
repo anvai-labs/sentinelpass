@@ -5,6 +5,7 @@ use sentinelpass_core::vault::{CredentialType, Entry, EntrySummary, VaultManager
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
+use zeroize::Zeroizing;
 
 /// Global vault handle storage
 ///
@@ -19,7 +20,12 @@ fn get_registry() -> &'static Mutex<VaultRegistry> {
 struct VaultRegistry {
     vaults: HashMap<u64, Arc<Mutex<VaultManager>>>,
     next_handle: u64,
-    biometric_keys: HashMap<u64, Vec<u8>>,
+    /// In-process biometric key material (WBS-804: zeroized on removal and
+    /// on vault destroy; never cloned out of the registry). This is the M1
+    /// containment contract — Stage M2 (WBS-812/821) replaces this map with
+    /// platform-keystore-bound slots so no key material lives in this
+    /// process at all.
+    biometric_keys: HashMap<u64, Zeroizing<Vec<u8>>>,
 }
 
 impl VaultRegistry {
@@ -47,14 +53,15 @@ impl VaultRegistry {
     }
 
     fn set_biometric_key(&mut self, handle: u64, key: Vec<u8>) {
-        self.biometric_keys.insert(handle, key);
+        self.biometric_keys.insert(handle, Zeroizing::new(key));
     }
 
-    fn get_biometric_key(&self, handle: u64) -> Option<&Vec<u8>> {
+    fn get_biometric_key(&self, handle: u64) -> Option<&Zeroizing<Vec<u8>>> {
         self.biometric_keys.get(&handle)
     }
 
-    fn remove_biometric_key(&mut self, handle: u64) -> Option<Vec<u8>> {
+    fn remove_biometric_key(&mut self, handle: u64) -> Option<Zeroizing<Vec<u8>>> {
+        // Zeroizing drops with an explicit zeroize pass.
         self.biometric_keys.remove(&handle)
     }
 }

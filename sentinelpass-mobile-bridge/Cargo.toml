@@ -32,6 +32,9 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# Secret hygiene (WBS-804: biometric key buffers zeroize on drop)
+zeroize = { workspace = true }
+
 # JNI (Android)
 jni = { version = "0.21", optional = true }
 lazy_static = { version = "1.4", optional = true }

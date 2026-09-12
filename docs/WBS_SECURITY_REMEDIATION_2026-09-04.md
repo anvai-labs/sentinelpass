@@ -1442,7 +1442,19 @@ Shared (801–807):
   `FEATURE_RELAY_SYNC_V2` are declared vocabulary but never advertised until
   WBS-812/821 and the mobile sync v2 wiring land (a prompt is not a
   cryptographic authorization — ADR-009). Pinned by abi.rs + ffi.rs tests.
-- **804** ownership + zeroizing destroy (TD-MOB-09) 2d.
+- **804** ownership + zeroizing destroy (TD-MOB-09) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). Single proven ownership contract
+  documented at the FFI boundary (8 rules, mirrored in the generated header):
+  out-strings via `sp_string_free`, out-byte-buffers via layout-matched
+  `sp_bytes_free` (the `Vec::leak` + unchecked-layout dealloc pairs are gone;
+  buffers now copied under `Layout::array::<u8>`), `sp_entry_free` +
+  `sp_entry_list_free` added for struct/array outputs with OOM-safe
+  allocation (no `unwrap()` panics at the boundary), dead `SyncResult`
+  removed. Registry biometric key material is `Zeroizing<Vec<u8>>` — removed
+  on `bridge_biometric_remove_key` and on `bridge_vault_destroy` with a
+  zeroize-on-drop pass (M1 containment; M2 removes the in-process map
+  entirely). Round-trip ownership tests cover every free path against a real
+  vault; double-destroy/use-after-destroy refused.
 - **805** FFI panic containment 1.5d.
 - **806** lifecycle/invalid-handle tests 2d.
 - **807** atomic update + placeholder removal (TD-MOB-03/04) 3d.
