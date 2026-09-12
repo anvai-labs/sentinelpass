@@ -18,6 +18,9 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.runtime.LaunchedEffect
+import com.sentinelpass.ui.disablePrivacyCover
+import com.sentinelpass.ui.enablePrivacyCover
 import com.sentinelpass.ui.screens.LockScreen
 import com.sentinelpass.ui.screens.SetupScreen
 import com.sentinelpass.ui.screens.MainScreen
@@ -43,6 +46,21 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * WBS-814 privacy cover: while the activity is not resumed its window
+     * surface is captured for the recents/app-switch thumbnail — FLAG_SECURE
+     * blanks that snapshot. Cleared again on resume.
+     */
+    override fun onPause() {
+        super.onPause()
+        enablePrivacyCover()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        disablePrivacyCover()
+    }
 }
 
 @Composable
@@ -51,6 +69,18 @@ fun SentinelPassApp(
     navController: NavHostController = rememberNavController()
 ) {
     val uiState by vaultState.uiState.collectAsState()
+
+    // WBS-814: when the vault locks (manual, background auto-lock from
+    // ProcessLifecycleOwner, or slot disable), return the UI to the lock
+    // screen. NavHost only evaluates startDestination once, so without this
+    // the auto-locked app would sit on the (now dead) main screen.
+    LaunchedEffect(uiState.hasVault, uiState.isUnlocked) {
+        if (uiState.hasVault && !uiState.isUnlocked) {
+            navController.navigate("lock") {
+                popUpTo(0) { inclusive = true }
+            }
+        }
+    }
 
     NavHost(
         navController = navController,
