@@ -1444,7 +1444,9 @@ Shared (801–807):
   cryptographic authorization — ADR-009). Pinned by abi.rs + ffi.rs tests.
 - **804** ownership + zeroizing destroy (TD-MOB-09) 2d —
   **Status:** Done (2026-09-11, Phase 6 M1). Single proven ownership contract
-  documented at the FFI boundary (8 rules, mirrored in the generated header):
+  documented at the FFI boundary (8 rules; every producer/free carries its
+  per-function ownership line in the generated header — cbindgen emits Rust
+  doc comments):
   out-strings via `sp_string_free`, out-byte-buffers via layout-matched
   `sp_bytes_free` (the `Vec::leak` + unchecked-layout dealloc pairs are gone;
   buffers now copied under `Layout::array::<u8>`), `sp_entry_free` +

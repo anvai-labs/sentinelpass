@@ -128,12 +128,12 @@ typedef struct SPPasswordAnalysis {
 /**
  * FFI-safe sync status representation
  */
-typedef struct SyncStatus {
+typedef struct SPSyncStatus {
   bool enabled;
   int64_t last_sync_at;
   uint64_t pending_changes;
   const char *device_id;
-} SyncStatus;
+} SPSyncStatus;
 
 /**
  * FFI-safe TOTP code representation
@@ -187,7 +187,10 @@ enum SPErrorCode sp_bridge_negotiate(uint32_t client_abi_version, struct SPBridg
 void sp_bytes_free(const uint8_t *ptr, uintptr_t len);
 
 /**
- * Add a new entry
+ * Add a new entry.
+ *
+ * Ownership (WBS-804 rule 2): on `Success` the caller MUST release
+ * `*out_entry_id` with `sp_string_free`.
  */
 enum SPErrorCode sp_entry_add(SPVaultHandle handle,
                               const char *title,
@@ -210,14 +213,22 @@ enum SPErrorCode sp_entry_delete(SPVaultHandle handle, const char *entry_id);
 void sp_entry_free(struct SPEntry *entry);
 
 /**
- * Get entry by ID
+ * Get entry by ID.
+ *
+ * Ownership (WBS-804 rule 6): on `Success` the caller MUST release the
+ * strings with `sp_entry_free(&mut entry)`. `url`/`notes` are NULL when the
+ * entry has no such field (rule 2); `id`/`title`/`username`/`password` are
+ * never NULL on `Success`.
  */
 enum SPErrorCode sp_entry_get_by_id(SPVaultHandle handle,
                                     const char *entry_id,
                                     struct SPEntry *out_entry);
 
 /**
- * List all entries
+ * List all entries.
+ *
+ * Ownership (WBS-804 rule 5): on `Success` the caller MUST release the
+ * array with `sp_entry_list_free(*out_entries, *out_count)`.
  */
 enum SPErrorCode sp_entry_list_all(SPVaultHandle handle,
                                    const struct SPEntrySummary **out_entries,
@@ -232,7 +243,10 @@ enum SPErrorCode sp_entry_list_all(SPVaultHandle handle,
 void sp_entry_list_free(struct SPEntrySummary *entries, uintptr_t count);
 
 /**
- * Search entries
+ * Search entries.
+ *
+ * Ownership (WBS-804 rule 5): on `Success` the caller MUST release the
+ * array with `sp_entry_list_free(*out_entries, *out_count)`.
  */
 enum SPErrorCode sp_entry_search(SPVaultHandle handle,
                                  const char *query,
@@ -256,13 +270,19 @@ enum SPErrorCode sp_entry_update(SPVaultHandle handle,
                                  const char *notes);
 
 /**
- * Check password strength
+ * Check password strength.
+ *
+ * Ownership: `out_analysis` is plain data written by the callee; nothing to
+ * free (WBS-804 rule 4).
  */
 enum SPErrorCode sp_password_check_strength(const char *password,
                                             struct SPPasswordAnalysis *out_analysis);
 
 /**
- * Generate password
+ * Generate a password (8..=128 chars).
+ *
+ * Ownership (WBS-804 rule 2): on `Success` the caller MUST release
+ * `*out_password` with `sp_string_free`.
  */
 enum SPErrorCode sp_password_generate(uintptr_t length,
                                       bool include_symbols,
@@ -276,12 +296,21 @@ enum SPErrorCode sp_password_generate(uintptr_t length,
 void sp_string_free(const char *ptr);
 
 /**
- * Get sync status
+ * Get sync status.
+ *
+ * Ownership (WBS-804 rule 4): on `Success` the caller MUST release
+ * `out_status.device_id` with `sp_string_free` (NULL when no device is
+ * registered — rule 2). Sync stays disabled until the mobile relay sync v2
+ * surface is wired (ADR-006/ADR-009; the CloudKit/Drive placeholders were
+ * removed under WBS-807).
  */
-enum SPErrorCode sp_sync_get_status(SPVaultHandle handle, struct SyncStatus *out_status);
+enum SPErrorCode sp_sync_get_status(SPVaultHandle handle, struct SPSyncStatus *out_status);
 
 /**
- * Generate TOTP code
+ * Generate TOTP code.
+ *
+ * Ownership (WBS-804 rule 4): on `Success` the caller MUST release
+ * `out_code.code` with `sp_string_free`.
  */
 enum SPErrorCode sp_totp_generate_code(SPVaultHandle handle,
                                        const char *entry_id,

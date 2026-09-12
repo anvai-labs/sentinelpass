@@ -372,6 +372,6 @@ adb logcat | grep -E "SentinelPass|sentinelpass"
    - iOS: Requires real device for true biometric testing
    - Android: Test on different Android versions
 3. **Missing Features**:
-   - iOS: AutoFill integration, iCloud sync
+   - iOS: AutoFill integration, iCloud sync *(OBSOLETE 2026-09-11: CloudKit/Drive sync removed per ADR-009 rev 2 / WBS-807 — mobile sync is relay-only sync v2; ignore this item.)*
    - Android: Autofill service, QR scanner for TOTP
    - Both: Import/export, advanced settings

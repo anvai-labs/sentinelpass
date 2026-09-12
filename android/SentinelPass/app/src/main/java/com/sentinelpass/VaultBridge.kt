@@ -116,8 +116,14 @@ class VaultBridge(private val context: Context) {
     suspend fun lockVault(): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                val result = nativeLock(nativeHandle)
+                val handle = nativeHandle
+                val result = nativeLock(handle)
                 if (result == ErrorCode.SUCCESS.value) {
+                    // WBS-804 review fix: locking does NOT destroy the native
+                    // vault — destroy the handle explicitly so the registry
+                    // entry and its VaultManager (open SQLite handle) are
+                    // freed instead of leaking on every lock->unlock cycle.
+                    nativeDestroy(handle)
                     nativeHandle = 0
                     true
                 } else {
