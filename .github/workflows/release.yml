@@ -92,15 +92,40 @@ jobs:
           name: web-artifacts-${{ matrix.platform }}
           path: .
 
-      # If artifacts weren't available, build fresh
+      # If artifacts weren't available, build fresh.
+      #
+      # WBS-908 (SBOM): release binaries are built with `cargo auditable`
+      # so every shipped binary EMBEDS its exact dependency list (versions
+      # + checksums) in a compressed blob. Chosen over generating a
+      # standalone SBOM file (syft/CycloneDX/SPDX) because the embedded
+      # form travels with the artifact — anyone can verify what shipped
+      # with `cargo audit bin ./sentinelpass` offline, it cannot drift
+      # from the binary the way a sidecar file can, and it feeds
+      # vulnerability matching without extra infrastructure. See
+      # docs/OSS_RELEASE_CHECKLIST.md ("Supply chain / SBOM").
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked
       - name: Build release binaries (if not cached)
         shell: bash
         run: |
           if [ ! -f "target/release/sentinelpass${{ runner.os == 'Windows' && '.exe' || '' }}" ]; then
-            cargo build --release --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
+            cargo auditable build --release --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
           else
             echo "Using cached build artifacts"
           fi
+
+      # WBS-908 smoke gate (Linux): prove the embedded SBOM is really
+      # present by auditing the built binary from its own embedded
+      # dependency data. Fails the release if `cargo auditable` data is
+      # missing or a dependency in the binary matches a known advisory.
+      - name: Install cargo-audit (SBOM verification)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@55ed588c2f0e092949af25ad4c5873185e476b5c # cargo-audit
+      - name: Verify embedded SBOM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo audit bin target/release/sentinelpass
+          cargo audit bin target/release/sentinelpass-daemon
 
       - name: Inject release version
         id: version
