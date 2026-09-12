@@ -979,6 +979,88 @@ pub unsafe extern "C" fn sp_slot_open_with_dek(
 }
 
 // ============================================================================
+// Authenticated backup (WBS-827): ADR-008 .spbackup bundles
+// ============================================================================
+
+/// Create an authenticated .spbackup bundle from the UNLOCKED vault at
+/// `handle`. Refuses to overwrite an existing output. Ownership rule 2:
+/// release `out_summary` (JSON, non-secret metadata) with `sp_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sp_backup_create(
+    handle: VaultHandle,
+    output_path: *const c_char,
+    out_summary: *mut *const c_char,
+) -> ErrorCode {
+    catch_panic(|| {
+        if out_summary.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let out_s = match c_to_string(output_path) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match crate::backup::bridge_backup_create(handle, &out_s) {
+            Ok(summary) => {
+                *out_summary = string_to_c(&summary);
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
+}
+
+/// Restore a .spbackup bundle onto `vault_path` (STATIC, offline-exclusive).
+/// CALLER CONTRACT: destroy every open bridge handle for `vault_path` first.
+/// `allow_replace` acknowledges replacing an existing target;
+/// `allow_epoch_rewind` is the ADR-004 rev 4 supervised override;
+/// `disable_sync` acknowledges ADR-008 branch 2 (restored state re-pairs).
+/// Ownership rule 2: release `out_report` (JSON) with `sp_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sp_backup_restore(
+    vault_path: *const c_char,
+    bundle_path: *const c_char,
+    master_password: *const c_char,
+    allow_replace: bool,
+    allow_epoch_rewind: bool,
+    disable_sync: bool,
+    out_report: *mut *const c_char,
+) -> ErrorCode {
+    catch_panic(|| {
+        if out_report.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let path_s = match c_to_string(vault_path) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let bundle_s = match c_to_string(bundle_path) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let pw_s = match c_to_string(master_password) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match crate::backup::bridge_backup_restore(
+            &path_s,
+            &bundle_s,
+            &pw_s,
+            allow_replace,
+            allow_epoch_rewind,
+            disable_sync,
+        ) {
+            Ok(report) => {
+                *out_report = string_to_c(&report);
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
+}
+
+// ============================================================================
 // Memory Management (WBS-804: single proven ownership contract)
 // ============================================================================
 
@@ -1104,6 +1186,8 @@ mod abi_contract_tests {
     /// The declared C ABI contract: every function exported to Swift. Must be
     /// kept in lockstep with cbindgen.toml `[export] include`.
     const DECLARED_C_ABI: &[&str] = &[
+        "sp_backup_create",
+        "sp_backup_restore",
         "sp_bridge_info",
         "sp_bridge_negotiate",
         "sp_entry_free",

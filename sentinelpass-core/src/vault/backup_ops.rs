@@ -531,7 +531,10 @@ pub fn verify_bundle_authenticity(
 // ---------------------------------------------------------------------------
 
 /// Summary of a created backup bundle.
-#[derive(Debug, Clone)]
+///
+/// Serialize (WBS-827): the bridge returns this as JSON metadata to the
+/// mobile UI — non-secret fields only by construction.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BackupSummary {
     pub output: PathBuf,
     pub backup_id: String,
@@ -1210,7 +1213,10 @@ pub struct RestoreOptions {
 }
 
 /// Outcome of a successful verified restore.
-#[derive(Debug, Clone)]
+///
+/// Serialize (WBS-827): bridge-facing JSON metadata, non-secret by
+/// construction.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RestoreReport {
     pub bundle_backup_id: String,
     pub vault_uuid: String,
