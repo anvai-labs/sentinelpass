@@ -47,7 +47,6 @@ class VaultState private constructor(private val context: Context) : ViewModel()
 
     // Auto-lock timer
     private var autoLockJob: kotlinx.coroutines.Job? = null
-    private val autoLockDelayMillis = 5 * 60 * 1000L // 5 minutes
 
     init {
         _uiState.value = _uiState.value.copy(
@@ -102,19 +101,7 @@ class VaultState private constructor(private val context: Context) : ViewModel()
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true)
 
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    val bridge = VaultBridge(context)
-                    val success = bridge.initVault(vaultFile.absolutePath, masterPassword)
-                    if (success) {
-                        vaultBridge = bridge
-                    }
-                    success
-                } catch (e: IllegalStateException) {
-                    android.util.Log.e("VaultState", "Bridge unavailable", e)
-                    false
-                }
-            }
+            val result = unlockVaultAwait(masterPassword)
 
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
@@ -126,6 +113,40 @@ class VaultState private constructor(private val context: Context) : ViewModel()
                 loadEntries()
             }
         }
+    }
+
+    /**
+     * Suspend unlock used by the autofill flows (WBS-813), which need a
+     * synchronous success signal rather than the fire-and-forget UI path.
+     * On success the singleton state is updated EXACTLY as the UI path
+     * would — an unlock performed inside the autofill overlay must not
+     * leave [VaultUiState.isUnlocked] false while the handle is open (the
+     * auto-lock timer gates on that flag and would never fire).
+     *
+     * GUARD: never orphan an open native handle — re-unlocking while a
+     * bridge is live previously replaced [vaultBridge] without destroying
+     * the old one, leaking the handle and its open SQLite vault.
+     */
+    suspend fun unlockVaultAwait(masterPassword: String): Boolean {
+        if (vaultBridge != null) return true
+        val success = withContext(Dispatchers.IO) {
+            try {
+                val bridge = VaultBridge(context)
+                val ok = bridge.initVault(vaultFile.absolutePath, masterPassword)
+                if (ok) {
+                    vaultBridge = bridge
+                }
+                ok
+            } catch (e: IllegalStateException) {
+                android.util.Log.e("VaultState", "Bridge unavailable", e)
+                false
+            }
+        }
+        if (success) {
+            _uiState.value = _uiState.value.copy(isUnlocked = true, hasVault = true, error = null)
+            loadEntries()
+        }
+        return success
     }
 
     /**
@@ -172,6 +193,37 @@ class VaultState private constructor(private val context: Context) : ViewModel()
             }
             _entries.value = entries
         }
+    }
+
+    /**
+     * Fresh list straight from the bridge (autofill flows, WBS-813, must not
+     * depend on the UI's entries cache being warm).
+     */
+    suspend fun listEntriesNow(): List<EntrySummary> {
+        return withContext(Dispatchers.IO) {
+            vaultBridge?.listEntries() ?: emptyList()
+        }
+    }
+
+    /**
+     * Suspend add used by the autofill save flow (WBS-813): returns the new
+     * entry id on success, null on failure, without touching the shared UI
+     * error state. Keeps the main app's entry list in sync via [loadEntries].
+     */
+    suspend fun addEntryAwait(
+        title: String,
+        username: String,
+        password: String,
+        url: String = "",
+        notes: String = ""
+    ): String? {
+        val result = withContext(Dispatchers.IO) {
+            vaultBridge?.addEntry(title, username, password, url, notes)
+        }
+        if (result != null) {
+            loadEntries()
+        }
+        return result
     }
 
     /**
@@ -438,12 +490,17 @@ class VaultState private constructor(private val context: Context) : ViewModel()
     // ==========================================================================
 
     /**
-     * Schedule auto-lock after delay
+     * Schedule auto-lock after [AUTO_LOCK_TIMEOUT_MS]. Single source of
+     * truth for background auto-lock: [com.sentinelpass.SentinelPassApplication]
+     * arms it when the app process moves to background (ProcessLifecycleOwner)
+     * and cancels it on return. Locking goes through [lockVault], which
+     * locks AND destroys the native handle (WBS-804 semantics) — no key
+     * material survives the timeout.
      */
     fun scheduleAutoLock() {
         autoLockJob?.cancel()
         autoLockJob = viewModelScope.launch {
-            delay(autoLockDelayMillis)
+            delay(AUTO_LOCK_TIMEOUT_MS)
             if (_uiState.value.isUnlocked) {
                 lockVault()
             }
@@ -451,11 +508,15 @@ class VaultState private constructor(private val context: Context) : ViewModel()
     }
 
     /**
-     * Check and execute auto-lock if scheduled
+     * Disarm a pending auto-lock — the user returned to the foreground
+     * before the timeout elapsed, so the timer must NOT fire while the app
+     * is in active use. (Replaces the old no-op `checkAutoLock`, which left
+     * the timer running and locked the vault mid-session after 5 minutes
+     * of active use following any background visit.)
      */
-    fun checkAutoLock() {
-        // Auto-lock is handled by the scheduleAutoLock coroutine
-        // This is called when app returns from foreground
+    fun cancelScheduledAutoLock() {
+        autoLockJob?.cancel()
+        autoLockJob = null
     }
 
     override fun onCleared() {
@@ -464,6 +525,13 @@ class VaultState private constructor(private val context: Context) : ViewModel()
     }
 
     companion object {
+        /**
+         * WBS-814: the ONE auto-lock timeout (5 minutes). Backgrounding the
+         * app arms a timer for this long; returning before it fires cancels
+         * the timer (see [cancelScheduledAutoLock]).
+         */
+        const val AUTO_LOCK_TIMEOUT_MS = 5 * 60 * 1000L
+
         @Volatile
         private var INSTANCE: VaultState? = null
 
