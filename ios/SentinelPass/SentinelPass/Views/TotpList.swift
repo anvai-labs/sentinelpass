@@ -189,9 +189,8 @@ struct TotpRow: View {
     }
 
     private func copyCode() {
-        #if os(iOS)
-        UIPasteboard.general.string = totp.code
-        #endif
+        // WBS-824: local expiring paste (30 s) — never a permanent write.
+        Pasteboard.copySensitive(totp.code)
 
         copied = true
 
