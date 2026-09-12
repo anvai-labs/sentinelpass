@@ -27,6 +27,9 @@ sentinelpass-core = { path = "../sentinelpass-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Hex encoding for slot challenges/signatures (WBS-812/821)
+hex = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 
@@ -41,6 +44,11 @@ tracing = { workspace = true }
 
 # Time
 chrono = { workspace = true }
+
+[dev-dependencies]
+# Slot-test fake platform: deterministic "signatures" (WBS-812/821)
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.26"

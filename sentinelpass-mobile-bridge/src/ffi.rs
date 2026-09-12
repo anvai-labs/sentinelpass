@@ -760,56 +760,6 @@ pub unsafe extern "C" fn sp_password_check_strength(
 }
 
 // ============================================================================
-// Biometric
-// ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn sp_biometric_set_key(
-    handle: VaultHandle,
-    key_data: *const u8,
-    key_data_len: usize,
-) -> ErrorCode {
-    catch_panic(|| {
-        if key_data.is_null() || key_data_len == 0 {
-            return ErrorCode::InvalidParam;
-        }
-
-        let slice = std::slice::from_raw_parts(key_data, key_data_len);
-        result_to_code(bridge::bridge_biometric_set_key(handle, slice))
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn sp_biometric_has_key(
-    handle: VaultHandle,
-    out_has_key: *mut bool,
-) -> ErrorCode {
-    catch_panic(|| {
-        if out_has_key.is_null() {
-            return ErrorCode::InvalidParam;
-        }
-
-        match bridge::bridge_biometric_has_key(handle) {
-            Ok(has_key) => {
-                *out_has_key = has_key;
-                ErrorCode::Success
-            }
-            Err(e) => e.to_error_code(),
-        }
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn sp_biometric_remove_key(handle: VaultHandle) -> ErrorCode {
-    catch_panic(|| result_to_code(bridge::bridge_biometric_remove_key(handle)))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn sp_biometric_unlock(handle: VaultHandle) -> ErrorCode {
-    catch_panic(|| result_to_code(bridge::bridge_biometric_unlock(handle)))
-}
-
-// ============================================================================
 // Sync Operations
 // ============================================================================
 
@@ -852,6 +802,175 @@ pub unsafe extern "C" fn sp_sync_get_status(
                         .map(string_to_c)
                         .unwrap_or(ptr::null()),
                 };
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
+}
+
+// ============================================================================
+// Platform slot (WBS-812/821): auth-bound Keystore/Keychain DEK wrap
+// ============================================================================
+
+/// Draw a fresh 32-byte challenge (hex) for the platform's auth-bound key to
+/// sign. Ownership rule 2: release `out_hex` with `sp_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sp_slot_challenge(out_hex: *mut *const c_char) -> ErrorCode {
+    catch_panic(|| {
+        if out_hex.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        match crate::slot::bridge_slot_challenge() {
+            Ok(hex) => {
+                *out_hex = string_to_c(&hex);
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
+}
+
+/// Seal the vault DEK under the platform signature (ENABLE).
+///
+/// `challenge`/`sig_a`/`sig_b` are hex strings from the host platform: the
+/// challenge the auth-bound key signed and TWO byte-identical signatures
+/// (deterministic scheme). `binding` is the caller-stable vault identity.
+/// Ownership rule 2: on `Success` release `out_blob` (the NON-SECRET
+/// at-rest blob JSON) with `sp_string_free`.
+#[no_mangle]
+pub unsafe extern "C" fn sp_slot_seal(
+    handle: VaultHandle,
+    challenge: *const c_char,
+    sig_a: *const c_char,
+    sig_b: *const c_char,
+    binding: *const c_char,
+    out_blob: *mut *const c_char,
+) -> ErrorCode {
+    catch_panic(|| {
+        if out_blob.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let challenge_s = match c_to_string(challenge) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let sig_a_s = match c_to_string(sig_a) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let sig_b_s = match c_to_string(sig_b) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let binding_s = match c_to_string(binding) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match crate::slot::bridge_slot_seal(handle, &challenge_s, &sig_a_s, &sig_b_s, &binding_s) {
+            Ok(blob) => {
+                *out_blob = string_to_c(&blob);
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
+}
+
+/// Release the DEK from the slot blob with a fresh platform signature over
+/// the blob's challenge and OPEN the vault (UNLOCK). Fails closed on any
+/// mismatch. Ownership rule 7: the returned handle must be destroyed.
+#[no_mangle]
+pub unsafe extern "C" fn sp_slot_unlock(
+    vault_path: *const c_char,
+    blob_json: *const c_char,
+    sig: *const c_char,
+    binding: *const c_char,
+    out_handle: *mut VaultHandle,
+) -> ErrorCode {
+    catch_panic(|| {
+        if out_handle.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let path_s = match c_to_string(vault_path) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let blob_s = match c_to_string(blob_json) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let sig_s = match c_to_string(sig) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let binding_s = match c_to_string(binding) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match crate::slot::bridge_slot_unlock(&path_s, &blob_s, &sig_s, &binding_s) {
+            Ok(handle) => {
+                *out_handle = handle;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
+}
+
+/// Preflight: whether `blob_json` is a recognized v1 slot blob. No key
+/// material involved; `out_has` is written on `Success`.
+#[no_mangle]
+pub unsafe extern "C" fn sp_slot_has_blob(
+    blob_json: *const c_char,
+    out_has: *mut bool,
+) -> ErrorCode {
+    catch_panic(|| {
+        if out_has.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let blob_s = match c_to_string(blob_json) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        *out_has = crate::slot::bridge_slot_has_blob(&blob_s);
+        ErrorCode::Success
+    })
+}
+
+/// iOS Keychain pattern (WBS-821, `biometric.rs mod macos` analog): Swift
+/// reads the DEK from the `kSecAccessControlBiometryCurrentSet`-gated
+/// Keychain item (the OS-gated release IS the authorization) and passes the
+/// 32 bytes here to open the vault. `dek` is BORROWED (rule 1: never
+/// retained; the caller zeroizes its copy). Ownership rule 7 on the
+/// returned handle.
+#[no_mangle]
+pub unsafe extern "C" fn sp_slot_open_with_dek(
+    vault_path: *const c_char,
+    dek: *const u8,
+    dek_len: usize,
+    source: *const c_char,
+    out_handle: *mut VaultHandle,
+) -> ErrorCode {
+    catch_panic(|| {
+        if out_handle.is_null() || dek.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let path_s = match c_to_string(vault_path) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let source_s = match c_to_string(source) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        let dek_slice = std::slice::from_raw_parts(dek, dek_len);
+
+        match crate::slot::bridge_slot_open_with_dek(&path_s, dek_slice, &source_s) {
+            Ok(handle) => {
+                *out_handle = handle;
                 ErrorCode::Success
             }
             Err(e) => e.to_error_code(),
@@ -985,14 +1104,10 @@ mod abi_contract_tests {
     /// The declared C ABI contract: every function exported to Swift. Must be
     /// kept in lockstep with cbindgen.toml `[export] include`.
     const DECLARED_C_ABI: &[&str] = &[
-        "sp_biometric_has_key",
         "sp_bridge_info",
         "sp_bridge_negotiate",
         "sp_entry_free",
         "sp_entry_list_free",
-        "sp_biometric_remove_key",
-        "sp_biometric_set_key",
-        "sp_biometric_unlock",
         "sp_bytes_free",
         "sp_entry_add",
         "sp_entry_delete",
@@ -1004,6 +1119,11 @@ mod abi_contract_tests {
         "sp_password_generate",
         "sp_string_free",
         "sp_sync_get_status",
+        "sp_slot_challenge",
+        "sp_slot_has_blob",
+        "sp_slot_open_with_dek",
+        "sp_slot_seal",
+        "sp_slot_unlock",
         "sp_totp_generate_code",
         "sp_vault_destroy",
         "sp_vault_init",
@@ -1359,21 +1479,14 @@ mod ownership_tests {
         unsafe { sp_entry_list_free(std::ptr::null_mut(), 0) };
         unsafe { sp_bytes_free(std::ptr::null(), 0) };
 
-        // Destroy removes the registry entry (use-after-destroy fails) and
-        // drops the zeroizing biometric buffer with it.
+        // Destroy removes the registry entry (use-after-destroy fails).
+        // WBS-812/821: the in-process biometric key map is GONE — platform
+        // slots keep no key material in this process (the zeroizing-destroy
+        // property now holds vacuously and structurally).
         let (dir, handle) = temp_vault();
-        bridge::bridge_biometric_set_key(handle, &[1u8, 2, 3, 4]).expect("set key");
-        assert!(
-            bridge::bridge_biometric_has_key(handle).unwrap_or(false),
-            "biometric key must be set"
-        );
         assert!(
             bridge::bridge_vault_destroy(handle).is_ok(),
             "destroy must succeed"
-        );
-        assert!(
-            !bridge::bridge_biometric_has_key(handle).unwrap_or(true),
-            "biometric key must be gone after destroy (zeroized on drop)"
         );
         assert!(
             bridge::bridge_vault_is_unlocked(handle).is_err(),

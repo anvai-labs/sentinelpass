@@ -145,7 +145,7 @@ find_llvm_nm() {
     echo ""
 }
 
-EXPECTED_SYMBOLS="nativeAbiVersion nativeInit nativeDestroy nativeIsUnlocked nativeLock nativeAddEntry nativeGetEntry nativeListEntries nativeSearchEntries nativeDeleteEntry nativeUpdateEntry nativeGenerateTotp nativeGeneratePassword nativeCheckStrength nativeBiometricHasKey nativeBiometricRemoveKey nativeBiometricUnlock"
+EXPECTED_SYMBOLS="nativeAbiVersion nativeInit nativeDestroy nativeIsUnlocked nativeLock nativeAddEntry nativeGetEntry nativeListEntries nativeSearchEntries nativeDeleteEntry nativeUpdateEntry nativeGenerateTotp nativeGeneratePassword nativeCheckStrength nativeSlotChallenge nativeSlotHasBlob nativeSlotSeal nativeSlotUnlock"
 
 NM_BIN="$(find_llvm_nm)"
 if [ -z "$NM_BIN" ]; then
@@ -168,7 +168,7 @@ else
             log_error "$SO exports stale (pre-WBS-802) VaultManager/DriveSync symbols"
             exit 1
         fi
-        log_success "$target: all 17 VaultBridge JNI symbols present, no stale symbols"
+        log_success "$target: all 18 VaultBridge JNI symbols present, no stale symbols"
     done
 fi
 

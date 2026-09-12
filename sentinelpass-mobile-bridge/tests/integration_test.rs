@@ -13,11 +13,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use sentinelpass_mobile_bridge::{
-    sp_biometric_has_key, sp_bridge_info, sp_entry_add, sp_entry_delete, sp_entry_get_by_id,
-    sp_entry_list_all, sp_entry_search, sp_entry_update, sp_password_check_strength,
-    sp_password_generate, sp_string_free, sp_sync_get_status, sp_totp_generate_code,
-    sp_vault_destroy, sp_vault_init, sp_vault_is_unlocked, sp_vault_lock, BridgeInfo, Entry,
-    EntrySummary, ErrorCode, PasswordAnalysis, SyncStatus, TotpCode, VaultHandle,
+    sp_bridge_info, sp_entry_add, sp_entry_delete, sp_entry_get_by_id, sp_entry_list_all,
+    sp_entry_search, sp_entry_update, sp_password_check_strength, sp_password_generate,
+    sp_string_free, sp_sync_get_status, sp_totp_generate_code, sp_vault_destroy, sp_vault_init,
+    sp_vault_is_unlocked, sp_vault_lock, BridgeInfo, Entry, EntrySummary, ErrorCode,
+    PasswordAnalysis, SyncStatus, TotpCode, VaultHandle,
 };
 
 static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -415,12 +415,9 @@ fn totp_and_sync_surfaces_report_expected_states() {
     );
     unsafe { sp_string_free(status.device_id) };
 
-    let mut has_key = true;
-    assert_eq!(
-        unsafe { sp_biometric_has_key(v.handle, &mut has_key) },
-        ErrorCode::Success
-    );
-    assert!(!has_key, "fresh vault must have no biometric key");
+    // WBS-812/821: the legacy in-process biometric surface is gone — the
+    // platform slot lives behind sp_slot_* (tested in slot.rs and the
+    // seal/unlock integration flow below).
 }
 
 #[test]

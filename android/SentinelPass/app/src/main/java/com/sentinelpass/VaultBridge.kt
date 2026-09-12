@@ -25,7 +25,7 @@ class VaultBridge(private val context: Context) {
          * [init] handshakes and fails closed on mismatch rather than
          * calling across an undefined contract.
          */
-        private const val EXPECTED_ABI_VERSION = 1
+        private const val EXPECTED_ABI_VERSION = 2
 
         init {
             System.loadLibrary("sentinelpass_mobile_bridge")
@@ -278,6 +278,78 @@ class VaultBridge(private val context: Context) {
     }
 
     // ==========================================================================
+    // Platform Slot (WBS-812)
+    // ==========================================================================
+
+    /**
+     * Draw a fresh challenge (hex) for the Keystore key to sign. The caller
+     * signs it TWICE through [com.sentinelpass.slot.BiometricKeystore]
+     * (BiometricPrompt.CryptoObject — the prompt IS the crypto
+     * authorization) and passes both signatures back to [slotSeal].
+     */
+    suspend fun slotChallenge(): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeSlotChallenge()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to draw slot challenge", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Seal the unlocked vault's DEK under the Keystore signature pair.
+     * Returns the NON-SECRET at-rest blob (store it in app-private FILE
+     * storage — never SharedPreferences), or null on failure.
+     */
+    suspend fun slotSeal(challenge: String, sigA: String, sigB: String, binding: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                nativeSlotSeal(nativeHandle, challenge, sigA, sigB, binding)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to seal platform slot", e)
+                null
+            }
+        }
+    }
+
+    /**
+     * Unlock the vault from the slot blob with a fresh Keystore signature
+     * over the blob's challenge. The vault must be CLOSED. On success the
+     * bridge holds a new unlocked handle and returns true.
+     */
+    suspend fun slotUnlock(vaultPath: String, blobJson: String, sig: String, binding: String): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val handle = nativeSlotUnlock(vaultPath, blobJson, sig, binding)
+                if (handle != 0L) {
+                    nativeHandle = handle
+                    true
+                } else {
+                    false
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to unlock from platform slot", e)
+                false
+            }
+        }
+    }
+
+    /**
+     * Preflight: whether `blobJson` is a recognized v1 slot blob (no key
+     * material involved).
+     */
+    fun slotHasBlob(blobJson: String): Boolean {
+        return try {
+            nativeSlotHasBlob(blobJson)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to inspect slot blob", e)
+            false
+        }
+    }
+
+    // ==========================================================================
     // TOTP
     // ==========================================================================
 
@@ -357,53 +429,6 @@ class VaultBridge(private val context: Context) {
         }
     }
 
-    // ==========================================================================
-    // Biometric
-    // ==========================================================================
-
-    /**
-     * Check if biometric key exists
-     */
-    suspend fun hasBiometricKey(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                nativeBiometricHasKey(nativeHandle)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to check biometric key", e)
-                false
-            }
-        }
-    }
-
-    /**
-     * Remove biometric key
-     */
-    suspend fun removeBiometricKey(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val result = nativeBiometricRemoveKey(nativeHandle)
-                result == ErrorCode.SUCCESS.value
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to remove biometric key", e)
-                false
-            }
-        }
-    }
-
-    /**
-     * Unlock with biometric
-     */
-    suspend fun unlockWithBiometric(): Boolean {
-        return withContext(Dispatchers.IO) {
-            try {
-                val result = nativeBiometricUnlock(nativeHandle)
-                result == ErrorCode.SUCCESS.value
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to unlock with biometric", e)
-                false
-            }
-        }
-    }
 
     // ==========================================================================
     // JNI Declarations
@@ -464,6 +489,29 @@ class VaultBridge(private val context: Context) {
         notes: String?
     ): Int
 
+    // ==========================================================================
+    // Platform Slot (WBS-812: Android Keystore auth-bound DEK wrap)
+    // ==========================================================================
+
+    private external fun nativeSlotChallenge(): String?
+
+    private external fun nativeSlotSeal(
+        handle: Long,
+        challenge: String,
+        sigA: String,
+        sigB: String,
+        binding: String
+    ): String?
+
+    private external fun nativeSlotUnlock(
+        vaultPath: String,
+        blobJson: String,
+        sig: String,
+        binding: String
+    ): Long
+
+    private external fun nativeSlotHasBlob(blobJson: String): Boolean
+
     private external fun nativeGenerateTotp(
         handle: Long,
         entryId: String
@@ -480,17 +528,6 @@ class VaultBridge(private val context: Context) {
         password: String
     ): String?
 
-    private external fun nativeBiometricHasKey(
-        handle: Long
-    ): Boolean
-
-    private external fun nativeBiometricRemoveKey(
-        handle: Long
-    ): Int
-
-    private external fun nativeBiometricUnlock(
-        handle: Long
-    ): Int
 }
 
 // ==========================================================================

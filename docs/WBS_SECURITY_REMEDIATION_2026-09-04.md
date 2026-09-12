@@ -1499,7 +1499,44 @@ Shared (801–807):
   type needed for test linkage; `sp_bytes_free` retained as the sanctioned
   byte-buffer release path for WBS-827 backup exports.
 
-Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d —
+Android: **812** Keystore-bound platform slot (TD-MOB-03,
+SR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M2). Signature-KDF slot on the
+  proven Hello orchestration (biometric_hello generalized with an explicit
+  domain salt — MOBILE_SLOT_WRAP_SALT — plus seal_dek_with_challenge /
+  release_dek_from_signature for the split FFI model where the HOST signs
+  and the bridge seals; cross-domain release tests prove a Hello signature
+  cannot unwrap a mobile blob and vice versa). Android: RSA-2048/PKCS1
+  AndroidKeyStore key (deterministic — randomized ECDSA is REFUSED at
+  enable), setUserAuthenticationRequired + setInvalidatedByBiometricEnrollment,
+  signed via BiometricPrompt.CryptoObject (the prompt IS the crypto
+  authorization). At-rest blob is NON-SECRET JSON in app-private file
+  storage (never SharedPreferences). VaultManager::current_dek +
+  open_with_released_dek (shared epoch-guard/registry/audit tail extracted
+  from open_with_biometric). FEATURE_PLATFORM_KEYSTORE now advertised;
+  ABI_VERSION bumped 1→2 (legacy biometric exports removed with the slot —
+  no key material lives in the bridge process at all).
+  **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
+FR-MOBILE-001) 5d; **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d; **815**
+cleartext deny 1d; **816** backup policy (TD-MOB-05) 2d; **817** permission trim 0.5d;
+**818** instrumentation matrix (TD-MOB-10, FR-MOBILE-002) 4d.
+
+iOS: **820** consolidate Swift bridges (TD-MOB-09) 3d; **821** Keychain
+SecAccessControl slot (TD-MOB-06, SR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M2). biometric.rs mod-macos pattern
+  on iOS: the DEK lives in the Keychain under
+  kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly +
+  kSecAccessControlBiometryCurrentSet (+ privateKeyUsage) — the OS refuses
+  the item read without the gesture, which IS the crypto authorization.
+  KeychainSlot.swift implements store/has/delete/unlock and hands the
+  released DEK to the new sp_slot_open_with_dek export (borrowed bytes, FFI
+  rule 1). Shares the core orchestration/tests with 812; the Swift file
+  compiles with the 820 project surgery (M3).
+  **822** file protection + backup
+policy (SR-MOBILE-004) 2d; **823** scene lock + cover (TD-MOB-07) 2d; **824** local
+expiring pasteboard 1d; **825** Credential Provider (TD-MOB-08, SR-MOBILE-003,
+FR-MOBILE-001) 5d; **826** remove plaintext persistence models 1d; **827**
+authenticated backup/export (TD-MOB-08) 3d; **828** XCTest matrix (TD-MOB-10) 4d. (TD-MOB-01/02, TV-007) 2d —
   **Status:** Done (2026-09-11, Phase 6 M1). JNI-enabled Rust builds/tests/
   clippy-clean (`--features jni` verified on host and in android.yml's
   integration job — the baseline state was 3× E0308 in drive.rs and zero CI

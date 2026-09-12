@@ -3,7 +3,7 @@
 use super::VaultManager;
 use crate::{
     audit::{AuditEventType, AuditLogger},
-    crypto::KeyHierarchy,
+    crypto::{DataEncryptionKey, KeyHierarchy},
     database::Database,
     PasswordManagerError, Result,
 };
@@ -21,13 +21,35 @@ impl VaultManager {
             PasswordManagerError::NotFound("Biometric unlock configuration".to_string())
         })?;
 
+        let dek = crate::biometric::BiometricManager::authenticate_and_load_vault_dek(
+            &biometric_ref,
+            reason,
+        )?;
+        Self::open_with_released_dek(vault_path, dek, "biometric authentication")
+    }
+
+    /// Open an existing vault with an ALREADY-RELEASED platform DEK
+    /// (WBS-812/821): the mobile platform slots recover the DEK in the
+    /// bridge process (signature-KDF release) and complete the unlock here,
+    /// running the SAME epoch-guard / slot-registry / audit obligations as
+    /// every other non-password unlock surface. `source` labels the audit
+    /// trail; the DEK is consumed (moved) and never stored.
+    pub fn open_with_released_dek<P: AsRef<Path>>(
+        path: P,
+        dek: DataEncryptionKey,
+        source: &str,
+    ) -> Result<Self> {
+        let vault_path = path.as_ref().to_path_buf();
+        let db = Database::open(&vault_path)?;
+        db.validate_schema_version()?;
+
         // Epoch high-water enforcement (WBS-301 / ADR-004 rev 4): this path
         // unlocks without the password-derived master key, so rolled-back or
         // rewound state has no other detection — check before anything.
-        // Refusals/TOFU are audited (the biometric surface must not be the
-        // silent one); a pending one-step heal is deliberately NOT adopted
-        // here — there is no password proof of the new state — and waits for
-        // the next password unlock.
+        // Refusals/TOFU are audited (the platform-slot surface must not be
+        // the silent one); a pending one-step heal is deliberately NOT
+        // adopted here — there is no password proof of the new state — and
+        // waits for the next password unlock.
         let early_logger = crate::platform::ensure_audit_log_dir()
             .ok()
             .and_then(|dir| AuditLogger::new(dir).map(Arc::new).ok());
@@ -39,7 +61,7 @@ impl VaultManager {
                     if let Some(ref logger) = early_logger {
                         let _ = logger.log(
                             AuditEventType::EpochHighWaterRebased { refused: true },
-                            &format!("biometric open refused by epoch guard: {guard_err}"),
+                            &format!("{source} open refused by epoch guard: {guard_err}"),
                         );
                     }
                     return Err(guard_err);
@@ -48,14 +70,10 @@ impl VaultManager {
         // Shared outcome auditing; the deferred-heal nuance (no password
         // proof on this surface) is recorded in the ADR residual.
         if let (Some(ref check), Some(ref logger)) = (&bio_check, &early_logger) {
-            Self::log_epoch_outcome(logger, check, "biometric open (heal deferred)");
+            Self::log_epoch_outcome(logger, check, &format!("{source} (heal deferred)"));
         }
 
         let mut key_hierarchy = KeyHierarchy::new();
-        let dek = crate::biometric::BiometricManager::authenticate_and_load_vault_dek(
-            &biometric_ref,
-            reason,
-        )?;
         key_hierarchy.unlock_vault_with_dek(dek);
 
         // WBS-414/415: the biometric-released DEK installs the audit key
@@ -119,7 +137,7 @@ impl VaultManager {
         if let Some(ref logger) = vault_manager.audit_logger {
             let _ = logger.log(
                 AuditEventType::VaultUnlocked { success: true },
-                "Vault unlocked via biometric authentication",
+                "Vault unlocked via platform slot",
             );
         }
 
@@ -263,6 +281,16 @@ impl VaultManager {
             crate::biometric::BiometricManager::store_vault_dek(&self.vault_path, &dek)?;
         Self::set_biometric_ref(&db, Some(&biometric_ref))?;
         Ok(())
+    }
+
+    /// The vault's current DEK (WBS-812/821): the single legitimate input to
+    /// the mobile platform-slot seal, mirroring what
+    /// [`Self::enable_biometric_unlock`] reads internally. Requires the
+    /// vault to be UNLOCKED — a locked vault holds no key material. The
+    /// returned key zeroizes on drop and must never be persisted.
+    pub fn current_dek(&self) -> Result<DataEncryptionKey> {
+        let dek = self.key_hierarchy.dek()?;
+        Ok(dek.clone())
     }
 
     /// Disable biometric unlock and clear keychain stored secret.

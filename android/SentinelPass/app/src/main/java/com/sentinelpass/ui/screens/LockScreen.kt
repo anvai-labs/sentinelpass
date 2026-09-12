@@ -50,7 +50,9 @@ fun LockScreen(
     if (showBiometricPrompt) {
         BiometricPrompt(
             onSuccess = {
-                vaultState.unlockWithBiometric()
+                (context as? androidx.fragment.app.FragmentActivity)?.let {
+                    vaultState.unlockWithBiometric(it)
+                }
                 showBiometricPrompt = false
             },
             onError = {
