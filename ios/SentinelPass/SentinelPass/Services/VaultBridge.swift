@@ -6,18 +6,66 @@
 //
 
 import Foundation
-import LocalAuthentication
 
 #if canImport(sentinelpass)
 import sentinelpass
 #endif
 
-/// Bridge class to communicate with the SentinelPass Rust mobile bridge
+/// Bridge class to communicate with the SentinelPass Rust mobile bridge.
+///
+/// Compiled against ABI v2 (see the copied contract in
+/// SentinelPass/Native/include/sentinelpass_bridge.h): the legacy
+/// in-process biometric exports (sp_biometric_set_key/has_key/remove_key/
+/// unlock) were REMOVED in v2 (WBS-812/821) and are replaced by the
+/// platform-keystore slot surface — on iOS, `KeychainSlot` +
+/// `sp_slot_open_with_dek` (see `openWithKeychainDek`).
 @available(iOS 17.0, macOS 14.0, *)
 @MainActor
 class VaultBridge {
 
     private var vaultHandle: SPVaultHandle = 0
+
+    /// A bridge with no open vault; `createVault`/`unlockVault` fill in the
+    /// handle.
+    init() {}
+
+    /// Take ownership of a handle opened outside this wrapper (rule 7: the
+    /// holder MUST eventually destroy it — `lockVault`/`destroyVault` do).
+    init(adoptingHandle handle: SPVaultHandle) {
+        self.vaultHandle = handle
+    }
+
+    /// Open the vault with a raw 32-byte DEK released from the platform
+    /// keystore slot (WBS-821 KeychainSlot). The bytes are BORROWED for the
+    /// duration of the call only (FFI rule 1 — never retained); the caller
+    /// zeroizes its copy.
+    /// Returns nil if the bridge refused the open (bad length, IO, crypto).
+    static func openWithKeychainDek(vaultPath: String, dek: Data) async -> VaultBridge? {
+        return await withCheckedContinuation { (continuation: CheckedContinuation<VaultBridge?, Never>) in
+            dek.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                vaultPath.withCString { pathC in
+                    let source = "iOS Keychain slot"
+                    source.withCString { sourceC in
+                        var handle: SPVaultHandle = 0
+                        let code = sp_slot_open_with_dek(
+                            pathC,
+                            base.assumingMemoryBound(to: UInt8.self),
+                            UInt(dek.count),
+                            sourceC,
+                            &handle
+                        )
+                        continuation.resume(returning: code == SPErrorCode_Success
+                            ? VaultBridge(adoptingHandle: handle)
+                            : nil)
+                    }
+                }
+            }
+        }
+    }
 
     // ==========================================================================
     // Vault Management
@@ -82,9 +130,14 @@ class VaultBridge {
         }
     }
 
-    /// Lock the vault
+    /// Lock the vault. Locks (drops the in-memory DEK) and then destroys the
+    /// handle — ownership rule 7: the holder must destroy; `sp_vault_lock`
+    /// alone leaves the registry entry alive, leaking the session.
     func lockVault() {
-        _ = sp_vault_lock(vaultHandle)
+        if vaultHandle != 0 {
+            _ = sp_vault_lock(vaultHandle)
+            _ = sp_vault_destroy(vaultHandle)
+        }
         vaultHandle = 0
     }
 
@@ -176,13 +229,9 @@ class VaultBridge {
                     modifiedAt: Date(timeIntervalSince1970: TimeInterval(entry.modified_at))
                 )
 
-                // Free strings
-                sp_string_free(idPtr)
-                sp_string_free(titlePtr)
-                sp_string_free(usernamePtr)
-                sp_string_free(passwordPtr)
-                if entry.url != nil { sp_string_free(entry.url!) }
-                if entry.notes != nil { sp_string_free(entry.notes!) }
+                // WBS-804 rule 6: release the struct's strings with the
+                // dedicated sp_entry_free (releases all six members).
+                sp_entry_free(&entry)
 
                 continuation.resume(returning: details)
             }
@@ -221,17 +270,12 @@ class VaultBridge {
                     favorite: entry.favorite
                 )
                 summaries.append(summary)
-
-                // Free strings
-                sp_string_free(idPtr)
-                sp_string_free(titlePtr)
-                sp_string_free(usernamePtr)
             }
 
-            // Free array
-            entries.withMemoryRebound(to: UInt8.self, capacity: Int(count) * MemoryLayout<SPEntrySummary>.stride) { bytePtr in
-                sp_bytes_free(bytePtr, Int(count) * MemoryLayout<SPEntrySummary>.stride)
-            }
+            // WBS-804 rule 5: sp_entry_list_free releases EVERY element's
+            // strings and the backing array — do not also sp_string_free
+            // the members (double free) or sp_bytes_free the array.
+            sp_entry_list_free(UnsafeMutablePointer(mutating: entries), count)
 
             continuation.resume(returning: summaries)
         }
@@ -275,17 +319,12 @@ class VaultBridge {
                         favorite: entry.favorite
                     )
                     summaries.append(summary)
-
-                    // Free strings
-                    sp_string_free(idPtr)
-                    sp_string_free(titlePtr)
-                    sp_string_free(usernamePtr)
                 }
 
-                // Free array
-                entries.withMemoryRebound(to: UInt8.self, capacity: Int(count) * MemoryLayout<SPEntrySummary>.stride) { bytePtr in
-                    sp_bytes_free(bytePtr, Int(count) * MemoryLayout<SPEntrySummary>.stride)
-                }
+                // WBS-804 rule 5: sp_entry_list_free releases EVERY element's
+                // strings and the backing array — do not also sp_string_free
+                // the members (double free) or sp_bytes_free the array.
+                sp_entry_list_free(UnsafeMutablePointer(mutating: entries), count)
 
                 continuation.resume(returning: summaries)
             }
@@ -307,15 +346,44 @@ class VaultBridge {
         }
     }
 
-    /// Update entry (not in C ABI yet, using delete + add)
+    /// Update entry — ATOMIC via `sp_entry_update` (WBS-807). The old
+    /// delete-then-add workaround lost history and raced concurrent readers;
+    /// the v2 ABI provides the real operation.
     func updateEntry(id: String, title: String, username: String, password: String, url: String, notes: String) async -> Bool {
-        // Delete old entry and add updated version
-        let deleted = await deleteEntry(id: id)
-        guard deleted,
-              let _ = await addEntry(title: title, username: username, password: password, url: url, notes: notes) else {
-            return false
+        return await withCheckedContinuation { continuation in
+            guard id.cString(using: .utf8) != nil,
+                  title.cString(using: .utf8) != nil,
+                  username.cString(using: .utf8) != nil,
+                  password.cString(using: .utf8) != nil,
+                  url.cString(using: .utf8) != nil,
+                  notes.cString(using: .utf8) != nil else {
+                continuation.resume(returning: false)
+                return
+            }
+
+            id.withCString { idC in
+                title.withCString { titleC in
+                    username.withCString { usernameC in
+                        password.withCString { passwordC in
+                            url.withCString { urlC in
+                                notes.withCString { notesC in
+                                    let result = sp_entry_update(
+                                        vaultHandle,
+                                        idC,
+                                        titleC,
+                                        usernameC,
+                                        passwordC,
+                                        urlC,
+                                        notesC
+                                    )
+                                    continuation.resume(returning: result == SPErrorCode_Success)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        return true
     }
 
     // ==========================================================================
@@ -361,7 +429,7 @@ class VaultBridge {
             var password: UnsafePointer<CChar>?
 
             let result = sp_password_generate(
-                Int(length),
+                UInt(length),
                 includeSymbols,
                 &password
             )
@@ -414,54 +482,26 @@ class VaultBridge {
     }
 
     // ==========================================================================
-    // Biometric
+    // Biometric / platform slot
     // ==========================================================================
-
-    /// Set biometric key
-    func setBiometricKey(keyData: Data) async -> Bool {
-        return await withCheckedContinuation { continuation in
-            let result = keyData.withUnsafeBytes { bytes in
-                sp_biometric_set_key(
-                    vaultHandle,
-                    bytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    keyData.count
-                )
-            }
-            continuation.resume(returning: result == SPErrorCode_Success)
-        }
-    }
-
-    /// Check if biometric key exists
-    func hasBiometricKey() async -> Bool {
-        return await withCheckedContinuation { continuation in
-            var hasKey: Bool = false
-            let result = sp_biometric_has_key(vaultHandle, &hasKey)
-            continuation.resume(returning: result == SPErrorCode_Success && hasKey)
-        }
-    }
-
-    /// Remove biometric key
-    func removeBiometricKey() async -> Bool {
-        return await withCheckedContinuation { continuation in
-            let result = sp_biometric_remove_key(vaultHandle)
-            continuation.resume(returning: result == SPErrorCode_Success)
-        }
-    }
-
-    /// Unlock with biometric
-    func unlockWithBiometric() async -> Bool {
-        return await withCheckedContinuation { continuation in
-            let result = sp_biometric_unlock(vaultHandle)
-            continuation.resume(returning: result == SPErrorCode_Success)
-        }
-    }
+    //
+    // ABI v2 removed the in-process biometric exports (sp_biometric_*). The
+    // iOS platform slot is Keychain-based: the DEK lives in a
+    // kSecAccessControlBiometryCurrentSet Keychain item (Services/
+    // KeychainSlot.swift, WBS-821) and the vault is opened through
+    // `openWithKeychainDek` above. VaultState exposes the user-facing
+    // surface (unlock with the slot; enrollment is an M4 deliverable).
 }
 
 // ==========================================================================
 // Supporting Types
 // ==========================================================================
 
-struct EntryDetails {
+/// Full entry as delivered by the bridge (`sp_entry_get_by_id`). This type
+/// exists ONLY in memory for a detail view — it is never persisted on the
+/// Swift side (the vault is the Rust SQLite database; WBS-826 removed the
+/// plaintext-mirroring SwiftData model).
+struct EntryDetails: Identifiable {
     let id: String
     let title: String
     let username: String

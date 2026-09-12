@@ -1,45 +1,29 @@
 #!/bin/bash
-# iOS Simulator Setup Script
-# This script helps prepare the iOS app for Xcode
+# SentinelPass iOS setup: build the Rust bridge for the iOS targets, assemble
+# the script-generated static libraries, and open the pre-made Xcode project.
+#
+# There is nothing to "create" anymore: ios/SentinelPass/SentinelPassApp.xcodeproj
+# is the single Xcode project (app target SentinelPassApp + credential-provider
+# extension target SentinelPassCredential). CloudKit and the old manual
+# SentinelPassBridge/ folder are removed (ADR-009 / WBS-807) — do not recreate them.
 
 set -e
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$PROJECT_ROOT"
+IOS_DIR="$PROJECT_ROOT/ios/SentinelPass"
 
 echo "=== SentinelPass iOS Setup ==="
 echo ""
 
-# 1. Build the mobile bridge for iOS (x86_64 for Intel Mac simulators, arm64 for Apple Silicon)
-echo "1. Building mobile bridge for iOS simulators..."
-
-# Detect if we're on Apple Silicon or Intel
-if [[ "$(uname -m)" == "arm64" ]]; then
-    echo "   Building for arm64 (Apple Silicon)..."
-    cargo build --package sentinelpass-mobile-bridge --release
-    BRIDGE_LIB="target/release/libsentinelpass_mobile_bridge.a"
-else
-    echo "   Building for x86_64 (Intel)..."
-    cargo build --package sentinelpass-mobile-bridge --release --target x86_64-apple-ios
-    BRIDGE_LIB="target/x86_64-apple-ios/release/libsentinelpass_mobile_bridge.a"
-fi
-
-if [ ! -f "$BRIDGE_LIB" ]; then
-    echo "ERROR: Bridge library not found at $BRIDGE_LIB"
-    exit 1
-fi
-
-echo "   ✓ Built: $BRIDGE_LIB"
+# 1. Build the bridge and populate ios/SentinelPass/SentinelPass/Native/libs/
+echo "1. Building mobile bridge for iOS (simulator + device)..."
+ONLY_SIM=1 "$IOS_DIR/build-ios.sh"
+echo "   (Simulator build done. Re-run '$IOS_DIR/build-ios.sh' without"
+echo "    ONLY_SIM to also build the device library.)"
 echo ""
 
-# 2. Show library and header locations
-echo "2. Bridge files ready:"
-echo "   Static library: $BRIDGE_LIB"
-echo "   C header: sentinelpass-mobile-bridge/include/sentinelpass_bridge.h"
-echo ""
-
-# 3. Check Xcode
-echo "3. Checking Xcode..."
+# 2. Check Xcode
+echo "2. Checking Xcode..."
 if command -v xcodebuild &> /dev/null; then
     XCODE_VERSION=$(xcodebuild -version | head -1)
     echo "   ✓ Xcode found: $XCODE_VERSION"
@@ -49,51 +33,34 @@ else
 fi
 echo ""
 
-# 4. Create a simple launcher that opens Xcode with a new project
-echo "4. To create an Xcode project:"
-echo ""
-echo "   OPTION A: Manual Setup (Recommended)"
-echo "   -----------------------------------"
-echo "   a) Open Xcode"
-echo "   b) File → New → Project"
-echo "   c) Select 'iOS' → 'App'"
-echo "   d) Configure:"
-echo "      - Product Name: SentinelPass"
-echo "      - Team: (Your Apple ID)"
-echo "      - Organization Identifier: com.sentinelpass"
-echo "      - Interface: SwiftUI"
-echo "      - Language: Swift"
-echo "      - Storage: SwiftData"
-echo "      - Save to: $(pwd)/SentinelPass (replace existing)"
-echo ""
-echo "   e) After creating project:"
-echo "      1. Delete auto-generated SentinelPassApp.swift and ContentView.swift"
-echo "      2. Copy all .swift files from ios/SentinelPass/SentinelPass/ to project"
-echo "      3. Copy SentinelPassBridge/ folder to project"
-echo "      4. Add static library: Build Phases → Link Binary With Libraries → Add Other..."
-echo "         Navigate to: $BRIDGE_LIB"
-echo "      5. Add header search path: Build Settings → Header Search Paths"
-echo "         Add: $(pwd)/../sentinelpass-mobile-bridge/include (recursive ✓)"
-echo "      6. Add LocalAuthentication framework"
-echo "      7. Add Face ID capability"
-echo ""
-echo "   OPTION B: Quick Test with Command Line"
-echo "   ---------------------------------------"
-echo "   Use xcodebuild to build once project is set up:"
-echo ""
-echo "   xcodebuild -project ios/SentinelPass/SentinelPass.xcodeproj \\"
-echo "              -scheme SentinelPass \\"
-echo "              -destination 'platform=iOS Simulator,name=iPhone 15' \\"
-echo "              build"
+# 3. Verify with a command-line build before opening Xcode
+echo "3. Verifying the project builds for the simulator..."
+SIM="$(xcrun simctl list devices available | awk -F'[()]' '/iPhone/ {print $2; exit}')"
+if [ -n "$SIM" ]; then
+    xcodebuild -project "$IOS_DIR/SentinelPassApp.xcodeproj" \
+        -scheme SentinelPassApp \
+        -sdk iphonesimulator \
+        -destination "platform=iOS Simulator,name=$SIM" \
+        build CODE_SIGNING_ALLOWED=NO -quiet \
+        && echo "   ✓ SentinelPassApp builds for iOS Simulator ($SIM)"
+else
+    echo "   ⚠ No iPhone simulator found; skipping verification build."
+    echo "     Run xcodebuild manually with an available destination."
+fi
 echo ""
 
-# 5. List available simulators
-echo "5. Available iOS Simulators:"
-xcrun simctl list devices available | grep -E "iPhone|iPad" | head -10
-echo ""
-echo "   Full list: xcrun simctl list devices"
-echo ""
+# 4. Open the project
+echo "4. Opening the project..."
+open "$IOS_DIR/SentinelPassApp.xcodeproj"
 
+echo ""
 echo "=== Setup Complete ==="
 echo ""
-echo "Next: Open Xcode and create a new project following OPTION A above."
+echo "Schemes:"
+echo "  - SentinelPassApp          main SwiftUI app (com.sentinelpass.app)"
+echo "  - SentinelPassCredential   iOS 17 credential-provider extension"
+echo "                             (com.sentinelpass.app.credential-provider)"
+echo ""
+echo "Signing: entitlements (App Group group.com.sentinelpass) are declarative"
+echo "in the repo; device provisioning with your own team is a user/CI concern"
+echo "(set DEVELOPMENT_TEAM, then let Xcode manage signing)."

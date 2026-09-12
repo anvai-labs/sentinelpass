@@ -19,19 +19,7 @@ import sentinelpass
 /// The at-rest store is the Keychain item itself: no secret ever lands in
 /// UserDefaults, files, or pasteboard. On release, the 32 recovered bytes
 /// cross into the bridge ONCE via `sp_slot_open_with_dek` (FFI rule 1:
-/// borrowed, never retained); the bridge-side buffer is zeroized after the
-/// call, and the FFI now THROWS on failure instead of returning success
-/// unconditionally (integration review M1).
-/// Errors surfaced by the platform-slot release path (integration review M1:
-/// the old closure dropped both the ErrorCode and the registered handle).
-struct SlotError: LocalizedError {
-    let message: String
-    var errorDescription: String? { message }
-    static func ffiFailure(_ message: String) -> SlotError {
-        SlotError(message: message)
-    }
-}
-
+/// borrowed, never retained) and the local copy is zeroized immediately.
 enum KeychainSlot {
 
     static let service = "com.sentinelpass.vault-slot"
@@ -83,7 +71,20 @@ enum KeychainSlot {
         SecItemDelete(query() as CFDictionary)
     }
 
+
     // MARK: - Release + open
+
+    /// Result of a keychain-slot unlock attempt.
+    enum SlotUnlock {
+        /// The vault was opened; the handle is owned by the receiver
+        /// (ownership rule 7 — it must be destroyed, `VaultBridge` does).
+        case opened(SPVaultHandle)
+        /// Unlock failed; the payload is a diagnosable (non-secret) string.
+        /// A refused gesture (errSecUserCanceled / errSecAuthDenied) fails
+        /// CLOSED with `slotUnavailableSentinel` — the user falls back to
+        /// the master password.
+        case failed(String)
+    }
 
     /**
      * Read the DEK under the OS gate (the system shows the biometric
@@ -92,17 +93,15 @@ enum KeychainSlot {
      * - Parameters:
      *   - vaultPath: canonical vault file path (the FFI binding).
      *   - openWithDek: bridge into `sp_slot_open_with_dek` (borrowed bytes,
-     *     FFI rule 1). Injected so this file has no direct C-module
-     *     dependency in tests; the production closure wraps `import sentinelpass`.
-     * - Returns: nil on success, or a failure string. A refused gesture
-     *   (errSecUserCanceled / itemNotFound after key invalidation) fails
-     *   CLOSED — the user falls back to the master password.
+     *     FFI rule 1); returns the opened handle, 0 on refusal. Injected so
+     *     the keychain half stays testable without the C module; the
+     *     production closure is `VaultBridge.openWithKeychainDek` wrapped
+     *     here as `openWithDekViaBridge`.
      */
-    @discardableResult
     static func unlock(
         vaultPath: String,
-        openWithDek: (String, Data) throws -> String? = openWithDekViaBridge
-    ) -> String? {
+        openWithDek: (String, Data) -> SPVaultHandle = openWithDekViaBridge
+    ) -> SlotUnlock {
         var item: CFTypeRef?
         var query = self.query()
         query[kSecReturnData as String] = true
@@ -110,76 +109,64 @@ enum KeychainSlot {
 
         guard status == errSecSuccess else {
             switch status {
-            case errSecUserCanceled, errSecAuthDenied:
-                return slotUnavailableSentinel // user refused — fail closed
+            // errSecAuthDenied is macOS-only; on iOS a refused/denied
+            // biometric read surfaces as UserCanceled or
+            // InteractionNotAllowed. Both fail CLOSED.
+            case errSecUserCanceled, errSecInteractionNotAllowed:
+                return .failed(slotUnavailableSentinel)
             case errSecItemNotFound:
-                return "no platform slot enrolled"
+                return .failed("no platform slot enrolled")
             default:
-                return "keychain read failed: \(status)"
+                return .failed("keychain read failed: \(status)")
             }
         }
 
         guard let data = item as? Data else {
-            return "keychain item was not data"
+            return .failed("keychain item was not data")
+        }
+        defer {
+            // Caller-side zeroization of the borrowed copy (FFI rule 1).
+            var mutable = data
+            mutable.resetBytes(in: 0..<mutable.count)
         }
 
         guard data.count == 32 else {
-            return "keychain DEK has invalid length"
+            return .failed("keychain DEK has invalid length")
         }
 
-        // Errors from the FFI must SURFACE: the old default closure dropped
-        // both the ErrorCode and the registered handle (integration review
-        // M1 — FFI rule 7 violation + a registry leak per attempt).
-        do {
-            return try openWithDek(vaultPath, data)
-        } catch let slotError {
-            return "slot release failed: \(slotError)"
+        let handle = openWithDek(vaultPath, data)
+        guard handle != 0 else {
+            return .failed("bridge refused slot open")
         }
+        return .opened(handle)
     }
 
-    private static func openWithDekViaBridge(vaultPath: String, dek: Data) throws -> String? {
+    /// Production open closure (see `VaultBridge.openWithKeychainDek` for
+    /// the async, richer variant used by `VaultState`; this synchronous
+    /// bridge exists so `unlock(vaultPath:openWithDek:)` keeps a single
+    /// non-async seam). Returns 0 when the bridge refuses.
+    private static func openWithDekViaBridge(vaultPath: String, dek: Data) -> SPVaultHandle {
         #if canImport(sentinelpass)
         let source = "iOS Keychain slot"
-        // FFI rule 1: borrowed for the duration of the call only. The DEK
-        // buffer is zeroized HERE after the call — the caller's Data is
-        // copy-on-write, so resetting a copy there would be cosmetic; THIS
-        // is the buffer the bridge read.
-        defer {
-            dek.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
-                raw.resetBytes(in: 0..<raw.count)
-            }
-        }
-        return try dek.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> String? in
-            guard let base = raw.baseAddress else {
-                throw SlotError.ffiFailure("DEK buffer had no base address")
-            }
-            var handle: SPVaultHandle = 0
-            let code = dek.withCString { sourceC in
-                vaultPath.withCString { pathC in
-                    sp_slot_open_with_dek(
+        // FFI rule 1: borrowed for the duration of the call only.
+        var handle: SPVaultHandle = 0
+        dek.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            vaultPath.withCString { pathC in
+                source.withCString { sourceC in
+                    _ = sp_slot_open_with_dek(
                         pathC,
                         base.assumingMemoryBound(to: UInt8.self),
-                        dek.count,
+                        UInt(dek.count),
                         sourceC,
                         &handle
                     )
                 }
             }
-            // FFI rule 7: a registered handle MUST be destroyed — the vault
-            // is released immediately (this call only installs the DEK into
-            // the app's vault state), so nothing leaks per attempt.
-            if handle != 0 {
-                sp_vault_destroy(handle)
-            }
-            guard code == SPErrorCode_Success else {
-                throw SlotError.ffiFailure(
-                    "sp_slot_open_with_dek failed with code \(code.rawValue)"
-                )
-            }
-            return nil
         }
+        return handle
         #else
-        return "platform slot requires the sentinelpass native module"
+        return 0
         #endif
     }
 
