@@ -89,6 +89,9 @@ pub enum BridgeError {
     #[error("NUL byte in string")]
     NulError(#[from] std::ffi::NulError),
 
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     #[error("Biometric error: {0}")]
     Biometric(String),
 
@@ -106,9 +109,24 @@ pub enum BridgeError {
 }
 
 // Implement From conversions for core error types
+//
+// WBS-806: the old catch-all (`PasswordManager → VaultLocked`) flattened
+// distinguishable outcomes — a missing entry or a wrong master password were
+// reported identically to a locked vault, so mobile UIs could neither show
+// "not found" nor "wrong password". Core variants now map precisely; the
+// residual falls to Unknown rather than masquerading as VaultLocked.
 impl From<sentinelpass_core::PasswordManagerError> for BridgeError {
     fn from(e: sentinelpass_core::PasswordManagerError) -> Self {
-        BridgeError::PasswordManager(e.to_string())
+        use sentinelpass_core::PasswordManagerError as E;
+        match e {
+            E::VaultLocked => BridgeError::Vault("Vault is locked".to_string()),
+            E::NotFound(msg) => BridgeError::NotFound(msg),
+            E::InvalidInput(msg) => BridgeError::InvalidParam(msg),
+            E::Crypto(err) => BridgeError::Crypto(err.to_string()),
+            E::Database(err) => BridgeError::Database(err.to_string()),
+            E::Io(err) => BridgeError::Io(err),
+            other => BridgeError::PasswordManager(other.to_string()),
+        }
     }
 }
 
@@ -129,7 +147,7 @@ impl BridgeError {
         match self {
             BridgeError::InvalidParam(_) => ErrorCode::InvalidParam,
             BridgeError::Vault(_) => ErrorCode::VaultLocked,
-            BridgeError::PasswordManager(_) => ErrorCode::VaultLocked,
+            BridgeError::NotFound(_) => ErrorCode::NotFound,
             BridgeError::Crypto(_) => ErrorCode::Crypto,
             BridgeError::Database(_) => ErrorCode::Database,
             BridgeError::Totp(_) => ErrorCode::Totp,
@@ -138,6 +156,9 @@ impl BridgeError {
             BridgeError::Sync(_) => ErrorCode::Sync,
             BridgeError::NotInitialized => ErrorCode::NotInitialized,
             BridgeError::AbiUnsupported(_) => ErrorCode::AbiUnsupported,
+            // Residual core errors (LockedOut, EpochRollback,
+            // SlotRegistryTampered, MaintenanceLockHeld, …) surface honestly
+            // as Unknown instead of masquerading as VaultLocked.
             _ => ErrorCode::Unknown,
         }
     }
