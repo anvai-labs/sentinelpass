@@ -58,7 +58,7 @@ Status definitions:
 | iOS native bridge and biometric | Experimental | Swift/Rust bridge scaffolds | Biometric data is process-local/unusable after restart; duplicate bridges and FFI ownership remain | 0.12 / ADR-009 |
 | iOS lifecycle, Credential Provider, and backup | Experimental | SwiftUI app scaffolding | No scene privacy/lock policy, Credential Provider, protected backup contract, or complete exports | 0.12 |
 | Mobile automated assurance | Planned | Core/default-feature builds and lightweight integration tests | No release-grade JNI, simulator/device unlock/CRUD/process-death/biometric/autofill/restore matrix | 0.12 |
-| Dependency and source scanning | Partial | Cargo audit, npm audit, Trivy, Dependabot workflows | Security exception lifecycle and release-job dependency need tightening | 0.10-1.0 RC |
+| Dependency and source scanning | Partial | Cargo audit, npm audit, Trivy, Dependabot workflows; governed dependency-exception lifecycle (WBS-909): `.cargo/audit.toml` is the single audit-policy source carrying only the failing advisory with owner/exposure/expiry metadata, full register in `docs/DEPENDENCY_EXCEPTIONS.md` with quarterly review, security.yml runs plain `cargo audit` (no inline ignores) | Release-job (tag-time) dependency of the release on these gates is still missing (WBS-901); warnings remain numerous (tracked, quarterly-reviewed) | 0.10-1.0 RC |
 | Artifact signing, updater trust, SBOM, provenance | Planned | Release packaging and SHA-256 output | Full platform signing/notarization, signed updater metadata/checksums, SBOM, and provenance are missing | 1.0 RC / ADR-010 |
 | Independent security assessment | Planned | Internal gap reviews | Full trust-boundary external review and critical/high remediation required | 1.0 RC |
 
