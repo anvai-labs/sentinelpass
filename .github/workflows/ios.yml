@@ -123,37 +123,41 @@ jobs:
           name: ios-lib-simulator
           path: target/aarch64-apple-ios-sim/release
 
-      - name: Boot iOS Simulator
+      - name: Prepare bridge libs (script-generated, ADR-009)
         run: |
-          # Boot iPhone 15 simulator
-          xcrun simctl boot "iPhone 15" || xcrun simctl boot "iPhone 14" || echo "Simulator boot skipped"
+          # Populate Native/libs + refresh the header copy from the canonical
+          # generated contract (ONLY_SIM builds just the simulator slice; the
+          # committed binaries were deleted under WBS-820).
+          cd ios/SentinelPass && ONLY_SIM=1 ./build-ios.sh
 
-      - name: Build and Test on Simulator
+      - name: Build app + extension targets (fail-closed, WBS-828)
         run: |
-          # Navigate to iOS directory
           cd ios/SentinelPass
+          DEST='platform=iOS Simulator,name=iPhone 15,OS=latest'
+          xcodebuild build \
+            -project SentinelPassApp.xcodeproj -scheme SentinelPassApp \
+            -sdk iphonesimulator -destination "$DEST" \
+            CODE_SIGNING_ALLOWED=NO | tail -20
+          xcodebuild build \
+            -project SentinelPassApp.xcodeproj -scheme SentinelPassCredential \
+            -sdk iphonesimulator -destination "$DEST" \
+            CODE_SIGNING_ALLOWED=NO | tail -20
 
-          # Check if we have an Xcode project
-          if [ -d "SentinelPassApp.xcodeproj" ]; then
-            # Build for testing with timeout
-            timeout 300 xcodebuild test \
-              -project SentinelPassApp.xcodeproj \
-              -scheme SentinelPassApp \
-              -sdk iphonesimulator \
-              -destination 'platform=iOS Simulator,name=iPhone 15' \
-              -enableCodeCoverage \
-              RESULT_BUNDLE_PATH=$PWD/TestResults.xcresult || echo "xcodebuild test timed out or failed - using swift test fallback"
+      - name: Bridge-contract XCTests on simulator (fail-closed, WBS-828)
+        run: |
+          cd ios/SentinelPass
+          DEST='platform=iOS Simulator,name=iPhone 15,OS=latest'
+          xcodebuild test \
+            -scheme SentinelPass-Package \
+            -sdk iphonesimulator -destination "$DEST" \
+            -enableCodeCoverage \
+            RESULT_BUNDLE_PATH=$PWD/TestResults.xcresult | tail -30
 
-            # Generate coverage report if tests succeeded
-            if [ -f "TestResults.xcresult" ]; then
-              xcrun xccov view --report --json TestResults.xcresult > coverage.json || echo "Coverage report generation failed"
-            fi
-          fi
-
-          # Fallback to swift test if xcodebuild failed or no project found
-          if [ ! -f "TestResults.xcresult" ]; then
-            echo "Running swift test as fallback"
-            swift test --enable-code-coverage || echo "Swift test completed with status: $?"
+      - name: Generate coverage report
+        if: always()
+        run: |
+          if [ -f ios/SentinelPass/TestResults.xcresult ]; then
+            xcrun xccov view --report --json ios/SentinelPass/TestResults.xcresult > ios/SentinelPass/coverage.json
           fi
 
       - name: Upload test results
