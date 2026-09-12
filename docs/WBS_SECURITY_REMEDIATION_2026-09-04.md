@@ -1517,9 +1517,39 @@ SR-MOBILE-002) 4d —
   ABI_VERSION bumped 1→2 (legacy biometric exports removed with the slot —
   no key material lives in the bridge process at all).
   **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
-FR-MOBILE-001) 5d; **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d; **815**
-cleartext deny 1d; **816** backup policy (TD-MOB-05) 2d; **817** permission trim 0.5d;
-**818** instrumentation matrix (TD-MOB-10, FR-MOBILE-002) 4d.
+FR-MOBILE-001) 5d —
+  **Status:** Done (2026-09-12, Phase 6 M3). Real fill+save through the
+  bridge: AssistStructure parsing (visible-only, self-fill guard,
+  no-password surfaces skipped) under a hard 3s fill deadline; unlocked ->
+  matched datasets (registrable-domain web matching + confident-only
+  package heuristic, 18 matcher unit tests), locked -> AUTH dataset into a
+  translucent unlock activity; save flow confirm-and-store (web saves
+  persist https://<domain>, app saves persist no URL); SaveInfo for
+  save-back; settingsActivity fixed to MainActivity.
+  **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d —
+  **Status:** Done (2026-09-12, M3). SentinelPassApplication actually
+  REGISTERED (was dead code) with ProcessLifecycleOwner auto-lock
+  (background schedules, foreground cancels — fixes a mid-session fire
+  bug); FLAG_SECURE privacy cover on pause; lock-screen return effect;
+  lifecycle lock goes through lockVault (handle destroyed).
+  **815** cleartext deny 1d —
+  **Status:** Done (2026-09-12, M3): network_security_config.xml
+  cleartextTrafficPermitted=false (no loopback override — it would ship).
+  **816** backup policy (TD-MOB-05) 2d —
+  **Status:** Done (2026-09-12, M3): vault db + SQLite sidecars + slot blob
+  excluded from cloud backup AND device-transfer (slot blob device-bound;
+  vault db rides D2D per accepted decision; prefs excluded — boolean only).
+  **817** permission trim 0.5d —
+  **Status:** Done (2026-09-12, M3): CAMERA + camera feature + CameraX/ZXing
+  deps removed (zero references, no scanner UI); USE_BIOMETRIC/INTERNET
+  kept with reasons; datastore-preferences flagged as unused dep.
+  **818** instrumentation matrix (TD-MOB-10, FR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-12, Phase 6 M4). Real androidTest sources
+  (VaultBridgeInstrumentedTest: 8 tests over the live JNI bridge — ABI
+  handshake, CRUD round-trip, lock/re-open, wrong-password, slot challenge
+  freshness, gated flows Assume-skipped on un-enrolled CI emulators); the
+  emulator-tests matrix (API 29/34 x default/google_apis) is fail-closed
+  and downloads the all-ABI --features jni .so artifacts (811).
 
 iOS: **820** consolidate Swift bridges (TD-MOB-09) 3d; **821** Keychain
 SecAccessControl slot (TD-MOB-06, SR-MOBILE-002) 4d —
@@ -1533,10 +1563,50 @@ SecAccessControl slot (TD-MOB-06, SR-MOBILE-002) 4d —
   rule 1). Shares the core orchestration/tests with 812; the Swift file
   compiles with the 820 project surgery (M3).
   **822** file protection + backup
-policy (SR-MOBILE-004) 2d; **823** scene lock + cover (TD-MOB-07) 2d; **824** local
-expiring pasteboard 1d; **825** Credential Provider (TD-MOB-08, SR-MOBILE-003,
-FR-MOBILE-001) 5d; **826** remove plaintext persistence models 1d; **827**
-authenticated backup/export (TD-MOB-08) 3d; **828** XCTest matrix (TD-MOB-10) 4d. (TD-MOB-01/02, TV-007) 2d —
+policy (SR-MOBILE-004) 2d —
+  **Status:** Done (2026-09-12, Phase 6 M3). VaultFile.swift: shared
+  container path (App Group) + NSFileProtectionComplete on the vault db and
+  WAL sidecars + isExcludedFromBackup (best-effort, documented that iOS
+  default is Complete-Until-First-Unlock so failure never downgrades);
+  Info.plist cleaned (bogus keys + armv7 removed).
+  **823** scene lock + cover (TD-MOB-07) 2d —
+  **Status:** Done (2026-09-12, M3): scenePhase privacy cover
+  (ultraThinMaterial) + 5-min background auto-lock matching the daemon
+  default; Keychain-slot unlock wired into LockView (refused gesture fails
+  closed and silent).
+  **824** local expiring pasteboard 1d —
+  **Status:** Done (2026-09-12, M3): all three secret-copy call sites use a
+  30 s expirationDate pasteboard (platform limitation documented: no
+  Universal-Clipboard opt-out exists).
+  **825** Credential Provider (TD-MOB-08, SR-MOBILE-003,
+FR-MOBILE-001) 5d —
+  **Status:** Done (2026-09-12, M3). SentinelPassCredential extension
+  target (com.apple.authentication-services.credential-provider-ui): own
+  VaultBridge on the shared-container vault, master-password unlock, domain
+  filtering with full-list fallback, ASPasswordCredential completion,
+  App Group entitlements on both targets. Compile+link verified against the
+  simulator SDK (xcodebuild itself broken on the dev machine — pre-existing
+  — CI exercises it).
+  **826** remove plaintext persistence models 1d —
+  **Status:** Done (2026-09-12, M3): SwiftData @Model (plaintext
+  password/url/notes) + modelContainer removed; EntryModel is a plain
+  summary-mirror struct; secrets only in in-memory structs.
+  **827** authenticated backup/export (TD-MOB-08) 3d —
+  **Status:** Done (2026-09-12, Phase 6 M4). ADR-008 .spbackup through the
+  bridge: sp_backup_create/sp_backup_restore (panic-contained, ownership
+  rule 2), bridge backup.rs (create refuses overwrite; restore is static/
+  offline with the close-handles-first caller contract; wrong-password,
+  locked-vault, round-trip tests), JNI + Kotlin facade, Swift
+  BackupService. Restore flags map 1:1 to core RestoreOptions
+  (allow_replace / allow_epoch_rewind supervised override / disable_sync).
+  **828** XCTest matrix (TD-MOB-10) 4d —
+  **Status:** Done (2026-09-12, Phase 6 M4). Real bridge-contract XCTests
+  (ABI handshake v2 + fail-closed flags, negotiate accept/refuse, owned-
+  string generate+free, length bounds, slot challenge freshness, blob
+  preflight, null-safe frees) run on an iOS simulator via the SPM package
+  scheme; ios.yml simulator-tests rewritten fail-closed: bridge libs
+  script-generated (ONLY_SIM), app + extension build gates, xcodebuild test
+  fail-closed (the old job swallowed failures with || echo). (TD-MOB-01/02, TV-007) 2d —
   **Status:** Done (2026-09-11, Phase 6 M1). JNI-enabled Rust builds/tests/
   clippy-clean (`--features jni` verified on host and in android.yml's
   integration job — the baseline state was 3× E0308 in drive.rs and zero CI
