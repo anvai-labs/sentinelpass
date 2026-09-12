@@ -494,7 +494,16 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeGeneratePassword(
     include_symbols: jboolean,
 ) -> jstring {
     catch_jni(std::ptr::null_mut(), || {
+        // WBS-805 review fix: enforce the same 8..=128 bound as the C ABI
+        // (sp_password_generate). A negative jint would widen to a huge usize
+        // and reach Vec::with_capacity — an ALLOCATION ABORT, which
+        // catch_jni cannot contain (abort is not unwind). Kotlin UI sliders
+        // bound the value today, but the contract surface must not rely on
+        // the caller.
         let length = length as usize;
+        if !(8..=128).contains(&length) {
+            return std::ptr::null_mut();
+        }
         let symbols = include_symbols != 0;
 
         match bridge::bridge_password_generate(length, symbols) {

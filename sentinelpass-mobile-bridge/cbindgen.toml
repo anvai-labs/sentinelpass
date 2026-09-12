@@ -66,6 +66,7 @@ include = [
 "EntrySummary" = "SPEntrySummary"
 "TotpCode" = "SPTotpCode"
 "PasswordAnalysis" = "SPPasswordAnalysis"
+"SyncStatus" = "SPSyncStatus"
 "ErrorCode" = "SPErrorCode"
 
 [fn]

@@ -199,8 +199,9 @@ log_success "JNI libraries prepared"
 # ============================================================================
 
 if [ "$SKIP_TESTS" = "false" ]; then
-    log_info "Running mobile bridge tests..."
+    log_info "Running mobile bridge tests (default + jni feature)..."
     cargo test --package sentinelpass-mobile-bridge
+    cargo test --package sentinelpass-mobile-bridge --features jni
     log_success "Tests passed"
 fi
 

@@ -65,13 +65,20 @@ class VaultState private constructor(private val context: Context) : ViewModel()
             _uiState.value = _uiState.value.copy(isLoading = true)
 
             val result = withContext(Dispatchers.IO) {
-                val bridge = VaultBridge(context)
-                val success = bridge.initVault(vaultFile.absolutePath, masterPassword)
-                if (success) {
-                    vaultBridge = bridge
-                    prefs.edit().putBoolean("vault_created", true).apply()
+                try {
+                    val bridge = VaultBridge(context)
+                    val success = bridge.initVault(vaultFile.absolutePath, masterPassword)
+                    if (success) {
+                        vaultBridge = bridge
+                        prefs.edit().putBoolean("vault_created", true).apply()
+                    }
+                    success
+                } catch (e: IllegalStateException) {
+                    // Bridge refused to operate (ABI handshake / library load
+                    // failure) — fail closed into UI error state, no crash.
+                    android.util.Log.e("VaultState", "Bridge unavailable", e)
+                    false
                 }
-                success
             }
 
             _uiState.value = _uiState.value.copy(
@@ -94,12 +101,17 @@ class VaultState private constructor(private val context: Context) : ViewModel()
             _uiState.value = _uiState.value.copy(isLoading = true)
 
             val result = withContext(Dispatchers.IO) {
-                val bridge = VaultBridge(context)
-                val success = bridge.initVault(vaultFile.absolutePath, masterPassword)
-                if (success) {
-                    vaultBridge = bridge
+                try {
+                    val bridge = VaultBridge(context)
+                    val success = bridge.initVault(vaultFile.absolutePath, masterPassword)
+                    if (success) {
+                        vaultBridge = bridge
+                    }
+                    success
+                } catch (e: IllegalStateException) {
+                    android.util.Log.e("VaultState", "Bridge unavailable", e)
+                    false
                 }
-                success
             }
 
             _uiState.value = _uiState.value.copy(

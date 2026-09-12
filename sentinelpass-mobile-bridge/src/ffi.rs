@@ -13,8 +13,12 @@
 //    them and never retains them past the call.
 // 2. OUT-STRINGS (`const char **`): allocated by the bridge with the Rust
 //    allocator (`CString::into_raw`). The caller MUST release each one with
-//    `sp_string_free`, exactly once. A null out-string on `Success` means
-//    the field is absent (optional field semantics), not a failure.
+//    `sp_string_free`, exactly once. NULL out-strings: for OPTIONAL fields
+//    (`SPEntry.url`/`notes`, `SyncStatus.device_id`) NULL on `Success` means
+//    the field is absent. REQUIRED strings (`id`, `title`, `username`,
+//    `password`, `SPTotpCode.code`, generated passwords, entry ids) are
+//    never NULL on `Success` — bridge inputs arrive as C strings, which
+//    cannot contain interior NUL, so the NUL case is unreachable defense.
 // 3. OUT-BYTE-BUFFERS (`const uint8_t **` + `uintptr_t *`): allocated by the
 //    bridge with `alloc` under `Layout::array::<u8>(len)`. The caller MUST
 //    release with `sp_bytes_free(ptr, len)` using the SAME `len` that was
@@ -344,7 +348,10 @@ pub unsafe extern "C" fn sp_vault_lock(handle: VaultHandle) -> ErrorCode {
 // Entry Management
 // ============================================================================
 
-/// Add a new entry
+/// Add a new entry.
+///
+/// Ownership (WBS-804 rule 2): on `Success` the caller MUST release
+/// `*out_entry_id` with `sp_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_add(
     handle: VaultHandle,
@@ -408,7 +415,12 @@ pub unsafe extern "C" fn sp_entry_add(
     })
 }
 
-/// Get entry by ID
+/// Get entry by ID.
+///
+/// Ownership (WBS-804 rule 6): on `Success` the caller MUST release the
+/// strings with `sp_entry_free(&mut entry)`. `url`/`notes` are NULL when the
+/// entry has no such field (rule 2); `id`/`title`/`username`/`password` are
+/// never NULL on `Success`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_get_by_id(
     handle: VaultHandle,
@@ -432,8 +444,13 @@ pub unsafe extern "C" fn sp_entry_get_by_id(
                     title: string_to_c(&entry.title),
                     username: string_to_c(&entry.username),
                     password: string_to_c(&entry.password),
-                    url: string_to_c(entry.url.as_deref().unwrap_or("")),
-                    notes: string_to_c(entry.notes.as_deref().unwrap_or("")),
+                    // Rule 2: absent optional fields are NULL, not "".
+                    url: entry.url.as_deref().map(string_to_c).unwrap_or(ptr::null()),
+                    notes: entry
+                        .notes
+                        .as_deref()
+                        .map(string_to_c)
+                        .unwrap_or(ptr::null()),
                     created_at: entry.created_at.timestamp(),
                     modified_at: entry.modified_at.timestamp(),
                     favorite: entry.favorite,
@@ -509,7 +526,10 @@ pub unsafe extern "C" fn sp_entry_update(
     })
 }
 
-/// List all entries
+/// List all entries.
+///
+/// Ownership (WBS-804 rule 5): on `Success` the caller MUST release the
+/// array with `sp_entry_list_free(*out_entries, *out_count)`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_list_all(
     handle: VaultHandle,
@@ -573,7 +593,10 @@ pub unsafe extern "C" fn sp_entry_delete(
     })
 }
 
-/// Search entries
+/// Search entries.
+///
+/// Ownership (WBS-804 rule 5): on `Success` the caller MUST release the
+/// array with `sp_entry_list_free(*out_entries, *out_count)`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_search(
     handle: VaultHandle,
@@ -632,7 +655,10 @@ pub unsafe extern "C" fn sp_entry_search(
 // TOTP
 // ============================================================================
 
-/// Generate TOTP code
+/// Generate TOTP code.
+///
+/// Ownership (WBS-804 rule 4): on `Success` the caller MUST release
+/// `out_code.code` with `sp_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_totp_generate_code(
     handle: VaultHandle,
@@ -666,7 +692,10 @@ pub unsafe extern "C" fn sp_totp_generate_code(
 // Password Generation
 // ============================================================================
 
-/// Generate password
+/// Generate a password (8..=128 chars).
+///
+/// Ownership (WBS-804 rule 2): on `Success` the caller MUST release
+/// `*out_password` with `sp_string_free`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_password_generate(
     length: usize,
@@ -692,7 +721,10 @@ pub unsafe extern "C" fn sp_password_generate(
     })
 }
 
-/// Check password strength
+/// Check password strength.
+///
+/// Ownership: `out_analysis` is plain data written by the callee; nothing to
+/// free (WBS-804 rule 4).
 #[no_mangle]
 pub unsafe extern "C" fn sp_password_check_strength(
     password: *const c_char,
@@ -790,7 +822,13 @@ pub struct SyncStatus {
     pub device_id: *const c_char,
 }
 
-/// Get sync status
+/// Get sync status.
+///
+/// Ownership (WBS-804 rule 4): on `Success` the caller MUST release
+/// `out_status.device_id` with `sp_string_free` (NULL when no device is
+/// registered — rule 2). Sync stays disabled until the mobile relay sync v2
+/// surface is wired (ADR-006/ADR-009; the CloudKit/Drive placeholders were
+/// removed under WBS-807).
 #[no_mangle]
 pub unsafe extern "C" fn sp_sync_get_status(
     handle: VaultHandle,
@@ -803,12 +841,16 @@ pub unsafe extern "C" fn sp_sync_get_status(
 
         match bridge::bridge_sync_get_status(handle) {
             Ok(status) => {
-                let device_id_str = status.device_id.unwrap_or_default();
                 *out_status = SyncStatus {
                     enabled: status.enabled,
                     last_sync_at: status.last_sync_at.unwrap_or(0),
                     pending_changes: status.pending_changes,
-                    device_id: string_to_c(&device_id_str),
+                    // Rule 2: absent device_id is NULL, not "".
+                    device_id: status
+                        .device_id
+                        .as_deref()
+                        .map(string_to_c)
+                        .unwrap_or(ptr::null()),
                 };
                 ErrorCode::Success
             }
@@ -1032,7 +1074,7 @@ mod abi_contract_tests {
             rest = after;
         }
         assert!(
-            checked >= 20,
+            checked >= 24,
             "parsed {checked} exports — parser desynced from ffi.rs"
         );
     }
@@ -1282,6 +1324,7 @@ mod ownership_tests {
             modified_at: 0,
             favorite: false,
         };
+        unsafe { sp_entry_free(&mut entry) };
         assert_eq!(
             unsafe { sp_entry_get_by_id(handle, cstr(&id).as_ptr(), &mut entry) },
             ErrorCode::Success

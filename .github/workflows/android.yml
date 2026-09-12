@@ -326,9 +326,9 @@ jobs:
 
       - name: Verify bridge header compiles
         run: |
-          # Verify the bridge header (common C ABI) compiles cleanly. JNI
-          # declarations are guarded with #ifdef __ANDROID__ so they are
-          # excluded here.
+          # Verify the bridge header (common C ABI) compiles cleanly. Since
+          # WBS-807 removed the un-gated drive/icloud modules, the header
+          # contains no JNI declarations at all — it is pure C ABI.
           echo '#include "sentinelpass-mobile-bridge/include/sentinelpass_bridge.h"' \
             | clang -x c -fsyntax-only - && echo "Header compiles OK"
 

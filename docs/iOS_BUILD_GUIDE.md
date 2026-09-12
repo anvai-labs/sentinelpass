@@ -1,7 +1,9 @@
 # iOS App Build & Wire-Up Guide
 
 > **CloudKit sections superseded (2026-09-11, ADR-009 rev 2 / WBS-807):** the
-> CloudKit capability/framework wiring and `CloudKitService` sync integration
+> *(OBSOLETE — see banner above: CloudKit removed per ADR-009 rev 2 / WBS-807)*
+
+CloudKit capability/framework wiring and `CloudKitService` sync integration
 > steps below are OBSOLETE — mobile sync is relay-based sync v2 only (ADR-006),
 > and the CloudKit/Drive bridge paths were removed. Do not add CloudKit to
 > the app.
@@ -272,7 +274,9 @@ After wiring up:
    - Pull entries: `let (records, nextToken) = await cloudKit.pullEntries()`
    - Handle errors for auth, quota, network issues
 
-### CloudKit Sync Data Model
+#*(OBSOLETE — see banner above: CloudKit removed per ADR-009 rev 2 / WBS-807)*
+
+## CloudKit Sync Data Model
 
 Records are stored in CloudKit's private database:
 
