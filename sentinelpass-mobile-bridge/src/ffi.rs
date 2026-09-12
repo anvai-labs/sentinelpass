@@ -151,6 +151,42 @@ fn result_to_code<T>(result: Result<T, crate::error::BridgeError>) -> ErrorCode 
     }
 }
 
+/// WBS-805 panic containment: no Rust panic may unwind across the C ABI
+/// boundary (unwinding into Swift/ObjC is undefined behavior). Every exported
+/// function body runs inside this wrapper; a contained panic is logged and
+/// surfaces as [`ErrorCode::Panic`]. Out-params written before the panic must
+/// be treated as undefined by the caller (see the ownership contract, rule 8).
+fn catch_panic<F>(op: F) -> ErrorCode
+where
+    F: FnOnce() -> ErrorCode,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(op)) {
+        Ok(code) => code,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))
+                .unwrap_or("<non-string panic payload>");
+            tracing::error!(target: "mobile_bridge", "contained panic at C ABI boundary: {detail}");
+            ErrorCode::Panic
+        }
+    }
+}
+
+/// Void-returning variant of [`catch_panic`] for the memory-management
+/// exports (frees report nothing; a contained panic there is logged and the
+/// free is treated as not having happened — callers must not retry frees).
+fn catch_panic_void<F>(op: F)
+where
+    F: FnOnce(),
+{
+    let _ = catch_panic(move || {
+        op();
+        ErrorCode::Success
+    });
+}
+
 // ============================================================================
 // ABI / Feature Negotiation (WBS-803)
 // ============================================================================
@@ -172,17 +208,19 @@ pub struct BridgeInfo {
 /// performed and nothing needs freeing.
 #[no_mangle]
 pub unsafe extern "C" fn sp_bridge_info(out_info: *mut BridgeInfo) -> ErrorCode {
-    if out_info.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-    let info = crate::abi::abi_info();
-    *out_info = BridgeInfo {
-        abi_version: info.abi_version,
-        min_supported_abi_version: info.min_supported_abi_version,
-        feature_flags: info.feature_flags,
-        reserved: 0,
-    };
-    ErrorCode::Success
+    catch_panic(|| {
+        if out_info.is_null() {
+            return ErrorCode::InvalidParam;
+        }
+        let info = crate::abi::abi_info();
+        *out_info = BridgeInfo {
+            abi_version: info.abi_version,
+            min_supported_abi_version: info.min_supported_abi_version,
+            feature_flags: info.feature_flags,
+            reserved: 0,
+        };
+        ErrorCode::Success
+    })
 }
 
 /// Negotiate a consumer's ABI version against this build (WBS-803).
@@ -199,30 +237,32 @@ pub unsafe extern "C" fn sp_bridge_negotiate(
     client_abi_version: u32,
     out_info: *mut BridgeInfo,
 ) -> ErrorCode {
-    if out_info.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-    match crate::abi::negotiate(client_abi_version) {
-        Ok(info) => {
-            *out_info = BridgeInfo {
-                abi_version: info.abi_version,
-                min_supported_abi_version: info.min_supported_abi_version,
-                feature_flags: info.feature_flags,
-                reserved: 0,
-            };
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_info.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => {
-            let info = crate::abi::abi_info();
-            *out_info = BridgeInfo {
-                abi_version: info.abi_version,
-                min_supported_abi_version: info.min_supported_abi_version,
-                feature_flags: info.feature_flags,
-                reserved: 0,
-            };
-            e.to_error_code()
+        match crate::abi::negotiate(client_abi_version) {
+            Ok(info) => {
+                *out_info = BridgeInfo {
+                    abi_version: info.abi_version,
+                    min_supported_abi_version: info.min_supported_abi_version,
+                    feature_flags: info.feature_flags,
+                    reserved: 0,
+                };
+                ErrorCode::Success
+            }
+            Err(e) => {
+                let info = crate::abi::abi_info();
+                *out_info = BridgeInfo {
+                    abi_version: info.abi_version,
+                    min_supported_abi_version: info.min_supported_abi_version,
+                    feature_flags: info.feature_flags,
+                    reserved: 0,
+                };
+                e.to_error_code()
+            }
         }
-    }
+    })
 }
 
 // ============================================================================
@@ -236,33 +276,35 @@ pub unsafe extern "C" fn sp_vault_init(
     master_password: *const c_char,
     out_handle: *mut VaultHandle,
 ) -> ErrorCode {
-    let path = match c_to_string(vault_path) {
-        Ok(p) => p,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
+    catch_panic(|| {
+        let path = match c_to_string(vault_path) {
+            Ok(p) => p,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
 
-    let password = match c_to_string(master_password) {
-        Ok(p) => p,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
+        let password = match c_to_string(master_password) {
+            Ok(p) => p,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
 
-    if out_handle.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_vault_init(&path, &password) {
-        Ok(handle) => {
-            *out_handle = handle;
-            ErrorCode::Success
+        if out_handle.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        match bridge::bridge_vault_init(&path, &password) {
+            Ok(handle) => {
+                *out_handle = handle;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Destroy a vault
 #[no_mangle]
 pub unsafe extern "C" fn sp_vault_destroy(handle: VaultHandle) -> ErrorCode {
-    result_to_code(bridge::bridge_vault_destroy(handle))
+    catch_panic(|| result_to_code(bridge::bridge_vault_destroy(handle)))
 }
 
 /// Check if vault is unlocked
@@ -271,23 +313,25 @@ pub unsafe extern "C" fn sp_vault_is_unlocked(
     handle: VaultHandle,
     out_unlocked: *mut bool,
 ) -> ErrorCode {
-    if out_unlocked.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_vault_is_unlocked(handle) {
-        Ok(unlocked) => {
-            *out_unlocked = unlocked;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_unlocked.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        match bridge::bridge_vault_is_unlocked(handle) {
+            Ok(unlocked) => {
+                *out_unlocked = unlocked;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Lock the vault
 #[no_mangle]
 pub unsafe extern "C" fn sp_vault_lock(handle: VaultHandle) -> ErrorCode {
-    result_to_code(bridge::bridge_vault_lock(handle))
+    catch_panic(|| result_to_code(bridge::bridge_vault_lock(handle)))
 }
 
 // ============================================================================
@@ -305,55 +349,57 @@ pub unsafe extern "C" fn sp_entry_add(
     notes: *const c_char,
     out_entry_id: *mut *const c_char,
 ) -> ErrorCode {
-    if out_entry_id.is_null() {
-        return ErrorCode::InvalidParam;
-    }
+    catch_panic(|| {
+        if out_entry_id.is_null() {
+            return ErrorCode::InvalidParam;
+        }
 
-    let title_str = match c_to_string(title) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-    let username_str = match c_to_string(username) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-    let password_str = match c_to_string(password) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    // Convert optional strings, handling null pointers
-    let url_str = if url.is_null() {
-        String::new()
-    } else {
-        match c_to_string(url) {
+        let title_str = match c_to_string(title) {
             Ok(s) => s,
             Err(_) => return ErrorCode::InvalidParam,
-        }
-    };
-    let notes_str = if notes.is_null() {
-        String::new()
-    } else {
-        match c_to_string(notes) {
+        };
+        let username_str = match c_to_string(username) {
             Ok(s) => s,
             Err(_) => return ErrorCode::InvalidParam,
-        }
-    };
+        };
+        let password_str = match c_to_string(password) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
 
-    match bridge::bridge_entry_add(
-        handle,
-        &title_str,
-        &username_str,
-        &password_str,
-        &url_str,
-        &notes_str,
-    ) {
-        Ok(entry_id) => {
-            *out_entry_id = string_to_c(&entry_id);
-            ErrorCode::Success
+        // Convert optional strings, handling null pointers
+        let url_str = if url.is_null() {
+            String::new()
+        } else {
+            match c_to_string(url) {
+                Ok(s) => s,
+                Err(_) => return ErrorCode::InvalidParam,
+            }
+        };
+        let notes_str = if notes.is_null() {
+            String::new()
+        } else {
+            match c_to_string(notes) {
+                Ok(s) => s,
+                Err(_) => return ErrorCode::InvalidParam,
+            }
+        };
+
+        match bridge::bridge_entry_add(
+            handle,
+            &title_str,
+            &username_str,
+            &password_str,
+            &url_str,
+            &notes_str,
+        ) {
+            Ok(entry_id) => {
+                *out_entry_id = string_to_c(&entry_id);
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
         }
-        Err(e) => e.to_error_code(),
-    }
+    })
 }
 
 /// Get entry by ID
@@ -363,32 +409,34 @@ pub unsafe extern "C" fn sp_entry_get_by_id(
     entry_id: *const c_char,
     out_entry: *mut Entry,
 ) -> ErrorCode {
-    if out_entry.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let id_str = match c_to_string(entry_id) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    match bridge::bridge_entry_get(handle, &id_str) {
-        Ok(entry) => {
-            *out_entry = Entry {
-                id: string_to_c(&entry.entry_id.map(|id| id.to_string()).unwrap_or_default()),
-                title: string_to_c(&entry.title),
-                username: string_to_c(&entry.username),
-                password: string_to_c(&entry.password),
-                url: string_to_c(entry.url.as_deref().unwrap_or("")),
-                notes: string_to_c(entry.notes.as_deref().unwrap_or("")),
-                created_at: entry.created_at.timestamp(),
-                modified_at: entry.modified_at.timestamp(),
-                favorite: entry.favorite,
-            };
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_entry.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let id_str = match c_to_string(entry_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match bridge::bridge_entry_get(handle, &id_str) {
+            Ok(entry) => {
+                *out_entry = Entry {
+                    id: string_to_c(&entry.entry_id.map(|id| id.to_string()).unwrap_or_default()),
+                    title: string_to_c(&entry.title),
+                    username: string_to_c(&entry.username),
+                    password: string_to_c(&entry.password),
+                    url: string_to_c(entry.url.as_deref().unwrap_or("")),
+                    notes: string_to_c(entry.notes.as_deref().unwrap_or("")),
+                    created_at: entry.created_at.timestamp(),
+                    modified_at: entry.modified_at.timestamp(),
+                    favorite: entry.favorite,
+                };
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// List all entries
@@ -398,44 +446,46 @@ pub unsafe extern "C" fn sp_entry_list_all(
     out_entries: *mut *const EntrySummary,
     out_count: *mut usize,
 ) -> ErrorCode {
-    if out_entries.is_null() || out_count.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_entry_list(handle) {
-        Ok(summaries) => {
-            let count = summaries.len();
-            *out_count = count;
-
-            if count == 0 {
-                *out_entries = ptr::null();
-                return ErrorCode::Success;
-            }
-
-            let layout = match alloc::Layout::array::<EntrySummary>(count) {
-                Ok(l) => l,
-                Err(_) => return ErrorCode::OutOfMemory,
-            };
-            let entries_ptr = alloc::alloc(layout) as *mut EntrySummary;
-            if entries_ptr.is_null() {
-                return ErrorCode::OutOfMemory;
-            }
-
-            for (i, summary) in summaries.into_iter().enumerate() {
-                let entry_ptr = entries_ptr.add(i);
-                *entry_ptr = EntrySummary {
-                    id: string_to_c(&summary.entry_id.to_string()),
-                    title: string_to_c(&summary.title),
-                    username: string_to_c(&summary.username),
-                    favorite: summary.favorite,
-                };
-            }
-
-            *out_entries = entries_ptr as *const EntrySummary;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_entries.is_null() || out_count.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        match bridge::bridge_entry_list(handle) {
+            Ok(summaries) => {
+                let count = summaries.len();
+                *out_count = count;
+
+                if count == 0 {
+                    *out_entries = ptr::null();
+                    return ErrorCode::Success;
+                }
+
+                let layout = match alloc::Layout::array::<EntrySummary>(count) {
+                    Ok(l) => l,
+                    Err(_) => return ErrorCode::OutOfMemory,
+                };
+                let entries_ptr = alloc::alloc(layout) as *mut EntrySummary;
+                if entries_ptr.is_null() {
+                    return ErrorCode::OutOfMemory;
+                }
+
+                for (i, summary) in summaries.into_iter().enumerate() {
+                    let entry_ptr = entries_ptr.add(i);
+                    *entry_ptr = EntrySummary {
+                        id: string_to_c(&summary.entry_id.to_string()),
+                        title: string_to_c(&summary.title),
+                        username: string_to_c(&summary.username),
+                        favorite: summary.favorite,
+                    };
+                }
+
+                *out_entries = entries_ptr as *const EntrySummary;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Delete entry
@@ -444,11 +494,13 @@ pub unsafe extern "C" fn sp_entry_delete(
     handle: VaultHandle,
     entry_id: *const c_char,
 ) -> ErrorCode {
-    let id_str = match c_to_string(entry_id) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-    result_to_code(bridge::bridge_entry_delete(handle, &id_str))
+    catch_panic(|| {
+        let id_str = match c_to_string(entry_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+        result_to_code(bridge::bridge_entry_delete(handle, &id_str))
+    })
 }
 
 /// Search entries
@@ -459,49 +511,51 @@ pub unsafe extern "C" fn sp_entry_search(
     out_entries: *mut *const EntrySummary,
     out_count: *mut usize,
 ) -> ErrorCode {
-    if out_entries.is_null() || out_count.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let query_str = match c_to_string(query) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    match bridge::bridge_entry_search(handle, &query_str) {
-        Ok(summaries) => {
-            let count = summaries.len();
-            *out_count = count;
-
-            if count == 0 {
-                *out_entries = ptr::null();
-                return ErrorCode::Success;
-            }
-
-            let layout = match alloc::Layout::array::<EntrySummary>(count) {
-                Ok(l) => l,
-                Err(_) => return ErrorCode::OutOfMemory,
-            };
-            let entries_ptr = alloc::alloc(layout) as *mut EntrySummary;
-            if entries_ptr.is_null() {
-                return ErrorCode::OutOfMemory;
-            }
-
-            for (i, summary) in summaries.into_iter().enumerate() {
-                let entry_ptr = entries_ptr.add(i);
-                *entry_ptr = EntrySummary {
-                    id: string_to_c(&summary.entry_id.to_string()),
-                    title: string_to_c(&summary.title),
-                    username: string_to_c(&summary.username),
-                    favorite: summary.favorite,
-                };
-            }
-
-            *out_entries = entries_ptr as *const EntrySummary;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_entries.is_null() || out_count.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let query_str = match c_to_string(query) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match bridge::bridge_entry_search(handle, &query_str) {
+            Ok(summaries) => {
+                let count = summaries.len();
+                *out_count = count;
+
+                if count == 0 {
+                    *out_entries = ptr::null();
+                    return ErrorCode::Success;
+                }
+
+                let layout = match alloc::Layout::array::<EntrySummary>(count) {
+                    Ok(l) => l,
+                    Err(_) => return ErrorCode::OutOfMemory,
+                };
+                let entries_ptr = alloc::alloc(layout) as *mut EntrySummary;
+                if entries_ptr.is_null() {
+                    return ErrorCode::OutOfMemory;
+                }
+
+                for (i, summary) in summaries.into_iter().enumerate() {
+                    let entry_ptr = entries_ptr.add(i);
+                    *entry_ptr = EntrySummary {
+                        id: string_to_c(&summary.entry_id.to_string()),
+                        title: string_to_c(&summary.title),
+                        username: string_to_c(&summary.username),
+                        favorite: summary.favorite,
+                    };
+                }
+
+                *out_entries = entries_ptr as *const EntrySummary;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 // ============================================================================
@@ -515,25 +569,27 @@ pub unsafe extern "C" fn sp_totp_generate_code(
     entry_id: *const c_char,
     out_code: *mut TotpCode,
 ) -> ErrorCode {
-    if out_code.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let id_str = match c_to_string(entry_id) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    match bridge::bridge_totp_generate_code(handle, &id_str) {
-        Ok(totp_info) => {
-            *out_code = TotpCode {
-                code: string_to_c(&totp_info.code),
-                seconds_remaining: totp_info.seconds_remaining,
-            };
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_code.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let id_str = match c_to_string(entry_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match bridge::bridge_totp_generate_code(handle, &id_str) {
+            Ok(totp_info) => {
+                *out_code = TotpCode {
+                    code: string_to_c(&totp_info.code),
+                    seconds_remaining: totp_info.seconds_remaining,
+                };
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 // ============================================================================
@@ -547,21 +603,23 @@ pub unsafe extern "C" fn sp_password_generate(
     include_symbols: bool,
     out_password: *mut *const c_char,
 ) -> ErrorCode {
-    if out_password.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    if !(8..=128).contains(&length) {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_password_generate(length, include_symbols) {
-        Ok(password) => {
-            *out_password = string_to_c(&password);
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_password.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        if !(8..=128).contains(&length) {
+            return ErrorCode::InvalidParam;
+        }
+
+        match bridge::bridge_password_generate(length, include_symbols) {
+            Ok(password) => {
+                *out_password = string_to_c(&password);
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Check password strength
@@ -570,31 +628,33 @@ pub unsafe extern "C" fn sp_password_check_strength(
     password: *const c_char,
     out_analysis: *mut PasswordAnalysis,
 ) -> ErrorCode {
-    if out_analysis.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let password_str = match c_to_string(password) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    match bridge::bridge_password_check_strength(&password_str) {
-        Ok(analysis) => {
-            *out_analysis = PasswordAnalysis {
-                score: analysis.strength.score() as c_int,
-                entropy_bits: analysis.entropy_bits,
-                crack_time_seconds: analysis.crack_time_seconds,
-                length: analysis.length as c_uint,
-                has_lower: analysis.has_lowercase,
-                has_upper: analysis.has_uppercase,
-                has_digit: analysis.has_digits,
-                has_symbol: analysis.has_symbols,
-            };
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_analysis.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let password_str = match c_to_string(password) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match bridge::bridge_password_check_strength(&password_str) {
+            Ok(analysis) => {
+                *out_analysis = PasswordAnalysis {
+                    score: analysis.strength.score() as c_int,
+                    entropy_bits: analysis.entropy_bits,
+                    crack_time_seconds: analysis.crack_time_seconds,
+                    length: analysis.length as c_uint,
+                    has_lower: analysis.has_lowercase,
+                    has_upper: analysis.has_uppercase,
+                    has_digit: analysis.has_digits,
+                    has_symbol: analysis.has_symbols,
+                };
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 // ============================================================================
@@ -607,12 +667,14 @@ pub unsafe extern "C" fn sp_biometric_set_key(
     key_data: *const u8,
     key_data_len: usize,
 ) -> ErrorCode {
-    if key_data.is_null() || key_data_len == 0 {
-        return ErrorCode::InvalidParam;
-    }
+    catch_panic(|| {
+        if key_data.is_null() || key_data_len == 0 {
+            return ErrorCode::InvalidParam;
+        }
 
-    let slice = std::slice::from_raw_parts(key_data, key_data_len);
-    result_to_code(bridge::bridge_biometric_set_key(handle, slice))
+        let slice = std::slice::from_raw_parts(key_data, key_data_len);
+        result_to_code(bridge::bridge_biometric_set_key(handle, slice))
+    })
 }
 
 #[no_mangle]
@@ -620,27 +682,29 @@ pub unsafe extern "C" fn sp_biometric_has_key(
     handle: VaultHandle,
     out_has_key: *mut bool,
 ) -> ErrorCode {
-    if out_has_key.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_biometric_has_key(handle) {
-        Ok(has_key) => {
-            *out_has_key = has_key;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_has_key.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        match bridge::bridge_biometric_has_key(handle) {
+            Ok(has_key) => {
+                *out_has_key = has_key;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sp_biometric_remove_key(handle: VaultHandle) -> ErrorCode {
-    result_to_code(bridge::bridge_biometric_remove_key(handle))
+    catch_panic(|| result_to_code(bridge::bridge_biometric_remove_key(handle)))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sp_biometric_unlock(handle: VaultHandle) -> ErrorCode {
-    result_to_code(bridge::bridge_biometric_unlock(handle))
+    catch_panic(|| result_to_code(bridge::bridge_biometric_unlock(handle)))
 }
 
 // ============================================================================
@@ -662,23 +726,25 @@ pub unsafe extern "C" fn sp_sync_get_status(
     handle: VaultHandle,
     out_status: *mut SyncStatus,
 ) -> ErrorCode {
-    if out_status.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_sync_get_status(handle) {
-        Ok(status) => {
-            let device_id_str = status.device_id.unwrap_or_default();
-            *out_status = SyncStatus {
-                enabled: status.enabled,
-                last_sync_at: status.last_sync_at.unwrap_or(0),
-                pending_changes: status.pending_changes,
-                device_id: string_to_c(&device_id_str),
-            };
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_status.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        match bridge::bridge_sync_get_status(handle) {
+            Ok(status) => {
+                let device_id_str = status.device_id.unwrap_or_default();
+                *out_status = SyncStatus {
+                    enabled: status.enabled,
+                    last_sync_at: status.last_sync_at.unwrap_or(0),
+                    pending_changes: status.pending_changes,
+                    device_id: string_to_c(&device_id_str),
+                };
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Collect entries pending sync (returns JSON bytes)
@@ -688,22 +754,24 @@ pub unsafe extern "C" fn sp_sync_collect_pending(
     out_bytes: *mut *const u8,
     out_len: *mut usize,
 ) -> ErrorCode {
-    if out_bytes.is_null() || out_len.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    match bridge::bridge_sync_collect_pending(handle) {
-        Ok(bytes) => {
-            let buf = bytes_to_c_buffer(&bytes);
-            if buf.is_null() && !bytes.is_empty() {
-                return ErrorCode::OutOfMemory;
-            }
-            *out_len = bytes.len();
-            *out_bytes = buf;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_bytes.is_null() || out_len.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        match bridge::bridge_sync_collect_pending(handle) {
+            Ok(bytes) => {
+                let buf = bytes_to_c_buffer(&bytes);
+                if buf.is_null() && !bytes.is_empty() {
+                    return ErrorCode::OutOfMemory;
+                }
+                *out_len = bytes.len();
+                *out_bytes = buf;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Apply downloaded entries (entries_json is JSON string)
@@ -714,18 +782,20 @@ pub unsafe extern "C" fn sp_sync_apply_entries(
     entries_len: usize,
     out_applied: *mut u64,
 ) -> ErrorCode {
-    if entries_json.is_null() || entries_len == 0 || out_applied.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let slice = std::slice::from_raw_parts(entries_json, entries_len);
-    match bridge::bridge_sync_apply_entries(handle, slice) {
-        Ok(applied) => {
-            *out_applied = applied;
-            ErrorCode::Success
+    catch_panic(|| {
+        if entries_json.is_null() || entries_len == 0 || out_applied.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let slice = std::slice::from_raw_parts(entries_json, entries_len);
+        match bridge::bridge_sync_apply_entries(handle, slice) {
+            Ok(applied) => {
+                *out_applied = applied;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Prepare entries for CloudKit upload (returns JSON bytes of CloudKit records)
@@ -736,27 +806,29 @@ pub unsafe extern "C" fn sp_sync_prepare_cloudkit(
     out_bytes: *mut *const u8,
     out_len: *mut usize,
 ) -> ErrorCode {
-    if out_bytes.is_null() || out_len.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let device_id_str = match c_to_string(device_id) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    match bridge::bridge_sync_prepare_cloudkit(handle, &device_id_str) {
-        Ok(bytes) => {
-            let buf = bytes_to_c_buffer(&bytes);
-            if buf.is_null() && !bytes.is_empty() {
-                return ErrorCode::OutOfMemory;
-            }
-            *out_len = bytes.len();
-            *out_bytes = buf;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_bytes.is_null() || out_len.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let device_id_str = match c_to_string(device_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match bridge::bridge_sync_prepare_cloudkit(handle, &device_id_str) {
+            Ok(bytes) => {
+                let buf = bytes_to_c_buffer(&bytes);
+                if buf.is_null() && !bytes.is_empty() {
+                    return ErrorCode::OutOfMemory;
+                }
+                *out_len = bytes.len();
+                *out_bytes = buf;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 /// Prepare entries for Google Drive upload (returns JSON bytes of Drive files)
@@ -767,27 +839,29 @@ pub unsafe extern "C" fn sp_sync_prepare_drive(
     out_bytes: *mut *const u8,
     out_len: *mut usize,
 ) -> ErrorCode {
-    if out_bytes.is_null() || out_len.is_null() {
-        return ErrorCode::InvalidParam;
-    }
-
-    let device_id_str = match c_to_string(device_id) {
-        Ok(s) => s,
-        Err(_) => return ErrorCode::InvalidParam,
-    };
-
-    match bridge::bridge_sync_prepare_drive(handle, &device_id_str) {
-        Ok(bytes) => {
-            let buf = bytes_to_c_buffer(&bytes);
-            if buf.is_null() && !bytes.is_empty() {
-                return ErrorCode::OutOfMemory;
-            }
-            *out_len = bytes.len();
-            *out_bytes = buf;
-            ErrorCode::Success
+    catch_panic(|| {
+        if out_bytes.is_null() || out_len.is_null() {
+            return ErrorCode::InvalidParam;
         }
-        Err(e) => e.to_error_code(),
-    }
+
+        let device_id_str = match c_to_string(device_id) {
+            Ok(s) => s,
+            Err(_) => return ErrorCode::InvalidParam,
+        };
+
+        match bridge::bridge_sync_prepare_drive(handle, &device_id_str) {
+            Ok(bytes) => {
+                let buf = bytes_to_c_buffer(&bytes);
+                if buf.is_null() && !bytes.is_empty() {
+                    return ErrorCode::OutOfMemory;
+                }
+                *out_len = bytes.len();
+                *out_bytes = buf;
+                ErrorCode::Success
+            }
+            Err(e) => e.to_error_code(),
+        }
+    })
 }
 
 // ============================================================================
@@ -799,9 +873,11 @@ pub unsafe extern "C" fn sp_sync_prepare_drive(
 /// bridge-allocated string; never on strings the caller allocated.
 #[no_mangle]
 pub unsafe extern "C" fn sp_string_free(ptr: *const c_char) {
-    if !ptr.is_null() {
-        drop(CString::from_raw(ptr as *mut c_char));
-    }
+    catch_panic_void(|| {
+        if !ptr.is_null() {
+            drop(CString::from_raw(ptr as *mut c_char));
+        }
+    })
 }
 
 /// Free a byte buffer returned by the bridge, using the same `len` that the
@@ -810,11 +886,13 @@ pub unsafe extern "C" fn sp_string_free(ptr: *const c_char) {
 /// `len` is a caller bug. Never call this on buffers the caller allocated.
 #[no_mangle]
 pub unsafe extern "C" fn sp_bytes_free(ptr: *const u8, len: usize) {
-    if !ptr.is_null() && len > 0 {
-        if let Ok(layout) = alloc::Layout::array::<u8>(len) {
-            alloc::dealloc(ptr as *mut u8, layout);
+    catch_panic_void(|| {
+        if !ptr.is_null() && len > 0 {
+            if let Ok(layout) = alloc::Layout::array::<u8>(len) {
+                alloc::dealloc(ptr as *mut u8, layout);
+            }
         }
-    }
+    })
 }
 
 /// Free one `SPEntry` returned by `sp_entry_get_by_id`, releasing all six
@@ -822,15 +900,17 @@ pub unsafe extern "C" fn sp_bytes_free(ptr: *const u8, len: usize) {
 /// freed here. Safe on null.
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_free(entry: *mut Entry) {
-    if entry.is_null() {
-        return;
-    }
-    let e = &mut *entry;
-    for s in [e.id, e.title, e.username, e.password, e.url, e.notes] {
-        if !s.is_null() {
-            drop(CString::from_raw(s as *mut c_char));
+    catch_panic_void(|| {
+        if entry.is_null() {
+            return;
         }
-    }
+        let e = &mut *entry;
+        for s in [e.id, e.title, e.username, e.password, e.url, e.notes] {
+            if !s.is_null() {
+                drop(CString::from_raw(s as *mut c_char));
+            }
+        }
+    })
 }
 
 /// Free an `SPEntrySummary` array returned by `sp_entry_list_all` /
@@ -839,20 +919,22 @@ pub unsafe extern "C" fn sp_entry_free(entry: *mut Entry) {
 /// null or `count == 0`.
 #[no_mangle]
 pub unsafe extern "C" fn sp_entry_list_free(entries: *mut EntrySummary, count: usize) {
-    if entries.is_null() || count == 0 {
-        return;
-    }
-    for i in 0..count {
-        let s = &*entries.add(i);
-        for p in [s.id, s.title, s.username] {
-            if !p.is_null() {
-                drop(CString::from_raw(p as *mut c_char));
+    catch_panic_void(|| {
+        if entries.is_null() || count == 0 {
+            return;
+        }
+        for i in 0..count {
+            let s = &*entries.add(i);
+            for p in [s.id, s.title, s.username] {
+                if !p.is_null() {
+                    drop(CString::from_raw(p as *mut c_char));
+                }
             }
         }
-    }
-    if let Ok(layout) = alloc::Layout::array::<EntrySummary>(count) {
-        alloc::dealloc(entries as *mut u8, layout);
-    }
+        if let Ok(layout) = alloc::Layout::array::<EntrySummary>(count) {
+            alloc::dealloc(entries as *mut u8, layout);
+        }
+    })
 }
 
 // ============================================================================
@@ -971,6 +1053,50 @@ mod abi_contract_tests {
         assert!(
             header.contains("} SPErrorCode;"),
             "generated header must declare the SPErrorCode enum type"
+        );
+    }
+
+    /// WBS-805: every C ABI export body must run inside `catch_panic` —
+    /// a panic must never unwind into Swift/ObjC (UB). Parsed from source so
+    /// a new export cannot skip containment.
+    #[test]
+    fn every_c_export_is_panic_contained() {
+        let src = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ffi.rs"))
+            .expect("ffi.rs source readable");
+        let export_region = src.split("#[cfg(test)]").next().expect("export region");
+        let needle = "pub unsafe extern \"C\" fn ";
+        let mut checked = 0usize;
+        let mut rest = export_region;
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            let name: String = after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let brace = after.find('{').expect("export body brace");
+            let first_stmt = after[brace + 1..].trim_start();
+            assert!(
+                first_stmt.starts_with("catch_panic"),
+                "export `{name}` is not panic-contained (body must open with catch_panic/catch_panic_void)"
+            );
+            checked += 1;
+            rest = after;
+        }
+        assert!(
+            checked >= 20,
+            "parsed {checked} exports — parser desynced from ffi.rs"
+        );
+    }
+
+    #[test]
+    fn catch_panic_contains_panics_and_passes_values_through() {
+        assert_eq!(
+            super::catch_panic(|| ErrorCode::Success),
+            ErrorCode::Success
+        );
+        assert_eq!(
+            super::catch_panic(|| panic!("synthetic boundary panic")),
+            ErrorCode::Panic
         );
     }
 

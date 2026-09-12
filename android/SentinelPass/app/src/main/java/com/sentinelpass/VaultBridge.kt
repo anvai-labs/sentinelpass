@@ -61,6 +61,7 @@ class VaultBridge(private val context: Context) {
         SYNC(-12),
         OUT_OF_MEMORY(-13),
         ABI_UNSUPPORTED(-14),
+        PANIC(-15),
         UNKNOWN(-99);
 
         companion object {

@@ -59,6 +59,11 @@ typedef enum SPErrorCode {
   SPErrorCode_Sync = -12,
   SPErrorCode_OutOfMemory = -13,
   SPErrorCode_AbiUnsupported = -14,
+  /**
+   * A Rust panic was contained at the FFI/JNI boundary (WBS-805). The
+   * operation did NOT complete; out-params are undefined.
+   */
+  SPErrorCode_Panic = -15,
   SPErrorCode_Unknown = -99,
 } SPErrorCode;
 
