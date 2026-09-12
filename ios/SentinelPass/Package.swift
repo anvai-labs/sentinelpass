@@ -41,11 +41,16 @@ let package = Package(
             resources: [
                 .process("Assets.xcassets"),
             ],
-            // The module map carries no `link` directive (per-SDK library
-            // names differ), so SPM links the simulator static library here.
-            // Library search path: SentinelPass/Native/libs (script-populated).
+            // .linkedLibrary cannot express a SEARCH PATH — the library lives
+            // in SentinelPass/Native/libs (script-populated, ADR-009: not
+            // committed), so the -L/-l pair rides unsafeFlags. Relative -L
+            // resolves against the package directory for both swift test and
+            // xcodebuild SPM-scheme builds.
             linkerSettings: [
-                .linkedLibrary("sentinelpass_mobile_bridge_ios_sim"),
+                .unsafeFlags([
+                    "-LSentinelPass/Native/libs",
+                    "-lsentinelpass_mobile_bridge_ios_sim",
+                ])
             ]
         ),
         // Test target (WBS-828): real bridge-contract XCTests over the C
@@ -56,7 +61,10 @@ let package = Package(
             dependencies: ["sentinelpass"],
             path: "SentinelPassTests",
             linkerSettings: [
-                .linkedLibrary("sentinelpass_mobile_bridge_ios_sim"),
+                .unsafeFlags([
+                    "-LSentinelPass/Native/libs",
+                    "-lsentinelpass_mobile_bridge_ios_sim",
+                ])
             ]
         ),
     ]

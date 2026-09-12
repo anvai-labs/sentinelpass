@@ -4,11 +4,14 @@
 // sentinelpass-mobile-bridge/include/sentinelpass_bridge.h (single source of
 // truth; CI drift-checks the copy — regenerate with build-ios.sh or cbindgen).
 //
-// No `link` directive on purpose: the simulator and device static libraries
-// have different names (…_ios_sim vs …_ios), so linking is selected per-SDK
-// by the Xcode project's OTHER_LDFLAGS and, for SPM, by Package.swift's
-// linkerSettings (.linkedLibrary).
+// The `link` directive names the SIMULATOR static library: this module map
+// is consumed by SPM (swift build/test for iOS) and by the Xcode
+// SPM-package scheme, both of which are simulator-only. The APP/extension
+// targets do NOT use this map for linking — they select the per-SDK
+// library via OTHER_LDFLAGS in the pbxproj (_ios_sim for simulators,
+// _ios for devices).
 module sentinelpass [system] [extern_c] {
+    link "sentinelpass_mobile_bridge_ios_sim"
     header "include/sentinelpass_bridge.h"
     export *
 }

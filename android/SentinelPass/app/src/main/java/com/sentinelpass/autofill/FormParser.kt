@@ -66,11 +66,22 @@ internal object FormParser {
             }
         }
         for (i in 0 until structure.windowNodeCount) {
-            walk(structure.getWindowNodeAt(i).rootViewNode)
+            // Review fix (M3): root views are @Nullable mid-transition — a
+            // null root must skip the window, not NPE the service.
+            walk(structure.getWindowNodeAt(i).rootViewNode ?: continue)
         }
         if (nodes.isEmpty()) return null
 
         // Web domain: first non-blank WebView domain in the structure.
+        //
+        // SECURITY LIMITATION (documented residual): the webDomain is taken
+        // from the client app's own structure — a malicious non-browser app
+        // can CLAIM any domain. Browsers report the genuine page origin, so
+        // direct matching is trustworthy there; for other packages the
+        // package->domain heuristic (below) only fires when confident, and
+        // everything else routes to the AUTH picker, where the USER picks
+        // the credential (the same trade-off mainstream autofill apps make
+        // on this platform API).
         val webDomain = nodes.firstOrNull { !it.webDomain.isNullOrBlank() }?.webDomain
 
         // App package: the id package of an app-owned editable field. Framework

@@ -1520,9 +1520,13 @@ SR-MOBILE-002) 4d —
 FR-MOBILE-001) 5d —
   **Status:** Done (2026-09-12, Phase 6 M3). Real fill+save through the
   bridge: AssistStructure parsing (visible-only, self-fill guard,
-  no-password surfaces skipped) under a hard 3s fill deadline; unlocked ->
+  no-password surfaces skipped) under a 3s fill deadline enforced at
+  coroutine suspension points (blocking JNI calls bound the precision —
+  entry-detail fetches capped; the system fill timeout backstops); unlocked ->
   matched datasets (registrable-domain web matching + confident-only
-  package heuristic, 18 matcher unit tests), locked -> AUTH dataset into a
+  package heuristic, 18 matcher unit tests; DOCUMENTED RESIDUAL: a
+  non-browser app can claim any webDomain — untrusted origins route to the
+  AUTH picker), locked -> AUTH dataset into a
   translucent unlock activity; save flow confirm-and-store (web saves
   persist https://<domain>, app saves persist no URL); SaveInfo for
   save-back; settingsActivity fixed to MainActivity.
@@ -1537,8 +1541,9 @@ FR-MOBILE-001) 5d —
   cleartextTrafficPermitted=false (no loopback override — it would ship).
   **816** backup policy (TD-MOB-05) 2d —
   **Status:** Done (2026-09-12, M3): vault db + SQLite sidecars + slot blob
-  excluded from cloud backup AND device-transfer (slot blob device-bound;
-  vault db rides D2D per accepted decision; prefs excluded — boolean only).
+  excluded from cloud backup; device-transfer keeps the encrypted vault db
+  (accepted decision) but excludes the device-bound slot blob and the
+  boolean-only prefs (allowlist semantics documented in the XML).
   **817** permission trim 0.5d —
   **Status:** Done (2026-09-12, M3): CAMERA + camera feature + CameraX/ZXing
   deps removed (zero references, no scanner UI); USE_BIOMETRIC/INTERNET
@@ -1582,8 +1587,12 @@ policy (SR-MOBILE-004) 2d —
 FR-MOBILE-001) 5d —
   **Status:** Done (2026-09-12, M3). SentinelPassCredential extension
   target (com.apple.authentication-services.credential-provider-ui): own
-  VaultBridge on the shared-container vault, master-password unlock, domain
-  filtering with full-list fallback, ASPasswordCredential completion,
+  VaultBridge on the shared-container vault (FAIL-CLOSED: a missing vault
+  file errors instead of letting sp_vault_init mint an empty one), master-
+  password unlock, title-substring filtering against the service identifier
+  with full-list fallback (entries carry no URL in the picker — documented
+  limitation), ASPasswordCredential completion (handle destroyed before
+  completion),
   App Group entitlements on both targets. Compile+link verified against the
   simulator SDK (xcodebuild itself broken on the dev machine — pre-existing
   — CI exercises it).

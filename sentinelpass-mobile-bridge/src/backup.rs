@@ -110,7 +110,6 @@ mod tests {
         let dir = temp_dir();
         let vault_path = dir.join("vault.db");
         let bundle = dir.join("out.spbackup");
-        let binding = vault_path.to_str().unwrap().to_string();
 
         // Create + populate through the normal bridge path.
         let vault = VaultManager::create(&vault_path, b"master-password").unwrap();

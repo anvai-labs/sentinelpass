@@ -40,11 +40,11 @@ jobs:
           # Build for iOS device (arm64)
           cargo build --package sentinelpass-mobile-bridge --target aarch64-apple-ios --release
 
-      - name: Run mobile bridge integration tests
+      - name: Run mobile bridge integration tests (host, fail-closed)
         run: |
-          # Skip integration tests for now due to iOS simulator compatibility issues
-          # The mobile bridge is still built and validated through compilation
-          echo "Skipping integration tests on iOS simulator"
+          # The integration tests drive the bridge from the host process (the
+          # same logic the iOS slices link); WBS-828 retired the echo-skip.
+          cargo test --package sentinelpass-mobile-bridge --test integration_test
 
       - name: Upload iOS static library (simulator)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -88,14 +88,12 @@ jobs:
           name: ios-lib-simulator
           path: target/aarch64-apple-ios-sim/release
 
-      - name: Run Swift unit tests
+      - name: Run bridge ABI contract tests (host, fail-closed)
         run: |
-          # Navigate to iOS directory
-          cd ios/SentinelPass
-
-          # Swift unit tests require iOS-specific APIs and framework bridging
-          # Skip for now - mobile bridge integration tests provide sufficient coverage
-          echo "Skipping Swift unit tests - mobile bridge tests cover core functionality"
+          # The iOS-consumed C ABI is pinned here on the host (WBS-801/802):
+          # declared contract == ffi.rs exports == generated header. The
+          # on-simulator XCTests run in the simulator-tests job (WBS-828).
+          cargo test --package sentinelpass-mobile-bridge --lib
 
   # iOS Simulator Tests
   simulator-tests:
@@ -132,21 +130,34 @@ jobs:
 
       - name: Build app + extension targets (fail-closed, WBS-828)
         run: |
+          # generic destination: builds both SDK slices without needing a
+          # concrete device name (runner simulator catalogs drift).
           cd ios/SentinelPass
-          DEST='platform=iOS Simulator,name=iPhone 15,OS=latest'
           xcodebuild build \
             -project SentinelPassApp.xcodeproj -scheme SentinelPassApp \
-            -sdk iphonesimulator -destination "$DEST" \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO | tail -20
           xcodebuild build \
             -project SentinelPassApp.xcodeproj -scheme SentinelPassCredential \
-            -sdk iphonesimulator -destination "$DEST" \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO | tail -20
 
       - name: Bridge-contract XCTests on simulator (fail-closed, WBS-828)
         run: |
           cd ios/SentinelPass
-          DEST='platform=iOS Simulator,name=iPhone 15,OS=latest'
+          # Runner simulator catalogs drift — try concrete devices in order.
+          DEST=''
+          for d in 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+                   'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+                   'platform=iOS Simulator,OS=latest'; do
+            if xcrun simctl list devices available | grep -q . && xcodebuild -showdestinations \
+                 -scheme SentinelPass-Package 2>/dev/null | grep -qF "$d"; then
+              DEST="$d"
+              break
+            fi
+          done
+          [ -n "$DEST" ] || DEST='platform=iOS Simulator,OS=latest'
+          echo "Using destination: $DEST"
           xcodebuild test \
             -scheme SentinelPass-Package \
             -sdk iphonesimulator -destination "$DEST" \

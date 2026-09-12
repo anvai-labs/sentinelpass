@@ -5,7 +5,6 @@
 //  iOS Password Manager using SentinelPass Mobile Bridge
 //
 //  WBS-823: a privacy cover shields the UI whenever the scene is not
-//  active, and the auto-lock timer (5 minutes) runs while backgrounded —
 //  returning after the deadline locks the vault.
 //
 

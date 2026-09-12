@@ -19,7 +19,8 @@ import sentinelpass
 /// The at-rest store is the Keychain item itself: no secret ever lands in
 /// UserDefaults, files, or pasteboard. On release, the 32 recovered bytes
 /// cross into the bridge ONCE via `sp_slot_open_with_dek` (FFI rule 1:
-/// borrowed, never retained) and the local copy is zeroized immediately.
+/// borrowed, never retained) and the buffer is zeroized before the local
+/// scope exits.
 enum KeychainSlot {
 
     static let service = "com.sentinelpass.vault-slot"
@@ -121,13 +122,15 @@ enum KeychainSlot {
             }
         }
 
-        guard let data = item as? Data else {
+        guard var data = item as? Data else {
             return .failed("keychain item was not data")
         }
         defer {
-            // Caller-side zeroization of the borrowed copy (FFI rule 1).
-            var mutable = data
-            mutable.resetBytes(in: 0..<mutable.count)
+            // Review fix (M3): zero the buffer we actually hand over —
+            // `data` is bound `var` and uniquely owned here, so resetBytes
+            // mutates THE buffer (zeroizing a `var` COPY would leave the
+            // original freed unzeroed under COW).
+            data.resetBytes(in: 0..<data.count)
         }
 
         guard data.count == 32 else {

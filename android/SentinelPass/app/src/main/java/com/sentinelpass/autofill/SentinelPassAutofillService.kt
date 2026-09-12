@@ -61,6 +61,12 @@ class SentinelPassAutofillService : AutofillService() {
 
     /**
      * Called when the system needs to autofill a field.
+     *
+     * Deadline note (review finding): FILL_DEADLINE_MILLIS is enforced at
+     * coroutine suspension points — the bridge JNI calls are blocking and
+     * cannot be preempted, so an overrun is bounded by the per-call native
+     * work (entry detail fetches are capped) rather than guaranteed to the
+     * millisecond. The system's own fill timeout remains the backstop.
      */
     override fun onFillRequest(
         request: FillRequest,
@@ -75,7 +81,17 @@ class SentinelPassAutofillService : AutofillService() {
                 return
             }
 
-        val form = FormParser.parseFillTarget(structure, packageName)
+        // Review fix (M3): the parse runs INSIDE the guard — AssistStructure
+        // views can surface null root views mid-walk, and a throw here would
+        // crash the service (the system unbinds/blacklists it). Any failure
+        // degrades to "no autofill".
+        val form = try {
+            FormParser.parseFillTarget(structure, packageName)
+        } catch (t: Throwable) {
+            Log.e(TAG, "Fill-target parse failed; declining to autofill", t)
+            callback.onSuccess(null)
+            return
+        }
         if (form == null || (form.username == null && form.password == null)) {
             callback.onSuccess(null)
             return

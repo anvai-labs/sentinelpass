@@ -55,6 +55,15 @@ final class CredentialViewModel: ObservableObject {
         Task {
             defer { isLoading = false }
             let path = VaultFile.vaultURL.path
+            // Review fix (M3): sp_vault_init CREATES when the file is
+            // missing — in the extension (whose container may diverge from
+            // the app's) that would silently mint an EMPTY vault and report
+            // success. Fail closed instead: no vault file -> no unlock.
+            guard FileManager.default.fileExists(atPath: path) else {
+                errorMessage = "No SentinelPass vault found — open the app once first"
+                showingError = true
+                return
+            }
             let password = masterPassword
             let success = await bridge.unlockVault(vaultPath: path, masterPassword: password)
             if success {
@@ -89,6 +98,10 @@ final class CredentialViewModel: ObservableObject {
             let credential = ASPasswordCredential(user: details.username, password: details.password)
             // The typed extensionContext (non-optional on
             // ASCredentialProviderViewController) completes the host request.
+            // Review fix (M3): release the vault handle BEFORE handing
+            // control back to the host — the extension process may be
+            // suspended immediately after completion (ownership rule 7).
+            bridge.destroyVault()
             provider.extensionContext.completeRequest(
                 withSelectedCredential: credential,
                 completionHandler: nil
@@ -275,6 +288,7 @@ class CredentialProviderViewController: ASCredentialProviderViewController {
     }
 
     private func cancel() {
+        bridge.destroyVault()
         extensionContext.cancelRequest(withError: ASExtensionError(.userCanceled))
     }
 }

@@ -112,11 +112,16 @@ internal object AutofillResponseBuilder {
         val ids = listOfNotNull(usernameId, passwordId)
         if (ids.isEmpty()) return null
 
+        // Review fix (M3): FLAG_UPDATE_CURRENT — PendingIntents match on
+        // filterEquals (extras excluded), so without it a second fill request
+        // for a DIFFERENT origin would reuse the first request's stale
+        // auth-intent extras and pre-filter the picker against the wrong
+        // domain.
         val pendingIntent = PendingIntent.getActivity(
             context,
             0,
             authIntent,
-            PendingIntent.FLAG_MUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         )
 
         val presentation = RemoteViews(context.packageName, R.layout.item_autofill_dataset)

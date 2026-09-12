@@ -170,11 +170,18 @@ class VaultState private constructor(private val context: Context) : ViewModel()
      */
     fun lockVault() {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                vaultBridge?.lockVault()
+            // Review fix (M3): the native side destroys the handle on BOTH
+            // paths (success = hygiene, failure = fail-safe close), so the
+            // facade reference is dropped either way — but a FAILED lock is
+            // surfaced instead of silently claiming a locked state.
+            val locked = withContext(Dispatchers.IO) {
+                vaultBridge?.lockVault() ?: false
             }
             vaultBridge = null
-            _uiState.value = VaultUiState(hasVault = true)
+            _uiState.value = VaultUiState(
+                hasVault = true,
+                error = if (!locked) "Failed to lock vault" else null
+            )
             _entries.value = emptyList()
         }
     }
