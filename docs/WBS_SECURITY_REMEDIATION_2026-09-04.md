@@ -1410,11 +1410,21 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
 
 Gate: ADR-009 + WBS-300/400 stable ABI/envelope. **Owner** ME.
 
-Shared (801–807): **WBS-801** generated C ABI (TD-MOB-09, SR-MOBILE-001) 4d;
-**802** JNI contract (TD-MOB-02) 2d; **803** ABI/feature negotiation 2d; **804**
-ownership + zeroizing destroy (TD-MOB-09) 2d; **805** FFI panic containment 1.5d;
-**806** lifecycle/invalid-handle tests 2d; **807** atomic update + placeholder removal
-(TD-MOB-03/04) 3d.
+Shared (801–807):
+
+- **WBS-801** generated C ABI (TD-MOB-09, SR-MOBILE-001) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M1). `cbindgen.toml` include-list synced
+  to the real export surface (phantom `sp_entry_update` removed; sync/biometric
+  surface declared; snake_case args), generated header tracked and pinned by
+  `declared_abi_matches_ffi_surface` + `header_declares_every_export` tests;
+  android.yml/ios.yml integration jobs now regenerate + diff the header
+  (drift = red) and `clang -fsyntax-only` it.
+- **802** JNI contract (TD-MOB-02) 2d.
+- **803** ABI/feature negotiation 2d.
+- **804** ownership + zeroizing destroy (TD-MOB-09) 2d.
+- **805** FFI panic containment 1.5d.
+- **806** lifecycle/invalid-handle tests 2d.
+- **807** atomic update + placeholder removal (TD-MOB-03/04) 3d.
 
 Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d; **811** all-ABI JNI
 CI (TD-MOB-01, TV-007) 2d; **812** Keystore-bound platform slot (TD-MOB-03,

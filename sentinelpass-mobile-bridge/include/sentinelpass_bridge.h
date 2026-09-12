@@ -111,7 +111,7 @@ extern "C" {
  *
  * Returns a handle to the sync manager
  */
-jlong Java_com_sentinelpass_DriveSync_nativeInit(JNIEnv Env, jobject Ctx, jstring DeviceId);
+jlong Java_com_sentinelpass_DriveSync_nativeInit(JNIEnv env, jobject _ctx, jstring device_id);
 #endif
 
 #if defined(__ANDROID__)
@@ -124,10 +124,10 @@ jlong Java_com_sentinelpass_DriveSync_nativeInit(JNIEnv Env, jobject Ctx, jstrin
  *
  * Returns a JSON string of DriveFile objects
  */
-jstring Java_com_sentinelpass_DriveSync_nativePrepareUpload(JNIEnv Env,
-                                                            jobject Obj,
-                                                            jlong Handle,
-                                                            jstring JsonBlobs);
+jstring Java_com_sentinelpass_DriveSync_nativePrepareUpload(JNIEnv env,
+                                                            jobject _obj,
+                                                            jlong _handle,
+                                                            jstring json_blobs);
 #endif
 
 #if defined(__ANDROID__)
@@ -140,34 +140,34 @@ jstring Java_com_sentinelpass_DriveSync_nativePrepareUpload(JNIEnv Env,
  *
  * Returns a JSON string of SyncEntryBlob objects
  */
-jstring Java_com_sentinelpass_DriveSync_nativeProcessDownload(JNIEnv Env,
-                                                              jobject Obj,
-                                                              jlong Handle,
-                                                              jstring JsonFiles);
+jstring Java_com_sentinelpass_DriveSync_nativeProcessDownload(JNIEnv env,
+                                                              jobject _obj,
+                                                              jlong _handle,
+                                                              jstring json_files);
 #endif
 
 #if defined(__ANDROID__)
 /**
  * Update sync state after successful sync (JNI)
  */
-jint Java_com_sentinelpass_DriveSync_nativeUpdateState(JNIEnv Env,
-                                                       jobject Obj,
-                                                       jlong Handle,
-                                                       jlong LastSync,
-                                                       jstring PageToken);
+jint Java_com_sentinelpass_DriveSync_nativeUpdateState(JNIEnv _env,
+                                                       jobject _obj,
+                                                       jlong _handle,
+                                                       jlong last_sync,
+                                                       jstring page_token);
 #endif
 
-enum SPErrorCode sp_biometric_has_key(SPVaultHandle Handle, bool *OutHasKey);
+enum SPErrorCode sp_biometric_has_key(SPVaultHandle handle, bool *out_has_key);
 
-enum SPErrorCode sp_biometric_remove_key(SPVaultHandle Handle);
+enum SPErrorCode sp_biometric_remove_key(SPVaultHandle handle);
 
-enum SPErrorCode sp_biometric_set_key(SPVaultHandle Handle,
-                                      const uint8_t *KeyData,
-                                      uintptr_t KeyDataLen);
+enum SPErrorCode sp_biometric_set_key(SPVaultHandle handle,
+                                      const uint8_t *key_data,
+                                      uintptr_t key_data_len);
 
-enum SPErrorCode sp_biometric_unlock(SPVaultHandle Handle);
+enum SPErrorCode sp_biometric_unlock(SPVaultHandle handle);
 
-void sp_bytes_free(const uint8_t *Ptr, uintptr_t Len);
+void sp_bytes_free(const uint8_t *ptr, uintptr_t len);
 
 /**
  * Initialize Drive sync (C FFI)
@@ -176,7 +176,7 @@ void sp_bytes_free(const uint8_t *Ptr, uintptr_t Len);
  * - `device_id` must be a valid null-terminated UTF-8 string
  * - `out_handle` must point to valid memory
  */
-int sp_drive_sync_init(const char *DeviceId, DriveSyncCHandle *OutHandle);
+int sp_drive_sync_init(const char *device_id, DriveSyncCHandle *out_handle);
 
 /**
  * Prepare sync files for upload (C FFI)
@@ -185,7 +185,7 @@ int sp_drive_sync_init(const char *DeviceId, DriveSyncCHandle *OutHandle);
  * - `json_blobs` must be a valid null-terminated UTF-8 string (JSON array of SyncEntryBlob)
  * - `out_json` must be either null or point to valid memory for output
  */
-int sp_drive_sync_prepare_upload(DriveSyncCHandle Handle, const char *JsonBlobs, char **OutJson);
+int sp_drive_sync_prepare_upload(DriveSyncCHandle _handle, const char *json_blobs, char **out_json);
 
 /**
  * Process downloaded sync files (C FFI)
@@ -194,50 +194,54 @@ int sp_drive_sync_prepare_upload(DriveSyncCHandle Handle, const char *JsonBlobs,
  * - `json_files` must be a valid null-terminated UTF-8 string (JSON array of DriveFile)
  * - `out_json` must be either null or point to valid memory for output
  */
-int sp_drive_sync_process_download(DriveSyncCHandle Handle, const char *JsonFiles, char **OutJson);
+int sp_drive_sync_process_download(DriveSyncCHandle _handle,
+                                   const char *json_files,
+                                   char **out_json);
 
 /**
  * Update sync state after successful sync (C FFI)
  */
-int sp_drive_sync_update_state(DriveSyncCHandle Handle, int64_t LastSync, const char *PageToken);
+int sp_drive_sync_update_state(DriveSyncCHandle _handle,
+                               int64_t last_sync,
+                               const char *_page_token);
 
 /**
  * Add a new entry
  */
-enum SPErrorCode sp_entry_add(SPVaultHandle Handle,
-                              const char *Title,
-                              const char *Username,
-                              const char *Password,
-                              const char *Url,
-                              const char *Notes,
-                              const char **OutEntryId);
+enum SPErrorCode sp_entry_add(SPVaultHandle handle,
+                              const char *title,
+                              const char *username,
+                              const char *password,
+                              const char *url,
+                              const char *notes,
+                              const char **out_entry_id);
 
 /**
  * Delete entry
  */
-enum SPErrorCode sp_entry_delete(SPVaultHandle Handle, const char *EntryId);
+enum SPErrorCode sp_entry_delete(SPVaultHandle handle, const char *entry_id);
 
 /**
  * Get entry by ID
  */
-enum SPErrorCode sp_entry_get_by_id(SPVaultHandle Handle,
-                                    const char *EntryId,
-                                    struct SPEntry *OutEntry);
+enum SPErrorCode sp_entry_get_by_id(SPVaultHandle handle,
+                                    const char *entry_id,
+                                    struct SPEntry *out_entry);
 
 /**
  * List all entries
  */
-enum SPErrorCode sp_entry_list_all(SPVaultHandle Handle,
-                                   const struct SPEntrySummary **OutEntries,
-                                   uintptr_t *OutCount);
+enum SPErrorCode sp_entry_list_all(SPVaultHandle handle,
+                                   const struct SPEntrySummary **out_entries,
+                                   uintptr_t *out_count);
 
 /**
  * Search entries
  */
-enum SPErrorCode sp_entry_search(SPVaultHandle Handle,
-                                 const char *Query,
-                                 const struct SPEntrySummary **OutEntries,
-                                 uintptr_t *OutCount);
+enum SPErrorCode sp_entry_search(SPVaultHandle handle,
+                                 const char *query,
+                                 const struct SPEntrySummary **out_entries,
+                                 uintptr_t *out_count);
 
 /**
  * Initialize iCloud sync
@@ -247,9 +251,9 @@ enum SPErrorCode sp_entry_search(SPVaultHandle Handle,
  * - `container_name` can be null (uses default)
  * - `out_handle` must point to valid memory
  */
-int32_t sp_icloud_sync_init(const char *DeviceId,
-                            const char *ContainerName,
-                            ICloudSyncHandle *OutHandle);
+int32_t sp_icloud_sync_init(const char *device_id,
+                            const char *container_name,
+                            ICloudSyncHandle *out_handle);
 
 /**
  * Prepare sync records for upload
@@ -259,9 +263,9 @@ int32_t sp_icloud_sync_init(const char *DeviceId,
  * - `out_json` must be either null or point to valid memory for output
  * - Returns a JSON string that must be freed with `sp_string_free`
  */
-int32_t sp_icloud_sync_prepare_upload(ICloudSyncHandle Handle,
-                                      const char *JsonBlobs,
-                                      char **OutJson);
+int32_t sp_icloud_sync_prepare_upload(ICloudSyncHandle handle,
+                                      const char *json_blobs,
+                                      char **out_json);
 
 /**
  * Process downloaded sync records
@@ -271,96 +275,96 @@ int32_t sp_icloud_sync_prepare_upload(ICloudSyncHandle Handle,
  * - `out_json` must be either null or point to valid memory for output
  * - Returns a JSON string that must be freed with `sp_string_free`
  */
-int32_t sp_icloud_sync_process_download(ICloudSyncHandle Handle,
-                                        const char *JsonRecords,
-                                        char **OutJson);
+int32_t sp_icloud_sync_process_download(ICloudSyncHandle handle,
+                                        const char *json_records,
+                                        char **out_json);
 
 /**
  * Update sync state after successful sync
  */
-int32_t sp_icloud_sync_update_state(ICloudSyncHandle Handle,
-                                    int64_t LastSync,
-                                    uint64_t ServerSequence);
+int32_t sp_icloud_sync_update_state(ICloudSyncHandle handle,
+                                    int64_t last_sync,
+                                    uint64_t server_sequence);
 
 /**
  * Check password strength
  */
-enum SPErrorCode sp_password_check_strength(const char *Password,
-                                            struct SPPasswordAnalysis *OutAnalysis);
+enum SPErrorCode sp_password_check_strength(const char *password,
+                                            struct SPPasswordAnalysis *out_analysis);
 
 /**
  * Generate password
  */
-enum SPErrorCode sp_password_generate(uintptr_t Length,
-                                      bool IncludeSymbols,
-                                      const char **OutPassword);
+enum SPErrorCode sp_password_generate(uintptr_t length,
+                                      bool include_symbols,
+                                      const char **out_password);
 
-void sp_string_free(const char *Ptr);
+void sp_string_free(const char *ptr);
 
 /**
  * Apply downloaded entries (entries_json is JSON string)
  */
-enum SPErrorCode sp_sync_apply_entries(SPVaultHandle Handle,
-                                       const uint8_t *EntriesJson,
-                                       uintptr_t EntriesLen,
-                                       uint64_t *OutApplied);
+enum SPErrorCode sp_sync_apply_entries(SPVaultHandle handle,
+                                       const uint8_t *entries_json,
+                                       uintptr_t entries_len,
+                                       uint64_t *out_applied);
 
 /**
  * Collect entries pending sync (returns JSON bytes)
  */
-enum SPErrorCode sp_sync_collect_pending(SPVaultHandle Handle,
-                                         const uint8_t **OutBytes,
-                                         uintptr_t *OutLen);
+enum SPErrorCode sp_sync_collect_pending(SPVaultHandle handle,
+                                         const uint8_t **out_bytes,
+                                         uintptr_t *out_len);
 
 /**
  * Get sync status
  */
-enum SPErrorCode sp_sync_get_status(SPVaultHandle Handle, struct SyncStatus *OutStatus);
+enum SPErrorCode sp_sync_get_status(SPVaultHandle handle, struct SyncStatus *out_status);
 
 /**
  * Prepare entries for CloudKit upload (returns JSON bytes of CloudKit records)
  */
-enum SPErrorCode sp_sync_prepare_cloudkit(SPVaultHandle Handle,
-                                          const char *DeviceId,
-                                          const uint8_t **OutBytes,
-                                          uintptr_t *OutLen);
+enum SPErrorCode sp_sync_prepare_cloudkit(SPVaultHandle handle,
+                                          const char *device_id,
+                                          const uint8_t **out_bytes,
+                                          uintptr_t *out_len);
 
 /**
  * Prepare entries for Google Drive upload (returns JSON bytes of Drive files)
  */
-enum SPErrorCode sp_sync_prepare_drive(SPVaultHandle Handle,
-                                       const char *DeviceId,
-                                       const uint8_t **OutBytes,
-                                       uintptr_t *OutLen);
+enum SPErrorCode sp_sync_prepare_drive(SPVaultHandle handle,
+                                       const char *device_id,
+                                       const uint8_t **out_bytes,
+                                       uintptr_t *out_len);
 
 /**
  * Generate TOTP code
  */
-enum SPErrorCode sp_totp_generate_code(SPVaultHandle Handle,
-                                       const char *EntryId,
-                                       struct SPTotpCode *OutCode);
+enum SPErrorCode sp_totp_generate_code(SPVaultHandle handle,
+                                       const char *entry_id,
+                                       struct SPTotpCode *out_code);
 
 /**
  * Destroy a vault
  */
-enum SPErrorCode sp_vault_destroy(SPVaultHandle Handle);
+enum SPErrorCode sp_vault_destroy(SPVaultHandle handle);
 
 /**
  * Initialize or unlock a vault
  */
-enum SPErrorCode sp_vault_init(const char *VaultPath,
-                               const char *MasterPassword,
-                               SPVaultHandle *OutHandle);
+enum SPErrorCode sp_vault_init(const char *vault_path,
+                               const char *master_password,
+                               SPVaultHandle *out_handle);
 
 /**
  * Check if vault is unlocked
  */
-enum SPErrorCode sp_vault_is_unlocked(SPVaultHandle Handle, bool *OutUnlocked);
+enum SPErrorCode sp_vault_is_unlocked(SPVaultHandle handle, bool *out_unlocked);
 
 /**
  * Lock the vault
  */
-enum SPErrorCode sp_vault_lock(SPVaultHandle Handle);
+enum SPErrorCode sp_vault_lock(SPVaultHandle handle);
 
 #ifdef __cplusplus
 } // extern "C"
