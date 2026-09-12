@@ -5,7 +5,6 @@ use sentinelpass_core::vault::{CredentialType, Entry, EntrySummary, VaultManager
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use zeroize::Zeroizing;
 
 /// Global vault handle storage
 ///
@@ -13,19 +12,13 @@ use zeroize::Zeroizing;
 /// handles to support future multi-vault scenarios and testing.
 static VAULT_REGISTRY: OnceLock<Mutex<VaultRegistry>> = OnceLock::new();
 
-fn get_registry() -> &'static Mutex<VaultRegistry> {
+pub(crate) fn get_registry() -> &'static Mutex<VaultRegistry> {
     VAULT_REGISTRY.get_or_init(|| Mutex::new(VaultRegistry::new()))
 }
 
-struct VaultRegistry {
+pub(crate) struct VaultRegistry {
     vaults: HashMap<u64, Arc<Mutex<VaultManager>>>,
     next_handle: u64,
-    /// In-process biometric key material (WBS-804: zeroized on removal and
-    /// on vault destroy; never cloned out of the registry). This is the M1
-    /// containment contract — Stage M2 (WBS-812/821) replaces this map with
-    /// platform-keystore-bound slots so no key material lives in this
-    /// process at all.
-    biometric_keys: HashMap<u64, Zeroizing<Vec<u8>>>,
 }
 
 impl VaultRegistry {
@@ -33,36 +26,22 @@ impl VaultRegistry {
         Self {
             vaults: HashMap::new(),
             next_handle: 1,
-            biometric_keys: HashMap::new(),
         }
     }
 
-    fn register_vault(&mut self, vault: VaultManager) -> u64 {
+    pub(crate) fn register_vault(&mut self, vault: VaultManager) -> u64 {
         let handle = self.next_handle;
         self.next_handle = handle.wrapping_add(1);
         self.vaults.insert(handle, Arc::new(Mutex::new(vault)));
         handle
     }
 
-    fn get_vault(&self, handle: u64) -> Option<Arc<Mutex<VaultManager>>> {
+    pub(crate) fn get_vault(&self, handle: u64) -> Option<Arc<Mutex<VaultManager>>> {
         self.vaults.get(&handle).cloned()
     }
 
     fn remove_vault(&mut self, handle: u64) -> Option<Arc<Mutex<VaultManager>>> {
         self.vaults.remove(&handle)
-    }
-
-    fn set_biometric_key(&mut self, handle: u64, key: Vec<u8>) {
-        self.biometric_keys.insert(handle, Zeroizing::new(key));
-    }
-
-    fn get_biometric_key(&self, handle: u64) -> Option<&Zeroizing<Vec<u8>>> {
-        self.biometric_keys.get(&handle)
-    }
-
-    fn remove_biometric_key(&mut self, handle: u64) -> Option<Zeroizing<Vec<u8>>> {
-        // Zeroizing drops with an explicit zeroize pass.
-        self.biometric_keys.remove(&handle)
     }
 }
 
@@ -99,7 +78,6 @@ pub fn bridge_vault_destroy(handle: VaultHandle) -> BridgeResult<()> {
         .lock()
         .map_err(|_| BridgeError::Unknown("Failed to acquire vault registry lock".into()))?;
 
-    registry.remove_biometric_key(handle);
     registry
         .remove_vault(handle)
         .ok_or_else(|| BridgeError::InvalidParam(format!("Invalid vault handle: {}", handle)))?;
@@ -385,52 +363,6 @@ pub fn bridge_password_check_strength(
 
     let analysis = strength::analyze_password(password)?;
     Ok(analysis)
-}
-
-/// Set biometric key data for a vault
-pub fn bridge_biometric_set_key(handle: VaultHandle, wrapped_key_data: &[u8]) -> BridgeResult<()> {
-    let mut registry = get_registry()
-        .lock()
-        .map_err(|_| BridgeError::Unknown("Failed to acquire vault registry lock".into()))?;
-
-    registry
-        .get_vault(handle)
-        .ok_or_else(|| BridgeError::InvalidParam(format!("Invalid vault handle: {}", handle)))?;
-
-    registry.set_biometric_key(handle, wrapped_key_data.to_vec());
-    Ok(())
-}
-
-/// Check if biometric key is set
-pub fn bridge_biometric_has_key(handle: VaultHandle) -> BridgeResult<bool> {
-    let registry = get_registry()
-        .lock()
-        .map_err(|_| BridgeError::Unknown("Failed to acquire vault registry lock".into()))?;
-
-    Ok(registry.get_biometric_key(handle).is_some())
-}
-
-/// Remove biometric key
-pub fn bridge_biometric_remove_key(handle: VaultHandle) -> BridgeResult<()> {
-    let mut registry = get_registry()
-        .lock()
-        .map_err(|_| BridgeError::Unknown("Failed to acquire vault registry lock".into()))?;
-
-    registry
-        .remove_biometric_key(handle)
-        .ok_or_else(|| BridgeError::Biometric("No biometric key set".into()))?;
-
-    Ok(())
-}
-
-/// Unlock vault using biometric key (placeholder for platform-specific implementation)
-pub fn bridge_biometric_unlock(_handle: VaultHandle) -> BridgeResult<()> {
-    // Platform-specific implementation required
-    // This would decrypt the wrapped master key using platform keystore
-    // and then unlock the vault
-    Err(BridgeError::Biometric(
-        "Platform-specific biometric unlock not yet implemented".into(),
-    ))
 }
 
 // ============================================================================

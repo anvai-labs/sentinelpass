@@ -47,8 +47,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// Blob format version. v1 = signature-KDF wrap (this module).
 pub const HELLO_BOUND_BLOB_VERSION: u8 = 1;
 
-/// HKDF salt for the wrap-key derivation (domain separation).
+/// HKDF salt for the Windows Hello wrap-key derivation (domain separation).
 const WRAP_KEY_SALT: &[u8] = b"sentinelpass.hello-wrap.v1";
+
+/// HKDF salt for the MOBILE platform-slot wrap (WBS-812/821): Android
+/// Keystore / iOS Keychain auth-bound signing keys. Domain-separated from
+/// [`WRAP_KEY_SALT`] so a signature under one scheme can never unwrap a
+/// blob sealed under the other.
+pub const MOBILE_SLOT_WRAP_SALT: &[u8] = b"sentinelpass.mobile-slot.v1";
 
 /// What the platform must supply: one Hello-gated signature over `data`.
 /// The Windows implementation routes to `KeyCredential::RequestSignAsync`
@@ -99,11 +105,19 @@ impl HelloBoundBlob {
     }
 }
 
-/// Derive the wrap key from a Hello signature, bound to the biometric ref
-/// (a signature for one vault's key cannot unwrap another vault's blob —
-/// and the binding rides the KDF `info`, not trust in the caller).
-pub fn derive_wrap_key(signature: &[u8], biometric_ref: &str) -> ZeroizingKey {
-    let hk = Hkdf::<Sha256>::new(Some(WRAP_KEY_SALT), signature);
+/// Draw a fresh random 32-byte challenge for the sign-at-release flow
+/// (WBS-812/821 mobile slots: the HOST platform draws nothing — the bridge
+/// hands it this challenge and the auth-bound key signs it).
+pub fn fresh_challenge() -> [u8; 32] {
+    rand::random()
+}
+
+/// Derive the wrap key from a platform signature, bound to the biometric
+/// ref and the scheme's domain salt (a signature for one vault's key or one
+/// scheme cannot unwrap another's blob — the binding rides the KDF
+/// `info`/salt, not trust in the caller).
+pub fn derive_wrap_key(salt: &[u8], signature: &[u8], biometric_ref: &str) -> ZeroizingKey {
+    let hk = Hkdf::<Sha256>::new(Some(salt), signature);
     let mut okm = ZeroizingKey::zeroed();
     hk.expand(biometric_ref.as_bytes(), okm.as_mut())
         .expect("HKDF-SHA256 expand with a 32-byte key cannot fail");
@@ -153,20 +167,63 @@ pub fn seal_dek_under_hello(
     biometric_ref: &str,
     dek: &DataEncryptionKey,
 ) -> Result<HelloBoundBlob> {
+    seal_dek_under_signature(WRAP_KEY_SALT, signer, key_name, biometric_ref, dek)
+}
+
+/// Release orchestration for Windows Hello (see [`seal_dek_under_hello`]).
+pub fn release_dek_under_hello(
+    signer: &dyn HelloKeySigner,
+    biometric_ref: &str,
+    blob: &HelloBoundBlob,
+) -> Result<DataEncryptionKey> {
+    release_dek_under_signature(WRAP_KEY_SALT, signer, biometric_ref, blob)
+}
+
+/// Domain-parameterized enable orchestration (WBS-812/821): the mobile
+/// platform slots (Android Keystore / iOS Keychain auth-bound signing keys)
+/// share this exact orchestration under [`MOBILE_SLOT_WRAP_SALT`]. `salt`
+/// MUST be a fixed domain constant — it is what makes a signature under one
+/// scheme useless against another scheme's blobs.
+pub fn seal_dek_under_signature(
+    salt: &[u8],
+    signer: &dyn HelloKeySigner,
+    key_name: &str,
+    biometric_ref: &str,
+    dek: &DataEncryptionKey,
+) -> Result<HelloBoundBlob> {
+    let challenge: [u8; 32] = rand::random();
+    seal_dek_with_challenge(salt, signer, key_name, biometric_ref, dek, &challenge)
+}
+
+/// Challenge-parameterized variant (WBS-812/821 mobile split model): the
+/// bridge draws the challenge, the HOST platform signs it under its
+/// auth-bound gate, and the captured signature pair is sealed here. The
+/// signer MUST reproduce exactly `challenge` (the mobile bridge enforces
+/// this with a captured-challenge signer) — the double-sign determinism
+/// check still applies to whatever the platform supplies.
+pub fn seal_dek_with_challenge(
+    salt: &[u8],
+    signer: &dyn HelloKeySigner,
+    key_name: &str,
+    biometric_ref: &str,
+    dek: &DataEncryptionKey,
+    challenge: &[u8; 32],
+) -> Result<HelloBoundBlob> {
     if !signer.is_supported() {
         return Err(PasswordManagerError::NotFound(
-            "Windows Hello key storage is not supported on this system".to_string(),
+            "Platform auth-bound key storage is not supported on this system".to_string(),
         ));
     }
 
-    let challenge: [u8; 32] = rand::random();
-
-    // The two signatures double as the Hello consent at enable time.
-    let sig_a = signer.sign(&challenge)?;
-    let sig_b = signer.sign(&challenge)?;
+    // The two signatures double as the consent prompt at enable time, and
+    // verify the platform signature is DETERMINISTIC (RSA-PKCS1) — a
+    // randomized-signature platform (e.g. Keystore ECDSA) is refused at
+    // enable, before any secret exists.
+    let sig_a = signer.sign(challenge)?;
+    let sig_b = signer.sign(challenge)?;
     require_deterministic_signature(&sig_a, &sig_b)?;
 
-    let wrap_key = derive_wrap_key(&sig_a, biometric_ref);
+    let wrap_key = derive_wrap_key(salt, &sig_a, biometric_ref);
     let wrap_dek = DataEncryptionKey::from_bytes(&mut {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(wrap_key.as_bytes());
@@ -186,33 +243,49 @@ pub fn seal_dek_under_hello(
 
     // Round-trip before accepting: catches platform signature drift and
     // seal bugs at enable time, when the user is present and can retry.
-    let roundtrip = release_dek_under_hello(signer, biometric_ref, &blob)?;
+    let roundtrip = release_dek_under_signature(salt, signer, biometric_ref, &blob)?;
     if roundtrip.as_bytes() != dek.as_bytes() {
         return Err(PasswordManagerError::from(DatabaseError::Keyring(
-            "Hello-bound storage round-trip mismatch; refusing to store".to_string(),
+            "Platform-bound storage round-trip mismatch; refusing to store".to_string(),
         )));
     }
 
     Ok(blob)
 }
 
-/// The release orchestration (platform-free). Signing the stored challenge
-/// triggers the platform's Hello prompt; the GCM tag authenticates the
-/// derived wrap key, so a refused gesture, a wrong key, or tampered blob
-/// bytes all fail closed.
-pub fn release_dek_under_hello(
+/// Domain-parameterized release orchestration. Signing the stored challenge
+/// triggers the platform's auth prompt (Keystore CryptoObject / Keychain
+/// access control); the GCM tag authenticates the derived wrap key, so a
+/// refused gesture, a wrong key, or tampered blob bytes all fail closed.
+pub fn release_dek_under_signature(
+    salt: &[u8],
     signer: &dyn HelloKeySigner,
     biometric_ref: &str,
     blob: &HelloBoundBlob,
 ) -> Result<DataEncryptionKey> {
     let challenge = hex::decode(&blob.challenge_hex).map_err(|_| {
         PasswordManagerError::from(DatabaseError::Keyring(
-            "Stored Hello-bound blob has an invalid challenge".to_string(),
+            "Stored platform-bound blob has an invalid challenge".to_string(),
         ))
     })?;
 
     let signature = signer.sign(&challenge)?;
-    let wrap_key = derive_wrap_key(&signature, biometric_ref);
+    release_dek_from_signature(salt, &signature, biometric_ref, blob)
+}
+
+/// Release from an ALREADY-CAPTURED signature (WBS-812/821 mobile flow): the
+/// platform (Kotlin Keystore / Swift Keychain) signs the challenge with its
+/// own auth gate and hands over the signature bytes; the GCM tag still
+/// authenticates everything, so a wrong key, wrong vault binding, or
+/// tampered blob fails closed. Used where the sign step must run in the
+/// platform process — the bridge cannot invoke upward into the host app.
+pub fn release_dek_from_signature(
+    salt: &[u8],
+    signature: &[u8],
+    biometric_ref: &str,
+    blob: &HelloBoundBlob,
+) -> Result<DataEncryptionKey> {
+    let wrap_key = derive_wrap_key(salt, signature, biometric_ref);
     let wrap_dek = DataEncryptionKey::from_bytes(&mut {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(wrap_key.as_bytes());
@@ -228,17 +301,17 @@ pub fn release_dek_under_hello(
         },
     )
     .map_err(|_: CryptoError| {
-        // Authentication failure: wrong Hello response, wrong vault, or a
+        // Authentication failure: wrong signature, wrong vault, or a
         // tampered/stale blob. Never distinguish which — fail closed.
         PasswordManagerError::from(DatabaseError::Keyring(
-            "Hello-bound release failed authentication".to_string(),
+            "Platform-bound release failed authentication".to_string(),
         ))
     })?;
 
     let mut key_bytes = [0u8; 32];
     if plaintext.len() != 32 {
         return Err(PasswordManagerError::from(DatabaseError::Keyring(
-            "Stored Hello-bound secret has invalid length".to_string(),
+            "Stored platform-bound secret has invalid length".to_string(),
         )));
     }
     key_bytes.copy_from_slice(&plaintext);
@@ -434,11 +507,76 @@ mod tests {
     }
 
     #[test]
+    fn mobile_slot_domain_is_separated_from_hello() {
+        // WBS-812/821: a mobile-slot seal must NOT release under the Hello
+        // salt and vice versa — the KDF salt is the domain boundary.
+        let signer = DeterministicSigner::new();
+        let dek = test_dek();
+        let blob = seal_dek_under_signature(
+            MOBILE_SLOT_WRAP_SALT,
+            &signer,
+            "com.sentinelpass.slot",
+            "vault-mobile",
+            &dek,
+        )
+        .expect("mobile seal must succeed");
+
+        assert!(
+            release_dek_under_signature(WRAP_KEY_SALT, &signer, "vault-mobile", &blob).is_err()
+        );
+        let released =
+            release_dek_under_signature(MOBILE_SLOT_WRAP_SALT, &signer, "vault-mobile", &blob)
+                .expect("mobile release must succeed");
+        assert_eq!(released.as_bytes(), dek.as_bytes());
+
+        // And the reverse direction: a Hello seal cannot release under the
+        // mobile salt.
+        let hello_blob = seal_dek_under_hello(&signer, "k", "vault-hello", &dek).unwrap();
+        assert!(release_dek_under_signature(
+            MOBILE_SLOT_WRAP_SALT,
+            &signer,
+            "vault-hello",
+            &hello_blob
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn release_from_captured_signature_matches_release_orchestration() {
+        // The mobile flow releases from a signature captured OUTSIDE this
+        // process (Kotlin/Swift). It must behave identically to the signer
+        // callback flow for the same signature bytes.
+        let signer = DeterministicSigner::new();
+        let dek = test_dek();
+        let blob =
+            seal_dek_under_signature(MOBILE_SLOT_WRAP_SALT, &signer, "alias", "vault-x", &dek)
+                .unwrap();
+        let challenge = hex::decode(&blob.challenge_hex).unwrap();
+        let sig = signer.signature_for(&challenge);
+
+        let via_callback =
+            release_dek_under_signature(MOBILE_SLOT_WRAP_SALT, &signer, "vault-x", &blob).unwrap();
+        let via_captured =
+            release_dek_from_signature(MOBILE_SLOT_WRAP_SALT, &sig, "vault-x", &blob).unwrap();
+        assert_eq!(via_callback.as_bytes(), via_captured.as_bytes());
+
+        // A signature over a DIFFERENT challenge fails closed.
+        let mut wrong = sig.clone();
+        wrong[0] ^= 0xFF;
+        assert!(
+            release_dek_from_signature(MOBILE_SLOT_WRAP_SALT, &wrong, "vault-x", &blob).is_err()
+        );
+    }
+
+    #[test]
     fn wrap_key_is_signature_and_ref_bound() {
-        let k1 = derive_wrap_key(b"sig", "vault-abc");
-        let k2 = derive_wrap_key(b"sig", "vault-abc");
-        let k3 = derive_wrap_key(b"different", "vault-abc");
-        let k4 = derive_wrap_key(b"sig", "vault-other");
+        let k1 = derive_wrap_key(WRAP_KEY_SALT, b"sig", "vault-abc");
+        let k2 = derive_wrap_key(WRAP_KEY_SALT, b"sig", "vault-abc");
+        let k3 = derive_wrap_key(WRAP_KEY_SALT, b"different", "vault-abc");
+        let k4 = derive_wrap_key(WRAP_KEY_SALT, b"sig", "vault-other");
+        // Domain separation holds inside the KDF itself.
+        let k5 = derive_wrap_key(MOBILE_SLOT_WRAP_SALT, b"sig", "vault-abc");
+        assert_ne!(k1.as_bytes(), k5.as_bytes());
         assert_eq!(k1.as_bytes(), k2.as_bytes());
         assert_ne!(k1.as_bytes(), k3.as_bytes());
         assert_ne!(k1.as_bytes(), k4.as_bytes());

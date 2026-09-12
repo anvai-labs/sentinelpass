@@ -481,6 +481,130 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeGenerateTotp(
 }
 
 // ============================================================================
+// Platform Slot - JNI (WBS-812: Android Keystore auth-bound DEK wrap)
+// ============================================================================
+
+/// Draw a fresh 32-byte challenge (hex) for BiometricKeystore to sign
+/// (twice, via BiometricPrompt.CryptoObject). Null on failure.
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeSlotChallenge(
+    mut env: JNIEnv,
+    this: JObject,
+) -> jstring {
+    catch_jni(
+        std::ptr::null_mut(),
+        || match crate::slot::bridge_slot_challenge() {
+            Ok(hex) => string_to_jstring(&mut env, &hex).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        },
+    )
+}
+
+/// Seal the unlocked vault's DEK under the Keystore signature pair (ENABLE).
+/// `challenge`/`sigA`/`sigB` are hex; `binding` is the canonical vault path.
+/// Returns the NON-SECRET blob JSON for app-private file storage, or null.
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeSlotSeal(
+    mut env: JNIEnv,
+    this: JObject,
+    handle: jlong,
+    challenge: JString,
+    sig_a: JString,
+    sig_b: JString,
+    binding: JString,
+) -> jstring {
+    catch_jni(std::ptr::null_mut(), || {
+        let challenge_s = match jstring_to_string(&mut env, challenge) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let sig_a_s = match jstring_to_string(&mut env, sig_a) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let sig_b_s = match jstring_to_string(&mut env, sig_b) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let binding_s = match jstring_to_string(&mut env, binding) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+
+        match crate::slot::bridge_slot_seal(
+            handle as u64,
+            &challenge_s,
+            &sig_a_s,
+            &sig_b_s,
+            &binding_s,
+        ) {
+            Ok(blob) => string_to_jstring(&mut env, &blob).unwrap_or(std::ptr::null_mut()),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Unlock the vault from the slot blob with a fresh Keystore signature over
+/// the blob's challenge. Returns the new vault handle (0 on failure). The
+/// caller must have the vault CLOSED (no active password handle).
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeSlotUnlock(
+    mut env: JNIEnv,
+    this: JObject,
+    vault_path: JString,
+    blob_json: JString,
+    sig: JString,
+    binding: JString,
+) -> jlong {
+    catch_jni(0, || {
+        let path_s = match jstring_to_string(&mut env, vault_path) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let blob_s = match jstring_to_string(&mut env, blob_json) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let sig_s = match jstring_to_string(&mut env, sig) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let binding_s = match jstring_to_string(&mut env, binding) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+
+        match crate::slot::bridge_slot_unlock(&path_s, &blob_s, &sig_s, &binding_s) {
+            Ok(handle) => handle as jlong,
+            Err(_) => 0,
+        }
+    })
+}
+
+/// Preflight: whether `blob` is a recognized v1 slot blob (no key material).
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeSlotHasBlob(
+    mut env: JNIEnv,
+    this: JObject,
+    blob_json: JString,
+) -> jboolean {
+    catch_jni(0, || match jstring_to_string(&mut env, blob_json) {
+        Ok(blob_s) => {
+            if crate::slot::bridge_slot_has_blob(&blob_s) {
+                1
+            } else {
+                0
+            }
+        }
+        Err(_) => 0,
+    })
+}
+
+// ============================================================================
 // Password Generation - JNI
 // ============================================================================
 
@@ -542,52 +666,9 @@ pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeCheckStrength(
     })
 }
 
-// ============================================================================
-// Biometric - JNI
-// ============================================================================
-//
-// WBS-802 trims the JNI surface to exactly the Kotlin-declared natives.
-// The platform-keystore-bound biometric slot (WBS-812) introduces new,
-// symmetrically declared natives in Stage M2.
-
-#[no_mangle]
-#[cfg(feature = "jni")]
-pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBiometricHasKey(
-    mut env: JNIEnv,
-    this: JObject,
-    handle: jlong,
-) -> jboolean {
-    catch_jni(0, || {
-        match bridge::bridge_biometric_has_key(handle as u64) {
-            Ok(true) => 1,
-            Ok(false) | Err(_) => 0,
-        }
-    })
-}
-
-#[no_mangle]
-#[cfg(feature = "jni")]
-pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBiometricRemoveKey(
-    mut env: JNIEnv,
-    this: JObject,
-    handle: jlong,
-) -> jint {
-    catch_jni(ErrorCode::Unknown as jint, || {
-        result_to_code(bridge::bridge_biometric_remove_key(handle as u64))
-    })
-}
-
-#[no_mangle]
-#[cfg(feature = "jni")]
-pub extern "system" fn Java_com_sentinelpass_VaultBridge_nativeBiometricUnlock(
-    mut env: JNIEnv,
-    this: JObject,
-    handle: jlong,
-) -> jint {
-    catch_jni(ErrorCode::Unknown as jint, || {
-        result_to_code(bridge::bridge_biometric_unlock(handle as u64))
-    })
-}
+// The legacy in-process biometric natives (nativeBiometricHasKey/RemoveKey/
+// Unlock) were removed with WBS-812: the platform slot (nativeSlotChallenge/
+// Seal/Unlock) replaces them — no key material lives in this process.
 
 #[cfg(all(test, feature = "jni"))]
 mod wire_tests {

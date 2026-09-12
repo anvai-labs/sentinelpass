@@ -28,6 +28,8 @@ fun SettingsScreen(
 ) {
     val scope = rememberCoroutineScope()
     val uiState by vaultState.uiState.collectAsState()
+    val activity = androidx.compose.ui.platform.LocalContext.current
+        as? androidx.fragment.app.FragmentActivity
 
     var hasBiometricKey by remember { mutableStateOf(false) }
     var showDeleteVaultDialog by remember { mutableStateOf(false) }
@@ -79,13 +81,16 @@ fun SettingsScreen(
                     Switch(
                         checked = hasBiometricKey,
                         onCheckedChange = { enabled ->
-                            scope.launch {
-                                if (enabled) {
-                                    // Enable biometric (would need to prompt user)
-                                } else {
-                                    vaultState.disableBiometric()
-                                    hasBiometricKey = false
+                            if (enabled) {
+                                if (activity != null) {
+                                    // Two BiometricPrompt gates: the challenge is
+                                    // signed twice (deterministic-scheme proof).
+                                    vaultState.enableBiometricSlot(activity)
+                                    hasBiometricKey = true
                                 }
+                            } else {
+                                vaultState.disableBiometricSlot()
+                                hasBiometricKey = false
                             }
                         }
                     )

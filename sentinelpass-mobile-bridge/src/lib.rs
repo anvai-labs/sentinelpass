@@ -42,6 +42,7 @@ mod abi;
 mod bridge;
 mod error;
 mod ffi;
+mod slot;
 
 #[cfg(feature = "jni")]
 mod jni;

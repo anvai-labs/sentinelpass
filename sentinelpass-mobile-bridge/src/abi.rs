@@ -14,22 +14,23 @@ use crate::error::BridgeError;
 /// backward-compatible changes (new symbols, new trailing error codes) do not
 /// require a bump, but a bump must also raise [`MIN_SUPPORTED_ABI_VERSION`]
 /// only when older consumers genuinely cannot interoperate.
-pub const ABI_VERSION: u32 = 1;
+/// History: v1 = M1 base surface. v2 = WBS-812/821 removed the legacy
+/// in-process biometric exports (sp_biometric_set_key/has_key/remove_key/
+/// unlock) and added the platform-slot surface (sp_slot_challenge/has_blob/
+/// seal/unlock/open_with_dek) — v1 consumers cannot interoperate.
+pub const ABI_VERSION: u32 = 2;
 
 /// Oldest consumer ABI version this bridge can still serve.
-pub const MIN_SUPPORTED_ABI_VERSION: u32 = 1;
+pub const MIN_SUPPORTED_ABI_VERSION: u32 = 2;
 
 /// Base vault surface (init/lock, entry CRUD, TOTP, password tools).
 pub const FEATURE_BASE: u32 = 1 << 0;
 
 /// Platform-keystore biometric slot (Android Keystore / iOS Keychain
-/// SecAccessControl wrapping the DEK). Off until WBS-812/821 land — a
-/// biometric prompt alone must never be reported as sufficient (ADR-009:
-/// a UI prompt authorizes nothing unless it authorizes the cryptographic
-/// operation).
-// Negotiation vocabulary: consumers test this flag; it is simply never SET
-// until the slot exists, hence "unused" until WBS-812/821.
-#[allow(dead_code)]
+/// SecAccessControl wrapping the DEK). Advertised since WBS-812/821 (Stage
+/// M2): the slot surface is challenge/seal/unlock behind auth-bound keys —
+/// a biometric prompt alone still authorizes nothing without the
+/// cryptographic operation (ADR-009).
 pub const FEATURE_PLATFORM_KEYSTORE: u32 = 1 << 1;
 
 /// Relay-based sync v2 (ADR-006) wired through the bridge. Off until the
@@ -49,10 +50,10 @@ pub struct BridgeInfo {
 /// Feature flags of this build. Fail-closed: capabilities are advertised
 /// only once actually implemented behind the ABI.
 pub fn feature_flags() -> u32 {
-    let flags = FEATURE_BASE;
-    // FEATURE_PLATFORM_KEYSTORE (WBS-812/821, Stage M2) and
-    // FEATURE_RELAY_SYNC_V2 stay unset until those WBS items land.
-    flags
+    // FEATURE_PLATFORM_KEYSTORE is live since WBS-812/821 (Stage M2): the
+    // slot challenge/seal/unlock surface exists and FEATURE_RELAY_SYNC_V2
+    // stays unset until the mobile relay sync v2 wiring lands.
+    FEATURE_BASE | FEATURE_PLATFORM_KEYSTORE
 }
 
 /// Description of this build's ABI surface.
@@ -129,16 +130,16 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_capabilities_fail_closed() {
-        // WBS-812/821 flip FEATURE_PLATFORM_KEYSTORE on when the keystore-bound
-        // slot actually wraps the DEK; WBS sync items flip FEATURE_RELAY_SYNC_V2.
-        // Until then the bridge must NOT advertise them (a prompt is not a
-        // cryptographic authorization — ADR-009).
+    fn capabilities_match_implementation() {
+        // FEATURE_PLATFORM_KEYSTORE is advertised since WBS-812/821 flipped
+        // it on with the real slot surface (challenge/seal/unlock);
+        // FEATURE_RELAY_SYNC_V2 stays unset until mobile sync v2 is wired
+        // (a prompt is not a cryptographic authorization — ADR-009).
         let flags = feature_flags();
         assert_eq!(
             flags & FEATURE_PLATFORM_KEYSTORE,
-            0,
-            "platform keystore slot not implemented yet — must not be advertised"
+            FEATURE_PLATFORM_KEYSTORE,
+            "platform keystore slot is implemented — must be advertised"
         );
         assert_eq!(
             flags & FEATURE_RELAY_SYNC_V2,

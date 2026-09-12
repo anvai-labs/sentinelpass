@@ -11,13 +11,17 @@
  * backward-compatible changes (new symbols, new trailing error codes) do not
  * require a bump, but a bump must also raise [`MIN_SUPPORTED_ABI_VERSION`]
  * only when older consumers genuinely cannot interoperate.
+ * History: v1 = M1 base surface. v2 = WBS-812/821 removed the legacy
+ * in-process biometric exports (sp_biometric_set_key/has_key/remove_key/
+ * unlock) and added the platform-slot surface (sp_slot_challenge/has_blob/
+ * seal/unlock/open_with_dek) — v1 consumers cannot interoperate.
  */
-#define ABI_VERSION 1
+#define ABI_VERSION 2
 
 /**
  * Oldest consumer ABI version this bridge can still serve.
  */
-#define MIN_SUPPORTED_ABI_VERSION 1
+#define MIN_SUPPORTED_ABI_VERSION 2
 
 /**
  * Base vault surface (init/lock, entry CRUD, TOTP, password tools).
@@ -26,10 +30,10 @@
 
 /**
  * Platform-keystore biometric slot (Android Keystore / iOS Keychain
- * SecAccessControl wrapping the DEK). Off until WBS-812/821 land — a
- * biometric prompt alone must never be reported as sufficient (ADR-009:
- * a UI prompt authorizes nothing unless it authorizes the cryptographic
- * operation).
+ * SecAccessControl wrapping the DEK). Advertised since WBS-812/821 (Stage
+ * M2): the slot surface is challenge/seal/unlock behind auth-bound keys —
+ * a biometric prompt alone still authorizes nothing without the
+ * cryptographic operation (ADR-009).
  */
 #define FEATURE_PLATFORM_KEYSTORE (1 << 1)
 
@@ -68,11 +72,6 @@ typedef enum SPErrorCode {
 } SPErrorCode;
 
 /**
- * Vault handle type (opaque u64 for FFI)
- */
-typedef uint64_t SPVaultHandle;
-
-/**
  * ABI/feature description reported to consumers (WBS-803).
  */
 typedef struct SPBridgeInfo {
@@ -85,6 +84,11 @@ typedef struct SPBridgeInfo {
    */
   uint32_t reserved;
 } SPBridgeInfo;
+
+/**
+ * Vault handle type (opaque u64 for FFI)
+ */
+typedef uint64_t SPVaultHandle;
 
 /**
  * FFI-safe entry representation
@@ -146,16 +150,6 @@ typedef struct SPTotpCode {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
-
-enum SPErrorCode sp_biometric_has_key(SPVaultHandle handle, bool *out_has_key);
-
-enum SPErrorCode sp_biometric_remove_key(SPVaultHandle handle);
-
-enum SPErrorCode sp_biometric_set_key(SPVaultHandle handle,
-                                      const uint8_t *key_data,
-                                      uintptr_t key_data_len);
-
-enum SPErrorCode sp_biometric_unlock(SPVaultHandle handle);
 
 /**
  * Report this build's ABI version and feature flags.
@@ -287,6 +281,59 @@ enum SPErrorCode sp_password_check_strength(const char *password,
 enum SPErrorCode sp_password_generate(uintptr_t length,
                                       bool include_symbols,
                                       const char **out_password);
+
+/**
+ * Draw a fresh 32-byte challenge (hex) for the platform's auth-bound key to
+ * sign. Ownership rule 2: release `out_hex` with `sp_string_free`.
+ */
+enum SPErrorCode sp_slot_challenge(const char **out_hex);
+
+/**
+ * Preflight: whether `blob_json` is a recognized v1 slot blob. No key
+ * material involved; `out_has` is written on `Success`.
+ */
+enum SPErrorCode sp_slot_has_blob(const char *blob_json, bool *out_has);
+
+/**
+ * iOS Keychain pattern (WBS-821, `biometric.rs mod macos` analog): Swift
+ * reads the DEK from the `kSecAccessControlBiometryCurrentSet`-gated
+ * Keychain item (the OS-gated release IS the authorization) and passes the
+ * 32 bytes here to open the vault. `dek` is BORROWED (rule 1: never
+ * retained; the caller zeroizes its copy). Ownership rule 7 on the
+ * returned handle.
+ */
+enum SPErrorCode sp_slot_open_with_dek(const char *vault_path,
+                                       const uint8_t *dek,
+                                       uintptr_t dek_len,
+                                       const char *source,
+                                       SPVaultHandle *out_handle);
+
+/**
+ * Seal the vault DEK under the platform signature (ENABLE).
+ *
+ * `challenge`/`sig_a`/`sig_b` are hex strings from the host platform: the
+ * challenge the auth-bound key signed and TWO byte-identical signatures
+ * (deterministic scheme). `binding` is the caller-stable vault identity.
+ * Ownership rule 2: on `Success` release `out_blob` (the NON-SECRET
+ * at-rest blob JSON) with `sp_string_free`.
+ */
+enum SPErrorCode sp_slot_seal(SPVaultHandle handle,
+                              const char *challenge,
+                              const char *sig_a,
+                              const char *sig_b,
+                              const char *binding,
+                              const char **out_blob);
+
+/**
+ * Release the DEK from the slot blob with a fresh platform signature over
+ * the blob's challenge and OPEN the vault (UNLOCK). Fails closed on any
+ * mismatch. Ownership rule 7: the returned handle must be destroyed.
+ */
+enum SPErrorCode sp_slot_unlock(const char *vault_path,
+                                const char *blob_json,
+                                const char *sig,
+                                const char *binding,
+                                SPVaultHandle *out_handle);
 
 /**
  * Free a string returned by the bridge (out-strings, `SPTotpCode.code`,

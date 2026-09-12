@@ -11,6 +11,8 @@ import com.sentinelpass.EntrySummary
 import com.sentinelpass.PasswordAnalysis
 import com.sentinelpass.TotpCode
 import com.sentinelpass.VaultBridge
+import com.sentinelpass.slot.BiometricKeystore
+import androidx.fragment.app.FragmentActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -127,26 +129,19 @@ class VaultState private constructor(private val context: Context) : ViewModel()
     }
 
     /**
-     * Unlock with biometric
+     * Unlock with biometric (WBS-812): routes to the Keystore-bound slot.
+     * `activity` hosts the BiometricPrompt; pass it from the Compose tree
+     * (`LocalContext.current`). Requires an enrolled platform slot —
+     * otherwise this fails closed to the master-password path.
      */
-    fun unlockWithBiometric() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true)
-
-            val result = withContext(Dispatchers.IO) {
-                vaultBridge?.unlockWithBiometric() ?: false
-            }
-
+    fun unlockWithBiometric(activity: FragmentActivity) {
+        if (!hasPlatformSlotBlob()) {
             _uiState.value = _uiState.value.copy(
-                isLoading = false,
-                isUnlocked = result,
-                error = if (!result) "Biometric unlock failed" else null
+                error = "Biometric unlock is not enrolled"
             )
-
-            if (result) {
-                loadEntries()
-            }
+            return
         }
+        unlockWithBiometricSlot(activity)
     }
 
     /**
@@ -253,6 +248,105 @@ class VaultState private constructor(private val context: Context) : ViewModel()
         }
     }
 
+    // ==========================================================================
+    // Platform slot (WBS-812): Keystore-bound biometric unlock
+    // ==========================================================================
+
+    private val slotJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+    private val slotBlobFile: java.io.File
+        get() = java.io.File(context.filesDir, "platform_slot.blob")
+
+    fun hasPlatformSlotBlob(): Boolean = slotBlobFile.exists()
+
+    /**
+     * ENABLE the Keystore-bound slot (vault must be unlocked). Draws a
+     * challenge from the bridge, signs it TWICE through the auth-bound
+     * Keystore key (two BiometricPrompt gates — the CryptoObject makes the
+     * prompt the crypto authorization), seals the DEK, and persists the
+     * NON-SECRET blob in app-private FILE storage (never SharedPreferences).
+     */
+    fun enableBiometricSlot(activity: FragmentActivity) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    if (vaultBridge == null) return@withContext false
+                    BiometricKeystore.ensureKey()
+                    val binding = vaultFile.absolutePath
+
+                    val challenge = vaultBridge?.slotChallenge() ?: return@withContext false
+                    val sigA = BiometricKeystore.signHex(activity, challenge, "Enable biometric unlock (1 of 2)")
+                        ?: return@withContext false
+                    val sigB = BiometricKeystore.signHex(activity, challenge, "Enable biometric unlock (2 of 2)")
+                        ?: return@withContext false
+
+                    val blob = vaultBridge?.slotSeal(challenge, sigA, sigB, binding)
+                        ?: return@withContext false
+                    if (!vaultBridge!!.slotHasBlob(blob)) return@withContext false
+
+                    slotBlobFile.writeText(blob)
+                    true
+                } catch (e: Exception) {
+                    android.util.Log.e("VaultState", "Failed to enable platform slot", e)
+                    false
+                }
+            }
+            _uiState.value = _uiState.value.copy(
+                isLoading = false,
+                error = if (!ok) "Failed to enable biometric unlock" else null
+            )
+        }
+    }
+
+    /**
+     * DISABLE: delete the at-rest blob AND the Keystore key, in that order —
+     * losing the blob alone leaves a live key with nothing to open (harmless),
+     * but losing the key alone would leave an unopenable blob (fail-closed
+     * noise). Order matters for hygiene, not safety.
+     */
+    fun disableBiometricSlot() {
+        slotBlobFile.delete()
+        BiometricKeystore.deleteKey()
+    }
+
+    /**
+     * UNLOCK from the platform slot: signs the blob's challenge through the
+     * auth-bound key (ONE gate) and lets the bridge open the vault with the
+     * released DEK. Any refusal/cancellation fails closed to the master-
+     * password screen.
+     */
+    fun unlockWithBiometricSlot(activity: FragmentActivity) {
+        viewModelScope.launch {
+            if (!hasPlatformSlotBlob()) return@launch
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    val blob = slotBlobFile.readText()
+                    val binding = vaultFile.absolutePath
+                    // Hello semantics (WBS-710 precedent): the gate signs the
+                    // BLOB'S STORED challenge — reproducing the enable-time
+                    // signature is what reconstructs the wrap key. A fresh
+                    // challenge would produce an unusable signature; the GCM
+                    // tag would (correctly) refuse it.
+                    val challenge = slotJson.decodeFromString<SlotBlob>(blob).challengeHex
+                    val sig = BiometricKeystore.signHex(activity, challenge, "Unlock SentinelPass")
+                        ?: return@withContext false
+                    vaultBridge?.slotUnlock(binding, blob, sig, binding) == true
+                } catch (e: Exception) {
+                    android.util.Log.e("VaultState", "Slot unlock failed", e)
+                    false
+                }
+            }
+            _uiState.value = _uiState.value.copy(
+                isLoading = false,
+                isUnlocked = ok,
+                error = if (!ok) "Biometric unlock failed" else null
+            )
+            if (ok) loadEntries()
+        }
+    }
+
     /**
      * Delete entry
      */
@@ -328,18 +422,7 @@ class VaultState private constructor(private val context: Context) : ViewModel()
      */
     suspend fun hasBiometricKey(): Boolean {
         return withContext(Dispatchers.IO) {
-            vaultBridge?.hasBiometricKey() ?: false
-        }
-    }
-
-    /**
-     * Remove biometric key
-     */
-    fun disableBiometric() {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                vaultBridge?.removeBiometricKey()
-            }
+            hasPlatformSlotBlob()
         }
     }
 
@@ -387,6 +470,14 @@ class VaultState private constructor(private val context: Context) : ViewModel()
             get() = INSTANCE ?: throw IllegalStateException("VaultState not initialized")
     }
 }
+
+/** Parsed subset of the NON-SECRET platform-slot blob (WBS-812). */
+@kotlinx.serialization.Serializable
+private data class SlotBlob(
+    val version: Int,
+    @kotlinx.serialization.SerialName("key_name") val keyName: String,
+    @kotlinx.serialization.SerialName("challenge_hex") val challengeHex: String
+)
 
 /**
  * UI State for vault
