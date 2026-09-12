@@ -1,0 +1,55 @@
+[package]
+name = "sentinelpass-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Detached from the parent workspace on purpose: fuzz targets build with a
+# nightly toolchain + libFuzzer (see README.md), which must never leak into
+# `cargo build/test --workspace` on stable.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+# WBS-903 (TV-003) fuzz targets: envelope open, sync v2 mutation parse,
+# IPC frame decode, import/export parse.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0"
+base64 = "0.22"
+uuid = { version = "1.6", features = ["v4"] }
+sentinelpass-protocol = { path = "../sentinelpass-protocol" }
+sentinelpass-core = { path = "../sentinelpass-core" }
+sentinelpass-relay = { path = "../sentinelpass-relay" }
+
+# Prevent this crate from being pulled into a coverage run as a dependency
+# of itself.
+[[bin]]
+name = "fuzz_envelope_open"
+path = "fuzz_targets/fuzz_envelope_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sync_mutation"
+path = "fuzz_targets/fuzz_sync_mutation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ipc_frame"
+path = "fuzz_targets/fuzz_ipc_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_import_parse"
+path = "fuzz_targets/fuzz_import_parse.rs"
+test = false
+doc = false
+bench = false

@@ -154,7 +154,11 @@ pub struct PullResponseV2 {
 }
 
 /// Static validation that does not depend on stored state.
-fn validate_shape(m: &MutationV2) -> Result<(), RelayError> {
+///
+/// Public by design (WBS-903): this is the protocol's hostile-input gate —
+/// exercised directly by the `fuzz_sync_mutation` target so the JSON-decode
+/// + shape-validation surface can never drift away from its fuzz coverage.
+pub fn validate_shape(m: &MutationV2) -> Result<(), RelayError> {
     if m.vault_id.is_nil() || m.object_id.is_nil() || m.mutation_id.is_nil() {
         return Err(RelayError::BadRequest(
             "mutation ids must not be nil".into(),
