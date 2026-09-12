@@ -1465,7 +1465,19 @@ Shared (801–807):
   panic (ownership rule 8). Pinned by source-parsing tests
   (`every_c_export_is_panic_contained`, `every_jni_export_is_panic_contained`)
   so a new export cannot skip containment, plus wrapper unit tests.
-- **806** lifecycle/invalid-handle tests 2d.
+- **806** lifecycle/invalid-handle tests 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). tests/integration_test.rs
+  rewritten against the real exported ABI (the old file asserted 2+2 and
+  imported nothing — the crate had no rlib target, so integration tests
+  could never link; fixed with `crate-type = ["rlib", …]`), covering vault
+  lifecycle (create/lock/reopen/double-destroy/use-after-destroy), entry
+  lifecycle end-to-end, invalid-handle/null-out-param refusals, wrong-
+  password refusal, generator bounds, and sync/biometric defaults. The dead
+  `tests/integration/` dir (never wired via `mod`, gated on the nonexistent
+  `icloud` feature) is deleted. Tests exposed a real mapping defect — core
+  NotFound/InvalidInput flattened into `VaultLocked` — fixed in the same
+  change (precise core→bridge error mapping; residual core errors now
+  surface as Unknown, not VaultLocked).
 - **807** atomic update + placeholder removal (TD-MOB-03/04) 3d.
 
 Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d; **811** all-ABI JNI
