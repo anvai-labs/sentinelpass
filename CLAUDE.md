@@ -464,10 +464,10 @@ it in sync when adding or renaming PR-triggered workflows or jobs).
 - **coverage** - Rust LLVM coverage with 50% minimum threshold
 
 Other workflows:
-- `security.yml` - cargo audit (policy: `.cargo/audit.toml`, register: `docs/DEPENDENCY_EXCEPTIONS.md`), npm audit (root + extension e2e), Trivy (PR-only)
-- `release.yml` - tag-driven (`v*`) release builds + crates.io publish of `sentinelpass-protocol`; PR runs are preflight only
+- `security.yml` - cargo audit (policy: `.cargo/audit.toml`, register: `docs/DEPENDENCY_EXCEPTIONS.md`), npm audit (root + extension e2e), Trivy (PR + manual dispatch)
+- `release.yml` - tag-driven (`v*`) release builds + crates.io publish of `sentinelpass-protocol`; PR runs are preflight only; tag runs are gated by the workflow's own tag-time security-audit jobs (WBS-901)
 - `build-all.yml`, `android.yml`, `ios.yml`, `extension-e2e.yml` - path-filtered PR workflows
-- `chrome-extension-release.yml` - `chrome-v*` tags
+- `chrome-extension-release.yml` - `chrome-v*` tags + manual dispatch
 - `public-overflow-runner-smoke.yml` - self-path pushes + manual dispatch
 
 All checks must pass (via the Gate) before merging to main branch.
