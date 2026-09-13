@@ -94,3 +94,4 @@ browser-extension/chrome/package.json
 
 # Scratch working files (never committed — enforced program rule)
 .scratch_*
+target-wt/
