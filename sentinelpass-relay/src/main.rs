@@ -3,21 +3,12 @@
 //! A self-hostable relay for E2E encrypted vault sync. The relay stores
 //! only opaque ciphertexts and device public keys -- it never possesses
 //! encryption keys or plaintext data.
-
-mod app_state;
-mod auth;
-mod cleanup;
-mod config;
-mod error;
-#[cfg(test)]
-mod fault_injection;
-mod handlers;
-mod pairing_security;
-mod rate_limit;
-mod server;
-mod storage;
+//!
+//! The module tree lives in the `sentinelpass_relay` library (WBS-903);
+//! this binary is configuration + startup only.
 
 use clap::Parser;
+use sentinelpass_relay::{app_state, cleanup, config, server, storage};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 

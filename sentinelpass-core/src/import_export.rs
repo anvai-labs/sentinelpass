@@ -194,15 +194,22 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
 /// clients call it directly and push the result through
 /// `VaultOp::ImportEntries` so the accepted file format is unchanged.
 pub fn parse_json_import(input: &Path) -> Result<Vec<Entry>> {
-    let file = std::fs::File::open(input).map_err(|e| {
+    let bytes = std::fs::read(input).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to open import file: {}",
             e
         )))
     })?;
+    parse_json_import_bytes(&bytes)
+}
 
-    let reader = BufReader::new(file);
-    let export_entries: Vec<ExportEntry> = serde_json::from_reader(reader).map_err(|e| {
+/// Byte-level JSON import parse (WBS-903): the untrusted-input surface
+/// behind [`parse_json_import`], exposed separately so fuzzing and
+/// integration tooling exercise EXACTLY what production parses.
+/// `serde_json::from_slice` performs the UTF-8 validation, so error
+/// behavior matches the former reader-based path.
+pub fn parse_json_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
+    let export_entries: Vec<ExportEntry> = serde_json::from_slice(data).map_err(|e| {
         PasswordManagerError::from(DatabaseError::Serialization(format!(
             "Failed to parse JSON: {}",
             e
@@ -256,14 +263,21 @@ pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize>
 
 /// Parse a CSV import file into importable entries (WBS-502 split).
 pub fn parse_csv_import(input: &Path) -> Result<Vec<Entry>> {
-    let file = std::fs::File::open(input).map_err(|e| {
+    let bytes = std::fs::read(input).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to open import file: {}",
             e
         )))
     })?;
+    parse_csv_import_bytes(&bytes)
+}
 
-    let reader = BufReader::new(file);
+/// Byte-level CSV import parse (WBS-903): the untrusted-input surface
+/// behind [`parse_csv_import`], exposed separately so fuzzing exercises
+/// EXACTLY what production parses. Line/UTF-8 handling is identical to the
+/// former reader-based path (`BufRead::lines` over the raw bytes).
+pub fn parse_csv_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
+    let reader = BufReader::new(std::io::Cursor::new(data));
     let mut lines = reader.lines();
 
     // Skip header line
