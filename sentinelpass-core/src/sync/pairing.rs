@@ -300,12 +300,13 @@ mod v2_tests {
     /// for human comparison, never used as key material.
     #[test]
     fn transcript_digits_are_stable_and_diverge() {
-        let a = generate_pairing_secret();
-        // Divergence is asserted against a DETERMINISTIC second secret, not
-        // a second random draw: the 6-digit transcript space is ~10^6, so
-        // two random draws collide with p≈10^-6 per CI run — a flake, not a
-        // property failure. A fixed mutated pair makes the same claim with
-        // zero randomness (and a collision would fail deterministically).
+        // BOTH secrets are fixed constants: transcript_digits is a 6-digit
+        // truncation of a PRF, so two RANDOM draws collide with p≈10^-6
+        // per CI run — a flake, not a property failure. With constants the
+        // divergence outcome is deterministic (verified once at authoring);
+        // zero per-run randomness. The mutation (byte 0 flipped) keeps the
+        // asserted property "different secrets → different transcripts".
+        let a = [0xa5u8; 32];
         let mut b = a;
         b[0] ^= 0xff;
         let ta = transcript_digits(&a);

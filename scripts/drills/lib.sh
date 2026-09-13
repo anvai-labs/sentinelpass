@@ -172,9 +172,12 @@ drill_setup() {
   # Uncaught-abort backstop: the EXIT trap guarantees the transcript is
   # scrubbed and the temp environment removed even when the drill dies
   # between secret capture and an explicit drill_finish (signal, OOM,
-  # disk-full, a set -e trip on an unguarded command). Idempotent with the
-  # explicit early-abort/end-of-script calls — first invocation wins.
-  trap drill_finish EXIT
+  # disk-full, a set -e trip on an unguarded command). The via-trap
+  # argument lets drill_finish read the in-flight exit status so a crashed
+  # run is never reported OK merely because no assertion had failed yet.
+  # Idempotent with the explicit early-abort/end-of-script calls — first
+  # invocation wins.
+  trap 'drill_finish via-trap' EXIT
 }
 
 drill_cleanup() {
@@ -400,6 +403,13 @@ drill_extract_epoch() {
 # ---------------------------------------------------------------------------
 
 drill_finish() {
+  # Via the trap, $? at entry is the script's IN-FLIGHT exit status —
+  # capture it as the VERY FIRST statement (the guard below and its
+  # assignments would reset it). A crashed run (set -e trip, signal,
+  # unguarded command failure) must fail CLOSED even when no assertion
+  # had been evaluated yet: the final status is the worse of the crash
+  # status and the assertion tally.
+  local pending_rc=$?
   # Idempotent: reachable both explicitly (early-abort + end-of-script)
   # and via the EXIT trap installed by drill_setup — whichever fires
   # first scrubs, reports, and cleans up; the second is a no-op.
@@ -407,8 +417,12 @@ drill_finish() {
     return 0
   fi
   _DRILL_FINISHED=1
+  local crash_rc=0
+  if [[ "${1:-}" == "via-trap" && "$pending_rc" -ne 0 ]]; then
+    crash_rc=$pending_rc
+  fi
   local status="OK"
-  if [[ "$DRILL_FAIL_COUNT" -gt 0 ]]; then
+  if [[ "$DRILL_FAIL_COUNT" -gt 0 || "$crash_rc" -ne 0 ]]; then
     status="FAILED"
   fi
   # Final paranoia pass: every secret is registered by now.
@@ -417,7 +431,7 @@ drill_finish() {
   drill_log "Drill result: $status — $DRILL_PASS_COUNT passed, $DRILL_FAIL_COUNT failed"
   drill_log "Evidence transcript: $DRILL_REPORT"
   drill_cleanup
-  if [[ "$DRILL_FAIL_COUNT" -gt 0 ]]; then
+  if [[ "$status" == "FAILED" ]]; then
     exit 1
   fi
   exit 0
