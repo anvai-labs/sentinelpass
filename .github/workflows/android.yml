@@ -126,9 +126,13 @@ jobs:
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
           for pair in "arm64-v8a:aarch64-linux-android" "armeabi-v7a:armv7a-linux-androideabi" "x86_64:x86_64-linux-android"; do
             abi="${pair%%:*}"; triple="${pair##*:}"
-            src=$(find "$SYSROOT" -maxdepth 2 -path "*$triple*" -name "libc++_shared.so" 2>/dev/null | head -1)
+            src=$(find "$SYSROOT/$triple" -maxdepth 1 -name "libc++_shared.so" 2>/dev/null | head -1)
+            if [ -z "$src" ] && [ "$triple" = "armv7a-linux-androideabi" ]; then
+              # Some NDK extracts name the arm dir without the trailing 'a'.
+              src=$(find "$SYSROOT/arm-linux-androideabi" -maxdepth 1 -name "libc++_shared.so" 2>/dev/null | head -1)
+            fi
             if [ -z "$src" ]; then
-              src=$(find "$ANDROID_NDK_HOME" -path "*$triple*libc++_shared.so" -not -path "*/sysroot/*" 2>/dev/null | head -1)
+              src=$(find "$ANDROID_NDK_HOME" -path "*${triple%%-*}*linux*androideabi*libc++_shared.so" -not -path "*/sysroot/*" 2>/dev/null | head -1)
             fi
             if [ -z "$src" ]; then
               echo "::error::libc++_shared.so not found for $triple"
