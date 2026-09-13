@@ -458,6 +458,61 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # ---- TD-REL-01 / WBS-902: feature/platform matrix as a release
+  # prerequisite --------------------------------------------------------------
+  # The shipped desktop binaries are only ever built ONE way (default
+  # features), so a feature-flag regression — e.g. the feature-gated `sync`
+  # client/engine breaking, or the workspace no longer compiling without
+  # defaults — would sit undetected until someone actually flips a flag.
+  # This matrix builds the whole workspace three ways per release platform
+  # and the `release` job now REQUIRES it: a red matrix leg aborts the
+  # release before anything publishes (same fail-closed pattern as the
+  # WBS-901 audits above).
+  #
+  # - Gated on is-release (skips PR preflight runs), so the
+  #   ci-gate.yml expectation table is unaffected — like the WBS-901 audit
+  #   jobs, these register no PR check runs.
+  # - Feature names verified against the workspace manifests:
+  #   sentinelpass-core defines `default = []` + `sync = ["reqwest"]` and is
+  #   the only member with a `sync` feature, so bare `--features sync`
+  #   resolves unambiguously for `--workspace` builds (virtual workspace).
+  # - Mobile is deliberately NOT in this matrix: android.yml / ios.yml are
+  #   the mobile gates (all-ABI JNI builds + the WBS-811 exported-symbol
+  #   check on Android, iOS device/simulator builds + bridge-contract tests
+  #   on iOS). They are PR-path-filtered and do NOT run at tag time, so the
+  #   release manager must dispatch them manually against the tag ref — both
+  #   accept `workflow_dispatch` (release-checklist item in
+  #   docs/OSS_RELEASE_CHECKLIST.md).
+  feature-matrix:
+    name: Feature Matrix (${{ matrix.os }}, ${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        features: ["", "--no-default-features", "--features sync"]
+        # Labels for the checks UI + distinct cache prefixes per leg.
+        include:
+          - features: ""
+            label: default
+          - features: "--no-default-features"
+            label: no-default
+          - features: "--features sync"
+            label: sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-rust-env
+        with:
+          cache-key-prefix: feature-matrix-${{ matrix.os }}-${{ matrix.label }}
+
+      - name: Build workspace (${{ matrix.label }})
+        shell: bash
+        run: cargo build --release --locked --workspace ${{ matrix.features }}
+
   # Create GitHub release and upload assets
   # Crates.io publish for the reusable protocol contract crate: sandhi's
   # sandhi-store pins sentinelpass-protocol, so an unpublished protocol crate
@@ -520,7 +575,10 @@ jobs:
 
   # Create GitHub release and upload assets. WBS-901: the release REQUIRES
   # the tag-time security gates — a failed audit aborts the release here,
-  # before anything is published.
+  # before anything is published. TD-REL-01/WBS-902: it also REQUIRES the
+  # feature/platform matrix for the same reason — a red matrix leg (default
+  # features, --no-default-features, or the feature-gated `sync` build on any
+  # release platform) aborts the release before anything publishes.
   release:
     name: Create Release
     runs-on: ubuntu-latest
@@ -528,6 +586,7 @@ jobs:
       - setup
       - bundle-smoke
       - native-installer-smoke
+      - feature-matrix
       - security-audit
       - npm-audit-root
       - npm-audit-e2e

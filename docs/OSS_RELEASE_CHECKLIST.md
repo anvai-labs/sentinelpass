@@ -38,6 +38,22 @@
 
 All installers should default to user-level install paths and avoid admin requirements.
 
+## Tag-time CI prerequisites (TD-REL-01)
+
+The `release` job in `.github/workflows/release.yml` fails closed unless ALL
+of the following are green at the tag — nothing publishes past a red gate:
+
+| Gate | Mode |
+| --- | --- |
+| RustSec audit (governed policy) + npm audits (root, extension e2e) | Automatic — `release.yml` WBS-901 jobs |
+| Feature/platform matrix: `cargo build --release --locked --workspace` × {default, `--no-default-features`, `--features sync`} on Linux/macOS/Windows | Automatic — `release.yml` `feature-matrix` job (WBS-902) |
+| Native installers carry daemon/host sidecars; packaged binaries execute; packaged CLI `--version` matches the tag | Automatic — `release.yml` `native-installer-smoke` job (WBS-905) |
+| Mobile: Android all-ABI JNI builds + exported-symbol gate; iOS bridge builds + contract tests | **Manual** — dispatch `android.yml` / `ios.yml` (Actions tab → Run workflow) against the tag ref; both accept `workflow_dispatch` |
+
+The mobile step is manual because mobile CI is PR-path-filtered and
+deliberately outside the desktop feature matrix (WBS-902 scope); it does not
+run automatically on tag pushes.
+
 ## Supply chain / SBOM (WBS-908)
 
 Release binaries are built with **`cargo auditable`** (release.yml): every
