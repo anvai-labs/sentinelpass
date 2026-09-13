@@ -122,10 +122,20 @@ jobs:
           # The bridge cdylib depends on the NDK's libc++_shared.so — without
           # it packaged alongside, System.loadLibrary fails on device and
           # every JNI call errors instantly (the emulator-matrix failure).
+          # The sysroot layout varies by NDK version, so locate per triple.
           SYSROOT="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib"
-          cp "$SYSROOT/aarch64-linux-android/libc++_shared.so" jniLibs/arm64-v8a/
-          cp "$SYSROOT/armv7a-linux-androideabi/libc++_shared.so" jniLibs/armeabi-v7a/
-          cp "$SYSROOT/x86_64-linux-android/libc++_shared.so" jniLibs/x86_64/
+          for pair in "arm64-v8a:aarch64-linux-android" "armeabi-v7a:armv7a-linux-androideabi" "x86_64:x86_64-linux-android"; do
+            abi="${pair%%:*}"; triple="${pair##*:}"
+            src=$(find "$SYSROOT/$triple" -maxdepth 1 -name "libc++_shared.so" 2>/dev/null | head -1)
+            if [ -z "$src" ]; then
+              src=$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot" -path "*$triple*libc++_shared.so" 2>/dev/null | head -1)
+            fi
+            if [ -z "$src" ]; then
+              echo "::error::libc++_shared.so not found for $triple"
+              exit 1
+            fi
+            cp "$src" "jniLibs/$abi/"
+          done
 
           # Verify the structure
           echo "JNI library structure:"
