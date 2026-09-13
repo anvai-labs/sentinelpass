@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 /// Generate a random 6-digit pairing code.
 pub fn generate_pairing_code() -> String {
-    let code: u32 = rand::thread_rng().gen_range(100_000..1_000_000);
+    let code: u32 = rand::rngs::OsRng.gen_range(100_000..1_000_000);
     format!("{:06}", code)
 }
 
@@ -91,7 +91,7 @@ pub fn decrypt_bootstrap(
 /// Generate a random 16-byte salt for HKDF.
 pub fn generate_pairing_salt() -> [u8; 16] {
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill(&mut salt);
+    rand::rngs::OsRng.fill(&mut salt);
     salt
 }
 

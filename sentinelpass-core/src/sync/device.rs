@@ -18,7 +18,7 @@ impl DeviceIdentity {
     /// Generate a new device identity with a fresh Ed25519 keypair.
     pub fn generate(device_name: &str) -> Self {
         let mut secret = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut secret);
+        rand::rngs::OsRng.fill_bytes(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
         Self {
             device_id: Uuid::new_v4(),
