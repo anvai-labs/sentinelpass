@@ -94,3 +94,7 @@ browser-extension/chrome/package.json
 
 # Scratch working files (never committed — enforced program rule)
 .scratch_*
+target-wt/
+
+# Local drill evidence transcripts (CI uploads its own via workflow artifacts)
+drill-report-*.txt

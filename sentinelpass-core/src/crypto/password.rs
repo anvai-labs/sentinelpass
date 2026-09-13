@@ -145,7 +145,7 @@ pub fn generate_password(config: &PasswordGeneratorConfig) -> Result<String> {
     config.validate()?;
 
     let charset = CharacterSets::get();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
 
     // Build the character pool
     let mut pool = Vec::new();
@@ -272,7 +272,7 @@ pub fn generate_passphrase(word_count: usize, separator: &str) -> Result<String>
         ));
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let words: Vec<&str> = (0..word_count)
         .map(|_| EFF_SHORT_WORDLIST.choose(&mut rng).copied().unwrap())
         .collect();

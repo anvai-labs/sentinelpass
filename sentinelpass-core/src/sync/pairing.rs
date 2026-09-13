@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 /// Generate a random 6-digit pairing code.
 pub fn generate_pairing_code() -> String {
-    let code: u32 = rand::thread_rng().gen_range(100_000..1_000_000);
+    let code: u32 = rand::rngs::OsRng.gen_range(100_000..1_000_000);
     format!("{:06}", code)
 }
 
@@ -91,7 +91,7 @@ pub fn decrypt_bootstrap(
 /// Generate a random 16-byte salt for HKDF.
 pub fn generate_pairing_salt() -> [u8; 16] {
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill(&mut salt);
+    rand::rngs::OsRng.fill(&mut salt);
     salt
 }
 
@@ -104,7 +104,7 @@ pub const PAIRING_SECRET_LEN: usize = 32;
 /// Generate a fresh 256-bit pairing secret (CSPRNG).
 pub fn generate_pairing_secret() -> [u8; PAIRING_SECRET_LEN] {
     let mut secret = [0u8; PAIRING_SECRET_LEN];
-    rand::thread_rng().fill(&mut secret);
+    rand::rngs::OsRng.fill(&mut secret);
     secret
 }
 
@@ -300,8 +300,15 @@ mod v2_tests {
     /// for human comparison, never used as key material.
     #[test]
     fn transcript_digits_are_stable_and_diverge() {
-        let a = generate_pairing_secret();
-        let b = generate_pairing_secret();
+        // BOTH secrets are fixed constants: transcript_digits is a 6-digit
+        // truncation of a PRF, so two RANDOM draws collide with p≈10^-6
+        // per CI run — a flake, not a property failure. With constants the
+        // divergence outcome is deterministic (verified once at authoring);
+        // zero per-run randomness. The mutation (byte 0 flipped) keeps the
+        // asserted property "different secrets → different transcripts".
+        let a = [0xa5u8; 32];
+        let mut b = a;
+        b[0] ^= 0xff;
         let ta = transcript_digits(&a);
         assert_eq!(ta, transcript_digits(&a), "stable for comparison");
         assert_eq!(ta.len(), 6);

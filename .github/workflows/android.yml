@@ -1,6 +1,11 @@
 name: Android CI
 
 on:
+  # Manual dispatch lets the release manager run mobile CI against a tag ref
+  # at release time (TD-REL-01/WBS-902): mobile legs are NOT part of
+  # release.yml's desktop feature-matrix, and the pull_request filter below
+  # does not fire on tag pushes.
+  workflow_dispatch:
   pull_request:
     branches: [main, develop]
     paths:

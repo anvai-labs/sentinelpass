@@ -40,6 +40,7 @@ use crate::crypto::cipher::{decrypt_entry, encrypt_entry};
 use crate::crypto::DataEncryptionKey;
 use crate::{CryptoError, DatabaseError, PasswordManagerError, Result};
 use hkdf::Hkdf;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -109,7 +110,7 @@ impl HelloBoundBlob {
 /// (WBS-812/821 mobile slots: the HOST platform draws nothing — the bridge
 /// hands it this challenge and the auth-bound key signs it).
 pub fn fresh_challenge() -> [u8; 32] {
-    rand::random()
+    rand::rngs::OsRng.gen()
 }
 
 /// Derive the wrap key from a platform signature, bound to the biometric
@@ -191,7 +192,7 @@ pub fn seal_dek_under_signature(
     biometric_ref: &str,
     dek: &DataEncryptionKey,
 ) -> Result<HelloBoundBlob> {
-    let challenge: [u8; 32] = rand::random();
+    let challenge: [u8; 32] = rand::rngs::OsRng.gen();
     seal_dek_with_challenge(salt, signer, key_name, biometric_ref, dek, &challenge)
 }
 

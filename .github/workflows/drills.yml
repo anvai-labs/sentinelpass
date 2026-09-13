@@ -1,0 +1,114 @@
+# WBS-905 recovery/restore/compromise-rotation drills (ADR-003 rev 3
+# blocking 1.0 drill gates; TD-REL-05).
+#
+# Triggers are DELIBERATELY manual + tag-only:
+#   - workflow_dispatch: on-demand drill evidence at any time;
+#   - push of a v* tag: every release produces a fresh drill transcript as
+#     release evidence (uploaded as artifacts, 90-day retention).
+# There is NO pull_request trigger on purpose — adding one would require
+# syncing ci-gate.yml's fail-closed expectation table (see CLAUDE.md,
+# "CI/CD Pipeline"), and drills are release evidence, not per-PR checks.
+#
+# The scripts build nothing themselves by default; this workflow builds the
+# CLI first (release profile — a debug Argon2id takes minutes per KDF) and
+# points the drills at it via SENTINELPASS_BIN_DIR.
+
+name: Recovery and restore drills
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  drills:
+    name: ${{ matrix.os }} / ${{ matrix.drill }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        drill:
+          - drill-recovery.sh
+          - drill-backup-restore.sh
+          - drill-compromise-rotation.sh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          prefix-key: drills
+
+      - name: Build the CLI (release profile)
+        run: cargo build --release -p sentinelpass-cli
+
+      - name: Run ${{ matrix.drill }}
+        env:
+          SENTINELPASS_BIN_DIR: ${{ github.workspace }}/target/release
+        # The drills confine themselves to a per-run temp environment
+        # (HOME + full XDG family + explicit custom --vault path) and never
+        # touch a real user installation; every assertion prints expected
+        # vs got, and the script exits nonzero on any failure.
+        run: bash scripts/drills/${{ matrix.drill }}
+
+      - name: Upload drill evidence transcript
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: drill-report-${{ matrix.os }}-${{ matrix.drill }}-${{ github.run_id }}
+          path: drill-report-*.txt
+          if-no-files-found: error
+          # This is release evidence for the 1.0 drill gates (ADR-003).
+          retention-days: 90
+
+  # Windows probe: EXPECTED to fail today, kept as an early signal.
+  # Two concrete blockers, both documented in scripts/drills/lib.sh:
+  #   1. isolation — the `dirs` crate derives paths from
+  #      %LOCALAPPDATA%/%APPDATA% (KNOWNFOLDERIDs) on Windows and ignores
+  #      HOME/XDG_*, so the temp-environment confinement the drills
+  #      guarantee on Linux/macOS does not hold (the explicit custom
+  #      --vault path still keeps the drill off a real vault, but the
+  #      by-construction guarantee is Unix-only);
+  #   2. automation — the CLI's rpassword prompts need a real pty, and
+  #      Python's `pty` module does not exist on Windows (Git Bash
+  #      included), so scripts/drills/cli_pty.py cannot drive the prompts.
+  # This job is continue-on-error: a green run means someone fixed (2) and
+  # the platform can be promoted into the required matrix.
+  drills-windows-probe:
+    name: windows-latest / probe (expected fail)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          prefix-key: drills
+
+      - name: Build the CLI (release profile)
+        run: cargo build --release -p sentinelpass-cli
+
+      - name: Run recovery drill probe
+        env:
+          SENTINELPASS_BIN_DIR: ${{ github.workspace }}/target/release
+        shell: bash
+        run: bash scripts/drills/drill-recovery.sh
