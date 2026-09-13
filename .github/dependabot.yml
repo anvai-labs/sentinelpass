@@ -11,9 +11,17 @@ updates:
           - patch
     # hmac 0.13 requires the digest-0.11 trait stack (sha2 0.11); the crypto
     # stack here is digest-0.10-based. Revisit when sha2 0.11 lands.
+    # hkdf 0.13 sits on hmac 0.13 internally — bumping it alone duals the MAC
+    # crate. Migrate hkdf+hmac+sha2 together, golden-vector-verified.
+    # windows 0.62 duals the binding stack while the Tauri ecosystem
+    # (tauri/tao/wry/webview2-com) pins 0.61 — take it when they unify.
     ignore:
       - dependency-name: hmac
         versions: [">=0.13"]
+      - dependency-name: hkdf
+        versions: [">=0.13"]
+      - dependency-name: windows
+        versions: [">=0.62"]
 
   - package-ecosystem: github-actions
     directory: /
