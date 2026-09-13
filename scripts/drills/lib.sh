@@ -110,22 +110,23 @@ _drill_cli_description() {
 
 # Resolve the CLI binary and create the isolated environment.
 drill_setup() {
-  # CLI resolution: explicit dir first, then PATH, then the repo's own
-  # cargo target dirs (release preferred: a debug-profile Argon2id takes
-  # minutes per KDF, which blows every sensible timeout).
-  if [[ -n "$SENTINELPASS_BIN_DIR" ]]; then
-    SENTINELPASS_BIN="$SENTINELPASS_BIN_DIR/sentinelpass"
-  else
-    SENTINELPASS_BIN="$(command -v sentinelpass || true)"
-  fi
+  # CLI resolution: explicit dir first, then the REPO's own builds, then
+  # PATH last. Drills verify THIS tree's behavior — an installed app found
+  # on PATH can be several releases behind (proven 2026-09-13: an
+  # installed 0.10.0 predates the ADR-007 custom-path refusal, which
+  # silently flipped the containment assertion to a false failure).
+  # Release preferred: a debug-profile Argon2id takes minutes per KDF.
   local repo_root
   repo_root="$(cd "$_DRILL_LIB_DIR/../.." && pwd)"
-  if [[ -z "$SENTINELPASS_BIN" || ! -x "$SENTINELPASS_BIN" ]]; then
-    if [[ -x "$repo_root/target/release/sentinelpass" ]]; then
-      SENTINELPASS_BIN="$repo_root/target/release/sentinelpass"
-    elif [[ -x "$repo_root/target/debug/sentinelpass" ]]; then
-      SENTINELPASS_BIN="$repo_root/target/debug/sentinelpass"
-    fi
+  SENTINELPASS_BIN=""
+  if [[ -n "$SENTINELPASS_BIN_DIR" ]]; then
+    SENTINELPASS_BIN="$SENTINELPASS_BIN_DIR/sentinelpass"
+  elif [[ -x "$repo_root/target/release/sentinelpass" ]]; then
+    SENTINELPASS_BIN="$repo_root/target/release/sentinelpass"
+  elif [[ -x "$repo_root/target/debug/sentinelpass" ]]; then
+    SENTINELPASS_BIN="$repo_root/target/debug/sentinelpass"
+  else
+    SENTINELPASS_BIN="$(command -v sentinelpass || true)"
   fi
   if [[ -z "$SENTINELPASS_BIN" || ! -x "$SENTINELPASS_BIN" ]]; then
     echo "FATAL: sentinelpass CLI not found." >&2
@@ -167,6 +168,13 @@ drill_setup() {
 
   DRILL_WORK="$DRILL_HOME/.drill-out"
   mkdir -p "$DRILL_WORK"
+
+  # Uncaught-abort backstop: the EXIT trap guarantees the transcript is
+  # scrubbed and the temp environment removed even when the drill dies
+  # between secret capture and an explicit drill_finish (signal, OOM,
+  # disk-full, a set -e trip on an unguarded command). Idempotent with the
+  # explicit early-abort/end-of-script calls — first invocation wins.
+  trap drill_finish EXIT
 }
 
 drill_cleanup() {
@@ -392,6 +400,13 @@ drill_extract_epoch() {
 # ---------------------------------------------------------------------------
 
 drill_finish() {
+  # Idempotent: reachable both explicitly (early-abort + end-of-script)
+  # and via the EXIT trap installed by drill_setup — whichever fires
+  # first scrubs, reports, and cleans up; the second is a no-op.
+  if [[ -n "${_DRILL_FINISHED:-}" ]]; then
+    return 0
+  fi
+  _DRILL_FINISHED=1
   local status="OK"
   if [[ "$DRILL_FAIL_COUNT" -gt 0 ]]; then
     status="FAILED"

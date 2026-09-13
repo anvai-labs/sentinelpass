@@ -299,16 +299,16 @@ jobs:
           path: dist
 
       # Installed-artifact execution smoke: extract the PACKAGED portable
-      # archive (built by the `package` job with the tag version injected)
-      # and prove the shipped binaries at least execute on each OS.
+      # archive and prove the shipped binaries at least execute on each OS.
       # Extraction + direct execution ONLY — the interactive installers are
       # never run against runner system paths.
       #
       # `sentinelpass` is the only binary with a real --version (clap): the
-      # daemon has no arg parser (an unknown flag would BOOT the daemon into
-      # maintenance mode, not print a version) and the host/UI have no arg
-      # surface at all, so for those we assert presence + execute permission
-      # inside the archive instead of exit codes. A functional
+      # daemon only ad-hoc-scans for --biometric/--start-locked and IGNORES
+      # unknown args (so an unknown flag boots it, it never prints a
+      # version), and the host/UI have no arg surface at all — for those we
+      # assert presence + execute permission inside the archive instead of
+      # exit codes. A functional
       # unlock/round-trip smoke on installed artifacts remains TD-REL-05.
       # Placed in this job rather than bundle-smoke because it is
       # release-gated (running binaries matters at tag time; PR preflight
@@ -332,8 +332,12 @@ jobs:
 
           version_out="$("$work/sentinelpass${exe}" --version)"
           echo "packaged CLI --version: ${version_out}"
-          # At tag time the package job injects the tag version before
-          # building — the packaged binary must carry it (drift guard).
+          # Drift guard: package-job binaries are built BEFORE the version-
+          # injection step runs, so they carry the COMMITTED workspace
+          # version. This check therefore enforces tag == committed
+          # manifest version (the crates-publish gate re-checks the same
+          # agreement before publishing). A tag pushed before the release
+          # commit's version bump fails here by design.
           echo "$version_out" | grep -q "${{ needs.setup.outputs.version }}" || {
             echo "::error::packaged CLI reports '${version_out}' but the tag version is ${{ needs.setup.outputs.version }}"
             exit 1
@@ -377,20 +381,23 @@ jobs:
         shell: bash
         run: bash scripts/build-native-installers.sh --stage-only
 
-      # Fail-closed, independent of the script: an empty staging directory
-      # must never reach the bundler (an empty resource glob ships
-      # sidecar-less installers silently — the exact WBS-905 regression).
-      - name: Assert staging dir is populated (fail-closed)
+      # Fail-closed backstop, independent of the script: the two sidecar
+      # files THEMSELVES (not any file — README.txt is git-tracked in this
+      # directory, so a total-file count can never reach 0) must exist
+      # non-empty, or the bundler would ship sidecar-less installers
+      # silently (the exact WBS-905 regression).
+      - name: Assert staged sidecars exist (fail-closed)
         shell: bash
         run: |
           set -euo pipefail
           staging="sentinelpass-ui/src-tauri/resources/bin"
-          count=$(find "$staging" -type f | wc -l | tr -d ' ')
-          if [ "$count" -eq 0 ]; then
-            echo "::error::$staging is EMPTY — tauri would bundle installers without the daemon/host sidecars (WBS-905)"
-            exit 1
-          fi
-          echo "Staged sidecars in $staging: $count"
+          for sidecar in sentinelpass-daemon sentinelpass-host; do
+            if ! find "$staging" -maxdepth 1 -type f -name "${sidecar}*" -size +0 | grep -q .; then
+              echo "::error::no non-empty ${sidecar} staged in $staging — tauri would bundle installers without the daemon/host sidecars (WBS-905)"
+              exit 1
+            fi
+          done
+          echo "Staged sidecars verified in $staging:"
           ls -la "$staging"
 
       - name: Build Tauri bundles

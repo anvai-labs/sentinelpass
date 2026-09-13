@@ -104,7 +104,7 @@ pub const PAIRING_SECRET_LEN: usize = 32;
 /// Generate a fresh 256-bit pairing secret (CSPRNG).
 pub fn generate_pairing_secret() -> [u8; PAIRING_SECRET_LEN] {
     let mut secret = [0u8; PAIRING_SECRET_LEN];
-    rand::thread_rng().fill(&mut secret);
+    rand::rngs::OsRng.fill(&mut secret);
     secret
 }
 
@@ -301,7 +301,13 @@ mod v2_tests {
     #[test]
     fn transcript_digits_are_stable_and_diverge() {
         let a = generate_pairing_secret();
-        let b = generate_pairing_secret();
+        // Divergence is asserted against a DETERMINISTIC second secret, not
+        // a second random draw: the 6-digit transcript space is ~10^6, so
+        // two random draws collide with p≈10^-6 per CI run — a flake, not a
+        // property failure. A fixed mutated pair makes the same claim with
+        // zero randomness (and a collision would fail deterministically).
+        let mut b = a;
+        b[0] ^= 0xff;
         let ta = transcript_digits(&a);
         assert_eq!(ta, transcript_digits(&a), "stable for comparison");
         assert_eq!(ta.len(), 6);

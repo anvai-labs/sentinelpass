@@ -7,8 +7,9 @@ child's status.
 
 Adapted from browser-extension/e2e/tests/helpers/cli_pty.py (WBS-719);
 the only change is the timeout override (DRILL_PTY_TIMEOUT_SECONDS,
-default 120) because debug-profile builds run Argon2id noticeably slower
-than release builds and the drills are run against debug binaries.
+default 300) because KDF operations dominate the runtime even against
+RELEASE-profile binaries — the profile lib.sh and drills.yml mandate
+(a debug-profile Argon2id takes minutes per derivation).
 
 Usage: SENTINELPASS_CLI_STDIN='pw
 pw' python3 cli_pty.py <command> [args...]

@@ -76,9 +76,11 @@ The engagement should combine, at the firm's discretion but covering all of:
 4. **Cryptographic implementation review** — Argon2id parameter handling,
    AES-256-GCM nonce discipline, HKDF domain separation (envelope vs slot
    registry vs pairing vs session keys), Ed25519 canonical signing string,
-   constant-time comparisons, and CSPRNG usage (including the open
-   TD-SEC-09 `thread_rng` hardening item — assess severity under the
-   CSPRNG-reseeded ThreadRng reality).
+   constant-time comparisons, and CSPRNG usage (the TD-SEC-09
+   `thread_rng` hardening item was closed 2026-09-13 — all production
+   secret/key generation now draws from `rand::rngs::OsRng`; independently
+   re-verify that claim, which an earlier adversarial review round caught
+   being made prematurely).
 5. **Verification work** — the vendor's automated evidence is reproducible:
    `cargo test --workspace`, the `fuzz/` crate (envelope open, sync v2 parse
    both ends, IPC frame decode, import/export byte parse), `cargo audit` under
