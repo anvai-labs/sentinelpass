@@ -169,9 +169,8 @@ struct GeneratorView: View {
     }
 
     private func copyPassword() {
-        #if os(iOS)
-        UIPasteboard.general.string = generatedPassword
-        #endif
+        // WBS-824: local expiring paste (30 s) — never a permanent write.
+        Pasteboard.copySensitive(generatedPassword)
 
         copied = true
 

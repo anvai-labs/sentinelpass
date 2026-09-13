@@ -129,7 +129,7 @@ The app uses `VaultBridge` class to communicate with the Rust mobile bridge via 
 2. **Entry CRUD**: Uses `nativeAddEntry()`, `nativeGetEntry()`, `nativeListEntries()`, `nativeDeleteEntry()`
 3. **TOTP**: Uses `nativeGenerateTotp()`
 4. **Password Generation**: Uses `nativeGeneratePassword()` and `nativeCheckStrength()`
-5. **Biometric**: Uses `nativeBiometricHasKey()`, `nativeBiometricRemoveKey()`, `nativeBiometricUnlock()`
+5. **Biometric**: Keystore-bound platform slot (WBS-812) — unlock via `slotUnlock()`
 
 ## Building for Different Architectures
 

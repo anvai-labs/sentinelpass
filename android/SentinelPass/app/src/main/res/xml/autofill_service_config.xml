@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- WBS-813: settingsActivity must point at an ACTIVITY. The previous
+     value referenced a Composable function's file class, which is not
+     launchable — the system settings entry for the autofill service now
+     opens MainActivity. -->
 <autofill-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/autofill_service_description"
-    android:settingsActivity="com.sentinelpass.ui.screens.settings.SettingsScreen">
+    android:settingsActivity="com.sentinelpass.MainActivity">
     <!-- Compatibility: disable field classification for now -->
 </autofill-service>

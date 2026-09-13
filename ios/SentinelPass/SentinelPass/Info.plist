@@ -29,10 +29,6 @@
     <true/>
     <key>UILaunchScreen</key>
     <dict/>
-    <key>UIRequiredDeviceCapabilities</key>
-    <array>
-        <string>armv7</string>
-    </array>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
@@ -48,9 +44,5 @@
     </array>
     <key>NSFaceIDUsageDescription</key>
     <string>Use Face ID to unlock your password vault securely.</string>
-    <key>NSBiometricIdentityUsageDescription</key>
-    <string>Use biometric authentication to unlock your password vault securely.</string>
-    <key>NSKeychainUsageDescription</key>
-    <string>Store your biometric key securely in the keychain.</string>
 </dict>
 </plist>
