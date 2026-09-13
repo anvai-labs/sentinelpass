@@ -274,7 +274,9 @@ jobs:
   native-installer-smoke:
     name: Native Installer Smoke (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    needs: package
+    # setup listed explicitly (it is also a transitive need via package) so
+    # the is-release gate below reads from a declared dependency.
+    needs: [setup, package]
     if: needs.setup.outputs.is-release == 'true'
     strategy:
       fail-fast: false
@@ -296,6 +298,60 @@ jobs:
           name: packages-${{ matrix.platform }}
           path: dist
 
+      # Installed-artifact execution smoke: extract the PACKAGED portable
+      # archive (built by the `package` job with the tag version injected)
+      # and prove the shipped binaries at least execute on each OS.
+      # Extraction + direct execution ONLY — the interactive installers are
+      # never run against runner system paths.
+      #
+      # `sentinelpass` is the only binary with a real --version (clap): the
+      # daemon has no arg parser (an unknown flag would BOOT the daemon into
+      # maintenance mode, not print a version) and the host/UI have no arg
+      # surface at all, so for those we assert presence + execute permission
+      # inside the archive instead of exit codes. A functional
+      # unlock/round-trip smoke on installed artifacts remains TD-REL-05.
+      # Placed in this job rather than bundle-smoke because it is
+      # release-gated (running binaries matters at tag time; PR preflight
+      # keeps the cheap existence checks) and the artifacts are already
+      # downloaded here.
+      - name: Smoke packaged binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          exe="${{ runner.os == 'Windows' && '.exe' || '' }}"
+          if [ "${{ matrix.platform }}" == "windows" ]; then
+            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.zip' ! -name '*installer*' | head -1)
+            unzip -q "$archive" -d "$work"
+          else
+            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.tar.gz' ! -name '*installer*' | head -1)
+            tar -xzf "$archive" -C "$work"
+          fi
+          echo "Extracted $(basename "$archive"):"
+          ls -la "$work"
+
+          version_out="$("$work/sentinelpass${exe}" --version)"
+          echo "packaged CLI --version: ${version_out}"
+          # At tag time the package job injects the tag version before
+          # building — the packaged binary must carry it (drift guard).
+          echo "$version_out" | grep -q "${{ needs.setup.outputs.version }}" || {
+            echo "::error::packaged CLI reports '${version_out}' but the tag version is ${{ needs.setup.outputs.version }}"
+            exit 1
+          }
+
+          for bin_name in sentinelpass-daemon sentinelpass-host sentinelpass-ui; do
+            f="$work/${bin_name}${exe}"
+            if [ ! -f "$f" ]; then
+              echo "::error::${bin_name}${exe} missing from portable archive"
+              exit 1
+            fi
+            if [ ! -x "$f" ]; then
+              echo "::error::${bin_name}${exe} is not executable"
+              exit 1
+            fi
+          done
+          echo "All packaged binaries present and executable; CLI runs."
+
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
         with:
@@ -308,6 +364,35 @@ jobs:
           cargo install tauri-cli --version "^2.0.0" --locked
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # WBS-905 sidecar staging: `cargo tauri build` alone bundles NO
+      # daemon/host sidecars — tauri.conf.json declares
+      # `resources: ["src-tauri/resources/bin/*"]` and the bundler SILENTLY
+      # tolerates the empty glob, which is exactly how sidecar-less
+      # installers shipped before. The staging script builds daemon + host,
+      # copies them (with the Windows .exe suffix handled under Git Bash)
+      # into src-tauri/resources/bin/, and FAILS if the staging directory is
+      # still empty. --stage-only defers the slow bundling to the next step
+      # so the tauri invocation (and its updater-signing env) stays visible.
+      - name: Stage daemon/host sidecars into Tauri resources
+        shell: bash
+        run: bash scripts/build-native-installers.sh --stage-only
+
+      # Fail-closed, independent of the script: an empty staging directory
+      # must never reach the bundler (an empty resource glob ships
+      # sidecar-less installers silently — the exact WBS-905 regression).
+      - name: Assert staging dir is populated (fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="sentinelpass-ui/src-tauri/resources/bin"
+          count=$(find "$staging" -type f | wc -l | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::$staging is EMPTY — tauri would bundle installers without the daemon/host sidecars (WBS-905)"
+            exit 1
+          fi
+          echo "Staged sidecars in $staging: $count"
+          ls -la "$staging"
+
       - name: Build Tauri bundles
         shell: bash
         env:
@@ -317,16 +402,41 @@ jobs:
           cd sentinelpass-ui
           cargo tauri build --verbose
 
-      - name: List bundle outputs
+      # WBS-905: prove the sidecars actually landed in the built bundles —
+      # cheaply, per OS. Linux reads the .deb payload directly (dpkg-deb);
+      # macOS walks the assembled .app; Windows installers (msi/nsis) have no
+      # cheap offline introspection, so there the pre-build staging gate
+      # above is the authoritative check and this step lists the bundle
+      # outputs for the release record.
+      - name: Verify sidecars landed in bundles
         shell: bash
         run: |
-          echo "Tauri bundle outputs:"
-          for dir in sentinelpass-ui/target/release/bundle target/release/bundle; do
-            if [ -d "$dir" ]; then
-              echo "Found bundles in $dir:"
-              find "$dir" -type f -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.app' | head -20
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" == "linux" ]; then
+            deb=$(find sentinelpass-ui/target/release/bundle/deb target/release/bundle/deb -name '*.deb' 2>/dev/null | head -1)
+            if [ -z "$deb" ]; then
+              echo "::error::no .deb bundle found to verify sidecars against"
+              exit 1
             fi
-          done
+            echo "Inspecting $deb payload for staged sidecars:"
+            listing=$(dpkg-deb -c "$deb")
+            echo "$listing" | grep 'resources/bin/sentinelpass-daemon' || {
+              echo "::error::.deb payload lacks resources/bin/sentinelpass-daemon (WBS-905)"; exit 1; }
+            echo "$listing" | grep 'resources/bin/sentinelpass-host' || {
+              echo "::error::.deb payload lacks resources/bin/sentinelpass-host (WBS-905)"; exit 1; }
+          elif [ "${{ matrix.platform }}" == "macos" ]; then
+            app=$(find sentinelpass-ui/target/release/bundle/macos target/release/bundle/macos -maxdepth 2 -name '*.app' 2>/dev/null | head -1)
+            if [ -z "$app" ]; then
+              echo "::error::no .app bundle found to verify sidecars against"
+              exit 1
+            fi
+            echo "Inspecting $app payload for staged sidecars:"
+            find "$app" -type f | grep -E 'sentinelpass-(daemon|host)' || {
+              echo "::error::.app bundle lacks daemon/host sidecars (WBS-905)"; exit 1; }
+          else
+            echo "Tauri bundle outputs (Windows — sidecar presence enforced by the pre-build staging gate):"
+            find sentinelpass-ui/target/release/bundle target/release/bundle -type f 2>/dev/null | head -40
+          fi
 
       - name: Upload Tauri bundle artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
