@@ -25,8 +25,8 @@ If macOS blocks the app, retain the error and consult [Apple's guidance](https:/
 3. In Terminal, change to that folder. For the `0.11.0` generic filename, run:
 
 ```bash
-awk '$2 == "./sentinelpass-0.11.0-macos.dmg" || $2 == "sentinelpass-0.11.0-macos.dmg" { print }' sha256sums.txt | shasum -a 256 --check
-hdiutil verify sentinelpass-0.11.0-macos.dmg
+awk '$2 == "./sentinelpass-0.11.0-macos.dmg" || $2 == "sentinelpass-0.11.0-macos.dmg" { print }' sha256sums.txt | shasum -a 256 --check &&
+  hdiutil verify sentinelpass-0.11.0-macos.dmg
 ```
 
 The first command must report `sentinelpass-0.11.0-macos.dmg: OK`; the second must report a valid image checksum. Stop if either fails or the checksum entry is missing. Select only the DMG entry instead of checking the whole manifest, which also lists platform assets you have not downloaded. For another release, use its filename and its own checksum file.
@@ -52,6 +52,8 @@ Then run the verification commands above. These examples are pinned to the inspe
 ```bash
 open /Applications/SentinelPass.app
 ```
+
+If you chose `~/Applications`, use `open "$HOME/Applications/SentinelPass.app"` instead and substitute that location in the version/helper checks below. This avoids launching a different copy in `/Applications`.
 
 5. Unlock the existing vault using its master password. Create a new vault only for a first installation. A running-but-locked daemon is expected until you unlock; the password-strength meter is not an unlock confirmation.
 6. Install the [browser extension](../README.md#browser-extension) if needed, then open its popup to check the connection. If it shows **Unlocked**, a browser restart is unnecessary. Keep the UI open while using autofill. The UI starts the bundled daemon with `--start-locked`; no `brew services` command or manual native-host launch is needed.
@@ -129,6 +131,8 @@ Copy the extracted `browser-extension/chrome/` folder to a stable location such 
 4. Pin SentinelPass in the toolbar and open its popup while the installed desktop app is running and unlocked. **Unlocked** confirms that the status request reached the native host and daemon; no Chrome restart is needed in that case. Refresh already-open login tabs before testing autofill. Grant only the site access you intend to use and verify autofill on a site you choose.
 
 If the popup does not connect, first check the desktop app is running and unlocked, then click **Reload** on the extension's card and reopen the popup. If connection problems persist after host registration or an upgrade, quit Chrome completely with **Command + Q** and reopen it. A locked vault still needs local unlock; restarting Chrome does not unlock it. Chrome [starts a native host for each `sendNativeMessage` request](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging#native-messaging-protocol), so a full browser restart is a troubleshooting step, not proof of a working connection.
+
+For site access, open the intended website, click the **SentinelPass toolbar icon**, then click the **gear icon inside its popup**. Under **Site access**, confirm the displayed hostname and click **Enable** if needed. Accept Chrome's site-access prompt if shown, then refresh the website. These controls are in SentinelPass itself; Chrome's general Settings page for the extension's camera, location, JavaScript, and other permissions is a different screen. Keep **Autofill over HTTP** disabled for HTTPS sites. **Unlocked** with an empty credential list means no matching entries were returned for that page; check site access and a matching saved entry separately from connection status.
 
 Chrome's supported unpacked-install workflow requires the browser's own confirmation; copying the files alone does not activate the extension. Managed Chrome profiles may prohibit Developer mode or unpacked extensions. See [Chrome's loading instructions](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-unpacked).
 

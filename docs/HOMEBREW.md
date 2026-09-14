@@ -26,7 +26,7 @@ brew upgrade anvai-labs/tap/sentinelpass
 sentinelpass --version
 ```
 
-Reopen the UI and unlock the vault. Restart the browser so it reconnects through the native host registered by the newly installed UI. An independently managed daemon must also be restarted using whichever service manager originally started it; upgrading files does not replace an already running process.
+Reopen the UI and unlock the vault, then open the extension popup. If it shows **Unlocked**, no browser restart is needed. If it does not connect, reload the extension and reopen its popup; fully quit and reopen the browser if the error persists. An independently managed daemon must also be restarted using whichever service manager originally started it; upgrading files does not replace an already running process.
 
 `brew update` refreshes the tap's formula definitions; `brew upgrade` installs a newer version when available. `brew reinstall` is for reinstalling the version Homebrew resolves, for example to repair missing package files. It is not a prerequisite for upgrading. In the reported `0.10.0` → `0.11.0` session, the tap refreshed during `brew upgrade`, after `brew reinstall` had already installed `0.10.0` again. See the [Homebrew command reference](https://docs.brew.sh/Manpage).
 
@@ -59,7 +59,7 @@ open -a SentinelPass
 
 That command requires the installed app bundle; the formula alone does not provide it. Create a vault on first use or unlock the existing vault. Keep the UI open for browser autofill: it normally owns the daemon it starts and stops that daemon on exit. If a compatible daemon is already running, the UI connects to it.
 
-The UI also registers `sentinelpass-host` for Chrome, Chromium, and Firefox. Install the [browser extension](../README.md#browser-extension), then restart the browser. The browser launches the host and communicates with it over native messaging. Running `sentinelpass-host` in Terminal only starts a process waiting for framed browser messages; its startup log is not an interactive prompt or a daemon health check.
+The UI also registers `sentinelpass-host` for Chrome, Chromium, and Firefox. Install the [browser extension](../README.md#browser-extension), then check its popup for **Unlocked**. The browser launches the host and communicates with it over native messaging. Running `sentinelpass-host` in Terminal only starts a process waiting for framed browser messages; its startup log is not an interactive prompt or a daemon health check.
 
 ## Current formula limitations
 
@@ -75,7 +75,7 @@ The UI also registers `sentinelpass-host` for Chrome, Chromium, and Firefox. Ins
 
 The [tap formula](https://github.com/anvai-labs/homebrew-tap/blob/main/Formula/sentinelpass.rb) installs the daemon only on Linux even though the upstream macOS portable archive contains it. A clean macOS formula installation therefore cannot start its own daemon for browser autofill. An older daemon elsewhere on `PATH` can mask this omission. A successful `brew install` or `brew reinstall` does not validate the complete browser workflow.
 
-The macOS DMG supplies all desktop components while this packaging gap remains; read its [signing status](MACOS_INSTALL.md#current-signing-status) before installing. Quit the formula UI before opening the app bundle, then restart the browser after the app registers its host. The default vault directory is `~/Library/Application Support/PasswordManager`, outside Homebrew's Cellar; do not delete it to troubleshoot installation. The app uses the existing default vault when run as the same user with the same configuration. A legacy vault may need the [owner-only permission repair](MACOS_INSTALL.md#legacy-vault-permissions) before it can unlock.
+The macOS DMG supplies all desktop components while this packaging gap remains; read its [signing status](MACOS_INSTALL.md#current-signing-status) before installing. Quit the formula UI before opening the app bundle, then check the extension connection after the app registers its host. The default vault directory is `~/Library/Application Support/PasswordManager`, outside Homebrew's Cellar; do not delete it to troubleshoot installation. The app uses the existing default vault when run as the same user with the same configuration. A legacy vault may need the [owner-only permission repair](MACOS_INSTALL.md#legacy-vault-permissions) before it can unlock.
 
 The source/script installer's macOS LaunchAgent work is tracked separately in [PR #144](https://github.com/anvai-labs/sentinelpass/pull/144). Installing a formula does not run `installation/install.sh`; that PR alone does not add a Homebrew service or fix the formula's missing daemon.
 
@@ -104,7 +104,7 @@ Use the desktop app to manage its daemon. Do not add a second service manager if
 | `open -a SentinelPass` cannot find the app | The formula installs executables, not an app bundle. Install the DMG, or run `sentinelpass-ui`. |
 | The UI cannot start/connect to the daemon | Check whether the daemon exists in the formula's `bin` directory. For the macOS `0.11.0` omission, use the DMG. |
 | `sentinelpass-host` prints a startup line and waits | It is waiting for browser-native messages. Exit the manual process and launch the UI, then use the extension. |
-| Native messaging host not found after an upgrade | Reopen the UI to refresh host registration, then restart the browser. The old Cellar version may have been removed by Homebrew cleanup. |
+| Native messaging host not found after an upgrade | Reopen the UI to refresh host registration, reload the extension, and check its popup. Restart the browser if the error persists. The old Cellar version may have been removed by Homebrew cleanup. |
 
 If no UI window appears, collect non-secret installation details:
 
@@ -114,7 +114,7 @@ brew list anvai-labs/tap/sentinelpass
 type -a sentinelpass sentinelpass-ui sentinelpass-daemon
 "$(brew --prefix sentinelpass)/bin/sentinelpass" --version
 ls -l "$(brew --prefix sentinelpass)/bin"
-sw_vers
+sw_vers # macOS only
 uname -m
 ```
 
