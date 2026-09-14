@@ -126,7 +126,7 @@ and [ADR-002](docs/decisions/adr/ADR-002-master-password-rotation.md).
 | Chrome | Follow the [release archive / stable-folder instructions](docs/MACOS_INSTALL.md#chrome-extension-from-the-release-archive), or load `browser-extension/chrome/` from a source checkout using `chrome://extensions/` → **Developer mode** → **Load unpacked** |
 | Firefox | `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → select `browser-extension/firefox/manifest.json` |
 
-After installing the extension, **restart the browser** so it picks up the native messaging host manifest written by the app.
+After installing the extension, open its popup with SentinelPass running and unlocked. If it shows **Unlocked**, the native connection works and no browser restart is needed. If it does not connect, follow the [connection troubleshooting steps](docs/MACOS_INSTALL.md#chrome-extension-from-the-release-archive); a full browser restart is a fallback after reloading the extension.
 
 ## Multi-Device Sync (Experimental)
 
@@ -154,7 +154,7 @@ See [`docs/SYNC.md`](docs/SYNC.md) for the full protocol reference, CLI commands
 | --- | --- |
 | Homebrew install/upgrade, `brew services` errors, or no UI window | Follow the [Homebrew troubleshooting guide](docs/HOMEBREW.md#troubleshooting) |
 | macOS blocks the DMG app, an older app opens, or unlock reports permissive vault permissions | Follow the [macOS install and upgrade guide](docs/MACOS_INSTALL.md) |
-| "Specified native messaging host not found" | Restart the browser after launching SentinelPass at least once |
+| "Specified native messaging host not found" | Launch SentinelPass to register the host, reload the extension, and reopen its popup; restart the browser if the error persists |
 | Autofill icon doesn't appear | Ensure the daemon is running (check SentinelPass UI status) |
 | "Vault is locked" | Unlock the vault in the SentinelPass UI first |
 | Extension installed but not working | Open DevTools → Console → filter for `[SentinelPass]` logs |
