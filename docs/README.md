@@ -7,6 +7,7 @@ Quick reference to all project documentation. Most docs live at the repository r
 | Document | Description | Keywords |
 |----------|-------------|----------|
 | [README.md](../README.md) | Project overview, installation, and quick start | install, setup, quick start, runtime, daemon |
+| [HOMEBREW.md](HOMEBREW.md) | Homebrew install, upgrade, launch, formula limitations, and troubleshooting | brew, macOS, services, daemon, native host |
 | [BUILD.md](../BUILD.md) | Toolchain requirements, build commands, coverage gates | cargo, npm, build, coverage, toolchain, platform |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contribution workflow, quality gates, PR process | PR, commit, lint, clippy, fmt, test, branch |
 | [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Community standards and expectations | conduct, community |
