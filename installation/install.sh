@@ -4,7 +4,15 @@
 set -e
 
 BINARY_DIR_OVERRIDE="${SENTINELPASS_BINARY_DIR:-}"
-NO_LAUNCHD="${SENTINELPASS_NO_LAUNCHD:-0}"
+NO_LAUNCHD=0
+case "${SENTINELPASS_NO_LAUNCHD:-0}" in
+    1|true|yes|on)  NO_LAUNCHD=1 ;;
+    0|false|no|off) NO_LAUNCHD=0 ;;
+    *)
+        echo "WARNING: unrecognized SENTINELPASS_NO_LAUNCHD='${SENTINELPASS_NO_LAUNCHD}' (expected 1/0/true/false) — treating as 0" >&2
+        NO_LAUNCHD=0
+        ;;
+esac
 FROM_APP_BUNDLE=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -206,10 +214,10 @@ if [[ "$PLATFORM" == "macos" && "$NO_LAUNCHD" != "1" && -x "$INSTALL_DIR/sentine
     LAUNCHD_LABEL="com.sentinelpass.daemon"
     LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
     DAEMON_LOG="$HOME/Library/Application Support/PasswordManager/daemon.log"
-    mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$DAEMON_LOG")"
-    # Unload any previous generation first so reinstalls are idempotent.
-    launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
-    cat > "$LAUNCHD_PLIST" << EOF
+    if mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$DAEMON_LOG")"; then
+        # Unload any previous generation first so reinstalls are idempotent.
+        launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
+        cat > "$LAUNCHD_PLIST" << EOF || echo "WARNING: could not write $LAUNCHD_PLIST" >&2
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -239,15 +247,23 @@ if [[ "$PLATFORM" == "macos" && "$NO_LAUNCHD" != "1" && -x "$INSTALL_DIR/sentine
 </dict>
 </plist>
 EOF
-    if launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 \
-       || launchctl load "$LAUNCHD_PLIST" >/dev/null 2>&1; then
-        echo "Daemon installed as a login service: $LAUNCHD_LABEL (auto-starts, restarts on crash)"
-        echo "  logs: $DAEMON_LOG"
-        echo "  note: installing/reinstalling restarts the daemon, so the vault re-locks — unlock again from the UI"
-        echo "  stop/remove: launchctl bootout gui/\$(id -u)/$LAUNCHD_LABEL && rm '$LAUNCHD_PLIST'"
+        if launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 \
+           || launchctl load "$LAUNCHD_PLIST" >/dev/null 2>&1; then
+            echo "Daemon installed as a login service: $LAUNCHD_LABEL (auto-starts, restarts on crash)"
+            echo "  logs: $DAEMON_LOG"
+            echo "  note: installing/reinstalling restarts the daemon, so the vault re-locks — unlock again from the UI"
+            echo "  stop/remove: launchctl bootout gui/\$(id -u)/$LAUNCHD_LABEL && rm '$LAUNCHD_PLIST'"
+            sleep 2
+            if ! pgrep -f "sentinelpass-daemon --start-locked" >/dev/null 2>&1; then
+                echo "  NOTE: the daemon is not up yet. If another instance is already running and holding" >&2
+                echo "  the vault lock, the service retries every 30s and takes over when it exits ($DAEMON_LOG)." >&2
+            fi
+        else
+            echo "WARNING: could not load the launchd agent ($LAUNCHD_PLIST)." >&2
+            echo "The daemon will not auto-start. Start it manually with: \"$INSTALL_DIR/sentinelpass-daemon\" --start-locked" >&2
+        fi
     else
-        echo "WARNING: could not load the launchd agent ($LAUNCHD_PLIST)." >&2
-        echo "The daemon will not auto-start. Start it manually with: \"$INSTALL_DIR/sentinelpass-daemon\" --start-locked" >&2
+        echo "WARNING: could not create $HOME/Library/LaunchAgents — skipping LaunchAgent setup" >&2
     fi
 fi
 

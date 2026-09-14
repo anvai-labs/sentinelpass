@@ -72,14 +72,17 @@ else
 fi
 
 echo "[2/2] Installing user-level binaries + native host manifests..."
+# Pass the launchd opt-out ONLY when the flag was given, so an externally
+# exported SENTINELPASS_NO_LAUNCHD (e.g. from a shell profile) is honored.
+if [[ "$NO_LAUNCHD" == "1" ]]; then
+  export SENTINELPASS_NO_LAUNCHD=1
+fi
 if [[ -n "$CHROME_EXTENSION_ID" ]]; then
   SENTINELPASS_CHROME_EXTENSION_ID="$CHROME_EXTENSION_ID" \
     SENTINELPASS_BINARY_DIR="$BINARY_DIR" \
-    SENTINELPASS_NO_LAUNCHD="$NO_LAUNCHD" \
     bash "$INSTALL_SCRIPT"
 else
-  SENTINELPASS_NO_LAUNCHD="$NO_LAUNCHD" \
-    SENTINELPASS_BINARY_DIR="$BINARY_DIR" bash "$INSTALL_SCRIPT"
+  SENTINELPASS_BINARY_DIR="$BINARY_DIR" bash "$INSTALL_SCRIPT"
 fi
 
 if [[ -n "$CHROME_EXTENSION_ID" && ! "$CHROME_EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
