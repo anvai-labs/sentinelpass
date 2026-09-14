@@ -50,7 +50,11 @@ impl TestVault {
                 &mut handle,
             )
         };
-        assert_eq!(code, ErrorCode::Success, "vault create must succeed");
+        assert_eq!(
+            code,
+            ErrorCode::Success,
+            "vault create must succeed (path={vault_path:?}, code={code:?})"
+        );
         Self { dir, handle }
     }
 
