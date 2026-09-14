@@ -321,10 +321,10 @@ jobs:
           work="$(mktemp -d)"
           exe="${{ runner.os == 'Windows' && '.exe' || '' }}"
           if [ "${{ matrix.platform }}" == "windows" ]; then
-            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.zip' ! -name '*installer*' | head -1)
+            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.zip' ! -name '*installer*' | head -1 || true)
             unzip -q "$archive" -d "$work"
           else
-            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.tar.gz' ! -name '*installer*' | head -1)
+            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.tar.gz' ! -name '*installer*' | head -1 || true)
             tar -xzf "$archive" -C "$work"
           fi
           echo "Extracted $(basename "$archive"):"
@@ -420,7 +420,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.platform }}" == "linux" ]; then
-            deb=$(find sentinelpass-ui/target/release/bundle/deb target/release/bundle/deb -name '*.deb' 2>/dev/null | head -1)
+            # `|| true` is REQUIRED under set -o pipefail: find exits 1 when any named
+            # path is missing (tauri's bundle output location varies by invocation),
+            # which killed this step with zero output on the v0.11.0 tag run.
+            deb=$(find sentinelpass-ui/target/release/bundle/deb target/release/bundle/deb -name '*.deb' 2>/dev/null | head -1 || true)
             if [ -z "$deb" ]; then
               echo "::error::no .deb bundle found to verify sidecars against"
               exit 1
@@ -432,7 +435,7 @@ jobs:
             echo "$listing" | grep 'resources/bin/sentinelpass-host' || {
               echo "::error::.deb payload lacks resources/bin/sentinelpass-host (WBS-905)"; exit 1; }
           elif [ "${{ matrix.platform }}" == "macos" ]; then
-            app=$(find sentinelpass-ui/target/release/bundle/macos target/release/bundle/macos -maxdepth 2 -name '*.app' 2>/dev/null | head -1)
+            app=$(find sentinelpass-ui/target/release/bundle/macos target/release/bundle/macos -maxdepth 2 -name '*.app' 2>/dev/null | head -1 || true)
             if [ -z "$app" ]; then
               echo "::error::no .app bundle found to verify sidecars against"
               exit 1
@@ -442,7 +445,7 @@ jobs:
               echo "::error::.app bundle lacks daemon/host sidecars (WBS-905)"; exit 1; }
           else
             echo "Tauri bundle outputs (Windows — sidecar presence enforced by the pre-build staging gate):"
-            find sentinelpass-ui/target/release/bundle target/release/bundle -type f 2>/dev/null | head -40
+            find sentinelpass-ui/target/release/bundle target/release/bundle -type f 2>/dev/null | head -40 || true
           fi
 
       - name: Upload Tauri bundle artifacts
