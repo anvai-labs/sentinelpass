@@ -43,8 +43,9 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 
 | Platform | Method |
 | --- | --- |
-| macOS | `brew tap anvai-labs/tap https://github.com/anvai-labs/homebrew-tap && brew install anvai-labs/tap/sentinelpass` — or download the DMG from [Releases](../../releases) |
-| Windows | Download the MSI installer from [Releases](../../releases) and run it |
+| macOS desktop (recommended) | Download the DMG from [Releases](https://github.com/anvai-labs/sentinelpass/releases/latest), open it, and drag **SentinelPass** to **Applications** |
+| Homebrew (macOS Apple Silicon / Linux x86_64) | Follow the [Homebrew install and upgrade guide](docs/HOMEBREW.md); the current macOS formula omits the daemon and does not install an Applications-folder app |
+| Windows | Download the MSI installer from [Releases](https://github.com/anvai-labs/sentinelpass/releases/latest) and run it |
 | Linux (Debian/Ubuntu) | `sudo apt install ./sentinelpass_<VERSION>_amd64.deb` — or `sudo dpkg -i sentinelpass-*.deb` |
 | Linux (Fedora/RHEL) | `sudo dnf install sentinelpass-*.rpm` |
 | Build from source | `npm install && npm run web:build && cargo build --release` |
@@ -53,9 +54,11 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 
 ## First Launch
 
-1. Open **SentinelPass** from your Applications folder / Start Menu / launcher.
-2. Create a new vault and set a master password.
-3. The app automatically starts the background daemon and registers the native messaging host for Chrome, Chromium, and Firefox.
+1. **Native installer:** open **SentinelPass** from Applications / Start Menu / launcher. **Homebrew formula:** run `sentinelpass-ui` in Terminal; it stays in the foreground while the window is open. See the [macOS formula limitation](docs/HOMEBREW.md#current-formula-limitations) before using browser autofill.
+2. Create a vault and set a master password, or unlock your existing vault.
+3. With the daemon and host installed, the app starts or connects to the daemon and registers the native messaging host for Chrome, Chromium, and Firefox. Keep the app open while using browser autofill.
+
+You do not need to launch `sentinelpass-host` manually. Browsers start it when the extension connects. The current formula does not support `brew services`; see [service management](docs/HOMEBREW.md#background-services).
 
 ## Secrets Broker for Local Tools
 
@@ -149,6 +152,7 @@ See [`docs/SYNC.md`](docs/SYNC.md) for the full protocol reference, CLI commands
 
 | Symptom | Fix |
 | --- | --- |
+| Homebrew install/upgrade, `brew services` errors, or no UI window | Follow the [Homebrew troubleshooting guide](docs/HOMEBREW.md#troubleshooting) |
 | "Specified native messaging host not found" | Restart the browser after launching SentinelPass at least once |
 | Autofill icon doesn't appear | Ensure the daemon is running (check SentinelPass UI status) |
 | "Vault is locked" | Unlock the vault in the SentinelPass UI first |
