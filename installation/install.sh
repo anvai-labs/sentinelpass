@@ -254,7 +254,10 @@ EOF
             echo "  note: installing/reinstalling restarts the daemon, so the vault re-locks — unlock again from the UI"
             echo "  stop/remove: launchctl bootout gui/\$(id -u)/$LAUNCHD_LABEL && rm '$LAUNCHD_PLIST'"
             sleep 2
-            if ! pgrep -f "sentinelpass-daemon --start-locked" >/dev/null 2>&1; then
+            # Check THE JOB (not pgrep — a manually started daemon with the same
+            # command line would silence this NOTE while the agent crash-loops
+            # on the vault lock).
+            if ! launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null | grep -q "pid ="; then
                 echo "  NOTE: the daemon is not up yet. If another instance is already running and holding" >&2
                 echo "  the vault lock, the service retries every 30s and takes over when it exits ($DAEMON_LOG)." >&2
             fi
