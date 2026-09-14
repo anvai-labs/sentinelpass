@@ -1,6 +1,6 @@
 # Install and launch with Homebrew
 
-For a macOS desktop installation, use the DMG from [the latest release](https://github.com/anvai-labs/sentinelpass/releases/latest), drag **SentinelPass** into **Applications**, and open it there. The app bundle includes the daemon and native messaging host needed for browser integration.
+For a macOS desktop installation, follow the [DMG installation guide](MACOS_INSTALL.md), including download verification and the current signing limitation. The app bundle includes the daemon and native messaging host needed for browser integration.
 
 The Homebrew formula installs terminal executables. It does not install `SentinelPass.app`, a Dock shortcut, or a login service. The current prebuilt formula supports **Apple Silicon macOS** and **x86_64 Linux**; it does not provide Intel macOS or ARM Linux archives.
 
@@ -75,7 +75,7 @@ The UI also registers `sentinelpass-host` for Chrome, Chromium, and Firefox. Ins
 
 The [tap formula](https://github.com/anvai-labs/homebrew-tap/blob/main/Formula/sentinelpass.rb) installs the daemon only on Linux even though the upstream macOS portable archive contains it. A clean macOS formula installation therefore cannot start its own daemon for browser autofill. An older daemon elsewhere on `PATH` can mask this omission. A successful `brew install` or `brew reinstall` does not validate the complete browser workflow.
 
-Use the macOS DMG for the complete desktop installation while this packaging gap remains. Quit the formula UI before opening the app bundle, then restart the browser after the app registers its host. The default vault directory is `~/Library/Application Support/PasswordManager`, outside Homebrew's Cellar; do not delete it to troubleshoot installation. The app uses the existing default vault when run as the same user with the same configuration.
+The macOS DMG supplies all desktop components while this packaging gap remains; read its [signing status](MACOS_INSTALL.md#current-signing-status) before installing. Quit the formula UI before opening the app bundle, then restart the browser after the app registers its host. The default vault directory is `~/Library/Application Support/PasswordManager`, outside Homebrew's Cellar; do not delete it to troubleshoot installation. The app uses the existing default vault when run as the same user with the same configuration. A legacy vault may need the [owner-only permission repair](MACOS_INSTALL.md#legacy-vault-permissions) before it can unlock.
 
 The source/script installer's macOS LaunchAgent work is tracked separately in [PR #144](https://github.com/anvai-labs/sentinelpass/pull/144). Installing a formula does not run `installation/install.sh`; that PR alone does not add a Homebrew service or fix the formula's missing daemon.
 
