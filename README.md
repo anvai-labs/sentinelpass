@@ -43,8 +43,9 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 
 | Platform | Method |
 | --- | --- |
-| macOS | `brew tap anvai-labs/tap https://github.com/anvai-labs/homebrew-tap && brew install anvai-labs/tap/sentinelpass` — or download the DMG from [Releases](../../releases) |
-| Windows | Download the MSI installer from [Releases](../../releases) and run it |
+| macOS desktop | Follow the [DMG installation guide](docs/MACOS_INSTALL.md) to verify the download, install in Applications, and check the current signing limitation |
+| Homebrew (macOS Apple Silicon / Linux x86_64) | Follow the [Homebrew install and upgrade guide](docs/HOMEBREW.md); the current macOS formula omits the daemon and does not install an Applications-folder app |
+| Windows | Download the MSI installer from [Releases](https://github.com/anvai-labs/sentinelpass/releases/latest) and run it |
 | Linux (Debian/Ubuntu) | `sudo apt install ./sentinelpass_<VERSION>_amd64.deb` — or `sudo dpkg -i sentinelpass-*.deb` |
 | Linux (Fedora/RHEL) | `sudo dnf install sentinelpass-*.rpm` |
 | Build from source | `npm install && npm run web:build && cargo build --release` |
@@ -53,9 +54,11 @@ Browser Extension -> sentinelpass-host -> sentinelpass-daemon -> sentinelpass-co
 
 ## First Launch
 
-1. Open **SentinelPass** from your Applications folder / Start Menu / launcher.
-2. Create a new vault and set a master password.
-3. The app automatically starts the background daemon and registers the native messaging host for Chrome, Chromium, and Firefox.
+1. **Native installer:** open **SentinelPass** from Applications / Start Menu / launcher. **Homebrew formula:** run `sentinelpass-ui` in Terminal; it stays in the foreground while the window is open. See the [macOS formula limitation](docs/HOMEBREW.md#current-formula-limitations) before using browser autofill.
+2. Create a vault and set a master password, or unlock your existing vault.
+3. With the daemon and host installed, the app starts or connects to the daemon and registers the native messaging host for Chrome, Chromium, and Firefox. Keep the app open while using browser autofill.
+
+You do not need to launch `sentinelpass-host` manually. Browsers start it when the extension connects. The current formula does not support `brew services`; see [service management](docs/HOMEBREW.md#background-services).
 
 ## Secrets Broker for Local Tools
 
@@ -120,10 +123,10 @@ and [ADR-002](docs/decisions/adr/ADR-002-master-password-rotation.md).
 
 | Browser | Steps |
 | --- | --- |
-| Chrome | `chrome://extensions/` → enable **Developer mode** → **Load unpacked** → select `browser-extension/chrome/` |
+| Chrome | Follow the [release archive / stable-folder instructions](docs/MACOS_INSTALL.md#chrome-extension-from-the-release-archive), or load `browser-extension/chrome/` from a source checkout using `chrome://extensions/` → **Developer mode** → **Load unpacked** |
 | Firefox | `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → select `browser-extension/firefox/manifest.json` |
 
-After installing the extension, **restart the browser** so it picks up the native messaging host manifest written by the app.
+After installing the extension, open its popup with SentinelPass running and unlocked. If it shows **Unlocked**, the native connection works and no browser restart is needed. If it does not connect, follow the [connection troubleshooting steps](docs/MACOS_INSTALL.md#chrome-extension-from-the-release-archive); a full browser restart is a fallback after reloading the extension.
 
 ## Multi-Device Sync (Experimental)
 
@@ -149,7 +152,9 @@ See [`docs/SYNC.md`](docs/SYNC.md) for the full protocol reference, CLI commands
 
 | Symptom | Fix |
 | --- | --- |
-| "Specified native messaging host not found" | Restart the browser after launching SentinelPass at least once |
+| Homebrew install/upgrade, `brew services` errors, or no UI window | Follow the [Homebrew troubleshooting guide](docs/HOMEBREW.md#troubleshooting) |
+| macOS blocks the DMG app, an older app opens, or unlock reports permissive vault permissions | Follow the [macOS install and upgrade guide](docs/MACOS_INSTALL.md) |
+| "Specified native messaging host not found" | Launch SentinelPass to register the host, reload the extension, and reopen its popup; restart the browser if the error persists |
 | Autofill icon doesn't appear | Ensure the daemon is running (check SentinelPass UI status) |
 | "Vault is locked" | Unlock the vault in the SentinelPass UI first |
 | Extension installed but not working | Open DevTools → Console → filter for `[SentinelPass]` logs |

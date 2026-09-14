@@ -38,6 +38,18 @@
 
 All installers should default to user-level install paths and avoid admin requirements.
 
+### macOS DMG acceptance
+
+Validate the **final published DMG**, not just the pre-bundle staging directory. Record these checks with the release evidence:
+
+- Download the DMG and its checksum manifest from the same release; verify the exact asset's SHA-256 and `hdiutil verify` result.
+- Mount read-only and confirm `CFBundleShortVersionString` matches the tag, the architecture matches the advertised platform, and the UI plus **both** daemon and native-host helpers are nonempty and executable.
+- Verify the complete app with `codesign --verify --deep --strict --verbose=2`, inspect its Developer ID identity, and require successful `spctl --assess --type execute --verbose=4` plus notarization/stapling evidence under [ADR-010](decisions/adr/ADR-010-release-assurance-and-provenance.md).
+- Test a browser-downloaded copy with normal quarantine metadata on a clean Mac. Copy into Applications, eject the DMG, launch normally, unlock, and verify browser integration. Repeat with an older app/default vault, including the documented legacy-permission refusal and repair.
+- Confirm native-host manifests point to the installed bundle, and check coexistence with the Homebrew CLI and any existing daemon service.
+
+These are manual acceptance checks until enforced in release CI. The `0.11.0` DMG passed download/payload checks but **failed signature/Gatekeeper assessment** ([#148](https://github.com/anvai-labs/sentinelpass/issues/148)); a launch from a CLI download does not satisfy the browser-origin check. The user-facing procedure and observed limitations are in [MACOS_INSTALL.md](MACOS_INSTALL.md). Do not overwrite existing published assets to disguise a packaging defect; ship a corrected version when the signing prerequisites are available.
+
 ## Tag-time CI prerequisites (TD-REL-01)
 
 The `release` job in `.github/workflows/release.yml` fails closed unless ALL
@@ -76,4 +88,3 @@ The gate fails the release if the embedded SBOM is missing or if a
 dependency inside the binary matches a known advisory. Dependency EXCEPTION
 policy lives in `docs/DEPENDENCY_EXCEPTIONS.md` (WBS-909); signing and
 provenance remain open under TD-REL-02/ADR-010 (WBS-906/907).
-
