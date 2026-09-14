@@ -8,7 +8,7 @@ use crate::{
     get_default_vault_path, CredentialType, DatabaseError, LifecycleSource, PasswordManagerError,
     Result, VaultManager,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -24,11 +24,17 @@ pub enum VaultState {
 
 /// Daemon vault manager with auto-lock functionality
 pub struct DaemonVault {
-    vault: Arc<Mutex<Option<VaultManager>>>,
+    /// `Arc`-wrapped so service dispatch can hand a `'static` manager to
+    /// the blocking pool (WBS-501) while the auto-lock task swaps `None`
+    /// in on lock.
+    vault: Arc<Mutex<Option<Arc<VaultManager>>>>,
     state: Arc<SyncMutex<VaultState>>,
     last_activity: Arc<SyncMutex<Instant>>,
     vault_path: PathBuf,
     inactivity_timeout: Duration,
+    /// WBS-513 / ADR-004 rev 5: ONE Argon2id derivation in flight per vault
+    /// — parallel wrong-key attempts cannot multiply 256 MB allocations.
+    kdf_gate: Arc<tokio::sync::Semaphore>,
 }
 
 // `normalize_host` and `domains_match` moved to `crate::domain` (WBS-306):
@@ -41,16 +47,15 @@ fn usernames_match(lhs: &str, rhs: &str) -> bool {
 }
 
 impl DaemonVault {
-    /// Create a new daemon vault manager
+    /// Create a new daemon vault manager.
+    ///
+    /// The path does NOT have to exist yet: when no vault is on disk the
+    /// daemon starts in maintenance mode (WBS-501/503) and the missing file
+    /// is only hit by [`VaultManager::open`] at unlock time, which fails
+    /// closed with `NotFound`. (The old construction-time refusal is the
+    /// daemon binary's no-vault branch, now a maintenance-mode entry.)
     pub fn new(vault_path: Option<PathBuf>, inactivity_timeout_sec: u64) -> Result<Self> {
         let vault_path = vault_path.unwrap_or_else(get_default_vault_path);
-
-        if !vault_path.exists() {
-            return Err(PasswordManagerError::NotFound(format!(
-                "No vault found at {:?}",
-                vault_path
-            )));
-        }
 
         Ok(Self {
             vault: Arc::new(Mutex::new(None)),
@@ -58,17 +63,53 @@ impl DaemonVault {
             last_activity: Arc::new(SyncMutex::new(Instant::now())),
             vault_path,
             inactivity_timeout: Duration::from_secs(inactivity_timeout_sec),
+            kdf_gate: Arc::new(tokio::sync::Semaphore::new(1)),
         })
+    }
+
+    /// Gate for KDF-heavy operations (unlock/create): one Argon2id at a
+    /// time per vault (ADR-004 rev 5, WBS-513).
+    pub async fn kdf_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.kdf_gate
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("kdf gate semaphore is never closed")
+    }
+
+    /// The vault path this daemon state is bound to.
+    pub fn vault_path(&self) -> &Path {
+        &self.vault_path
+    }
+
+    /// Snapshot of the unlocked manager, if any (service dispatch hands
+    /// this to the blocking pool). `None` while locked.
+    pub async fn manager(&self) -> Option<Arc<VaultManager>> {
+        self.vault.lock().await.clone()
     }
 
     /// Unlock the vault with master password
     pub async fn unlock(&self, master_password: &[u8]) -> Result<()> {
-        let vault = VaultManager::open(&self.vault_path, master_password).map_err(|e| {
-            PasswordManagerError::from(DatabaseError::Other(format!(
-                "Failed to unlock vault: {}",
-                e
-            )))
-        })?;
+        // WBS-513: Argon2id runs on the BLOCKING pool (never the async
+        // executor) with the per-vault KDF gate held — parallel wrong-key
+        // attempts cannot multiply the 256 MB allocation (stage-6 F1).
+        let _permit = self.kdf_permit().await;
+        let vault_path = self.vault_path.clone();
+        let password = master_password.to_vec();
+        let vault = tokio::task::spawn_blocking(move || VaultManager::open(&vault_path, &password))
+            .await
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Other(format!(
+                    "unlock task failed: {}",
+                    e
+                )))
+            })?
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::Other(format!(
+                    "Failed to unlock vault: {}",
+                    e
+                )))
+            })?;
 
         self.unlock_with_manager(vault).await;
         Ok(())
@@ -76,7 +117,7 @@ impl DaemonVault {
 
     /// Unlock the daemon with an already opened vault manager.
     pub async fn unlock_with_manager(&self, vault: VaultManager) {
-        *self.vault.lock().await = Some(vault);
+        *self.vault.lock().await = Some(Arc::new(vault));
         *self.state.lock().unwrap() = VaultState::Unlocked;
         *self.last_activity.lock().unwrap() = Instant::now();
 
@@ -88,13 +129,27 @@ impl DaemonVault {
 
     /// Unlock the vault with biometric authentication.
     pub async fn unlock_with_biometric(&self, prompt_reason: &str) -> Result<()> {
-        let vault =
-            VaultManager::open_with_biometric(&self.vault_path, prompt_reason).map_err(|e| {
-                PasswordManagerError::from(DatabaseError::Other(format!(
-                    "Failed biometric unlock: {}",
-                    e
-                )))
-            })?;
+        // WBS-513: same blocking-pool + KDF-gate discipline as password
+        // unlock (stage-6 review F1).
+        let _permit = self.kdf_permit().await;
+        let vault_path = self.vault_path.clone();
+        let reason = prompt_reason.to_string();
+        let vault = tokio::task::spawn_blocking(move || {
+            VaultManager::open_with_biometric(&vault_path, &reason)
+        })
+        .await
+        .map_err(|e| {
+            PasswordManagerError::from(DatabaseError::Other(format!(
+                "biometric unlock task failed: {}",
+                e
+            )))
+        })?
+        .map_err(|e| {
+            PasswordManagerError::from(DatabaseError::Other(format!(
+                "Failed biometric unlock: {}",
+                e
+            )))
+        })?;
 
         self.unlock_with_manager(vault).await;
         Ok(())
@@ -121,6 +176,23 @@ impl DaemonVault {
     /// for the matched rows). Falls back to a full entry scan when no
     /// domain mappings exist (e.g. entries created before sync was enabled).
     pub async fn get_credential(&self, domain: &str) -> Result<Option<CredentialResponse>> {
+        self.get_credential_for_username(domain, None).await
+    }
+
+    /// Credential delivery optionally narrowed to ONE exact username
+    /// (case-insensitive) — the disambiguator for multi-credential sites
+    /// (WBS-712 popup "Pass", WBS-715 chooser). The domain match semantics
+    /// are unchanged; the username filter applies AFTER the domain match.
+    pub async fn get_credential_for_username(
+        &self,
+        domain: &str,
+        username: Option<&str>,
+    ) -> Result<Option<CredentialResponse>> {
+        let username_matches = |candidate: &str| match username {
+            None => true,
+            Some(want) => want.trim().eq_ignore_ascii_case(candidate.trim()),
+        };
+
         let vault_guard = self.vault.lock().await;
         let vault = match vault_guard.as_ref() {
             Some(v) => v,
@@ -131,10 +203,9 @@ impl DaemonVault {
         // Fast path: indexed lookup via domain_mappings
         if let Some(host) = normalize_host(domain) {
             let indexed = vault.find_entries_by_domain(&host)?;
-            if let Some(entry) = indexed
-                .into_iter()
-                .find(|entry| entry.credential_type.is_retrievable_secret())
-            {
+            if let Some(entry) = indexed.into_iter().find(|entry| {
+                entry.credential_type.is_retrievable_secret() && username_matches(&entry.username)
+            }) {
                 return Ok(Some(CredentialResponse {
                     username: entry.username,
                     password: entry.password.as_str().to_string(),
@@ -151,7 +222,7 @@ impl DaemonVault {
             }
             if let Ok(entry) = vault.get_entry(summary.entry_id) {
                 if let Some(ref url) = entry.url {
-                    if domains_match(domain, url) {
+                    if domains_match(domain, url) && username_matches(&entry.username) {
                         return Ok(Some(CredentialResponse {
                             username: entry.username,
                             password: entry.password.as_str().to_string(),
@@ -170,6 +241,23 @@ impl DaemonVault {
     /// Tries an indexed lookup via `domain_mappings` first, then falls back
     /// to a full entry scan.
     pub async fn get_totp_code(&self, domain: &str) -> Result<Option<TotpCodeResponse>> {
+        self.get_totp_code_for_username(domain, None).await
+    }
+
+    /// TOTP delivery optionally narrowed to ONE exact username
+    /// (case-insensitive) — the account bound to a password fill (WBS-715
+    /// review fix F4): without it, the first TOTP-bearing entry for the
+    /// domain would be delivered regardless of the picked account.
+    pub async fn get_totp_code_for_username(
+        &self,
+        domain: &str,
+        username: Option<&str>,
+    ) -> Result<Option<TotpCodeResponse>> {
+        let username_matches = |candidate: &str| match username {
+            None => true,
+            Some(want) => want.trim().eq_ignore_ascii_case(candidate.trim()),
+        };
+
         let vault_guard = self.vault.lock().await;
         let vault = match vault_guard.as_ref() {
             Some(v) => v,
@@ -181,6 +269,9 @@ impl DaemonVault {
         if let Some(host) = normalize_host(domain) {
             let indexed = vault.find_entries_by_domain(&host)?;
             for entry in &indexed {
+                if !username_matches(&entry.username) {
+                    continue;
+                }
                 if let Some(entry_id) = entry.entry_id {
                     match vault.generate_totp_code(entry_id) {
                         Ok(code) => {
@@ -467,6 +558,7 @@ impl DaemonVault {
                 relay_url: None,
                 last_sync_at: None,
                 pending_changes: 0,
+                conflict_count: 0,
             })
         }
     }
@@ -479,6 +571,18 @@ impl DaemonVault {
             .as_ref()
             .ok_or(PasswordManagerError::VaultLocked)?;
         vault.sync_now().await
+    }
+
+    /// Claim the AUTHORITATIVE migration at the relay (WBS-624); returns the
+    /// freshly minted relay vault id. Requires the vault unlocked (identity
+    /// + relay URL come from the live vault).
+    #[cfg(feature = "sync")]
+    pub async fn claim_sync_migration(&self) -> Result<uuid::Uuid> {
+        let vault_guard = self.vault.lock().await;
+        let vault = vault_guard
+            .as_ref()
+            .ok_or(PasswordManagerError::VaultLocked)?;
+        vault.claim_sync_migration().await
     }
 
     /// Record activity (resets the auto-lock timer)

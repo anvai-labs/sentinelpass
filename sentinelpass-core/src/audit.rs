@@ -240,6 +240,27 @@ pub enum AuditEventType {
         count: usize,
     },
 
+    /// A portable authenticated backup bundle was created (WBS-416 /
+    /// ADR-008). The context carries the bundle's random `backup_id` —
+    /// the audit trail's opaque reference; no vault content is recorded.
+    BackupCreated,
+    /// A bundle restore REPLACED the live vault (WBS-417 / ADR-008) —
+    /// severity 5, the vault-takeover class of event. `epoch_rewound`
+    /// records the ADR-004 rev 4 supervised override (sidecar re-baselined
+    /// to a state the guard would refuse); `sync_disabled` records that
+    /// the restored state requires re-pairing.
+    VaultRestored {
+        from_epoch: Option<i64>,
+        to_epoch: i64,
+        epoch_rewound: bool,
+        sync_disabled: bool,
+    },
+    /// A restore was REFUSED before any mutation, or failed after it
+    /// (context distinguishes; the retained pre-restore snapshot path is
+    /// named in the failure case). Severity 5: every refusal on this path
+    /// is either a tamper signal or a serious operational failure.
+    VaultRestoreRefused,
+
     /// Registry operations (ADR-001). Identifier fields are opaqued at
     /// record time (WBS-414); context strings stay free of raw ids.
     RegistryEntityCreated {
@@ -1231,7 +1252,9 @@ impl AuditLogger {
             | AuditEventType::DataExported { .. }
             | AuditEventType::EpochHighWaterRebased { refused: true }
             | AuditEventType::SlotRegistryIntegrityRefused
-            | AuditEventType::RecoveryPerformed { .. } => 5,
+            | AuditEventType::RecoveryPerformed { .. }
+            | AuditEventType::VaultRestored { .. }
+            | AuditEventType::VaultRestoreRefused => 5,
 
             // Bulk re-encryption sweep (WBS-404): significant but planned.
             AuditEventType::V2BlobMigration => 3,
@@ -1264,7 +1287,8 @@ impl AuditLogger {
             | AuditEventType::ExternalSecretAccess { success: false, .. }
             | AuditEventType::ExternalSecretWrite { success: false, .. }
             | AuditEventType::MasterPasswordChanged { success: false, .. }
-            | AuditEventType::BiometricUnlockRequested { success: false } => 2,
+            | AuditEventType::BiometricUnlockRequested { success: false }
+            | AuditEventType::BackupCreated => 2,
 
             // Low severity (1)
             AuditEventType::CredentialsListed { .. }

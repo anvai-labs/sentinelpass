@@ -22,49 +22,52 @@ pub fn handle_setup(vault_path: PathBuf) -> Result<()> {
         );
     }
 
-    let master_password = crate::prompt_master_password(false)?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+    // WBS-503: writing a key slot is exclusive offline maintenance.
+    crate::with_maintenance_lock(&vault_path, || {
+        let master_password = crate::prompt_master_password(false)?;
+        let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
 
-    let key = RecoveryKey::generate()?;
-    let display = key.to_display_string();
+        let key = RecoveryKey::generate()?;
+        let display = key.to_display_string();
 
-    println!("Recovery key (shown ONCE — store it somewhere safe, e.g. a printed");
-    println!("copy or a separate password manager):");
-    println!();
-    println!("    {}", *display);
-    println!();
-    println!("This key cannot be recovered or regenerated. If it is lost AND your");
-    println!("master password is lost, the vault is permanently unreadable.");
-    println!();
+        println!("Recovery key (shown ONCE — store it somewhere safe, e.g. a printed");
+        println!("copy or a separate password manager):");
+        println!();
+        println!("    {}", *display);
+        println!();
+        println!("This key cannot be recovered or regenerated. If it is lost AND your");
+        println!("master password is lost, the vault is permanently unreadable.");
+        println!();
 
-    // Verified re-entry: loop until the user re-enters a checksum-valid key
-    // that decodes to the SAME bytes (identity check, not just checksum).
-    // No-echo input like every other secret in this CLI (rpassword) — the
-    // key must not land in terminal scrollback.
-    loop {
-        let entry = rpassword::prompt_password("Re-enter the recovery key to confirm: ")
-            .context("reading recovery key confirmation")?;
-        let entry = entry.trim();
+        // Verified re-entry: loop until the user re-enters a checksum-valid key
+        // that decodes to the SAME bytes (identity check, not just checksum).
+        // No-echo input like every other secret in this CLI (rpassword) — the
+        // key must not land in terminal scrollback.
+        loop {
+            let entry = rpassword::prompt_password("Re-enter the recovery key to confirm: ")
+                .context("reading recovery key confirmation")?;
+            let entry = entry.trim();
 
-        use subtle::ConstantTimeEq;
-        match parse_recovery_key(entry) {
-            Ok(retyped) if bool::from(retyped.as_bytes().ct_eq(key.as_bytes())) => break,
-            Ok(_) => {
-                println!(
-                    "That is a VALID key, but not the one shown. Try again (or Ctrl-C to abort)."
-                );
-            }
-            Err(e) => {
-                println!("Could not parse that key: {e}");
-                println!("Check each character against what was shown; dashes optional.");
+            use subtle::ConstantTimeEq;
+            match parse_recovery_key(entry) {
+                Ok(retyped) if bool::from(retyped.as_bytes().ct_eq(key.as_bytes())) => break,
+                Ok(_) => {
+                    println!(
+                        "That is a VALID key, but not the one shown. Try again (or Ctrl-C to abort)."
+                    );
+                }
+                Err(e) => {
+                    println!("Could not parse that key: {e}");
+                    println!("Check each character against what was shown; dashes optional.");
+                }
             }
         }
-    }
 
-    vault.create_recovery_slot(&key)?;
-    println!("Recovery slot created and verified.");
-    println!("Vault remains fully usable; the key works even if the master password is lost.");
-    Ok(())
+        vault.create_recovery_slot(&key)?;
+        println!("Recovery slot created and verified.");
+        println!("Vault remains fully usable; the key works even if the master password is lost.");
+        Ok(())
+    })
 }
 
 /// `sentinelpass recovery recover`: regain access WITHOUT the old master
@@ -82,19 +85,24 @@ pub fn handle_recover(vault_path: PathBuf) -> Result<()> {
     let key = parse_recovery_key(entry.trim())
         .context("that recovery key does not parse — check the characters (dashes optional)")?;
 
-    let new_password = crate::prompt_master_password(true)?;
-    // Zeroize-on-drop via the prompt's own handling; recover_access applies
-    // its own length policy and stages/verifies the new wrap before commit.
-    VaultManager::recover_access(&vault_path, &key, new_password.as_bytes())?;
+    // WBS-503: recovery revokes every slot and advances the epoch — an
+    // exclusive offline operation. A live daemon must not own the vault
+    // while its authority is being replaced.
+    crate::with_maintenance_lock(&vault_path, || {
+        let new_password = crate::prompt_master_password(true)?;
+        // Zeroize-on-drop via the prompt's own handling; recover_access applies
+        // its own length policy and stages/verifies the new wrap before commit.
+        VaultManager::recover_access(&vault_path, &key, new_password.as_bytes())?;
 
-    println!("Access recovered: a new master password is active and all previous");
-    println!("unlock slots were revoked. If you use biometric unlock or sync,");
-    println!("re-enable them with the new password.");
-    println!();
-    println!("IMPORTANT: the recovery slot was revoked with everything else — run");
-    println!("`sentinelpass recovery setup` now to create a new recovery key, or the");
-    println!("next lost password is unrecoverable.");
-    Ok(())
+        println!("Access recovered: a new master password is active and all previous");
+        println!("unlock slots were revoked. If you use biometric unlock or sync,");
+        println!("re-enable them with the new password.");
+        println!();
+        println!("IMPORTANT: the recovery slot was revoked with everything else — run");
+        println!("`sentinelpass recovery setup` now to create a new recovery key, or the");
+        println!("next lost password is unrecoverable.");
+        Ok(())
+    })
 }
 
 /// `sentinelpass recovery status`: whether a usable recovery slot exists

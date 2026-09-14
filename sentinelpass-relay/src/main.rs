@@ -3,19 +3,12 @@
 //! A self-hostable relay for E2E encrypted vault sync. The relay stores
 //! only opaque ciphertexts and device public keys -- it never possesses
 //! encryption keys or plaintext data.
-
-mod app_state;
-mod auth;
-mod cleanup;
-mod config;
-mod error;
-mod handlers;
-mod pairing_security;
-mod rate_limit;
-mod server;
-mod storage;
+//!
+//! The module tree lives in the `sentinelpass_relay` library (WBS-903);
+//! this binary is configuration + startup only.
 
 use clap::Parser;
+use sentinelpass_relay::{app_state, cleanup, config, server, storage};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -66,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.tombstone_retention_days,
         cfg.nonce_window_secs,
         (cfg.pairing_ttl_secs + cfg.pairing_fetch_backoff_max_secs) as i64,
+        cfg.mutation_result_ttl_secs as i64,
+        cfg.max_mutation_results_per_device,
     );
 
     let app_state = app_state::RelayAppState::new(storage, cfg.clone());

@@ -765,6 +765,12 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   migration/compat tests incl. the Windows directory-refusal regression.
 - **WBS-408 — Application services / unit-of-work boundary.** SR-DATA-001, TD-ROB-02.
   Deps — may start after ADR-007 direction. Est 4d.
+  **Status:** Done (2026-09-09) — `sentinelpass-protocol/src/service.rs`: `VaultOp`/
+  `VaultOpResult`/`ServiceError` (stable codes) + serde-defaulted wire DTOs;
+  `IpcMessage::ServiceCall`/`ServiceResult` + `IpcClient::call_service`;
+  `sentinelpass-core/src/daemon/service.rs`: `VaultApplicationService` trait +
+  `LiveVaultService` executor + wire-core conversions; redacting Debug on
+  secret-bearing wire types; review round 1 findings fixed.
 - **WBS-409 — Explicit local vs remote write paths (remove trigger echo).** TD-ROB-02.
   Tests: N remote apply cannot re-mark pending. Est 3d.
   **Status:** Done (2026-09-08, write-path PR) — schema v9: `create_triggers` no
@@ -826,38 +832,140 @@ Gate: WBS-300 core types + ADR-008 accepted. **Owner** CM.
   TD-ROB-12, ADR-008. Bundle carries vault UUID + epoch but NOT the high-water
   sidecar (ADR-004 rev 4: restore re-baselines via TOFU-warning or override).
   Tests: N live-file copy rejected; bundle tamper fails. Est 4d.
+  **Status:** Done (2026-09-08) — `vault/backup_ops.rs`: `VACUUM INTO` snapshot
+  under the db lock, SPBACKUP bundle (format registered in
+  docs/DURABLE_WIRE_FORMATS.md §6) with HKDF-over-DEK manifest MAC (registry
+  precedent), digest+identity+slot-inventory binding, usable-slot-only manifest
+  inventory (bounded), no-plaintext-entry-content, atomic 0600 bundle write,
+  CLI `backup create`. Negatives: locked/in-memory refusal, overwrite+symlink
+  output refusal, snapshot-byte/manifest-field/cross-bundle-splice tamper,
+  truncation, trailing bytes, hostile lengths pre-allocation, unknown/dup
+  keys, unknown version (typed), wrong password, raw live-file copy rejected,
+  depth bomb.
 - **WBS-417 — Dry-run validation + atomic verified restore.** SR-DATA-005.
   Restoring an older-epoch bundle on a machine with a newer high-water requires
   reauthentication + acknowledgment, re-baselines the sidecar, and audit-logs
   (ADR-004 rev 4). Tests: N interrupted restore leaves prior state complete;
   restore-older-epoch override flow + abuse negative. Est 3d.
+  **Status:** Done (2026-09-08) — `backup_ops::restore_bundle` (static,
+  path-based): MAC-first authenticity → target classification + gates
+  (allow_replace / allow_epoch_rewind / disable_sync flags; live-sync
+  refusal per ADR-008) → full staged validation (identity, slot inventory,
+  schema-migration path, registry MAC, WBS-405 full decrypt) → sync-lineage
+  neutralization + biometric-ref clearing on the staged copy → single-rename
+  swap with checkpoint-then-remove `-wal`/`-shm` → epoch sidecar re-baseline
+  as the sequenced second step (TOFU / forward / acknowledged supervised
+  override, all audited) → final functional `open()` → only then is the
+  retained `<vault>.pre-restore` snapshot replaced (exactly one, replaced
+  on the next restore; preserved untouched on any post-swap failure).
+  CLI `backup verify --deep` exposes the dry-run; `backup restore` carries
+  the three acknowledgment flags. Negatives: older-epoch + equal-epoch-
+  different-material restores refused without the ack; live-sync restore
+  refused without disable-sync; replace refusal leaves live state complete;
+  tampered bundle + wrong password refuse pre-mutation with live state
+  complete; pre-restore snapshot retention/replacement verified.
 - **WBS-418 — Crash/fault injection harness (migration/CRUD/backup/restore).**
   SR-DATA-001, TV-005. Est 4d. Gate for the phase: fault at any step → complete-old or
   complete-new, never partial.
+  **Status:** Done for the backup/restore scope (2026-09-08; migration/CRUD sweeps
+  already landed with #121). Restore: staged-write authorizer sweep (fail_at =
+  0..N over the staged connection's validation + sync-neutralization statements —
+  every denial leaves the live vault complete-old, clean run proves complete-new,
+  with a non-vacuity guard) plus swap-phase interruption tests (abort after the
+  pre-restore snapshot / sidecar removal / swap / re-baseline: pre-swap aborts
+  leave the prior state complete with no litter; a post-swap abort leaves the
+  documented refused-open rollback state with the safety net preserved and a
+  re-run completing it). Backup: failure injections prove no partial output and
+  no staging litter. SR-DATA-005 fixture acceptance: hand-sealed bundles of the
+  v6/v7/v8 released schemas restore through the migration ladder and fully
+  decrypt (v1–v5 have no durable vault identity, so no manifest can bind them —
+  inherent, not a gap).
 
 ## 6. Phase 3 — daemon authority & IPC (WBS-500, release 0.10)
 
 Gate: ADR-007 accepted + WBS-408 contracts. **Owner** CM.
 
 - **WBS-501 — Daemon sole DEK owner/writer.** SR-IPC-004, TD-ROB-13. Est 4d.
+  **Status:** Done (2026-09-09) — lifetime advisory lock `<vault>.maint-lock`
+  (0600/0700, File::try_lock, never unlinked) with coexistence refusal
+  (MaintenanceLockHeld, non-zero exit); no-vault startup is a maintenance
+  mode serving only status/bootstrap (`VaultCreate` on the blocking pool,
+  audited, transitions to live); full `ServiceCall` dispatch. Tests: lock
+  mutual exclusion, bootstrap e2e, live refusal negatives.
 - **WBS-502 — Desktop+CLI CRUD via daemon services.** SR-IPC-004, TD-ROB-13, deferred
   TD-#10. Est 4d.
+  **Status:** Done (2026-09-09) — every UI/CLI vault command routes through
+  `VaultOp` (CLI backend: daemon default, FLAGGED
+  `SENTINELPASS_ALLOW_DIRECT_VAULT=1` compat lock-guarded + announced; custom
+  `--vault` never daemon-served; UI `service_call` same ops, Tauri command
+  signatures unchanged). Dual-writer ratchet test pins the direct-open
+  allowlist to the offline-maintenance set. Residual: compat env removed at
+  1.0 (TD-ROB-13 Partial until then).
 - **WBS-503 — Exclusive offline maintenance mode.** SR-IPC-004. Est 2d.
+  **Status:** Done (2026-09-09) — `with_maintenance_lock` wired into init,
+  passwd, backup create/restore, recovery setup/recover, sync
+  pair-start/pair-join; refuses while held (typed error names owner+lock);
+  audit ownership during maintenance rides the multi-process-append-safe
+  WBS-415 chain.
 - **WBS-504 — Scoped capabilities (audience/op/resource/expiry/nonce).** SR-IPC-003,
   TD-SEC-06. Est 4d.
+  **Status:** Done for the browser/native-host audience (2026-09-09) —
+  hashed-at-rest store (0600), constant-time verify, expiry + revocation
+  (restart does not resurrect), fail-closed on unreadable store; negative
+  suite (wrong audience/secret/expired/revoked) unit + e2e. General-purpose
+  grant-minting CLI surface deferred with the 1.0 protocol hardening.
 - **WBS-505 — Native-host installation capability.** SR-IPC-003. Tests: N general
   client claiming NativeHost denied. Est 2d.
+  **Status:** Done (2026-09-09) — daemon provisions `native_host.capability`
+  (0600) on start; host presents it on every envelope; browser-surface gate
+  verifies audience `native-host`; e2e negative (claim without material
+  denied, with material served, wrong material denied); legacy windows are
+  explicit announced env opt-outs removed in 1.0. Honest scope sentence per
+  ADR-003 rev 2 in `capabilities.rs` + SECURITY_ARCHITECTURE §10.
 - **WBS-506 — Retain least-privilege external grants.** (extends existing
   `external_secret_access.rs`). Est 1d.
+  **Status:** Done (2026-09-09) — external-secret grants (audience-bound,
+  token-enforced, write-gated, expiry) retained unchanged beside the
+  capability store; existing daemon tests cover grant/token
+  enforcement/rotation/revocation; documented in SECURITY_ARCHITECTURE
+  §10/§11.
 - **WBS-507 — Unix peer UID + owner-only socket.** SR-IPC-005. Est 1.5d.
+  **Status:** Done (2026-09-09) — default socket `$XDG_RUNTIME_DIR/SentinelPass/`
+  (config runtime fallback), /tmp fallback removed; bind creates 0700 or
+  refuses non-private/symlinked/not-owned dirs; clients refuse before
+  connect; SO_PEERCRED/getpeereid peer-UID check rejects foreign or
+  unverifiable peers; legacy tcp:// branch removed from server and client.
 - **WBS-508 — Windows SID ACL + remote rejection.** TD-ROB-15, SR-IPC-005. Est 2d.
+  **Status:** Done (2026-09-09) — raw CreateNamedPipeW with explicit
+  current-user SID DACL (GENERIC_READ|WRITE), FILE_FLAG_FIRST_PIPE_INSTANCE
+  on the first instance (squatting refusal), PIPE_REJECT_REMOTE_CLIENTS;
+  FFI type-checked against windows 0.61 for x86_64-pc-windows-msvc; runtime
+  verification rides the Windows CI matrix.
 - **WBS-509 — HKDF directional session keys.** TD-ROB-16. Est 2.5d.
+  **Status:** Done (2026-09-09) — `protocol::session`: HKDF-SHA256 over the
+  token with session-random salt derives directional c2s/s2c keys; clients
+  negotiate SessionHello/SessionAccept; `IpcConnection` negotiates on both
+  endpoints (legacy plaintext accepted only server-side, announced,
+  removed 1.0).
 - **WBS-510 — AAD-bound session context (proto/direction/type/counter).** TD-ROB-16.
   Est 2d.
+  **Status:** Done (2026-09-09) — AAD binds SPIS magic + protocol version +
+  sender direction + counter; reflection and cross-direction replay fail
+  authentication (tested).
 - **WBS-511 — Replay protection, frame bounds, deadlines.** TD-ROB-14, SR-IPC-005.
   Est 3d.
+  **Status:** Done (2026-09-09) — strictly-increasing per-direction counters
+  (duplicates/reorder refused pre-delivery); 64KiB frame bounds unchanged +
+  sealed-frame bound check; 30s deadline bounds every frame read/write
+  (negotiation and per-frame).
 - **WBS-512 — Bounded concurrent clients.** TD-ROB-14. Est 2d.
+  **Status:** Done (2026-09-09) — one bounded task per connection gated by a
+  16-client semaphore; a stalled client no longer wedges others (negative
+  test proves a second client completes during a stall).
 - **WBS-513 — Blocking pool for Argon2/IO.** TD-ROB-14. Est 1.5d.
+  **Status:** Done (2026-09-09) — all service ops execute on
+  `spawn_blocking`; KDF-heavy paths (unlock, bootstrap VaultCreate) hold a
+  per-vault 1-permit gate (ADR-004 rev 5: one Argon2id per vault).
 - **WBS-514 — Remove lock-poisoning unwraps.** deferred TD-#9. Est 1.5d.
 - **WBS-515 — Protocol upgrade/credential rotation path.** Est 2d.
 - **Phase negative suite (gate):** general-client-claims-NativeHost; originless;
@@ -870,28 +978,180 @@ Gate: ADR-006 + WBS-300/400. **Owner** CM (client) + SL (relay). May overlap WBS
 after 408/409 stabilize.
 
 - **WBS-601 — v2 mutation schema.** SR-SYNC-004. Est 3d.
-- **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002, TD-ROB-01. Est 2d.
-- **WBS-603 — Idempotency + original-result replay.** SR-SYNC-001, TD-ROB-05. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `core/src/sync/v2.rs`:
+  `MutationV2` (vault/epoch, object UUID/type, expected+resulting versions,
+  origin device, idempotency key, authenticated tombstone state, payload,
+  DEK-derived metadata MAC over canonical shared metadata — distinct from
+  the ADR-005 per-device storage envelope, identity-domain split
+  documented; stage-1 computes/transports/stores the MAC, ENFORCEMENT is
+  WBS-612/613); per-field MAC-tamper negatives.
+- **WBS-602 — Distinct sequence/version/cursor types.** SR-SYNC-002,
+  TD-ROB-01. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — `DeviceSequence` /
+  `ObjectVersion` / `ServerCursor` newtypes with checked arithmetic, no
+  cross-`From`, distinct serde fields; cursor lineage comparisons.
+- **WBS-603 — Idempotency + original-result replay.** SR-SYNC-001,
+  TD-ROB-05. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — relay `mutation_results`
+  (TTL `mutation_result_ttl_secs` + per-device cap
+  `max_mutation_results_per_device` in cleanup); duplicates replay the
+  ORIGINAL durable result (applied AND rejected); post-expiry duplicates
+  re-evaluated by CAS and REJECTED, never replayed; deterministic
+  content-derived mutation ids survive re-collection with fresh GCM
+  nonces; one SQLite transaction per push (results + object state + log +
+  counters). Negatives: `duplicate_push_returns_original_rejection`,
+  `expired_duplicate_is_re_evaluated_by_cas_and_rejected`,
+  `same_version_overwrite_is_rejected_regardless_of_content`.
 - **WBS-604 — Per-object acknowledgements.** SR-SYNC-001. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 1) — schema v10
+  `sync_acked_version` on entries/ssh_keys/totp_secrets (migration seeds
+  synced=version, pending=0; fixtures extended); engine records each
+  object's own ack in the checkpoint transaction; relay per-mutation
+  results are the server-side durable ack.
 - **WBS-605 — Outbox removal only on specific ack.** TD-ROB-01. Est 1.5d.
+  **Status:** Done (2026-09-10, sync v2 stage 1, after adversarial review
+  round 1) — `outbox::apply_push_acks` honors ONLY an Applied ack matching
+  the version the client actually sent (mismatched acks are ignored —
+  hostile-relay hardening); Applied marks synced+acked in ONE transaction
+  with the cursor diagnostic. Conflicts reconcile without wedging: at-or-
+  beyond the attempt adopts the relay baseline (pull reconciles content),
+  behind it re-bases the row for a FRESH mutation id (review findings:
+  lost-response-then-edit and TTL-expiry wedges closed by
+  `conflict_behind_our_attempt_rebases_for_a_fresh_mutation`);
+  remote-apply arms record `sync_acked_version` so peer-sourced objects
+  are editable (`pull_then_edit_push_succeeds`). End-to-end over an
+  in-memory relay model serving its log:
+  `lost_push_response_retry_completes_without_wedge`,
+  `lost_response_then_edit_recovers`,
+  `conflict_rejection_converges_without_wedge`; fault-injection sweep
+  `apply_push_acks_fault_injection_is_all_or_nothing`. The #121
+  device_sequence wedge note in engine.rs is resolved (v2 framing counter
+  recorded, never gated). Two-alternative conflict PRESERVATION remains
+  WBS-611 (stage 1 adopts the relay state on superseding conflicts).
 - **WBS-606 — Relay atomic mutation/entry/sequence/ack.** SR-SYNC-003, TD-ROB-04. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 2) — `handlers/sync_v2.rs`:
+  one SQLite transaction per push request covers per-mutation result rows,
+  object state, the append-only log, the vault sequence counter, the epoch
+  high-water, and the device framing counter. Authorizer fault-injection
+  sweep (`push_v2_fault_injection_is_all_or_nothing`): denial at every
+  write → complete-old across ALL five stores; clean run proves
+  complete-new. (The handler was born transactional in stage 1; stage 2
+  added the evidence.)
 - **WBS-607 — Client atomic page/inbox/object/index/cursor.** TD-ROB-04. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 2) — schema v11
+  `sync_dead_letter` (hard-capped at 1,000, fail-closed at overflow); the
+  pull page folds applies, dispositions, and the cursor advance into ONE
+  transaction (`pull_page_fault_injection_is_all_or_nothing`); order-
+  dependent applies (TOTP parent later in the page) get one bounded
+  requeue pass (`deferred_totp_parent_resolves_within_one_run` — the
+  pre-v2 permanent silent loss is gone); unappliable mutations are
+  dead-lettered with their server_sequence as the disposition key and the
+  cursor passes them only with a disposition recorded
+  (`unappliable_mutation_is_dead_lettered_and_page_advances`); cap
+  overflow rolls the page back and errors until purged
+  (`dead_letter_cap_fails_closed_until_purged`). Skip-and-advance is
+  removed from the pull path.
 - **WBS-608 — Remove remote-apply trigger echo.** TD-ROB-02 (sync half). Est 1.5d.
 - **WBS-609 — Nullable encrypted fields preserved.** TD-ROB-03 (sync half). Est 1d.
 - **WBS-610 — One bounded paginated path (normal+full).** TD-ROB-06. Est 3d.
 - **WBS-611 — Preserve concurrent alternatives; expose conflicts.** SR-SYNC-005,
   TD-UX-02. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 3) — schema v12
+  `sync_conflicts` (one durable alternative per object, DEK ciphertext
+  stored relay-shaped, re-sealed under the LOCAL identity at resolution);
+  pull-side guard records any mutation (tombstones included) hitting an
+  object with an UNSYNCED local edit (equal-or-greater version; stale
+  blobs keep the lineage skip) and marks `sync_state = 'conflict'`;
+  push-side conflicts mark conflicted instead of adopting; resolvers
+  keep-local (re-version above the peer + CAS re-base) and take-remote
+  (apply the alternative through the normal seal-under-local path); CLI
+  `sync conflict-list` / `conflict-resolve --object-id [--take-remote]`;
+  conflict count surfaced through `SyncStatus` and the daemon service
+  contract (`ServiceSyncStatus.conflicts`, serde default). Evidence:
+  `conflict_preserves_alternatives_and_resolves_keep_local`,
+  `conflict_take_remote_applies_the_alternative`,
+  `tombstone_vs_edit_conflict_is_preserved_and_resolvable`,
+  `take_remote_resurrects_a_locally_deleted_row`. After adversarial
+  review round 1: content applies are RESURRECTION-SAFE (clear the local
+  tombstone — delete-vs-edit races and take-remote resolution can no
+  longer silently no-op into an invisible row); resolutions are atomic
+  (pre-adjust + apply + record removal in ONE transaction — a failed
+  take-remote leaves the row conflicted with the record intact);
+  stale alternatives are purged when the row applies past them; the
+  conflict surface counts stored records OR conflicted rows (whichever
+  is larger) so transient record-less windows stay visible. The relay
+  same-version-rejection half landed with WBS-603 (stage 1).
 - **WBS-612 — Authenticate identity/type/origin/version/epoch/tombstone.** SR-SYNC-004,
   TD-SEC-02. Apply-side rule: pull never applies epoch/registry state below the
   local high-water sidecar — rejected as suspected rollback (ADR-004 rev 4). Est 4d.
+  **Status:** Done (2026-09-10, sync v2 stage 4) — every foreign pulled
+  mutation is authenticated BEFORE application: DEK-derived metadata MAC
+  verification (covering identity, type, versions, epoch, origin,
+  tombstone, payload hash — distinct identity-domain from the ADR-005
+  envelope) plus deterministic mutation-id recomputation; failures are
+  dead-lettered, never applied
+  (`relay_metadata_tamper_is_dead_lettered`). Apply-side epoch rule: a
+  mutation below the LOCAL vault epoch is dead-lettered
+  (`stale_epoch_mutation_is_dead_lettered_on_pull`).
 - **WBS-613 — Version/hash lineage + trusted high-water.** SR-SYNC-004. Est 3d.
+  **Status:** Done (2026-09-10, sync v2 stage 4) — schema v13
+  `sync_metadata.lineage_high_water` (TRUSTED max accepted vault-log
+  cursor; deliberately DISTINCT from the ADR-004 epoch sidecar): a pull
+  whose cursor moves below it is REFUSED fail-closed (relay log reset /
+  vault swap) — local state untouched, re-pairing is the remedy
+  (`lineage_rollback_is_refused_fail_closed`). Folded into the high-water
+  from BOTH the pull cursor and the push-response cursor. Follow-up
+  ticketed from stage-2 review: own-device log entries are skipped by
+  origin — a backup-restored device behind local version should apply
+  them (restore path already neutralizes sync state, ADR-008).
 - **WBS-614 — Device/epoch revocation everywhere.** TD-SEC-05. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stages 1+4) — revocation: the
+  Ed25519 auth middleware checks the device-revoked flag on EVERY request
+  (v1 and v2 alike); epoch: the relay rejects mutations below the vault's
+  forward-only epoch high-water (bounded jump), and the CLIENT dead-letters
+  pulled mutations below its LOCAL vault epoch (apply-side mirror of the
+  ADR-004 rotation revocation). Residual (documented): the relay-side
+  epoch high-water advances on client assertion — authenticated epoch
+  publication (epoch-bound MAC context) remains a later-stage option.
 - **WBS-615 — High-entropy QR bootstrap / reviewed PAKE.** SR-SYNC-006, TD-SEC-07,
   SR-RELAY-002. Est 5d.
+  **Status:** Done (2026-09-10, sync v2 stage 5) — the reviewed CHOICE is
+  the HMAC-challenge protocol (documented per ADR-006's allowance; a PAKE
+  was judged heavy for the coordinated-relay deployment model): pairing
+  uses a 256-bit CSPRNG secret S as the sole root — bootstrap encrypted
+  under HKDF(S); the relay stores ONLY Argon2id(S) + ciphertext, gates
+  retrieval on knowledge of S (POST body, one-use, TTL, exponential
+  attempt-limit backoff); a 6-digit TRANSCRIPT derived from S is shown on
+  both devices purely for human comparison and never encrypts anything.
+  v1 pairing endpoints remain for old clients until WBS-624 retirement.
+  Tests: 256-bit + roundtrip, short-numeric rejection, transcript
+  stability/divergence, bootstrap-id determinism, wrong-secret decryption
+  failure.
 - **WBS-616 — Pairing material in bodies; one-use; transcript-bound.** TD-NET-01. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 5) — pairing material moves
+  in POST bodies only (`/api/v2/pairing/bootstrap` upload — authenticated;
+  `/api/v2/pairing/bootstrap/retrieve` — public + attempt-limited);
+  retrieval is ONE-USE (consumed in the same transaction as the return
+  data) and short-lived (TTL); the transcript (6 digits from the secret,
+  shown on both devices) binds the human side; registration is bound to
+  the pairing via the registration proof, staged relay-side at successful
+  retrieval with a short window and consumed at device registration. The
+  pairing secret is PROMPTED at pair-join — never a command-line argument
+  (TD-NET-01's URL/CLI exposure gone).
 - **WBS-617 — TLS-only, safe redirects, no userinfo (full client rules).** SR-SYNC-007,
   TD-NET-02. Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 6) — `SyncClient` installs a
+  bounded redirect policy: max 3 hops, same scheme (TLS downgrade
+  refused), same host+port (cross-origin bounce refused), target
+  re-validated against the transport policy (`redirect_decision` free fn
+  pinned by cross-origin/downgrade/bound tests). TLS-only + no-userinfo
+  were enforced since 0.8.x (`validate_relay_url`).
 - **WBS-618 — Proxy-trust config for forwarded IPs.** TD-NET-03. Est 1.5d.
+  **Status:** Done (2026-09-10, sync v2 stage 6) — relay `trusted_proxies`
+  config (default EMPTY): X-Forwarded-For keys the rate limiter ONLY when
+  the direct peer is a configured trusted proxy; with the default, a
+  spoofed XFF cannot rotate rate-limit identities
+  (`forwarded_ip_trust_follows_configuration`).
 - **WBS-619 — Per-vault/device quotas + bounded limiter state.** TD-NET-04,
   SR-RELAY-001, FR-SYNC-001/003. Est 3d.
 - **WBS-620 — Non-blocking relay storage.** TD-NET-05. Est 3d.
@@ -900,6 +1160,20 @@ after 408/409 stabilize.
   Est 1d.
 - **WBS-623 — Production self-host profile docs.** FR-SYNC-004, OP-001/002. Est 1.5d.
 - **WBS-624 — v1 retirement + authoritative-device re-bootstrap.** Est 2d.
+  **Status:** Done (2026-09-10, sync v2 stage 7) — v1 routes mount ONLY
+  behind the retirement gate: `allow_v1` defaults false → every v1
+  sync/pairing endpoint responds 410 Gone with the re-pair remediation
+  (mixed v1/v2 forbidden, fail-closed both sides; clients refuse v1-era
+  configs via the protocol gate). Authoritative-device migration: relay
+  `POST /api/v2/migration/claim` mints a FRESH relay vault and records
+  ONE claim per origin (a second authoritative claim is refused —
+  `migration_claim_is_one_per_origin`); client
+  `migrate_sync_authoritative` resets every object's sync bookkeeping in
+  one transaction so the full local baseline re-uploads as fresh creates
+  against the empty v2 vault (CAS expects 0; "never upload from
+  pre-migration state" honored structurally); CLI
+  `sync migrate-authoritative` (confirm-gated). Old vault blobs persist
+  relay-side as the documented residual.
 - **Phase gate (tests):** loss/retry, duplicate/reorder, partial acceptance, concurrent
   edits, stale versions/devices/epochs, malicious relay metadata/tombstone/identity,
   crash between every persistence step, pagination boundaries, rate-limit/proxy/size/TLS
@@ -919,39 +1193,436 @@ Gate: WBS-500 (sync UI also needs 600). **Owner** DE.
 - **WBS-704 — Privacy cover before visibility loss.** TD-CLIENT-02. Est 2d.
 - **WBS-705 — Reauthentication for sensitive ops.** TD-UX-01 (op half). Est 2d.
 - **WBS-706 — Structured URL parsing; HTTP warn/refuse.** TD-CLIENT-06 (URL half). Est 1.5d.
+  **Status:** Done (2026-09-08, PR #126) — extension save paths use WHATWG
+  structured parsing (IDN→punycode, ports/userinfo/IPv6; unparseable values
+  refused, not stored raw); plain-HTTP saves warn with explicit consent on
+  all three save surfaces (25 test cases; ~60 adversarial inputs, zero
+  wrong-host results). Hard default-deny autofill remains WBS-711.
 - **WBS-707 — Minimize Tauri capabilities + CSP.** SR-CLIENT-002, TD-CLIENT-03. Est 2d.
+  **Status:** Done (2026-09-08, PR #126) — grep-evidence capability audit:
+  tauri-plugin-shell removed entirely (dependency, registration, config),
+  unused dialog/clipboard grants dropped, capabilities single-sourced in
+  default.json, CSP script-src 'self' with Tauri IPC origins; 18-case
+  negative gate test tripwires capability/CSP regressions in CI.
 - **WBS-708 — Remove production debug-unlock artifacts.** Est 1d.
   **Status:** Done (2026-09-07, PR #107) — debug-unlock paths removed from
   production wiring; no plaintext unlock shortcut remains (stream C verification
   + gate review).
 - **WBS-709 — Native expiring/sensitive clipboard.** Est 1.5d.
+  **Status:** Done (2026-09-08, PR #126) — secrets copy Rust-side (arboard)
+  with native sensitive markers (macOS ConcealedType, Windows
+  exclude-from-monitoring); expiry (30s, re-armed) clears only if the
+  clipboard still hashes the registered secret; vault-lock and app-exit
+  clear hooks; the clipboard-manager plugin and its IPC surface are
+  removed entirely. Known residual (documented): frontend-timed expiry is
+  throttled in hidden webviews — backend timer is the tracked follow-up.
 - **WBS-710 — Windows Hello-bound key release.** TD-CLIENT-04, SR-CLIENT (biometric
-  parity). Est 3d.
+  parity).
+  Est 3d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the Windows DEK wrap
+  for biometric unlock is now bound to a per-vault TPM/Hello
+  `KeyCredentialManager` key: enable creates the key (ReplaceExisting;
+  platform verifies Hello presence), draws a random 32-byte challenge,
+  signs it twice (the Hello prompt), REFUSES enable unless both signatures
+  are byte-identical (RSASSA-PKCS1-v1_5 determinism self-check — a
+  randomizing platform fails closed before anything is stored), seals the
+  DEK under `HKDF-SHA256(signature, ref-bound)`, and verifies a full
+  release round-trip before persisting. The stored keyring value is now a
+  NON-SECRET blob; release requires a FRESH Hello-gated signature over the
+  stored challenge (the sign prompt IS the authentication — no separate
+  UserConsentVerifier double-prompt), and the GCM tag authenticates the
+  derived wrap key, so a refused gesture, wrong key, cross-vault ref, or
+  tampered blob all fail closed (master-password fallback). Legacy
+  pre-710 base64-DEK enrollments keep working (verify-then-read) and are
+  upgraded by re-enabling. Chosen primitive is the platform's DOCUMENTED
+  surface: passport keys are sign-only (NCryptDecrypt is undocumented),
+  so the release gate is the signature itself. Evidence: platform-free
+  orchestration unit suite (10 cases: roundtrip, cross-ref, refused
+  gesture, wrong key, tampered blob, non-deterministic refusal,
+  unsupported refusal, legacy/version decode, KDF binding) + the WinRT
+  call surface type-checked for x86_64-pc-windows-msvc against
+  windows 0.61 (KeyCredentialManager/KeyCredential/CryptographicBuffer);
+  runtime Hello verification rides the Windows CI matrix like the rest
+  of the named-pipe FFI. Honest residual: determinism relies on
+  RSA-PKCS1-v1_5 (self-checked at every enable, so platform drift fails
+  enable, not unlock).
 - **WBS-711 — Default-deny HTTP autofill.** SR-CLIENT-003, SR-EXT-002, TD-CLIENT-05.
   Est 2d.
-- **WBS-712 — Optional/requested site permissions.** TD-CLIENT-05. Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the daemon's
+  browser-surface handlers (GetCredential, GetTotpCode, ListDomainCredentials)
+  now carry a `page_url` (the browser-provided sender URL, never a
+  content-script-claimed value) and a WHATWG origin gate: `https:` delivers,
+  bound to the parsed host (the claimed `domain` no longer drives the lookup);
+  plain `http:` is refused (`insecure-http`) — WBS-706's consent covered SAVE,
+  this covers AUTOFILL delivery; missing/unparseable/non-web URLs are refused
+  (`origin-unverified`) — fail-closed, and a valid capability does NOT bypass
+  the scheme gate. Denials carry a typed `denied_reason` to the extension
+  (distinct toast vs no-match). Negative evidence: 9-case daemon gate suite
+  incl. handler-level tests over a real unlocked vault (http denied with
+  capability present, missing-URL denied, delivery bound to URL host not the
+  claimed domain, TOTP+listing gated identically, locked-vault ordering) and
+  extension-side resolution tests (claimed URL ignored for content senders).
+  Allow-listing arrives with WBS-712's per-site permissions.
+- **WBS-712 — Optional/requested site permissions.** TD-CLIENT-05.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — two layers. (1) DAEMON
+  allow-list for the 711 denial: `site_permissions.json` (0600) next to the
+  capability store holds EXACT-host `allow_insecure` grants (normalized with
+  the vault's `normalize_host`; no suffix matching — a grant for
+  `example.com` covers neither `sub.example.com` nor `evil-example.com`);
+  Grant/Revoke/List IPC messages ride the same native-host capability gate
+  (non-browser senders refused, tested); a missing/unreadable store stays
+  deny. Extension popup settings gain a Site access section: browser origin
+  access enable/remove (`optional_host_permissions` + `scripting` replace the
+  blanket install-time `host_permissions`; Firefox `strict_min_version`
+  raised to 128 for MV3 optional host permissions) plus explicit
+  "Autofill over HTTP" allow/revoke per site — permission CHANGES are
+  popup-only by design (content-script requests refused in the background).
+  Tests: store unit suite (default-deny, exact-host isolation, revocation
+  durability, 0600 mode), handler-level grant→deliver/revoke→deny lifecycle
+  over a real vault, grant-requires-capability negative, 86-case vitest suite
+  green.
 - **WBS-713 — Validated site/frame/form/field binding.** SR-CLIENT-003, SR-EXT-002,
-  TD-CLIENT-06. Est 3d.
-- **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06. Est 2d.
-- **WBS-715 — Ambiguity chooser.** TD-CLIENT-06. Est 2d.
-- **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07. Est 2d.
-- **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08. Est 3d.
-- **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08. Est 1.5d.
+  TD-CLIENT-06.
+  Est 3d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — SITE binding: the
+  daemon delivers only to the scheme-validated host parsed from the
+  browser-provided URL (WBS-711). FRAME binding: cross-origin iframe
+  requests stay default-denied in the background
+  (validateSenderDomainContext) and the claimed domain must equal the
+  frame host. FORM/FIELD binding: the fill targets the REQUESTED field
+  (the one whose autofill button was clicked), verified still-connected +
+  fillable (login semantics via the field classifier), falling back to the
+  first visible fillable field — never the page-first querySelector — and
+  the username lookup is scoped to the same form. Pure decision logic in
+  shared modules (`field-semantics.ts`, `credential-choice.ts`) with unit
+  suites; artifacts byte-parity; typecheck + 105 vitest cases green.
+- **WBS-714 — autocomplete semantics + password-change handling.** TD-CLIENT-06.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — the page's own
+  `autocomplete` attribute is the primary field signal
+  (`username`/`email`/`current-password`/`new-password`/`one-time-code`;
+  text hints only break ties; `autocomplete="off"` is deliberately ignored
+  for password fields per browser convention). Autofill targets
+  current-password fields only — new-password fields are never silently
+  filled. Password-CHANGE pairs (existing filled current-password +
+  new-password) are recognized as a form class: the inline prompt reads
+  "Update Password?" / "Update", the notification text matches, and the
+  save carries `save_trigger: 'password_change'`. Text heuristics remain
+  only as a fallback for pages that declare nothing (and two un-attributed
+  password fields now classify as login, not guessed new-account). 13-case
+  pure suite for the classifier + form kinds.
+- **WBS-715 — Ambiguity chooser.** TD-CLIENT-06.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — autofill flow is now
+  list -> explicit choice -> fetch: `list_domain_credentials` (origin-bound
+  by 711) feeds a pure decision (zero -> "none" notice; one -> direct
+  fill; multiple -> an explicit chooser overlay listing usernames/titles
+  only, Esc/cancel closes, and the SECRET is requested only after the
+  user picks, via the exact-username filter shipped for the popup Pass
+  fix). A picked username that is not among the candidates never falls
+  back to first-match. Decision logic unit-tested
+  (`credential-choice.test.ts`); popup Pass uses the same disambiguator.
+- **WBS-716 — Minimize/scrub extension session secrets.** TD-CLIENT-07.
+  Est 2d.
+  **Status:** Done (2026-09-10, Phase 5 remainder) — full inventory
+  committed (`browser-extension/chrome/DEBUGGING.md` +
+  `docs/SECRET_LIFETIME_AUDIT.md` §N). Content scripts no longer touch
+  `chrome.storage.session` at all (pre-716 content-script writes were also
+  dead code under MV3's trusted-context default): submissions are captured
+  via `capture_pending_login` and consumed via a boolean-only
+  `resume_pending_login` — plaintext lives ONLY in the background worker,
+  TTL-stamped through a shared pure registry (`session-secrets.ts`: 30 s /
+  2 min / 10 min per payload class), swept by a `chrome.alarms` minute tick
+  (fail-closed: an unstamped secret entry sweeps as expired), purged on
+  vault lock together with a `scrub_secrets` broadcast that clears content
+  scripts' in-memory autofill context (also cleared on `pagehide`).
+  Evidence: registry unit suite (classification, TTL bounds, expiry,
+  fail-closed malformed stamps, sweep list); typecheck + vitest green;
+  artifacts rebuilt byte-parity. Adversarial-review round 1 fixes: the
+  background-driven inline prompt no longer ships the payload (incl. the
+  password) to the content script — it holds it under a TTL-stamped
+  one-time `pendingInlinePrompt:<id>` key and the prompt confirms by id
+  (`inline_save_confirm`); content-script save/notification/capture
+  payloads get their URLs overwritten with the browser sender URL
+  (provenance enforcement, not convention); the minute alarm now also
+  purges + scrubs when the vault was locked OUTSIDE the extension (daemon
+  auto-lock/CLI/UI have no push channel).
+- **WBS-717 — Shared Chrome/Firefox security source.** SR-CLIENT-004, TD-CLIENT-08.
+  Est 3d.
+  **Status:** Done (2026-09-10/11, Phase 5 remainder) — ONE pipeline and ONE
+  source set. `scripts/build-extension.mjs` compiles the shared TypeScript
+  sources once (repo-local tsc via `tsconfig.extension.json`; the content
+  script is esbuild-BUNDLED into a single classic IIFE — content scripts are
+  classic scripts, and the ES `import` syntax the previous artifacts carried
+  made injection fail silently; discovered by the 719 suite) and copies the
+  artifacts byte-identically into chrome/ and firefox/. The firefox/*.ts
+  copies are DELETED (single source; the stale pre-hardening copies were a
+  live re-introduction trap). Gate: `tests/web/extension-pipeline.test.ts`
+  asserts no per-target .ts sources, byte-parity of every artifact across
+  targets, and byte-exact reproduction through a fresh pipeline build.
+  Verified: the pipeline reproduces the previously checked-in artifacts
+  byte-for-byte (zero diff at introduction).
+- **WBS-718 — Manifest/native-host parity CI.** SR-CLIENT-004, TD-CLIENT-08.
+  Est 1.5d.
+  **Status:** Done (2026-09-11, Phase 5 remainder) —
+  `tests/web/manifest-parity.test.ts` runs with the unit suite (CI: test:ts):
+  chrome/firefox manifests must agree on version/name/permissions/host
+  permissions/content scripts; the Chrome stable ID is DERIVED from the
+  manifest key (SHA-256 → a-p) and must appear in install.sh, install.ps1,
+  and the Tauri registration; ONE firefox gecko ID must appear in the
+  manifest and all three native-host sources; the host name
+  `com.passwordmanager.host` must match across the extension source, the
+  manifest template, both installers, and the Tauri constant. The gate
+  found and this commit fixes two live drifts: the firefox manifest gecko
+  ID (`@sentinelpass.org`) did not match the ID every native-host source
+  allows (`@localhost` — Firefox native messaging was dead), and
+  install.ps1 defaulted `$ExtensionId` to empty (a default run wrote the
+  YOUR_EXTENSION_ID_HERE placeholder, forbidding Chrome).
 - **WBS-719 — Chromium/Firefox/daemon E2E suite.** TD-CLIENT-09, SR-CLIENT-003, TV-001.
   Est 4d.
+  **Status:** Done (2026-09-11, Phase 5 remainder) — REAL-backend E2E
+  (`browser-extension/e2e/tests/daemon-autofill.spec.ts` + harness): an
+  ISOLATED installation (temp HOME / XDG_RUNTIME_DIR — every path the
+  daemon, CLI, native host, and Chromium derive is confined to a temp dir)
+  with the REAL daemon (`--start-locked`, unlocked through the CLI), REAL
+  native host (manifest installed into the Playwright profile; stable
+  unpacked extension ID asserted), and real Chromium. Flows: HTTPS autofill
+  fills the bound field; HTTP default-deny shows the typed 711 toast; after
+  a host-driven exact-site grant (WBS-712; driven through the REAL host
+  stdio protocol because Chrome's optional-permission prompt is not
+  Playwright-automatable) the same page delivers through the explicit
+  chooser; the chooser (closed shadow root, trusted-input picks) fills the
+  picked account; a login submit is captured into background-held,
+  TTL-stamped session state; a registration submit's inline Save writes
+  through the daemon (verified via the CLI against the same vault); a
+  locked vault delivers nothing. Found + fixed by building this suite: the
+  content script never injected under ESM emit (classic-script bundling,
+  WBS-717), a top-level-const-after-bootstrap crash killed init on form
+  pages, the firefox gecko ID drift (WBS-718), popup-as-tab senders were
+  misclassified, and install.ps1's empty ExtensionId default. Firefox E2E
+  remains an honest gap (Playwright cannot load extensions in stock
+  Firefox) — documented; Firefox consumes the same byte-parity artifacts,
+  daemon gates, and unit suites. CI: extension-e2e.yml now builds the
+  daemon/host/CLI and runs this suite under xvfb.
 
 ## 9. Phase 6 — mobile (WBS-800, release 0.12 beta)
 
 Gate: ADR-009 + WBS-300/400 stable ABI/envelope. **Owner** ME.
 
-Shared (801–807): **WBS-801** generated C ABI (TD-MOB-09, SR-MOBILE-001) 4d;
-**802** JNI contract (TD-MOB-02) 2d; **803** ABI/feature negotiation 2d; **804**
-ownership + zeroizing destroy (TD-MOB-09) 2d; **805** FFI panic containment 1.5d;
-**806** lifecycle/invalid-handle tests 2d; **807** atomic update + placeholder removal
-(TD-MOB-03/04) 3d.
+Shared (801–807):
 
-Android: **810** JNI compile/type fixes (TD-MOB-01/02, TV-007) 2d; **811** all-ABI JNI
-CI (TD-MOB-01, TV-007) 2d; **812** Keystore-bound platform slot (TD-MOB-03,
+- **WBS-801** generated C ABI (TD-MOB-09, SR-MOBILE-001) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M1). `cbindgen.toml` include-list synced
+  to the real export surface (phantom `sp_entry_update` removed; sync/biometric
+  surface declared; snake_case args), generated header tracked and pinned by
+  `declared_abi_matches_ffi_surface` + `header_declares_every_export` tests;
+  android.yml/ios.yml integration jobs now regenerate + diff the header
+  (drift = red) and `clang -fsyntax-only` it.
+- **802** JNI contract (TD-MOB-02) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). One contract:
+  Kotlin `com.sentinelpass.VaultBridge` owns the declarations; Rust renamed to
+  `Java_com_sentinelpass_VaultBridge_*` (was `VaultManager_*` — unresolvable),
+  receiver typed as instance `JObject`, arity fixed (nativeGeneratePassword /
+  nativeCheckStrength now take the Kotlin-declared handle), wire formats fixed
+  (Entry/EntrySummary JNI wire DTOs matching the Kotlin models — the old
+  serde-pass-through dropped `id`; TOTP now returns `code,seconds`), Rust-side
+  undeclared placeholder natives removed (nativeBiometricSetKey,
+  nativeSyncGetStatus/CollectPending/ApplyEntries/PrepareDrive), dead
+  JNI_VAULT_REGISTRY pass-through deleted. Pinned by tests/jni_contract.rs
+  (name set + arity + type/return mapping, both directions, host-runnable).
+- **803** ABI/feature negotiation 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). `src/abi.rs` single source of
+  truth (`ABI_VERSION=1`, `MIN_SUPPORTED_ABI_VERSION=1`); C ABI gains
+  `sp_bridge_info` + `sp_bridge_negotiate` (fills `SPBridgeInfo` even on
+  refusal so consumers can report the mismatch) and `ErrorCode::AbiUnsupported
+  = -14`; JNI gains `nativeAbiVersion` with the Kotlin facade handshaking in
+  its init block (exact-match, fail-closed via `IllegalStateException`).
+  Feature flags fail closed: `FEATURE_PLATFORM_KEYSTORE` /
+  `FEATURE_RELAY_SYNC_V2` are declared vocabulary but never advertised until
+  WBS-812/821 and the mobile sync v2 wiring land (a prompt is not a
+  cryptographic authorization — ADR-009). Pinned by abi.rs + ffi.rs tests.
+- **804** ownership + zeroizing destroy (TD-MOB-09) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). Single proven ownership contract
+  documented at the FFI boundary (8 rules; every producer/free carries its
+  per-function ownership line in the generated header — cbindgen emits Rust
+  doc comments):
+  out-strings via `sp_string_free`, out-byte-buffers via layout-matched
+  `sp_bytes_free` (the `Vec::leak` + unchecked-layout dealloc pairs are gone;
+  buffers now copied under `Layout::array::<u8>`), `sp_entry_free` +
+  `sp_entry_list_free` added for struct/array outputs with OOM-safe
+  allocation (no `unwrap()` panics at the boundary), dead `SyncResult`
+  removed. Registry biometric key material is `Zeroizing<Vec<u8>>` — removed
+  on `bridge_biometric_remove_key` and on `bridge_vault_destroy` with a
+  zeroize-on-drop pass (M1 containment; M2 removes the in-process map
+  entirely). Round-trip ownership tests cover every free path against a real
+  vault; double-destroy/use-after-destroy refused.
+- **805** FFI panic containment 1.5d —
+  **Status:** Done (2026-09-11, Phase 6 M1). Every C ABI export runs inside
+  `catch_panic` (errors → `ErrorCode::Panic = -15`, mirrored in the Kotlin
+  enum and generated header) and every JNI export inside `catch_jni`
+  (default-return; a panic through an `extern "system"` frame would abort
+  the JVM). Contained panics are logged via `tracing` and never unwind into
+  Swift/ObjC/JVM; out-params are documented undefined after a contained
+  panic (ownership rule 8). Pinned by source-parsing tests
+  (`every_c_export_is_panic_contained`, `every_jni_export_is_panic_contained`)
+  so a new export cannot skip containment, plus wrapper unit tests.
+- **806** lifecycle/invalid-handle tests 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). tests/integration_test.rs
+  rewritten against the real exported ABI (the old file asserted 2+2 and
+  imported nothing — the crate had no rlib target, so integration tests
+  could never link; fixed with `crate-type = ["rlib", …]`), covering vault
+  lifecycle (create/lock/reopen/double-destroy/use-after-destroy), entry
+  lifecycle end-to-end, invalid-handle/null-out-param refusals, wrong-
+  password refusal, generator bounds, and sync/biometric defaults. The dead
+  `tests/integration/` dir (never wired via `mod`, gated on the nonexistent
+  `icloud` feature) is deleted. Tests exposed a real mapping defect — core
+  NotFound/InvalidInput flattened into `VaultLocked` — fixed in the same
+  change (precise core→bridge error mapping; residual core errors now
+  surface as Unknown, not VaultLocked).
+- **807** atomic update + placeholder removal (TD-MOB-03/04) 3d —
+  **Status:** Done (2026-09-11, Phase 6 M1). REMOVED per ADR-009 rev 2
+  (relay-only mobile sync, ADR-006): `src/drive.rs` (666 ln) + `src/icloud.rs`
+  (432 ln), the `sp_sync_prepare_cloudkit` / `sp_sync_prepare_drive` exports,
+  the file-sync placeholder exports `sp_sync_collect_pending` /
+  `sp_sync_apply_entries` (both serialized plaintext entry titles into fake
+  "sync blobs" — the collect path even leaked titles over the shape a host
+  app treats as uploadable), the Kotlin `DriveService.kt` + the three Google
+  Drive SDK dependencies + their Apache-HTTP packaging excludes, and the now
+  unused bridge deps (uuid, base64, anyhow, lazy_static). `bridge_sync_get_status`
+  kept as an honest disabled-stub (comment no longer claims iCloud/Drive);
+  MOBILE_DESIGN.md + iOS_BUILD_GUIDE.md carry supersession banners.
+  ATOMIC UPDATE (TD-MOB-04): `sp_entry_update` (C) / `nativeUpdateEntry`
+  (JNI, null = unchanged) exported; Kotlin `VaultBridge.updateEntry` +
+  `VaultState.updateEntry` rewritten from delete-then-add to one atomic call
+  (entry identity/history preserved). Also: crate gained the `rlib` target
+  type needed for test linkage; `sp_bytes_free` retained as the sanctioned
+  byte-buffer release path for WBS-827 backup exports.
+
+Android: **812** Keystore-bound platform slot (TD-MOB-03,
+SR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M2). Signature-KDF slot on the
+  proven Hello orchestration (biometric_hello generalized with an explicit
+  domain salt — MOBILE_SLOT_WRAP_SALT — plus seal_dek_with_challenge /
+  release_dek_from_signature for the split FFI model where the HOST signs
+  and the bridge seals; cross-domain release tests prove a Hello signature
+  cannot unwrap a mobile blob and vice versa). Android: RSA-2048/PKCS1
+  AndroidKeyStore key (deterministic — randomized ECDSA is REFUSED at
+  enable), setUserAuthenticationRequired + setInvalidatedByBiometricEnrollment,
+  signed via BiometricPrompt.CryptoObject (the prompt IS the crypto
+  authorization). At-rest blob is NON-SECRET JSON in app-private file
+  storage (never SharedPreferences). VaultManager::current_dek +
+  open_with_released_dek (shared epoch-guard/registry/audit tail extracted
+  from open_with_biometric). FEATURE_PLATFORM_KEYSTORE now advertised;
+  ABI_VERSION bumped 1→2 (legacy biometric exports removed with the slot —
+  no key material lives in the bridge process at all).
+  **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
+FR-MOBILE-001) 5d —
+  **Status:** Done (2026-09-12, Phase 6 M3). Real fill+save through the
+  bridge: AssistStructure parsing (visible-only, self-fill guard,
+  no-password surfaces skipped) under a hard 3s fill deadline; unlocked ->
+  matched datasets (registrable-domain web matching + confident-only
+  package heuristic, 18 matcher unit tests), locked -> AUTH dataset into a
+  translucent unlock activity; save flow confirm-and-store (web saves
+  persist https://<domain>, app saves persist no URL); SaveInfo for
+  save-back; settingsActivity fixed to MainActivity.
+  **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d —
+  **Status:** Done (2026-09-12, M3). SentinelPassApplication actually
+  REGISTERED (was dead code) with ProcessLifecycleOwner auto-lock
+  (background schedules, foreground cancels — fixes a mid-session fire
+  bug); FLAG_SECURE privacy cover on pause; lock-screen return effect;
+  lifecycle lock goes through lockVault (handle destroyed).
+  **815** cleartext deny 1d —
+  **Status:** Done (2026-09-12, M3): network_security_config.xml
+  cleartextTrafficPermitted=false (no loopback override — it would ship).
+  **816** backup policy (TD-MOB-05) 2d —
+  **Status:** Done (2026-09-12, M3): vault db + SQLite sidecars + slot blob
+  excluded from cloud backup AND device-transfer (slot blob device-bound;
+  vault db rides D2D per accepted decision; prefs excluded — boolean only).
+  **817** permission trim 0.5d —
+  **Status:** Done (2026-09-12, M3): CAMERA + camera feature + CameraX/ZXing
+  deps removed (zero references, no scanner UI); USE_BIOMETRIC/INTERNET
+  kept with reasons; datastore-preferences flagged as unused dep.
+  **818** instrumentation matrix (TD-MOB-10, FR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-12, Phase 6 M4). Real androidTest sources
+  (VaultBridgeInstrumentedTest: 8 tests over the live JNI bridge — ABI
+  handshake, CRUD round-trip, lock/re-open, wrong-password, slot challenge
+  freshness, gated flows Assume-skipped on un-enrolled CI emulators); the
+  emulator-tests matrix (API 29/34 x default/google_apis) is fail-closed
+  and downloads the all-ABI --features jni .so artifacts (811).
+
+iOS: **820** consolidate Swift bridges (TD-MOB-09) 3d; **821** Keychain
+SecAccessControl slot (TD-MOB-06, SR-MOBILE-002) 4d —
+  **Status:** Done (2026-09-11, Phase 6 M2). biometric.rs mod-macos pattern
+  on iOS: the DEK lives in the Keychain under
+  kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly +
+  kSecAccessControlBiometryCurrentSet (+ privateKeyUsage) — the OS refuses
+  the item read without the gesture, which IS the crypto authorization.
+  KeychainSlot.swift implements store/has/delete/unlock and hands the
+  released DEK to the new sp_slot_open_with_dek export (borrowed bytes, FFI
+  rule 1). Shares the core orchestration/tests with 812; the Swift file
+  compiles with the 820 project surgery (M3).
+  **822** file protection + backup
+policy (SR-MOBILE-004) 2d —
+  **Status:** Done (2026-09-12, Phase 6 M3). VaultFile.swift: shared
+  container path (App Group) + NSFileProtectionComplete on the vault db and
+  WAL sidecars + isExcludedFromBackup (best-effort, documented that iOS
+  default is Complete-Until-First-Unlock so failure never downgrades);
+  Info.plist cleaned (bogus keys + armv7 removed).
+  **823** scene lock + cover (TD-MOB-07) 2d —
+  **Status:** Done (2026-09-12, M3): scenePhase privacy cover
+  (ultraThinMaterial) + 5-min background auto-lock matching the daemon
+  default; Keychain-slot unlock wired into LockView (refused gesture fails
+  closed and silent).
+  **824** local expiring pasteboard 1d —
+  **Status:** Done (2026-09-12, M3): all three secret-copy call sites use a
+  30 s expirationDate pasteboard (platform limitation documented: no
+  Universal-Clipboard opt-out exists).
+  **825** Credential Provider (TD-MOB-08, SR-MOBILE-003,
+FR-MOBILE-001) 5d —
+  **Status:** Done (2026-09-12, M3). SentinelPassCredential extension
+  target (com.apple.authentication-services.credential-provider-ui): own
+  VaultBridge on the shared-container vault, master-password unlock, domain
+  filtering with full-list fallback, ASPasswordCredential completion,
+  App Group entitlements on both targets. Compile+link verified against the
+  simulator SDK (xcodebuild itself broken on the dev machine — pre-existing
+  — CI exercises it).
+  **826** remove plaintext persistence models 1d —
+  **Status:** Done (2026-09-12, M3): SwiftData @Model (plaintext
+  password/url/notes) + modelContainer removed; EntryModel is a plain
+  summary-mirror struct; secrets only in in-memory structs.
+  **827** authenticated backup/export (TD-MOB-08) 3d —
+  **Status:** Done (2026-09-12, Phase 6 M4). ADR-008 .spbackup through the
+  bridge: sp_backup_create/sp_backup_restore (panic-contained, ownership
+  rule 2), bridge backup.rs (create refuses overwrite; restore is static/
+  offline with the close-handles-first caller contract; wrong-password,
+  locked-vault, round-trip tests), JNI + Kotlin facade, Swift
+  BackupService. Restore flags map 1:1 to core RestoreOptions
+  (allow_replace / allow_epoch_rewind supervised override / disable_sync).
+  **828** XCTest matrix (TD-MOB-10) 4d —
+  **Status:** Done (2026-09-12, Phase 6 M4). Real bridge-contract XCTests
+  (ABI handshake v2 + fail-closed flags, negotiate accept/refuse, owned-
+  string generate+free, length bounds, slot challenge freshness, blob
+  preflight, null-safe frees) run on an iOS simulator via the SPM package
+  scheme; ios.yml simulator-tests rewritten fail-closed: bridge libs
+  script-generated (ONLY_SIM), app + extension build gates, xcodebuild test
+  fail-closed (the old job swallowed failures with || echo). (TD-MOB-01/02, TV-007) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). JNI-enabled Rust builds/tests/
+  clippy-clean (`--features jni` verified on host and in android.yml's
+  integration job — the baseline state was 3× E0308 in drive.rs and zero CI
+  coverage); the type errors died with WBS-802's contract rewrite and
+  WBS-807's drive.rs removal. TD-MOB-01's CI half lands in 811.
+  **811** all-ABI JNI
+  CI (TD-MOB-01, TV-007) 2d —
+  **Status:** Done (2026-09-11, Phase 6 M1). android.yml mobile-bridge now
+  builds ALL THREE app ABIs (arm64-v8a, armeabi-v7a, x86_64 — armeabi-v7a
+  was missing entirely) WITH `--features jni` and fails closed on a
+  llvm-nm symbol check: all 17 `Java_com_sentinelpass_VaultBridge_*`
+  symbols must exist in every `.so`, and any stale
+  `VaultManager`/`DriveSync` symbol fails the job. scripts/build-android.sh
+  (build-all.yml path) gets the same `--features jni` + symbol check on its
+  NDK-r29 ABI set; android/build-libs.sh already matched.
+  **812** Keystore-bound platform slot (TD-MOB-03,
 SR-MOBILE-002) 4d; **813** AutofillService save/retrieve (TD-MOB-03, SR-MOBILE-003,
 FR-MOBILE-001) 5d; **814** lifecycle/lock/cover (TD-MOB-05, SR-MOBILE-004) 3d; **815**
 cleartext deny 1d; **816** backup policy (TD-MOB-05) 2d; **817** permission trim 0.5d;

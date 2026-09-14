@@ -7,6 +7,8 @@ use axum::response::{IntoResponse, Response};
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum RelayError {
+    /// 410: the endpoint's protocol generation was retired (v1 sync).
+    Gone(String),
     Database(String),
     Auth(String),
     NotFound(String),
@@ -20,6 +22,7 @@ pub enum RelayError {
 impl std::fmt::Display for RelayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Gone(m) => write!(f, "Gone: {}", m),
             Self::Database(e) => write!(f, "Database error: {}", e),
             Self::Auth(e) => write!(f, "Auth error: {}", e),
             Self::NotFound(e) => write!(f, "Not found: {}", e),
@@ -37,6 +40,7 @@ impl std::error::Error for RelayError {}
 impl IntoResponse for RelayError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
+            Self::Gone(m) => (StatusCode::GONE, m.clone()),
             Self::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             Self::Auth(e) => (StatusCode::UNAUTHORIZED, e.clone()),
             Self::NotFound(e) => (StatusCode::NOT_FOUND, e.clone()),

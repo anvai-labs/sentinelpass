@@ -1,5 +1,14 @@
 # Mobile Apps & Thick Client Auto-fill - Technical Design
 
+> **SUPERSEDED IN PART (2026-09-11, ADR-009 rev 2 / ADR-006):** every
+> CloudKit / iCloud / Google Drive sync section below (design sketch, platform
+> table "Cloud Sync" column, `CloudKitSync` / `GoogleDriveSync` /
+> `CloudKitSyncEngine` samples, and the related checklist items) is
+> SUPERSEDED and does NOT match the product. Mobile sync is relay-based
+> sync v2 only (ADR-006); the CloudKit/Drive bridge paths and the Android
+> Drive SDK integration were REMOVED under WBS-807. Sync status: see
+> `docs/SYNC.md` and `docs/decisions/adr/ADR-006-sync-protocol-v2.md`.
+
 **Version:** 0.1.0-design
 **Date:** 2026-02-24
 **Status:** Design Phase
@@ -1315,7 +1324,9 @@ extension Notification.Name {
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use sentinelpass_core::vault::VaultManager;
-use sentinelpass_core::crypto::SecureBuffer;
+// Owned secret buffers use `Zeroizing` (`SecureBuffer` was removed with
+// `crypto/zero.rs`); borrowed `&[u8]` is fine with caller-side zeroization.
+use zeroize::Zeroizing;
 
 // Mobile-specific configuration
 const MOBILE_DB_PATH: &str = "sentinelpass_vault.db";

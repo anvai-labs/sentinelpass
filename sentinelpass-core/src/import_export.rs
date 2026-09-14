@@ -52,33 +52,13 @@ impl From<Entry> for ExportEntry {
     }
 }
 
-/// Export vault to JSON format
-pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
-    if !vault.is_unlocked() {
-        return Err(PasswordManagerError::VaultLocked);
-    }
-
-    let entries = vault.list_entries()?;
-    let mut export_entries = Vec::new();
-
-    for summary in entries {
-        if !summary.credential_type.is_generic_password_exportable() {
-            continue;
-        }
-        match vault.get_entry(summary.entry_id) {
-            Ok(entry) => {
-                export_entries.push(ExportEntry::from(entry));
-            }
-            Err(e) => {
-                return Err(PasswordManagerError::from(DatabaseError::Other(format!(
-                    "Failed to export entry {}: {}",
-                    summary.entry_id, e
-                ))));
-            }
-        }
-    }
-
-    let json = serde_json::to_string_pretty(&export_entries)
+/// Render a JSON export from already-decrypted entries (WBS-502 split).
+///
+/// The vault-fused [`export_to_json`] delegates here; daemon-rerouted
+/// clients call it directly with entries obtained via `VaultOp::ExportAll`
+/// so the file format stays byte-compatible with the pre-split writer.
+pub fn render_json_export(export_entries: &[ExportEntry], output: &Path) -> Result<()> {
+    let json = serde_json::to_string_pretty(export_entries)
         .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
 
     let mut file = create_export_file(output)?;
@@ -101,13 +81,8 @@ pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Export vault to CSV format
-pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
-    if !vault.is_unlocked() {
-        return Err(PasswordManagerError::VaultLocked);
-    }
-
-    let entries = vault.list_entries()?;
+/// Render a CSV export from already-decrypted entries (WBS-502 split).
+pub fn render_csv_export(entries: &[Entry], output: &Path) -> Result<()> {
     let mut file = create_export_file(output)?;
 
     // Write CSV header with plaintext warning prepended.
@@ -125,12 +100,7 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
         PasswordManagerError::from(DatabaseError::FileIo(format!("Failed to write CSV: {}", e)))
     })?;
 
-    for summary in entries {
-        if !summary.credential_type.is_generic_password_exportable() {
-            continue;
-        }
-        let entry = vault.get_entry(summary.entry_id)?;
-
+    for entry in entries {
         // Escape CSV fields
         let escape = |s: &str| {
             let needs_quotes = s.contains(',') || s.contains('"') || s.contains('\n');
@@ -170,30 +140,85 @@ pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Import entries from JSON format
-pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize> {
+/// Export vault to JSON format
+pub fn export_to_json(vault: &VaultManager, output: &Path) -> Result<()> {
     if !vault.is_unlocked() {
         return Err(PasswordManagerError::VaultLocked);
     }
 
-    let file = std::fs::File::open(input).map_err(|e| {
+    let entries = vault.list_entries()?;
+    let mut export_entries = Vec::new();
+
+    for summary in entries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
+        match vault.get_entry(summary.entry_id) {
+            Ok(entry) => {
+                export_entries.push(ExportEntry::from(entry));
+            }
+            Err(e) => {
+                return Err(PasswordManagerError::from(DatabaseError::Other(format!(
+                    "Failed to export entry {}: {}",
+                    summary.entry_id, e
+                ))));
+            }
+        }
+    }
+
+    render_json_export(&export_entries, output)
+}
+
+/// Export vault to CSV format
+pub fn export_to_csv(vault: &VaultManager, output: &Path) -> Result<()> {
+    if !vault.is_unlocked() {
+        return Err(PasswordManagerError::VaultLocked);
+    }
+
+    let entries = vault.list_entries()?;
+    let mut exportable = Vec::new();
+
+    for summary in entries {
+        if !summary.credential_type.is_generic_password_exportable() {
+            continue;
+        }
+        exportable.push(vault.get_entry(summary.entry_id)?);
+    }
+
+    render_csv_export(&exportable, output)
+}
+
+/// Parse a JSON import file into importable entries (WBS-502 split).
+///
+/// The vault-fused [`import_from_json`] delegates here; daemon-rerouted
+/// clients call it directly and push the result through
+/// `VaultOp::ImportEntries` so the accepted file format is unchanged.
+pub fn parse_json_import(input: &Path) -> Result<Vec<Entry>> {
+    let bytes = std::fs::read(input).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to open import file: {}",
             e
         )))
     })?;
+    parse_json_import_bytes(&bytes)
+}
 
-    let reader = BufReader::new(file);
-    let export_entries: Vec<ExportEntry> = serde_json::from_reader(reader).map_err(|e| {
+/// Byte-level JSON import parse (WBS-903): the untrusted-input surface
+/// behind [`parse_json_import`], exposed separately so fuzzing and
+/// integration tooling exercise EXACTLY what production parses.
+/// `serde_json::from_slice` performs the UTF-8 validation, so error
+/// behavior matches the former reader-based path.
+pub fn parse_json_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
+    let export_entries: Vec<ExportEntry> = serde_json::from_slice(data).map_err(|e| {
         PasswordManagerError::from(DatabaseError::Serialization(format!(
             "Failed to parse JSON: {}",
             e
         )))
     })?;
 
-    let mut imported = 0;
+    let mut entries = Vec::with_capacity(export_entries.len());
     for export_entry in export_entries {
-        let entry = Entry {
+        entries.push(Entry {
             entry_id: None,
             title: export_entry.title,
             username: export_entry.username,
@@ -214,29 +239,45 @@ pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize>
                 )))
             })?,
             favorite: export_entry.favorite,
-        };
+        });
+    }
 
-        vault.add_entry(&entry)?;
+    Ok(entries)
+}
+
+/// Import entries from JSON format
+pub fn import_from_json(vault: &mut VaultManager, input: &Path) -> Result<usize> {
+    if !vault.is_unlocked() {
+        return Err(PasswordManagerError::VaultLocked);
+    }
+
+    let entries = parse_json_import(input)?;
+    let mut imported = 0;
+    for entry in &entries {
+        vault.add_entry(entry)?;
         imported += 1;
     }
 
     Ok(imported)
 }
 
-/// Import entries from CSV format
-pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> {
-    if !vault.is_unlocked() {
-        return Err(PasswordManagerError::VaultLocked);
-    }
-
-    let file = std::fs::File::open(input).map_err(|e| {
+/// Parse a CSV import file into importable entries (WBS-502 split).
+pub fn parse_csv_import(input: &Path) -> Result<Vec<Entry>> {
+    let bytes = std::fs::read(input).map_err(|e| {
         PasswordManagerError::from(DatabaseError::FileIo(format!(
             "Failed to open import file: {}",
             e
         )))
     })?;
+    parse_csv_import_bytes(&bytes)
+}
 
-    let reader = BufReader::new(file);
+/// Byte-level CSV import parse (WBS-903): the untrusted-input surface
+/// behind [`parse_csv_import`], exposed separately so fuzzing exercises
+/// EXACTLY what production parses. Line/UTF-8 handling is identical to the
+/// former reader-based path (`BufRead::lines` over the raw bytes).
+pub fn parse_csv_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
+    let reader = BufReader::new(std::io::Cursor::new(data));
     let mut lines = reader.lines();
 
     // Skip header line
@@ -252,7 +293,7 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
             )))
         })?;
 
-    let mut imported = 0;
+    let mut entries = Vec::new();
 
     for (line_num, line_result) in lines.enumerate().take(10000) {
         let line = line_result.map_err(|e| {
@@ -276,7 +317,7 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
         })?;
 
         let empty = &String::new();
-        let entry = Entry {
+        entries.push(Entry {
             entry_id: None,
             title: record.first().unwrap_or(empty).to_string(),
             username: record.get(1).unwrap_or(empty).to_string(),
@@ -301,9 +342,22 @@ pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> 
             created_at: chrono::Utc::now(),
             modified_at: chrono::Utc::now(),
             favorite: record.get(7).map(|s| s == "true").unwrap_or(false),
-        };
+        });
+    }
 
-        vault.add_entry(&entry)?;
+    Ok(entries)
+}
+
+/// Import entries from CSV format
+pub fn import_from_csv(vault: &mut VaultManager, input: &Path) -> Result<usize> {
+    if !vault.is_unlocked() {
+        return Err(PasswordManagerError::VaultLocked);
+    }
+
+    let entries = parse_csv_import(input)?;
+    let mut imported = 0;
+    for entry in &entries {
+        vault.add_entry(entry)?;
         imported += 1;
     }
 

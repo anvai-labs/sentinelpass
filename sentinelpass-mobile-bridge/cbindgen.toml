@@ -1,4 +1,14 @@
-# cbindgen configuration for iOS header generation
+# cbindgen configuration for the SentinelPass mobile C ABI (WBS-801)
+#
+# This file is the declared binding generator (ADR-009 rev 2): the checked-in
+# header `include/sentinelpass_bridge.h` is build-generated from it by
+# build.rs. CI regenerates and diffs the header on every mobile-bridge change
+# (drift check), so this config + src/ffi.rs are the single source of truth.
+#
+# NOTE: `[export] include` is ADDITIVE in cbindgen (it names items that must be
+# exported in addition to auto-detected `#[no_mangle] pub extern "C"` items).
+# It is kept in lockstep with the real export surface and pinned by the
+# `header_declares_every_export` test in src/ffi.rs.
 
 language = "C"
 cpp_compat = true
@@ -6,33 +16,47 @@ cpp_compat = true
 [defines]
 "target_os = ios" = "IOS_PLATFORM"
 "target_os = android" = "ANDROID_PLATFORM"
-"feature = jni" = "__ANDROID__"
+# The JNI surface is Kotlin's contract (jni.rs, feature-gated at the module
+# level), not part of the C header: since WBS-807 removed the un-gated
+# drive/icloud modules, no `feature = jni` items leak into generated bindings.
 
 [export]
-# Explicitly list items to export
+# The declared C ABI surface (Rust item names; [export.rename] maps types).
+# Must list every exported function and FFI-safe type in src/ffi.rs.
 include = [
-    "SPVaultHandle",
-    "SPEntry",
-    "SPEntrySummary",
-    "SPTotpCode",
-    "SPPasswordAnalysis",
-    "SPErrorCode",
+    "VaultHandle",
+    "BridgeInfo",
+    "Entry",
+    "EntrySummary",
+    "TotpCode",
+    "PasswordAnalysis",
+    "SyncStatus",
+    "ErrorCode",
     "sp_vault_init",
     "sp_vault_destroy",
     "sp_vault_is_unlocked",
     "sp_vault_lock",
     "sp_entry_add",
-    "sp_entry_update",
     "sp_entry_delete",
     "sp_entry_get_by_id",
     "sp_entry_list_all",
     "sp_entry_search",
+    "sp_entry_update",
     "sp_totp_generate_code",
     "sp_password_generate",
     "sp_password_check_strength",
-    "sp_biometric_set_key",
-    "sp_biometric_has_key",
-    "sp_biometric_remove_key",
+    "sp_backup_create",
+    "sp_backup_restore",
+    "sp_bridge_info",
+    "sp_bridge_negotiate",
+    "sp_entry_free",
+    "sp_entry_list_free",
+    "sp_sync_get_status",
+    "sp_slot_challenge",
+    "sp_slot_has_blob",
+    "sp_slot_open_with_dek",
+    "sp_slot_seal",
+    "sp_slot_unlock",
     "sp_string_free",
     "sp_bytes_free",
 ]
@@ -40,15 +64,17 @@ include = [
 [export.rename]
 # Rename Rust types to C-compatible names
 "VaultHandle" = "SPVaultHandle"
+"BridgeInfo" = "SPBridgeInfo"
 "Entry" = "SPEntry"
 "EntrySummary" = "SPEntrySummary"
 "TotpCode" = "SPTotpCode"
 "PasswordAnalysis" = "SPPasswordAnalysis"
+"SyncStatus" = "SPSyncStatus"
 "ErrorCode" = "SPErrorCode"
 
 [fn]
 # Function naming conventions
-rename_args = "PascalCase"
+rename_args = "None"
 
 # Sort by name
 sort_by = "Name"

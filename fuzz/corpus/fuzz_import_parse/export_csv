@@ -1,0 +1,3 @@
+title,username,password,url,notes,created_at,modified_at,favorite
+Example Login,user@example.com,correct horse,https://example.com,,2026-01-01T00:00:00Z,2026-01-02T00:00:00Z,true
+Quoted,Title,"pass,with,commas","""quoted""",,x,x,false

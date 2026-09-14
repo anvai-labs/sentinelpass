@@ -4,6 +4,26 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Clock abstraction so ALL window math is deterministic under test
+/// (WBS-910 / TD-REL-06). Production uses the monotonic system clock; tests
+/// advance a fake clock FORWARD from the real `Instant::now()` instead of
+/// subtracting durations from it — `Instant::now() - Duration` can underflow
+/// (panic) on some platforms, which is exactly why the old window-reset
+/// tests were `#[ignore]`d.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Production clock: `Instant::now()` (monotonic).
+#[derive(Debug, Clone, Copy, Default)]
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 #[derive(Clone)]
 pub struct RateLimiter {
     buckets: Arc<Mutex<HashMap<String, TokenBucket>>>,
@@ -13,6 +33,7 @@ pub struct RateLimiter {
     hourly_limit: u32,
     daily_buckets: Arc<Mutex<HashMap<String, DailyBucket>>>,
     daily_limit: u32,
+    clock: Arc<dyn Clock>,
 }
 
 #[allow(dead_code)]
@@ -34,6 +55,12 @@ struct DailyBucket {
 #[allow(dead_code)]
 impl RateLimiter {
     pub fn new(requests_per_minute: u32) -> Self {
+        Self::with_clock(Arc::new(SystemClock), requests_per_minute)
+    }
+
+    /// Injectable-clock constructor (WBS-910): production passes the system
+    /// clock via [`RateLimiter::new`]; tests pass a deterministic fake.
+    fn with_clock(clock: Arc<dyn Clock>, requests_per_minute: u32) -> Self {
         // Hourly limit: 10x the per-minute rate (allows bursts but prevents sustained abuse)
         let hourly_limit = requests_per_minute.saturating_mul(10);
         // Daily limit: 100x the per-minute rate (allows legitimate usage while preventing automated abuse)
@@ -47,30 +74,33 @@ impl RateLimiter {
             hourly_limit,
             daily_buckets: Arc::new(Mutex::new(HashMap::new())),
             daily_limit,
+            clock,
         }
     }
 
     pub fn check(&self, device_id: &str) -> bool {
+        // One timestamp per decision: all three windows agree on "now".
+        let now = self.clock.now();
+
         // Check per-minute rate limit (token bucket)
-        if !self.check_minute_limit(device_id) {
+        if !self.check_minute_limit(device_id, now) {
             return false;
         }
 
         // Check per-hour quota (sliding window)
-        if !self.check_hourly_limit(device_id) {
+        if !self.check_hourly_limit(device_id, now) {
             return false;
         }
 
         // Check per-day quota (sliding window)
-        self.check_daily_limit(device_id)
+        self.check_daily_limit(device_id, now)
     }
 
-    fn check_minute_limit(&self, device_id: &str) -> bool {
+    fn check_minute_limit(&self, device_id: &str, now: Instant) -> bool {
         let mut buckets = match self.buckets.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let now = Instant::now();
 
         let bucket = buckets.entry(device_id.to_string()).or_insert(TokenBucket {
             tokens: self.max_tokens as f64,
@@ -90,12 +120,11 @@ impl RateLimiter {
         }
     }
 
-    fn check_hourly_limit(&self, device_id: &str) -> bool {
+    fn check_hourly_limit(&self, device_id: &str, now: Instant) -> bool {
         let mut buckets = match self.hourly_buckets.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let now = Instant::now();
 
         let bucket = buckets
             .entry(device_id.to_string())
@@ -118,12 +147,11 @@ impl RateLimiter {
         }
     }
 
-    fn check_daily_limit(&self, device_id: &str) -> bool {
+    fn check_daily_limit(&self, device_id: &str, now: Instant) -> bool {
         let mut buckets = match self.daily_buckets.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let now = Instant::now();
 
         let bucket = buckets.entry(device_id.to_string()).or_insert(DailyBucket {
             count: 0,
@@ -148,8 +176,38 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
     use std::time::Duration;
+
+    /// Deterministic fake clock (WBS-910): starts at the real monotonic
+    /// `Instant::now()` and advances only FORWARD by a controlled offset, so
+    /// a test can place a window "an hour ago" without ever subtracting from
+    /// `Instant::now()` (the underflow that hung the original tests).
+    struct FakeClock {
+        base: Instant,
+        offset: Mutex<Duration>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                offset: Mutex::new(Duration::ZERO),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.offset.lock().unwrap() += by;
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
+            let offset = *self.offset.lock().unwrap();
+            self.base
+                .checked_add(offset)
+                .expect("fake clock offset overflowed Instant")
+        }
+    }
 
     #[test]
     fn rate_limiter_exhausts_tokens() {
@@ -212,62 +270,73 @@ mod tests {
         assert_eq!(bucket.unwrap().count, 1, "Daily count should be 1");
     }
 
-    #[cfg(not(windows))]
+    /// WBS-910 (TD-REL-06): the hourly window resets after 1 hour and the
+    /// bucket restarts at the single new request. Driven entirely through
+    /// the public `check` path with a forward-only fake clock — no sleeps,
+    /// no `Instant` subtraction, runs on every platform in CI.
     #[test]
-    #[ignore = "Instant subtraction causes overflow/hang on some platforms"]
     fn rate_limiter_resets_hourly_window() {
-        let limiter = RateLimiter::new(10);
+        let clock = Arc::new(FakeClock::new());
+        let limiter = RateLimiter::with_clock(clock.clone(), 10); // 10/min, 100/hour
         let key = "hourly-reset-test";
 
-        // Create a bucket with custom start time (in the past)
-        let mut buckets = limiter.hourly_buckets.lock().unwrap();
-        buckets.insert(
-            key.to_string(),
-            HourlyBucket {
-                count: 999,                                               // Near limit
-                window_start: Instant::now() - Duration::from_secs(3601), // 1 hour + 1 second ago
-            },
-        );
-        drop(buckets);
+        // Reach the hourly limit of exactly 100: drain the 10 per-minute
+        // tokens, clock-advance one minute to refill, repeat ten times
+        // (600s of fake time — still inside the 1-hour window).
+        for _ in 0..10 {
+            for _ in 0..10 {
+                assert!(limiter.check(key), "within per-minute and hourly limits");
+            }
+            clock.advance(Duration::from_secs(60));
+        }
+        // Minute tokens refilled by the advance, but the hourly quota is gone.
+        assert!(!limiter.check(key), "hourly limit must block");
 
-        // Should reset and allow new requests
+        // Advance past the hourly window (elapsed > 3600s): the bucket
+        // resets and requests flow again.
+        clock.advance(Duration::from_secs(3601));
         assert!(
             limiter.check(key),
-            "Should succeed after hourly window reset"
+            "hourly window reset should allow requests"
         );
 
         let buckets = limiter.hourly_buckets.lock().unwrap();
-        let bucket = buckets.get(key).unwrap();
-        assert_eq!(bucket.count, 1, "Count should reset to 1");
+        assert_eq!(buckets.get(key).unwrap().count, 1, "count restarts at 1");
     }
 
-    #[cfg(not(windows))]
+    /// WBS-910 (TD-REL-06): the daily window resets after 24 hours, same
+    /// deterministic discipline as the hourly test.
     #[test]
-    #[ignore = "Instant subtraction causes overflow/hang on some platforms"]
     fn rate_limiter_resets_daily_window() {
-        let limiter = RateLimiter::new(10);
+        let clock = Arc::new(FakeClock::new());
+        let limiter = RateLimiter::with_clock(clock.clone(), 10); // 10/min, 100/hour, 1000/day
         let key = "daily-reset-test";
 
-        // Create a bucket with custom start time (in the past)
-        let mut buckets = limiter.daily_buckets.lock().unwrap();
-        buckets.insert(
-            key.to_string(),
-            DailyBucket {
-                count: 9999,                                               // Near limit
-                window_start: Instant::now() - Duration::from_secs(86401), // 24 hours + 1 second ago
-            },
-        );
-        drop(buckets);
+        // Reach the daily limit of exactly 1000: ten hourly batches of 100
+        // requests (ten per-minute cycles each), jumping past the hourly
+        // window between batches. Total fake time is
+        // 10 * (600s + 3601s) = 42010s — still inside the 24-hour window,
+        // so the daily window never resets mid-accumulation.
+        for _ in 0..10 {
+            for _ in 0..10 {
+                for _ in 0..10 {
+                    assert!(limiter.check(key), "within per-minute limit");
+                }
+                clock.advance(Duration::from_secs(60));
+            }
+            clock.advance(Duration::from_secs(3601)); // reset the hourly quota
+        }
+        assert!(!limiter.check(key), "daily limit must block");
 
-        // Should reset and allow new requests
+        // Advance past the daily window (elapsed > 86400s): reset.
+        clock.advance(Duration::from_secs(86401));
         assert!(
             limiter.check(key),
-            "Should succeed after daily window reset"
+            "daily window reset should allow requests"
         );
 
         let buckets = limiter.daily_buckets.lock().unwrap();
-        let bucket = buckets.get(key).unwrap();
-        assert_eq!(bucket.count, 1, "Count should reset to 1");
+        assert_eq!(buckets.get(key).unwrap().count, 1, "count restarts at 1");
     }
 
     #[test]
@@ -294,9 +363,13 @@ mod tests {
         );
     }
 
+    /// Token refill is elapsed-time driven: exhaust, advance the fake clock
+    /// ~1.1 refill periods, and exactly one token returns (WBS-910 made
+    /// this deterministic — the previous version slept 1.1 real seconds).
     #[test]
     fn rate_limiter_minute_refill_works() {
-        let limiter = RateLimiter::new(60); // 60 per minute = 1 per second
+        let clock = Arc::new(FakeClock::new());
+        let limiter = RateLimiter::with_clock(clock.clone(), 60); // 60 per minute = 1 per second
         let key = "refill-test";
 
         // Exhaust all tokens
@@ -308,8 +381,8 @@ mod tests {
             "Should be rate limited after exhaustion"
         );
 
-        // Wait 1 second for one token refill
-        thread::sleep(Duration::from_millis(1100));
+        // Advance 1 second for one token refill
+        clock.advance(Duration::from_millis(1100));
         assert!(limiter.check(key), "Should succeed after token refill");
     }
 }

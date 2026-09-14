@@ -5,7 +5,8 @@
  * clipboard operations, password-visibility toggling, HTML escaping,
  * and date formatting.
  */
-import { writeText, readText } from './state.js';
+import { invoke } from './state.js';
+import { createClipboardManager } from './clipboard.js';
 /**
  * Display a transient toast notification that auto-dismisses after 3 seconds.
  *
@@ -23,9 +24,24 @@ export function showToast(message, type = 'success') {
     }, 3000);
 }
 /**
- * Copy a string to the system clipboard via the Tauri clipboard plugin,
- * showing a toast on success.  Automatically clears the clipboard after
- * 30 seconds if the content has not changed.
+ * The app-wide clipboard controller (WBS-709): one shared expiry timer for
+ * every secret copy (passwords, usernames, TOTP codes). The backend writes
+ * the secret with platform sensitive-markers and auto-clears it 30 seconds
+ * later — or on app exit — if the user has not copied something else since.
+ *
+ * The invoker is an arrow around state.js's `invoke` so the controller reads
+ * the LIVE binding at call time (invoke is undefined until initTauriAPI()
+ * runs, which happens after module evaluation).
+ */
+export const appClipboard = createClipboardManager((cmd, args) => invoke(cmd, args), undefined, (cleared) => {
+    if (cleared) {
+        showToast('Clipboard cleared', 'success');
+    }
+});
+/**
+ * Copy a string to the system clipboard as a secret, showing a toast on
+ * success. The clipboard is cleared automatically after 30 seconds (or on
+ * app exit) unless the user copied something else in the meantime.
  *
  * @param text - The text to copy.
  * @param label - A human-readable label for the toast (e.g. "Password").
@@ -36,21 +52,8 @@ export async function copyToClipboard(text, label) {
         return;
     }
     try {
-        await writeText(text);
+        await appClipboard.copySecret(text);
         showToast(`${label} copied to clipboard!`, 'success');
-        // Auto-clear after 30 seconds
-        setTimeout(async () => {
-            try {
-                const clipboard = await readText();
-                if (clipboard === text) {
-                    await writeText('');
-                    showToast('Clipboard cleared', 'success');
-                }
-            }
-            catch (clearError) {
-                console.warn('Failed to clear clipboard:', clearError);
-            }
-        }, 30000);
     }
     catch (error) {
         showToast(error, 'error');

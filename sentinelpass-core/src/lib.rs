@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod autofill;
 pub mod biometric;
+pub mod biometric_hello;
 pub mod crypto;
 pub mod daemon;
 pub mod database;
@@ -40,7 +41,8 @@ pub use external_secret_access::{
     ExternalSecretGrant,
 };
 pub use import_export::{
-    export_to_csv, export_to_json, import_from_csv, import_from_json, ExportEntry,
+    export_to_csv, export_to_json, import_from_csv, import_from_json, parse_csv_import,
+    parse_json_import, render_csv_export, render_json_export, ExportEntry,
 };
 pub use keepass::{export_to_keepass_xml, import_from_keepass_xml, KeePassEntry};
 pub use lockout::{LockoutConfig, LockoutManager, DEFAULT_MAX_ATTEMPTS};
@@ -143,6 +145,13 @@ pub enum PasswordManagerError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// A pulled sync mutation could not be applied YET for an order-dependent
+    /// reason (e.g. a TOTP whose parent credential arrives later in the log).
+    /// The pull gives it one bounded retry within the run and dead-letters it
+    /// if still unresolved (WBS-607) — never a silent skip.
+    #[error("Sync apply deferred: {0}")]
+    SyncDeferred(String),
+
     #[error(
         "slot registry failed integrity verification — a key slot may have been \
          added, edited, or restored without the vault's authority. Refusing to \
@@ -152,6 +161,13 @@ pub enum PasswordManagerError {
 
     #[error("Not implemented: {0}")]
     NotImplemented(String),
+
+    #[error(
+        "the vault is owned by a running daemon or an exclusive maintenance process \
+         (lock: {lock_path}). Quit the daemon first (or wait for maintenance to finish), \
+         then retry"
+    )]
+    MaintenanceLockHeld { lock_path: String },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

@@ -107,19 +107,27 @@ pub fn handle_check(password: Option<String>) -> Result<()> {
 }
 
 pub fn handle_health(vault_path: PathBuf, detailed: bool, only_issues: bool) -> Result<()> {
-    use sentinelpass_core::crypto::health::HealthScore;
+    use crate::commands::service_client as sc;
+    use sentinelpass_core::crypto::health::{HealthScore, PasswordHealth, VaultHealthSummary};
+    use sentinelpass_protocol::service::VaultOp;
 
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let master_password_bytes = master_password.as_bytes();
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-    let vault = crate::open_vault_with_password(&vault_path, master_password_bytes)?;
-
-    // Get health summary
-    let summary = vault.get_vault_health_summary()?;
+    // Health report through the service boundary; decode back into the core
+    // render types.
+    let value = sc::expect_report(backend.call(VaultOp::HealthReport)?)?;
+    let summary: VaultHealthSummary = serde_json::from_value(value["summary"].clone())
+        .map_err(|e| anyhow::anyhow!("failed to decode health summary: {}", e))?;
+    let health_report: Vec<PasswordHealth> = if detailed {
+        serde_json::from_value(value["passwords"].clone())
+            .map_err(|e| anyhow::anyhow!("failed to decode health report: {}", e))?
+    } else {
+        Vec::new()
+    };
 
     println!();
     println!("Vault Password Health Report");
@@ -173,7 +181,6 @@ pub fn handle_health(vault_path: PathBuf, detailed: bool, only_issues: bool) -> 
 
     // Detailed report if requested
     if detailed {
-        let health_report = vault.get_password_health_report()?;
         println!("Detailed Password Report:");
         println!("========================");
         println!();

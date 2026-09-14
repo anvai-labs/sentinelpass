@@ -19,6 +19,29 @@ pub struct RelayConfig {
     pub pairing_fetch_backoff_max_secs: u64,
     pub tombstone_retention_days: u64,
     pub nonce_window_secs: i64,
+    /// WBS-624 (ADR-006 retirement): when false (the default), ALL v1
+    /// sync/pairing endpoints respond 410 Gone — the v1 protocol is
+    /// retired and mixed v1/v2 operation is forbidden. Set true ONLY for a
+    /// bounded migration window serving pre-v2 clients.
+    #[serde(default)]
+    pub allow_v1: bool,
+    /// WBS-618 (TD-NET-03): reverse-proxy IPs trusted to set
+    /// `X-Forwarded-For`. Default EMPTY — a direct deployment keys rate
+    /// limits on the peer address and IGNORES forwarded headers, so a
+    /// spoofed XFF cannot rotate rate-limit identities. Set this to the
+    /// proxy's IP only when running behind a trusted reverse proxy.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// v2 (ADR-006 / WBS-603): how long a durable per-mutation result is
+    /// replayed to duplicate requests before the record ages out. Post-expiry
+    /// duplicates are RE-evaluated by the CAS guard, which rejects them
+    /// rather than replaying them.
+    #[serde(default)]
+    pub mutation_result_ttl_secs: u64,
+    /// v2: per-device cap on stored mutation results (bounded idempotency
+    /// state; oldest records beyond the cap are pruned).
+    #[serde(default)]
+    pub max_mutation_results_per_device: usize,
 }
 
 impl Default for RelayConfig {
@@ -36,6 +59,10 @@ impl Default for RelayConfig {
             pairing_fetch_backoff_max_secs: 300,
             tombstone_retention_days: 90,
             nonce_window_secs: 300,
+            allow_v1: false,
+            trusted_proxies: Vec::new(),
+            mutation_result_ttl_secs: 7 * 24 * 3600,
+            max_mutation_results_per_device: 4_096,
         }
     }
 }
@@ -89,6 +116,12 @@ impl RelayConfig {
         }
         if self.nonce_window_secs <= 0 {
             anyhow::bail!("Relay nonce_window_secs must be greater than zero");
+        }
+        if self.mutation_result_ttl_secs == 0 {
+            anyhow::bail!("Relay mutation_result_ttl_secs must be greater than zero");
+        }
+        if self.max_mutation_results_per_device == 0 {
+            anyhow::bail!("Relay max_mutation_results_per_device must be greater than zero");
         }
 
         Ok(())

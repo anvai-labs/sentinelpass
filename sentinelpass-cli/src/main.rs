@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use rpassword::prompt_password;
 use sentinelpass_core::{CredentialType, ExternalSecretField, VaultManager};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -462,6 +462,10 @@ enum Commands {
         command: commands::recovery::RecoveryCommands,
     },
 
+    /// Portable authenticated backup (create, verify, restore)
+    #[command(subcommand)]
+    Backup(commands::backup::BackupCommands),
+
     /// Sync subcommands for encrypted cloud sync
     #[command(subcommand)]
     Sync(SyncCommands),
@@ -754,23 +758,50 @@ enum SyncCommands {
     /// Start pairing (existing device generates code for new device)
     PairStart,
 
-    /// Join sync from a new device using a pairing code
+    /// Join sync from a new device using a v2 pairing secret (WBS-615:
+    /// 256-bit; the secret is prompted, never a command-line argument)
     PairJoin {
         /// Relay server URL
         #[arg(long)]
         relay_url: String,
-
-        /// 6-digit pairing code
-        #[arg(long)]
-        code: String,
-
-        /// Pairing salt (base64) printed by `pair-start`
-        #[arg(long)]
-        salt: String,
     },
 
     /// Disable sync for this vault
     Disable,
+
+    /// List dead-lettered sync mutations (unappliable changes kept for
+    /// inspection)
+    DeadLetterList,
+
+    /// List concurrent-edit conflicts awaiting resolution (WBS-611)
+    ConflictList,
+
+    /// Resolve a concurrent-edit conflict
+    ConflictResolve {
+        /// Object ID from `conflict-list`
+        #[arg(long)]
+        object_id: String,
+
+        /// Apply the REMOTE (peer's) version instead of keeping the local
+        /// edit
+        #[arg(long, default_value_t = false)]
+        take_remote: bool,
+    },
+
+    /// Claim the authoritative migration and re-baseline this device's
+    /// sync onto a FRESH relay vault (v1 retirement path)
+    MigrateAuthoritative,
+
+    /// Purge dead-lettered sync mutations (one by sequence, or all)
+    DeadLetterPurge {
+        /// Purge only this server sequence (from `dead-letter list`)
+        #[arg(long)]
+        server_sequence: Option<i64>,
+
+        /// Purge ALL dead-lettered mutations
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -877,6 +908,84 @@ pub(crate) fn run_async<T>(future: impl std::future::Future<Output = T>) -> Resu
     Ok(runtime.block_on(future))
 }
 
+/// Run `f` while holding the EXCLUSIVE vault maintenance lock (WBS-503,
+/// ADR-007): offline maintenance (creation, password rotation, backup
+/// restore, recovery) refuses while a live daemon — or any other exclusive
+/// process — owns the vault, and holds the lock itself for the duration of
+/// the operation so the daemon cannot start mid-operation.
+///
+/// The in-memory dev vault (`:memory:`) has no durable state to guard and
+/// runs unlocked.
+pub(crate) fn with_maintenance_lock<T>(
+    vault_path: &Path,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if vault_path.as_os_str() == ":memory:" {
+        return f();
+    }
+    let guard = sentinelpass_core::daemon::try_acquire(vault_path)?;
+    let outcome = f();
+    drop(guard);
+    outcome
+}
+
+#[cfg(test)]
+mod maintenance_lock_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// WBS-503 negative: offline maintenance refuses while the lock is held
+    /// (a live daemon holds it for its lifetime), with the remediation in
+    /// the message.
+    #[test]
+    fn maintenance_refuses_while_exclusively_held() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault.db");
+
+        let held = sentinelpass_core::daemon::try_acquire(&vault).unwrap();
+
+        let err = with_maintenance_lock(&vault, || Ok(()))
+            .expect_err("maintenance must refuse while the daemon owns the vault");
+        let message = err.to_string();
+        assert!(
+            message.contains("daemon") && message.contains("lock"),
+            "refusal must name the owner and the lock: {message}"
+        );
+
+        drop(held);
+        with_maintenance_lock(&vault, || Ok(()))
+            .expect("release must allow the next maintenance run");
+    }
+
+    /// Positive: the operation runs under the lock and the lock is released
+    /// afterwards (even when the operation fails).
+    #[test]
+    fn maintenance_runs_under_lock_and_releases() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = tmp.path().join("vault.db");
+
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_clone = ran.clone();
+        let result: anyhow::Result<()> = with_maintenance_lock(&vault, || {
+            ran_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(anyhow::anyhow!("operation failed"))
+        });
+        assert!(result.is_err());
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            sentinelpass_core::daemon::try_acquire(&vault).is_ok(),
+            "lock must be released even after a failed operation"
+        );
+    }
+
+    /// The in-memory dev vault bypasses the lock (no durable state).
+    #[test]
+    fn dev_memory_vault_bypasses_lock() {
+        let path = PathBuf::from(":memory:");
+        assert!(with_maintenance_lock(&path, || Ok(42)).unwrap() == 42);
+    }
+}
+
 fn main() -> Result<()> {
     // Initialize logging
     let subscriber = FmtSubscriber::builder()
@@ -915,6 +1024,30 @@ fn main() -> Result<()> {
 
         Commands::Lock => {
             commands::vault::handle_lock()?;
+        }
+
+        Commands::Backup(ref command) => {
+            let vault_path = get_vault_path(&cli, false);
+            match command {
+                commands::backup::BackupCommands::Create { output } => {
+                    commands::backup::handle_backup_create(vault_path, output.clone())?
+                }
+                commands::backup::BackupCommands::Verify { bundle, deep } => {
+                    commands::backup::handle_backup_verify(bundle.clone(), *deep)?
+                }
+                commands::backup::BackupCommands::Restore {
+                    ref bundle,
+                    allow_replace,
+                    allow_epoch_rewind,
+                    disable_sync,
+                } => commands::backup::handle_backup_restore(
+                    vault_path,
+                    bundle.clone(),
+                    *allow_replace,
+                    *allow_epoch_rewind,
+                    *disable_sync,
+                )?,
+            }
         }
 
         Commands::BiometricStatus => {
@@ -1263,6 +1396,224 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod reroute_tests {
+    use std::path::{Path, PathBuf};
+
+    /// WBS-502 dual-writer ratchet: vault-opening calls are allowed ONLY in
+    /// the maintenance/offline set (init, passwd, backup create/restore,
+    /// recovery, pairing, compat backend, status) and the backend module
+    /// itself. A direct `open_vault_with_password`/`VaultManager::open`
+    /// appearing in any other command module is a silent dual-writer
+    /// regression and fails this test.
+    #[test]
+    fn direct_vault_opens_are_confined_to_the_allowlist() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src = manifest.join("src");
+        let allowlist = [
+            Path::new("main.rs"),                    // helper definitions
+            Path::new("commands/service_client.rs"), // FLAGGED compat backend
+            // Whole-file trust (stage-3 review F6): these files hold ONLY
+            // offline-maintenance commands. Splitting a mixed-purpose file
+            // requires tightening this list in the same change.
+            Path::new("commands/vault.rs"), // init/passwd/status/biometric
+            Path::new("commands/backup.rs"), // offline maintenance
+            Path::new("commands/recovery.rs"), // offline maintenance
+            Path::new("commands/sync.rs"),  // sync + pairing (offline exclusive)
+        ];
+
+        let markers = [
+            "open_vault_with_password(",
+            "VaultManager::open(",
+            "VaultManager::create(",
+            "VaultManager::open_default(",
+            "VaultManager::create_default(",
+            "open_with_biometric(",
+            "recover_access(",
+            "restore_bundle(",
+            "import_from_json(",
+            "import_from_csv(",
+            "import_from_keepass_xml(",
+        ];
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&src).expect("cli src dir") {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                for sub in std::fs::read_dir(&path).expect("command dir") {
+                    let sub = sub.unwrap();
+                    let p = sub.path();
+                    check_file(&p, &allowlist, &markers, &mut offenders);
+                }
+            } else {
+                check_file(&path, &allowlist, &markers, &mut offenders);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "direct vault-open calls outside the maintenance allowlist (dual-writer              regression, ADR-007): {:?}",
+            offenders
+        );
+    }
+
+    fn check_file(path: &Path, allowlist: &[&Path], markers: &[&str], offenders: &mut Vec<String>) {
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            return;
+        }
+        let rel = path
+            .strip_prefix(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"))
+            .unwrap_or(path);
+        if allowlist.contains(&rel) {
+            return;
+        }
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        for marker in markers {
+            if contents.contains(marker) {
+                offenders.push(format!("{} contains {}", rel.display(), marker));
+            }
+        }
+    }
+
+    /// WBS-502 positive evidence: the daemon backend executes the
+    /// application-service contract end-to-end over a real socket. The
+    /// backend calls are SYNC in production (they spin their own runtime),
+    /// so they run on `spawn_blocking` here — same shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn daemon_backend_executes_service_ops_over_ipc() {
+        use crate::commands::service_client::Backend;
+        use sentinelpass_core::daemon::{DaemonVault, IpcServer};
+        use sentinelpass_core::VaultManager;
+        use sentinelpass_protocol::service::VaultOp;
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        // Windows transports are NAMED PIPES, not socket files — a temp-dir
+        // path is unbindable there (the server task exits instantly). Use a
+        // unique pipe name on Windows, the private-dir socket on Unix.
+        #[cfg(windows)]
+        let socket_path = std::path::PathBuf::from(format!(
+            r"\\.\pipe\SentinelPass-cli-test-{}",
+            std::process::id()
+        ));
+        #[cfg(not(windows))]
+        let socket_path = tmp.path().join("test.sock");
+        // The socket must live in a private (0700) dir (WBS-507); tempfile
+        // dirs can be 0755 on some platforms. Unix-only: on Windows the
+        // private-dir check is a no-op (pipe security comes from the DACL).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let password = b"test_password_123!";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        drop(vault);
+
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.clone()), 300).unwrap());
+        daemon_vault.unlock(password).await.unwrap();
+        let server = Arc::new(IpcServer::new(
+            socket_path.clone(),
+            daemon_vault,
+            "reroute-token".to_string(),
+        ));
+        let mut server_task = tokio::spawn({
+            let server = server.clone();
+            async move { server.run().await }
+        });
+        for _ in 0..50 {
+            if socket_path.exists() {
+                break;
+            }
+            if server_task.is_finished() {
+                // Surface run()'s startup error instead of asserting blind —
+                // a silently-dead server gives no diagnosis.
+                match (&mut server_task).await {
+                    Ok(Err(e)) => panic!("IPC server exited during startup: {e}"),
+                    Ok(Ok(())) => panic!("IPC server exited cleanly during startup"),
+                    Err(join) => panic!("IPC server task panicked: {join}"),
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Per-call fresh clients: IpcClient connects per call, so this is
+        // the same wire behavior as the CLI's long-lived Backend.
+        let socket_for_factory = Arc::new(socket_path.clone());
+        let make_backend = Arc::new(move || -> Backend {
+            Backend::Daemon(sentinelpass_core::daemon::IpcClient::new_with_token(
+                (*socket_for_factory).clone(),
+                "reroute-token".to_string(),
+            ))
+        });
+
+        let entry_id = match tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || {
+                make_backend().call(VaultOp::EntryAdd {
+                    entry: sentinelpass_protocol::service::ServiceEntry {
+                        entry_id: None,
+                        title: "Rerouted".to_string(),
+                        username: "user@example.com".to_string(),
+                        password: "via-daemon".to_string().into(),
+                        url: Some("https://example.com".to_string()),
+                        notes: None,
+                        credential_type: "password".to_string(),
+                        created_at: 1_700_000_000,
+                        modified_at: 1_700_000_000,
+                        favorite: false,
+                    },
+                })
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            sentinelpass_protocol::service::VaultOpResult::EntryId(id) => id,
+            other => panic!("expected EntryId, got {other:?}"),
+        };
+
+        let listed = match tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || make_backend().call(VaultOp::EntryList)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            sentinelpass_protocol::service::VaultOpResult::EntryList(list) => list,
+            other => panic!("expected EntryList, got {other:?}"),
+        };
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].entry_id, entry_id);
+
+        tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || make_backend().call(VaultOp::EntryDelete { entry_id })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let listed = match tokio::task::spawn_blocking({
+            let make_backend = make_backend.clone();
+            move || make_backend().call(VaultOp::EntryList)
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        {
+            sentinelpass_protocol::service::VaultOpResult::EntryList(list) => list,
+            other => panic!("expected EntryList, got {other:?}"),
+        };
+        assert!(listed.is_empty());
+
+        server_task.abort();
+    }
 }
 
 #[cfg(test)]

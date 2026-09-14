@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod backup;
 pub mod credentials;
 pub mod exec;
 pub mod generate;
@@ -7,6 +8,7 @@ pub mod passkey;
 pub mod recovery;
 pub mod registry;
 pub mod secret;
+pub mod service_client;
 pub mod ssh;
 pub mod sync;
 pub mod totp;

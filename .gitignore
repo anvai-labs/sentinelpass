@@ -91,3 +91,10 @@ browser-extension/chrome/demo-slides.html
 browser-extension/chrome/voiceover-generator.sh
 browser-extension/chrome/package-lock.json
 browser-extension/chrome/package.json
+
+# Scratch working files (never committed — enforced program rule)
+.scratch_*
+target-wt/
+
+# Local drill evidence transcripts (CI uploads its own via workflow artifacts)
+drill-report-*.txt

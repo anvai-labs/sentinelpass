@@ -57,13 +57,6 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
-            // Exclude Apache HTTP client license files to avoid merge conflicts
-            excludes += "META-INF/DEPENDENCIES"
-            excludes += "META-INF/LICENSE"
-            excludes += "META-INF/NOTICE"
-            excludes += "META-INF/NOTICE.txt"
-            excludes += "META-INF/LICENSE.txt"
-            excludes += "META-INF/DEPENDENCIES.txt"
         }
     }
 
@@ -103,24 +96,11 @@ dependencies {
     // DataStore
     implementation("androidx.datastore:datastore-preferences:1.0.0")
 
-    // CameraX (for QR scanning)
-    implementation("androidx.camera:camera-camera2:1.3.1")
-    implementation("androidx.camera:camera-lifecycle:1.3.1")
-    implementation("androidx.camera:camera-view:1.3.1")
-
-    // ZXing for QR code
-    implementation("com.google.zxing:core:3.5.2")
-
     // Kotlin Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-
-    // Google Drive API
-    implementation("com.google.api-client:google-api-client-android:2.2.0")
-    implementation("com.google.apis:google-api-services-drive:v3-rev20240123-2.0.0")
-    implementation("com.google.http-client:google-http-client-gson:1.43.3")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

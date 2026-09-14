@@ -12,7 +12,9 @@ struct EntryDetailView: View {
     @EnvironmentObject private var vaultState: VaultState
     @Environment(\.dismiss) private var dismiss
 
-    let entry: EntryModel
+    /// Full bridge detail — in memory only, never persisted Swift-side
+    /// (WBS-826 removed the plaintext SwiftData mirror).
+    let entry: EntryDetails
     @State private var showPassword: Bool = false
     @State private var copiedField: String?
     @State private var showingEdit: Bool = false
@@ -51,8 +53,8 @@ struct EntryDetailView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
 
-                        if showPassword, let password = entry.password {
-                            Text(password)
+                        if showPassword {
+                            Text(entry.password)
                                 .font(.body.monospaced())
                         } else {
                             Text("••••••••")
@@ -116,22 +118,18 @@ struct EntryDetailView: View {
 
                 // Metadata
                 Section {
-                    if let createdAt = entry.createdAt {
-                        HStack {
-                            Text("Created")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text(createdAt, style: .date)
-                        }
+                    HStack {
+                        Text("Created")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(entry.createdAt, style: .date)
                     }
 
-                    if let modifiedAt = entry.modifiedAt {
-                        HStack {
-                            Text("Modified")
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text(modifiedAt, style: .date)
-                        }
+                    HStack {
+                        Text("Modified")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(entry.modifiedAt, style: .date)
                     }
                 } header: {
                     Text("Metadata")
@@ -185,9 +183,8 @@ struct EntryDetailView: View {
     private func copyToClipboard(_ value: String?, field: String) {
         guard let value = value else { return }
 
-        #if os(iOS)
-        UIPasteboard.general.string = value
-        #endif
+        // WBS-824: local expiring paste (30 s) — never a permanent write.
+        Pasteboard.copySensitive(value)
 
         withAnimation {
             self.copiedField = field
@@ -211,13 +208,14 @@ struct EntryDetailView: View {
 
 @available(iOS 17.0, macOS 14.0, *)
 #Preview {
-    EntryDetailView(entry: EntryModel(
+    EntryDetailView(entry: EntryDetails(
         id: "1",
         title: "Example",
         username: "user@example.com",
         password: "password123",
         url: "https://example.com",
         notes: "Test notes",
+        favorite: false,
         createdAt: Date(),
         modifiedAt: Date()
     ))

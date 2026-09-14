@@ -18,16 +18,12 @@ export let invoke: any;
 /** Tauri `confirm` dialog helper. */
 export let confirm: any;
 
-/** Tauri clipboard `writeText` helper. */
-export let writeText: any;
-
-/** Tauri clipboard `readText` helper. */
-export let readText: any;
-
 /**
  * Detect the Tauri runtime and bind its core API helpers.
  *
- * Must be called before any `invoke`, `confirm`, or clipboard operations.
+ * Must be called before any `invoke` or `confirm` operations. Clipboard
+ * secrets go through the `copy_secret_to_clipboard` command instead of the
+ * clipboard plugin (WBS-709), so no clipboard bindings exist here.
  *
  * @returns `true` if the Tauri API is available, `false` otherwise.
  */
@@ -35,8 +31,6 @@ export function initTauriAPI(): boolean {
     if ((window as any).__TAURI__) {
         invoke = (window as any).__TAURI__.core.invoke;
         confirm = (window as any).__TAURI__.dialog.confirm;
-        writeText = (window as any).__TAURI__.clipboardManager.writeText;
-        readText = (window as any).__TAURI__.clipboardManager.readText;
         return true;
     }
     return false;

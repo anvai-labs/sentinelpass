@@ -7,10 +7,13 @@
   "permissions": [
     "storage",
     "activeTab",
+    "tabs",
     "notifications",
-    "nativeMessaging"
+    "nativeMessaging",
+    "scripting",
+    "alarms"
   ],
-  "host_permissions": [
+  "optional_host_permissions": [
     "http://*/*",
     "https://*/*"
   ],

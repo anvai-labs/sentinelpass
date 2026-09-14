@@ -2,8 +2,63 @@
 //! core server's accept loop).
 
 use super::{TransportError, TransportResult, MAX_MESSAGE_SIZE};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Validate that the socket's parent directory is a PRIVATE runtime
+/// directory (WBS-507): owned by the effective UID, mode 0700, and not a
+/// symlink. When `create` is set (server/default path), a missing directory
+/// is created owner-only; clients never create — they refuse.
+///
+/// This is what removes the `/tmp` fallback in practice: ANY socket path
+/// (default or custom) whose directory is not owner-only is refused by both
+/// the daemon and the clients, fail-closed.
+pub fn ensure_private_socket_dir(socket_path: &Path, create: bool) -> TransportResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(dir) = socket_path.parent() else {
+        return Err(TransportError::Other(format!(
+            "socket path has no parent directory: {}",
+            socket_path.display()
+        )));
+    };
+
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(TransportError::Other(format!(
+                    "refusing IPC socket directory (symlink): {}",
+                    dir.display()
+                )));
+            }
+            use std::os::unix::fs::MetadataExt;
+            if meta.uid() != unsafe { libc::geteuid() } {
+                return Err(TransportError::Other(format!(
+                    "refusing IPC socket directory (not owned by the current user): {}",
+                    dir.display()
+                )));
+            }
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                return Err(TransportError::Other(format!(
+                    "refusing IPC socket directory (not owner-only, mode {:o}): {} \
+                     — the daemon and clients only accept sockets inside a private \
+                     runtime directory (0700)",
+                    mode & 0o777,
+                    dir.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
+            std::fs::create_dir_all(dir).map_err(TransportError::Io)?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(TransportError::Io)?;
+            Ok(())
+        }
+        Err(e) => Err(TransportError::Io(e)),
+    }
+}
 
 /// Unix socket connection
 pub struct UnixSocketConnection {
@@ -18,6 +73,9 @@ impl UnixSocketConnection {
 
     /// Create a new connection as a client
     pub async fn connect(path: PathBuf) -> TransportResult<Self> {
+        // WBS-507: clients refuse sockets outside a private runtime dir.
+        ensure_private_socket_dir(&path, false)?;
+
         let stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
             TransportError::ConnectionFailed(format!(
                 "Failed to connect to {}: {}",
@@ -92,10 +150,21 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    fn private_dir() -> PathBuf {
+        // tempfile dirs can be 0755 on some platforms; make the fixture a
+        // valid private runtime dir explicitly.
+        let dir = tempfile::TempDir::new().unwrap().keep();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
     #[tokio::test]
     async fn test_unix_socket_connection_roundtrip() {
-        let temp_dir = std::env::temp_dir();
-        let socket_path = temp_dir.join(format!("test_ipc_{}.sock", uuid_v4()));
+        let dir = private_dir();
+        let socket_path = dir.join(format!("test_ipc_{}.sock", uuid_v4()));
 
         // Start server
         let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
@@ -119,6 +188,45 @@ mod tests {
         assert_eq!(received, test_data);
 
         server_handle.await.unwrap();
+    }
+
+    /// WBS-507 negative: a client refuses a socket whose directory is not
+    /// owner-only (e.g. a world-traversable /tmp-style directory).
+    #[tokio::test]
+    async fn client_refuses_socket_in_loose_directory() {
+        let outer = tempfile::TempDir::new().unwrap();
+        let loose = outer.path().join("loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let socket_path = loose.join("sock");
+
+        let err = match UnixSocketConnection::connect(socket_path).await {
+            Err(err) => err,
+            Ok(_) => panic!("loose socket dir must be refused"),
+        };
+        assert!(
+            err.to_string().contains("owner-only"),
+            "refusal must name the policy: {err}"
+        );
+    }
+
+    /// WBS-507 positive: a client accepts a socket in a 0700 directory.
+    #[tokio::test]
+    async fn client_accepts_socket_in_private_directory() {
+        let dir = private_dir();
+        let socket_path = dir.join("sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        tokio::spawn(async move {
+            let listener = listener;
+            // Accept one connection and drop it; presence check is the point.
+            let _ = listener.accept().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let client = UnixSocketConnection::connect(socket_path).await;
+        assert!(client.is_ok(), "private-dir socket must be accepted");
     }
 
     fn uuid_v4() -> String {

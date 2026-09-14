@@ -11,6 +11,7 @@ impl VaultManager {
         let db = self.lock_db()?;
         let config = crate::sync::config::SyncConfig::load(db.conn())?;
         let pending = crate::sync::change_tracker::count_pending_changes(db.conn())?;
+        let conflict_count = crate::sync::outbox::count_sync_conflicts(db.conn())?;
 
         Ok(crate::sync::models::SyncStatus {
             enabled: config.sync_enabled,
@@ -19,7 +20,99 @@ impl VaultManager {
             relay_url: config.relay_url.clone(),
             last_sync_at: config.last_sync_at,
             pending_changes: pending,
+            conflict_count,
         })
+    }
+
+    /// List stored conflict alternatives (metadata only; WBS-611).
+    pub fn list_sync_conflicts(&self) -> Result<Vec<crate::sync::outbox::SyncConflictRow>> {
+        let db = self.lock_db()?;
+        crate::sync::outbox::list_sync_conflicts(db.conn())
+    }
+
+    /// Claim the AUTHORITATIVE migration at the relay (WBS-624): mints a
+    /// fresh relay vault; returns its id. Requires sync configured (v1-era
+    /// or v2 — the claim names the ORIGIN vault explicitly).
+    #[cfg(feature = "sync")]
+    pub async fn claim_sync_migration(&self) -> Result<uuid::Uuid> {
+        let identity = self.load_sync_device_identity()?.ok_or_else(|| {
+            PasswordManagerError::InvalidInput("Sync device identity missing".to_string())
+        })?;
+        let origin_vault = {
+            let db = self.lock_db()?;
+            let config = crate::sync::config::SyncConfig::load(db.conn())?;
+            config.vault_id.ok_or_else(|| {
+                PasswordManagerError::InvalidInput("Sync vault ID missing".to_string())
+            })?
+        };
+        let client = crate::sync::client::SyncClient::new(
+            &self.relay_url_for_client()?,
+            identity.device_id,
+            identity.signing_key,
+        )?;
+        client.claim_migration(&origin_vault).await
+    }
+
+    #[cfg(feature = "sync")]
+    fn relay_url_for_client(&self) -> Result<String> {
+        let db = self.lock_db()?;
+        let config = crate::sync::config::SyncConfig::load(db.conn())?;
+        config
+            .relay_url
+            .ok_or_else(|| PasswordManagerError::InvalidInput("Sync relay URL missing".to_string()))
+    }
+
+    /// Resolve a stored concurrent-edit conflict (WBS-611 / SR-SYNC-005):
+    /// delegates to the engine-level resolvers.
+    #[cfg(feature = "sync")]
+    pub fn resolve_sync_conflict(&self, object_id: &uuid::Uuid, take_remote: bool) -> Result<()> {
+        let db = self.lock_db()?;
+        let conn = db.conn();
+        let row: Option<(String, i64, Vec<u8>, String, i64)> = conn
+            .query_row(
+                "SELECT object_type, remote_version, remote_payload, origin_device_id,
+                        is_tombstone
+                 FROM sync_conflicts WHERE object_id = ?1",
+                [object_id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map_err(DatabaseError::Sqlite)
+            .ok();
+        let Some((type_str, remote_version, payload, origin, is_tombstone)) = row else {
+            return Err(PasswordManagerError::NotFound(format!(
+                "no stored conflict for object {object_id}"
+            )));
+        };
+        let entry_type = crate::sync::engine::parse_object_type(&type_str)?;
+        let origin_uuid = uuid::Uuid::parse_str(&origin).unwrap_or_default();
+        if take_remote {
+            let dek = self.key_hierarchy.dek()?.clone();
+            let engine = crate::sync::engine::SyncEngine::new(
+                crate::sync::client::DetachedTransport,
+                self.db.clone(),
+                uuid::Uuid::nil(),
+            );
+            crate::sync::engine::resolve_conflict_take_remote(
+                &engine,
+                conn,
+                &dek,
+                object_id,
+                &crate::sync::engine::ConflictAlternative {
+                    entry_type,
+                    remote_version: remote_version as u64,
+                    payload,
+                    origin: origin_uuid,
+                    is_tombstone: is_tombstone != 0,
+                },
+            )
+        } else {
+            crate::sync::engine::resolve_conflict_keep_local(
+                conn,
+                object_id,
+                entry_type,
+                remote_version as u64,
+            )
+        }
     }
 
     /// Load the local sync device identity (Ed25519 signing key + metadata) if present.
@@ -313,6 +406,8 @@ impl VaultManager {
             last_push_sequence: 0,
             last_pull_sequence: 0,
             last_sync_at: None,
+            protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+            lineage_high_water: 0,
         };
         config.save(db.conn())?;
         let dek = self.key_hierarchy.dek()?;
@@ -422,6 +517,74 @@ impl VaultManager {
             .map_err(DatabaseError::Sqlite)?;
 
         Ok(devices)
+    }
+
+    /// AUTHORITATIVE-DEVICE RE-BASELINE (WBS-624, ADR-006): this device is
+    /// the single migration authority for `origin_relay_vault`; the relay
+    /// has minted a FRESH vault (`new_relay_vault`). One transaction:
+    /// re-point the config at the new vault (protocol v2, cursors and
+    /// lineage zeroed) and reset EVERY object's sync bookkeeping so the
+    /// collector re-emits the full local baseline as fresh creates
+    /// (expected 0 against an empty v2 vault). Conflict alternatives and
+    /// dead-letters are purged (they belong to the abandoned lineage).
+    /// The ADR rule "never upload from pre-migration state" is honored
+    /// because the fresh vault's objects are all absent — CAS expects 0.
+    pub fn migrate_sync_authoritative(&self, new_relay_vault: &uuid::Uuid) -> Result<()> {
+        let db = self.lock_db()?;
+        let tx = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+
+        // Stale lineage state is PURGED (stage-7 review): conflict
+        // alternatives and dead-letters belong to the abandoned lineage —
+        // keeping them would let take-remote regress post-migration data
+        // and count pre-migration debris against the dead-letter cap.
+        tx.execute("DELETE FROM sync_conflicts", [])
+            .map_err(DatabaseError::Sqlite)?;
+        tx.execute("DELETE FROM sync_dead_letter", [])
+            .map_err(DatabaseError::Sqlite)?;
+
+        for table in ["entries", "ssh_keys", "totp_secrets"] {
+            tx.execute(
+                &format!(
+                    "UPDATE {table} SET sync_state = 'pending',
+                     sync_acked_version = 0
+                     WHERE is_deleted = 0"
+                ),
+                [],
+            )
+            .map_err(DatabaseError::Sqlite)?;
+            // Locally deleted rows keep their tombstone (they push as
+            // deletions); a never-synced deleted row has nothing to push.
+        }
+
+        let mut config = crate::sync::config::SyncConfig::load(&tx)?;
+        config.vault_id = Some(*new_relay_vault);
+        config.last_push_sequence = 0;
+        config.last_pull_sequence = 0;
+        config.lineage_high_water = 0;
+        config.protocol_version = crate::sync::config::SYNC_PROTOCOL_VERSION;
+        config.sync_enabled = true;
+        config.save(&tx)?;
+
+        tx.commit().map_err(DatabaseError::Sqlite)?;
+        Ok(())
+    }
+
+    /// List dead-lettered sync mutations (WBS-607 sanctioned tooling:
+    /// the fail-closed dead-letter bound requires a supported inspection
+    /// and purge path, not raw SQL against the daemon-owned vault).
+    pub fn list_sync_dead_letter(&self) -> Result<Vec<crate::sync::outbox::DeadLetterRow>> {
+        let db = self.lock_db()?;
+        crate::sync::outbox::list_dead_letter(db.conn())
+    }
+
+    /// Purge one (`Some`) or all (`None`) dead-lettered sync mutations.
+    /// Returns the number of rows removed.
+    pub fn purge_sync_dead_letter(&self, server_sequence: Option<i64>) -> Result<usize> {
+        let db = self.lock_db()?;
+        crate::sync::outbox::purge_dead_letter(db.conn(), server_sequence)
     }
 
     /// Revoke a sync device locally.

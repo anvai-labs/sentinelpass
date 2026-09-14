@@ -1,6 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- WBS-816 backup policy — android:fullBackupContent (API 26–30 path).
+
+     POLICY:
+     - sentinelpass_vault.db is encrypted at rest with the master password,
+       but the plaintext-derived KEK never leaves the device — cloud backup
+       of the vault is excluded outright (brute-force offline is somebody
+       else's cloud problem to enable).
+     - platform_slot.blob (WBS-812) is NON-SECRET but DEVICE-BOUND: it wraps
+       the vault DEK under an Android Keystore key that does not transfer.
+       Restored anywhere it is dead weight that can only fail closed — so it
+       is excluded rather than shipped around.
+     - sentinelpass.xml prefs hold only the `vault_created` boolean
+       (data/VaultState.kt); excluded — nothing worth backing up.
+     - SQLite sidecars (-journal/-wal/-shm) are listed explicitly because
+       glob behavior in fullBackupContent paths is not guaranteed across
+       API levels; the glob form is kept as belt-and-suspenders. -->
 <full-backup-content>
-    <!-- Exclude vault database from cloud backup for security -->
     <exclude domain="file" path="sentinelpass_vault.db" />
+    <exclude domain="file" path="sentinelpass_vault.db-journal" />
+    <exclude domain="file" path="sentinelpass_vault.db-wal" />
+    <exclude domain="file" path="sentinelpass_vault.db-shm" />
     <exclude domain="file" path="sentinelpass_vault.db-*" />
+    <exclude domain="file" path="platform_slot.blob" />
+    <exclude domain="file" path="platform_slot.blob-*" />
+    <exclude domain="sharedpref" path="sentinelpass.xml" />
 </full-backup-content>

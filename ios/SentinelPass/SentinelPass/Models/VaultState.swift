@@ -4,10 +4,14 @@
 //
 //  Manages vault state and communicates with the bridge
 //
+//  WBS-822: the vault lives under the App Group container shared with the
+//  credential-provider extension (Services/VaultFile.swift) and gets
+//  NSFileProtectionComplete + backup exclusion applied best-effort after
+//  creation and on every launch.
+//
 
 import Foundation
 import SwiftUI
-import LocalAuthentication
 
 @available(iOS 17.0, macOS 14.0, *)
 @MainActor
@@ -24,10 +28,13 @@ class VaultState: ObservableObject {
     private let vaultURL: URL
 
     private init() {
-        // Vault stored in app's documents directory
-        let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        self.vaultURL = documentsDir.appendingPathComponent("sentinelpass_vault.db")
-        self.hasVault = FileManager.default.fileExists(atPath: vaultURL.path)
+        // WBS-825: shared App Group container so the credential-provider
+        // extension can open the SAME vault (Documents is the unsigned
+        // build fallback — see VaultFile.directoryURL).
+        self.vaultURL = VaultFile.vaultURL
+        self.hasVault = VaultFile.vaultExists
+        // Idempotent; the policy is enforced at rest from the first run.
+        VaultFile.applyAtRestPolicy()
     }
 
     // MARK: - Vault Management
@@ -49,6 +56,8 @@ class VaultState: ObservableObject {
         self.vaultBridge = bridge
         self.hasVault = true
         self.isUnlocked = true
+        // WBS-822: protect the freshly created database immediately.
+        VaultFile.applyAtRestPolicy()
         await loadEntries()
     }
 
@@ -69,6 +78,30 @@ class VaultState: ObservableObject {
         self.vaultBridge = bridge
         self.isUnlocked = true
         await loadEntries()
+    }
+
+    /// WBS-821/823: unlock via the Keychain platform slot. The OS raises
+    /// the biometric/passcode prompt for the KEYCHAIN ITEM READ — the
+    /// release IS the cryptographic authorization (ADR-009), the UI here
+    /// only waits. Runs off the main actor because the keychain read
+    /// blocks until the user answers the system prompt.
+    func unlockWithKeychainSlot() async throws {
+        isLoading = true
+        defer { isLoading = false }
+
+        let path = vaultURL.path
+        let result = await Task.detached(priority: .userInitiated) {
+            KeychainSlot.unlock(vaultPath: path)
+        }.value
+
+        switch result {
+        case .opened(let handle):
+            self.vaultBridge = VaultBridge(adoptingHandle: handle)
+            self.isUnlocked = true
+            await loadEntries()
+        case .failed(let message):
+            throw VaultError.slotUnlockFailed(message)
+        }
     }
 
     func lockVault() {
@@ -94,7 +127,9 @@ class VaultState: ObservableObject {
         }
     }
 
-    func getEntry(id: String) async throws -> EntryModel {
+    /// Full entry detail (password/url/notes included) for the detail
+    /// view — in memory only, never persisted Swift-side (WBS-826).
+    func getEntry(id: String) async throws -> EntryDetails {
         guard let bridge = vaultBridge else {
             throw VaultError.vaultLocked
         }
@@ -103,17 +138,7 @@ class VaultState: ObservableObject {
             throw VaultError.entryNotFound
         }
 
-        return EntryModel(
-            id: entry.id,
-            title: entry.title,
-            username: entry.username,
-            password: entry.password,
-            url: entry.url,
-            notes: entry.notes,
-            favorite: entry.favorite,
-            createdAt: entry.createdAt,
-            modifiedAt: entry.modifiedAt
-        )
+        return entry
     }
 
     func addEntry(title: String, username: String, password: String, url: String, notes: String) async throws {
@@ -206,59 +231,16 @@ class VaultState: ObservableObject {
         return await VaultBridge.checkPasswordStrength(password: password)
     }
 
-    // MARK: - Biometric
+    // MARK: - Platform Keychain Slot (WBS-821)
 
-    func enableBiometric() async throws {
-        guard let bridge = vaultBridge else {
-            throw VaultError.vaultLocked
-        }
-
-        // Generate biometric key
-        let keyData = generateBiometricKey()
-        let success = await bridge.setBiometricKey(keyData: keyData)
-
-        guard success else {
-            throw VaultError.biometricFailed
-        }
+    /// Whether a keychain slot is enrolled (no key material involved).
+    func hasKeychainSlot() -> Bool {
+        KeychainSlot.hasSlot()
     }
 
-    func disableBiometric() async throws {
-        guard let bridge = vaultBridge else {
-            throw VaultError.vaultLocked
-        }
-
-        let success = await bridge.removeBiometricKey()
-        guard success else {
-            throw VaultError.biometricFailed
-        }
-    }
-
-    func hasBiometricKey() async -> Bool {
-        guard let bridge = vaultBridge else { return false }
-        return await bridge.hasBiometricKey()
-    }
-
-    func unlockWithBiometric() async throws {
-        guard let bridge = vaultBridge else {
-            throw VaultError.vaultLocked
-        }
-
-        let success = await bridge.unlockWithBiometric()
-        guard success else {
-            throw VaultError.biometricFailed
-        }
-
-        isUnlocked = true
-        await loadEntries()
-    }
-
-    // MARK: - Helpers
-
-    private func generateBiometricKey() -> Data {
-        // Generate 32 random bytes for biometric key
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, 32, &bytes)
-        return Data(bytes)
+    /// Remove the enrolled slot (disable flow).
+    func disableKeychainSlot() {
+        KeychainSlot.deleteSlot()
     }
 }
 
@@ -273,7 +255,7 @@ enum VaultError: LocalizedError {
     case updateEntryFailed
     case deleteEntryFailed
     case totpFailed
-    case biometricFailed
+    case slotUnlockFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -293,8 +275,11 @@ enum VaultError: LocalizedError {
             return "Failed to delete entry"
         case .totpFailed:
             return "TOTP generation failed"
-        case .biometricFailed:
-            return "Biometric operation failed"
+        case .slotUnlockFailed(let message):
+            if message == KeychainSlot.slotUnavailableSentinel {
+                return "Keychain unlock was refused. Please use your master password."
+            }
+            return "Keychain slot unlock failed: \(message)"
         }
     }
 }

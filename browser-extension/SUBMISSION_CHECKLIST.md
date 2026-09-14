@@ -22,7 +22,7 @@ This release addresses all security vulnerabilities identified in the Chrome Web
 - ✅ **XSS protection** — All user input escaped via `escapeHtml()` helper
 - ✅ **Removed inline event handlers** — No `onclick` attributes
 - ✅ **CSP enforced** — `script-src 'self'; object-src 'none'`
-- ✅ **Updated extension ID** — `sentinelpass@sentinelpass.org` (production-ready)
+- ✅ **Updated extension ID** — `sentinelpass@localhost` (must match the native-host manifest's allowed_extensions — see installation/ and tests/web/manifest-parity.test.ts)
 - ✅ **Permissions minimized** — Only `storage`, `activeTab`, `notifications`, `nativeMessaging`
 
 ## Test Coverage ✅
@@ -47,7 +47,7 @@ Extension ID: nophfgfiiohedlodfeepjoioljbhggdd
 Location: browser-extension/dist/sentinelpass-firefox-0.6.3.zip
 Size: 37KB
 Manifest: Manifest V3
-Extension ID: sentinelpass@sentinelpass.org
+Extension ID: sentinelpass@localhost
 ```
 
 ## Store Submission Steps

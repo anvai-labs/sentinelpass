@@ -1,9 +1,11 @@
+use crate::commands::service_client as sc;
 use anyhow::Result;
 use base64::Engine;
-use rpassword::prompt_password;
 use sentinelpass_core::{SshAgentClient, SshKeyImporter};
+use sentinelpass_protocol::service::{VaultOp, VaultOpResult};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 pub fn default_public_key_path(
     private_key_path: &Path,
@@ -72,16 +74,27 @@ pub fn handle_ssh_agent_add_stored(vault_path: PathBuf, id: i64) -> Result<()> {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    let mut private_key = vault.export_ssh_private_key(id)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+
+    // The agent protocol needs the PEM in THIS process; fetch it over the
+    // service boundary (typed SshKey with private material), zeroized on
+    // drop (stage-3 review F8).
+    let private_key = match backend.call(VaultOp::SshKeyGet {
+        key_id: id,
+        include_private: true,
+    })? {
+        VaultOpResult::SshKey(key) => match key.private_key {
+            Some(private_key) => private_key,
+            None => anyhow::bail!("daemon did not return the private key"),
+        },
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
+    let private_key = Zeroizing::new(private_key.to_string());
 
     let client = SshAgentClient::new()?;
-    let add_result = client
-        .add_identity_from_pem(&private_key)
-        .map_err(|e| anyhow::anyhow!("Failed to add stored SSH key to agent: {}", e));
-    private_key.clear();
-    add_result?;
+    client
+        .add_identity_from_pem(private_key.as_str())
+        .map_err(|e| anyhow::anyhow!("Failed to add stored SSH key to agent: {}", e))?;
 
     println!("Added stored SSH key {} to agent.", id);
     Ok(())
@@ -134,17 +147,22 @@ pub fn handle_ssh_key_add(
     let key_comment = comment.or_else(|| extract_public_key_comment(&public_key));
     let fingerprint = compute_ssh_fingerprint(&public_key)?;
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    let key_id = vault.add_ssh_key_plaintext(
-        name.to_string(),
-        key_comment,
-        key_type,
-        None,
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+
+    let key_id = match backend.call(VaultOp::SshKeyAdd {
+        name: name.to_string(),
+        comment: key_comment,
+        key_type: serde_json::to_value(key_type)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .ok_or_else(|| anyhow::anyhow!("failed to encode SSH key type"))?,
         public_key,
-        private_key,
+        private_key: private_key.into(),
         fingerprint,
-    )?;
+    })? {
+        VaultOpResult::EntryId(key_id) => key_id,
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
 
     println!("SSH key added with ID: {}", key_id);
     Ok(())
@@ -155,9 +173,11 @@ pub fn handle_ssh_key_list(vault_path: PathBuf) -> Result<()> {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    let keys = vault.list_ssh_keys()?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    let keys = match backend.call(VaultOp::SshKeyList)? {
+        VaultOpResult::SshKeyList(keys) => keys,
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
 
     if keys.is_empty() {
         println!("No SSH keys found in vault.");
@@ -181,9 +201,14 @@ pub fn handle_ssh_key_get(vault_path: PathBuf, id: i64, show_private: bool) -> R
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    let key = vault.get_ssh_key(id)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    let key = match backend.call(VaultOp::SshKeyGet {
+        key_id: id,
+        include_private: show_private,
+    })? {
+        VaultOpResult::SshKey(key) => key,
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
 
     println!();
     println!("ID: {}", id);
@@ -196,10 +221,14 @@ pub fn handle_ssh_key_get(vault_path: PathBuf, id: i64, show_private: bool) -> R
     println!("Public key: {}", key.public_key);
 
     if show_private {
-        let private_key = vault.export_ssh_private_key(id)?;
-        println!();
-        println!("Private key:");
-        println!("{}", private_key);
+        match key.private_key {
+            Some(private_key) => {
+                println!();
+                println!("Private key:");
+                println!("{}", private_key.as_str());
+            }
+            None => anyhow::bail!("daemon did not return the private key"),
+        }
     }
     println!();
     Ok(())
@@ -222,9 +251,8 @@ pub fn handle_ssh_key_delete(vault_path: PathBuf, id: i64, force: bool) -> Resul
         }
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    vault.delete_ssh_key(id)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::SshKeyDelete { key_id: id })?;
     println!("Deleted SSH key {}", id);
     Ok(())
 }

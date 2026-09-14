@@ -12,7 +12,7 @@ struct EditEntryView: View {
     @EnvironmentObject private var vaultState: VaultState
     @Environment(\.dismiss) private var dismiss
 
-    let entry: EntryModel
+    let entry: EntryDetails
 
     @State private var title: String
     @State private var username: String
@@ -31,11 +31,11 @@ struct EditEntryView: View {
         case title, username, password, url, notes
     }
 
-    init(entry: EntryModel) {
+    init(entry: EntryDetails) {
         self.entry = entry
         _title = State(initialValue: entry.title)
         _username = State(initialValue: entry.username)
-        _password = State(initialValue: entry.password ?? "")
+        _password = State(initialValue: entry.password)
         _url = State(initialValue: entry.url ?? "")
         _notes = State(initialValue: entry.notes ?? "")
     }
@@ -188,11 +188,16 @@ struct EditEntryView: View {
 
 @available(iOS 17.0, macOS 14.0, *)
 #Preview {
-    EditEntryView(entry: EntryModel(
+    EditEntryView(entry: EntryDetails(
         id: "1",
         title: "Example",
         username: "user@example.com",
-        password: "password123"
+        password: "password123",
+        url: nil,
+        notes: nil,
+        favorite: false,
+        createdAt: Date(),
+        modifiedAt: Date()
     ))
     .environmentObject(VaultState.shared)
 }

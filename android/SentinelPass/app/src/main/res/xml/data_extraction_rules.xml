@@ -1,12 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- WBS-816 backup policy — android:dataExtractionRules (API 31+ path).
+
+     cloud-backup: the vault database is EXCLUDED entirely (same reasoning
+     as the API 26–30 rules in backup_rules.xml — the plaintext-derived KEK
+     never leaves the device, so cloud-restored vaults invite offline
+     brute force). The platform slot blob is excluded too: it is
+     non-secret but device-bound (wrapped under an Android Keystore key
+     that does not transfer; a restored blob is fail-closed dead weight).
+
+     device-transfer (D2D): the vault database MAY transfer — it is
+     encrypted at rest with the master password and the receiving device
+     re-unlocks with that password (accepted decision, M1/M2 supervisor).
+     The slot blob and the Keystore-dependent material MUST NOT: Keystore
+     keys do not survive D2D, so the blob would be unopenable. The
+     sentinelpass.xml prefs hold only the `vault_created` boolean
+     (data/VaultState.kt) — excluded as valueless. -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- Exclude vault database from cloud backup for security -->
         <exclude domain="file" path="sentinelpass_vault.db" />
+        <exclude domain="file" path="sentinelpass_vault.db-journal" />
+        <exclude domain="file" path="sentinelpass_vault.db-wal" />
+        <exclude domain="file" path="sentinelpass_vault.db-shm" />
         <exclude domain="file" path="sentinelpass_vault.db-*" />
+        <exclude domain="file" path="platform_slot.blob" />
+        <exclude domain="file" path="platform_slot.blob-*" />
+        <exclude domain="sharedpref" path="sentinelpass.xml" />
     </cloud-backup>
     <device-transfer>
-        <include domain="file" path="sentinelpass_vault.db" />
-        <include domain="sharedpref" path="sentinelpass.xml" />
+        <!-- Default for device-transfer is EVERYTHING, so no <include> list
+             here: the encrypted vault db (and its SQLite sidecars) ride along
+             with the master-password relock on the new device. The excludes
+             below carve out the device-bound and valueless material — note
+             that adding an <include> block would flip this to allowlist
+             semantics and silently strand those excludes (lint: FullBackupContent). -->
+        <exclude domain="file" path="platform_slot.blob" />
+        <exclude domain="file" path="platform_slot.blob-*" />
+        <exclude domain="sharedpref" path="sentinelpass.xml" />
     </device-transfer>
 </data-extraction-rules>

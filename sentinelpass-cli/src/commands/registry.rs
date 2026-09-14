@@ -1,14 +1,14 @@
-//! `sentinelpass registry` — credential registry posture commands (ADR-001).
-
+use crate::commands::service_client::{self as sc, Backend};
+use crate::RegistryCommands;
 use anyhow::Result;
-use rpassword::prompt_password;
-use sentinelpass_core::registry::policy::RotationStatus;
-use sentinelpass_core::{Criticality, EntityKind, VaultManager};
+use sentinelpass_core::registry::{Criticality, EntityKind, RegistryOverview, RotationStatus};
+use sentinelpass_protocol::service::VaultOp;
 use std::path::PathBuf;
 
-use crate::RegistryCommands;
-
-pub fn handle_registry_command(vault_path: PathBuf, command: &RegistryCommands) -> Result<()> {
+pub fn handle_registry_command(
+    vault_path: PathBuf,
+    command: &crate::RegistryCommands,
+) -> Result<()> {
     match command {
         RegistryCommands::EntityAdd {
             name,
@@ -42,21 +42,20 @@ pub fn handle_registry_command(vault_path: PathBuf, command: &RegistryCommands) 
     }
 }
 
-fn open_vault(vault_path: PathBuf) -> Result<VaultManager> {
-    if !vault_path.exists() {
-        anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
-    }
-    let master_password = prompt_password("Master password: ")?;
-    let vault = VaultManager::open(&vault_path, master_password.as_bytes())?;
-    Ok(vault)
-}
-
 fn parse_kind(value: &str) -> Result<EntityKind> {
     EntityKind::parse(value).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 fn parse_criticality(value: &str) -> Result<Criticality> {
     Criticality::parse(value).map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Fetch the registry overview through the service backend and decode into
+/// the core render type (one conversion point for all registry renders).
+fn fetch_overview(backend: &Backend, include_strength: bool) -> Result<RegistryOverview> {
+    let value = sc::expect_report(backend.call(VaultOp::RegistryOverview { include_strength })?)?;
+    serde_json::from_value(value)
+        .map_err(|e| anyhow::anyhow!("failed to decode registry overview: {}", e))
 }
 
 fn handle_entity_add(
@@ -69,19 +68,25 @@ fn handle_entity_add(
 ) -> Result<()> {
     let kind = parse_kind(kind)?;
     let criticality = parse_criticality(criticality)?;
-    let vault = open_vault(vault_path)?;
-    let entity = vault.create_entity(
-        name.trim(),
-        kind,
-        criticality,
-        notes.map(str::trim).filter(|value| !value.is_empty()),
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    let entity = match backend.call(VaultOp::EntityAdd {
+        name: name.trim().to_string(),
+        kind: kind.as_str().to_string(),
+        criticality: criticality.as_str().to_string(),
+        notes: notes
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         rotation_interval_days,
-    )?;
+    })? {
+        sentinelpass_protocol::service::VaultOpResult::Entity(entity) => entity,
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
     println!("Entity registered: {} ({})", entity.name, entity.entity_id);
     println!(
         "  kind={} criticality={} rotation-interval={}",
-        entity.kind.as_str(),
-        entity.criticality.as_str(),
+        entity.kind,
+        entity.criticality,
         entity
             .rotation_interval_days_override
             .map(|days| format!("{}d (override)", days))
@@ -91,8 +96,8 @@ fn handle_entity_add(
 }
 
 fn handle_entity_list(vault_path: PathBuf) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    let overview = vault.registry_overview(false)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    let overview = fetch_overview(&backend, false)?;
 
     if overview.entities.is_empty() {
         println!("No entities registered. Use 'sentinelpass registry entity-add' to create one.");
@@ -123,10 +128,11 @@ fn handle_entity_list(vault_path: PathBuf) -> Result<()> {
 }
 
 fn handle_entity_delete(vault_path: PathBuf, name: &str) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    let entity = resolve_entity(&vault, name)?;
-    vault.delete_entity(&entity.entity_id)?;
-    println!("Entity deleted: {}", entity.name);
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::EntityDelete {
+        name: name.trim().to_string(),
+    })?;
+    println!("Entity deleted: {}", name.trim());
     Ok(())
 }
 
@@ -136,16 +142,19 @@ fn handle_assign(
     entity_name: &str,
     label: Option<&str>,
 ) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    let entity = resolve_entity(&vault, entity_name)?;
-    vault.assign_entry(entry_id, &entity.entity_id, label)?;
-    println!("Entry {} assigned to {}", entry_id, entity.name);
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::EntryAssign {
+        entry_id,
+        entity: entity_name.trim().to_string(),
+        label: label.map(str::to_string),
+    })?;
+    println!("Entry {} assigned to {}", entry_id, entity_name.trim());
     Ok(())
 }
 
 fn handle_mark_rotated(vault_path: PathBuf, entry_id: i64) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    vault.mark_entry_rotated(entry_id)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::EntryMarkRotated { entry_id })?;
     println!(
         "Entry {} marked as rotated (password_rotated_at = now)",
         entry_id
@@ -154,15 +163,18 @@ fn handle_mark_rotated(vault_path: PathBuf, entry_id: i64) -> Result<()> {
 }
 
 fn handle_unassign(vault_path: PathBuf, entry_id: i64) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    vault.unassign_entry(entry_id)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::EntryUnassign { entry_id })?;
     println!("Entry {} unassigned from its entity", entry_id);
     Ok(())
 }
 
 fn handle_expires_at(vault_path: PathBuf, entry_id: i64, timestamp: Option<i64>) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    vault.set_expires_at(entry_id, timestamp)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::EntrySetExpiresAt {
+        entry_id,
+        expires_at: timestamp,
+    })?;
     match timestamp {
         Some(ts) => println!("Entry {} expiry set to unix timestamp {}", entry_id, ts),
         None => println!("Entry {} expiry cleared", entry_id),
@@ -171,9 +183,8 @@ fn handle_expires_at(vault_path: PathBuf, entry_id: i64, timestamp: Option<i64>)
 }
 
 fn handle_status(vault_path: PathBuf) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    ensure_index(&vault)?;
-    let overview = vault.registry_overview(false)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    let overview = fetch_overview(&backend, false)?;
 
     let findings = overview
         .posture
@@ -217,9 +228,8 @@ fn handle_status(vault_path: PathBuf) -> Result<()> {
 }
 
 fn handle_report(vault_path: PathBuf, only_issues: bool) -> Result<()> {
-    let vault = open_vault(vault_path)?;
-    ensure_index(&vault)?;
-    let overview = vault.registry_overview(true)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    let overview = fetch_overview(&backend, true)?;
 
     println!(
         "Registry report ({} entries, strength analysis included)",
@@ -232,26 +242,6 @@ fn handle_report(vault_path: PathBuf, only_issues: bool) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn resolve_entity(vault: &VaultManager, name: &str) -> Result<sentinelpass_core::Entity> {
-    let entities = vault.list_entities()?;
-    entities
-        .into_iter()
-        .find(|entity| entity.name == name.trim())
-        .ok_or_else(|| anyhow::anyhow!("No entity named '{}'", name.trim()))
-}
-
-/// Repair the equality index before reading posture from it.
-fn ensure_index(vault: &VaultManager) -> Result<()> {
-    if vault.registry_backfill_needed()? {
-        let report = vault.sweep_registry_index()?;
-        eprintln!(
-            "Registry index swept: {} scanned, {} inserted, {} rotated, {} orphans pruned",
-            report.scanned, report.inserted, report.rotated, report.orphans_pruned
-        );
-    }
-    Ok(())
-}
 
 fn status_label(status: RotationStatus) -> &'static str {
     match status {

@@ -38,15 +38,21 @@
 #![allow(clippy::missing_safety_doc)]
 // We use unsafe for FFI boundaries, safety is documented per function
 
+mod abi;
+mod backup;
 mod bridge;
 mod error;
 mod ffi;
+mod slot;
 
 #[cfg(feature = "jni")]
 mod jni;
 
-mod drive;
-mod icloud;
+// The CloudKit/Drive file-sync placeholder modules (drive.rs, icloud.rs) and
+// their sp_sync_prepare_* / collect / apply exports were removed under
+// WBS-807 (ADR-009 rev 2: mobile sync is relay-based sync v2 only — ADR-006;
+// the file-sync paths conflicted with it and serialized plaintext entry
+// titles into "sync blobs").
 
 // Re-export error types
 pub use error::{BridgeError, ErrorCode};

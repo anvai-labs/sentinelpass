@@ -189,6 +189,33 @@ All debug logging is now enabled by default. No additional configuration needed.
 2. When creating a new password, the save prompt should appear
 3. Look for "create password" or "new password" indicators
 
+## Extension Secret Lifetime Inventory (WBS-716)
+
+What the extension keeps, where, and for how long — the concrete answer to
+"where can a password live?" for the browser surface:
+
+| Location | Content | Lifetime | Cleared by |
+|---|---|---|---|
+| Background: `chrome.storage.session` `pendingCredential` | Captured submission (username + password) | 30 s (`expiresAt` stamp) | 2FA-page resume consumption, expiry alarm sweep (1 min), vault lock, browser exit |
+| Background: `chrome.storage.session` `pendingSaveCredential:<id>` | Pending save payload for one notification | 10 min (`expiresAt` stamp) | Save/never/dismiss handling, expiry alarm sweep, vault lock, browser exit |
+| Background: `chrome.storage.session` `pendingUnlockRetry` | Locked-vault save retry payload | 2 min (`expiresAt` stamp) | Retry/expiry handling, expiry alarm sweep, vault lock, browser exit |
+| Content script: `lastAutofillContext` (memory) | Autofilled username + password for submit-source detection | 10 min timeout | Timeout, page navigation (`pagehide`), `scrub_secrets` broadcast on vault lock |
+| Popup: `allCredentials` (memory) | Usernames/titles for the CURRENT site only — no passwords | Popup lifetime | Popup closes |
+| `chrome.storage.local` `neverSaveDomains`, site prefs | Domains only — never secrets | Until removed | User action |
+
+Hard rules enforced by this model:
+
+- **Content scripts never hold session secrets.** Captured submissions are
+  handed to the background (`capture_pending_login`); resuming a pending
+  login is a question (`resume_pending_login`) whose answer is yes/no — the
+  payload never round-trips to a page context. `chrome.storage.session`
+  stays a trusted-context surface.
+- **Every secret entry is stamped `expiresAt`** and swept by a
+  `chrome.alarms` tick (service workers are ephemeral; timers are not
+  trusted). An entry that LOSES its stamp is swept as expired (fail-closed).
+- **A vault lock purges everything** pending and broadcasts `scrub_secrets`
+  to all tabs; `chrome.storage.session` itself dies with the browser session.
+
 ## Reporting Issues
 
 When reporting issues, please include:

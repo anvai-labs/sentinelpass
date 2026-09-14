@@ -92,15 +92,40 @@ jobs:
           name: web-artifacts-${{ matrix.platform }}
           path: .
 
-      # If artifacts weren't available, build fresh
+      # If artifacts weren't available, build fresh.
+      #
+      # WBS-908 (SBOM): release binaries are built with `cargo auditable`
+      # so every shipped binary EMBEDS its exact dependency list (versions
+      # + checksums) in a compressed blob. Chosen over generating a
+      # standalone SBOM file (syft/CycloneDX/SPDX) because the embedded
+      # form travels with the artifact — anyone can verify what shipped
+      # with `cargo audit bin ./sentinelpass` offline, it cannot drift
+      # from the binary the way a sidecar file can, and it feeds
+      # vulnerability matching without extra infrastructure. See
+      # docs/OSS_RELEASE_CHECKLIST.md ("Supply chain / SBOM").
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked
       - name: Build release binaries (if not cached)
         shell: bash
         run: |
           if [ ! -f "target/release/sentinelpass${{ runner.os == 'Windows' && '.exe' || '' }}" ]; then
-            cargo build --release --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
+            cargo auditable build --release --bin sentinelpass --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass-ui
           else
             echo "Using cached build artifacts"
           fi
+
+      # WBS-908 smoke gate (Linux): prove the embedded SBOM is really
+      # present by auditing the built binary from its own embedded
+      # dependency data. Fails the release if `cargo auditable` data is
+      # missing or a dependency in the binary matches a known advisory.
+      - name: Install cargo-audit (SBOM verification)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@55ed588c2f0e092949af25ad4c5873185e476b5c # cargo-audit
+      - name: Verify embedded SBOM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo audit bin target/release/sentinelpass
+          cargo audit bin target/release/sentinelpass-daemon
 
       - name: Inject release version
         id: version
@@ -249,7 +274,9 @@ jobs:
   native-installer-smoke:
     name: Native Installer Smoke (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    needs: package
+    # setup listed explicitly (it is also a transitive need via package) so
+    # the is-release gate below reads from a declared dependency.
+    needs: [setup, package]
     if: needs.setup.outputs.is-release == 'true'
     strategy:
       fail-fast: false
@@ -271,6 +298,64 @@ jobs:
           name: packages-${{ matrix.platform }}
           path: dist
 
+      # Installed-artifact execution smoke: extract the PACKAGED portable
+      # archive and prove the shipped binaries at least execute on each OS.
+      # Extraction + direct execution ONLY — the interactive installers are
+      # never run against runner system paths.
+      #
+      # `sentinelpass` is the only binary with a real --version (clap): the
+      # daemon only ad-hoc-scans for --biometric/--start-locked and IGNORES
+      # unknown args (so an unknown flag boots it, it never prints a
+      # version), and the host/UI have no arg surface at all — for those we
+      # assert presence + execute permission inside the archive instead of
+      # exit codes. A functional
+      # unlock/round-trip smoke on installed artifacts remains TD-REL-05.
+      # Placed in this job rather than bundle-smoke because it is
+      # release-gated (running binaries matters at tag time; PR preflight
+      # keeps the cheap existence checks) and the artifacts are already
+      # downloaded here.
+      - name: Smoke packaged binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          exe="${{ runner.os == 'Windows' && '.exe' || '' }}"
+          if [ "${{ matrix.platform }}" == "windows" ]; then
+            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.zip' ! -name '*installer*' | head -1)
+            unzip -q "$archive" -d "$work"
+          else
+            archive=$(find dist -maxdepth 1 -name 'sentinelpass-*.tar.gz' ! -name '*installer*' | head -1)
+            tar -xzf "$archive" -C "$work"
+          fi
+          echo "Extracted $(basename "$archive"):"
+          ls -la "$work"
+
+          version_out="$("$work/sentinelpass${exe}" --version)"
+          echo "packaged CLI --version: ${version_out}"
+          # Drift guard: package-job binaries are built BEFORE the version-
+          # injection step runs, so they carry the COMMITTED workspace
+          # version. This check therefore enforces tag == committed
+          # manifest version (the crates-publish gate re-checks the same
+          # agreement before publishing). A tag pushed before the release
+          # commit's version bump fails here by design.
+          echo "$version_out" | grep -q "${{ needs.setup.outputs.version }}" || {
+            echo "::error::packaged CLI reports '${version_out}' but the tag version is ${{ needs.setup.outputs.version }}"
+            exit 1
+          }
+
+          for bin_name in sentinelpass-daemon sentinelpass-host sentinelpass-ui; do
+            f="$work/${bin_name}${exe}"
+            if [ ! -f "$f" ]; then
+              echo "::error::${bin_name}${exe} missing from portable archive"
+              exit 1
+            fi
+            if [ ! -x "$f" ]; then
+              echo "::error::${bin_name}${exe} is not executable"
+              exit 1
+            fi
+          done
+          echo "All packaged binaries present and executable; CLI runs."
+
       - name: Setup build environment
         uses: ./.github/actions/setup-rust-env
         with:
@@ -283,6 +368,38 @@ jobs:
           cargo install tauri-cli --version "^2.0.0" --locked
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # WBS-905 sidecar staging: `cargo tauri build` alone bundles NO
+      # daemon/host sidecars — tauri.conf.json declares
+      # `resources: ["src-tauri/resources/bin/*"]` and the bundler SILENTLY
+      # tolerates the empty glob, which is exactly how sidecar-less
+      # installers shipped before. The staging script builds daemon + host,
+      # copies them (with the Windows .exe suffix handled under Git Bash)
+      # into src-tauri/resources/bin/, and FAILS if the staging directory is
+      # still empty. --stage-only defers the slow bundling to the next step
+      # so the tauri invocation (and its updater-signing env) stays visible.
+      - name: Stage daemon/host sidecars into Tauri resources
+        shell: bash
+        run: bash scripts/build-native-installers.sh --stage-only
+
+      # Fail-closed backstop, independent of the script: the two sidecar
+      # files THEMSELVES (not any file — README.txt is git-tracked in this
+      # directory, so a total-file count can never reach 0) must exist
+      # non-empty, or the bundler would ship sidecar-less installers
+      # silently (the exact WBS-905 regression).
+      - name: Assert staged sidecars exist (fail-closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="sentinelpass-ui/src-tauri/resources/bin"
+          for sidecar in sentinelpass-daemon sentinelpass-host; do
+            if ! find "$staging" -maxdepth 1 -type f -name "${sidecar}*" -size +0 | grep -q .; then
+              echo "::error::no non-empty ${sidecar} staged in $staging — tauri would bundle installers without the daemon/host sidecars (WBS-905)"
+              exit 1
+            fi
+          done
+          echo "Staged sidecars verified in $staging:"
+          ls -la "$staging"
+
       - name: Build Tauri bundles
         shell: bash
         env:
@@ -292,16 +409,41 @@ jobs:
           cd sentinelpass-ui
           cargo tauri build --verbose
 
-      - name: List bundle outputs
+      # WBS-905: prove the sidecars actually landed in the built bundles —
+      # cheaply, per OS. Linux reads the .deb payload directly (dpkg-deb);
+      # macOS walks the assembled .app; Windows installers (msi/nsis) have no
+      # cheap offline introspection, so there the pre-build staging gate
+      # above is the authoritative check and this step lists the bundle
+      # outputs for the release record.
+      - name: Verify sidecars landed in bundles
         shell: bash
         run: |
-          echo "Tauri bundle outputs:"
-          for dir in sentinelpass-ui/target/release/bundle target/release/bundle; do
-            if [ -d "$dir" ]; then
-              echo "Found bundles in $dir:"
-              find "$dir" -type f -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.exe' -o -name '*.app' | head -20
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" == "linux" ]; then
+            deb=$(find sentinelpass-ui/target/release/bundle/deb target/release/bundle/deb -name '*.deb' 2>/dev/null | head -1)
+            if [ -z "$deb" ]; then
+              echo "::error::no .deb bundle found to verify sidecars against"
+              exit 1
             fi
-          done
+            echo "Inspecting $deb payload for staged sidecars:"
+            listing=$(dpkg-deb -c "$deb")
+            echo "$listing" | grep 'resources/bin/sentinelpass-daemon' || {
+              echo "::error::.deb payload lacks resources/bin/sentinelpass-daemon (WBS-905)"; exit 1; }
+            echo "$listing" | grep 'resources/bin/sentinelpass-host' || {
+              echo "::error::.deb payload lacks resources/bin/sentinelpass-host (WBS-905)"; exit 1; }
+          elif [ "${{ matrix.platform }}" == "macos" ]; then
+            app=$(find sentinelpass-ui/target/release/bundle/macos target/release/bundle/macos -maxdepth 2 -name '*.app' 2>/dev/null | head -1)
+            if [ -z "$app" ]; then
+              echo "::error::no .app bundle found to verify sidecars against"
+              exit 1
+            fi
+            echo "Inspecting $app payload for staged sidecars:"
+            find "$app" -type f | grep -E 'sentinelpass-(daemon|host)' || {
+              echo "::error::.app bundle lacks daemon/host sidecars (WBS-905)"; exit 1; }
+          else
+            echo "Tauri bundle outputs (Windows — sidecar presence enforced by the pre-build staging gate):"
+            find sentinelpass-ui/target/release/bundle target/release/bundle -type f 2>/dev/null | head -40
+          fi
 
       - name: Upload Tauri bundle artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -323,6 +465,61 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # ---- TD-REL-01 / WBS-902: feature/platform matrix as a release
+  # prerequisite --------------------------------------------------------------
+  # The shipped desktop binaries are only ever built ONE way (default
+  # features), so a feature-flag regression — e.g. the feature-gated `sync`
+  # client/engine breaking, or the workspace no longer compiling without
+  # defaults — would sit undetected until someone actually flips a flag.
+  # This matrix builds the whole workspace three ways per release platform
+  # and the `release` job now REQUIRES it: a red matrix leg aborts the
+  # release before anything publishes (same fail-closed pattern as the
+  # WBS-901 audits above).
+  #
+  # - Gated on is-release (skips PR preflight runs), so the
+  #   ci-gate.yml expectation table is unaffected — like the WBS-901 audit
+  #   jobs, these register no PR check runs.
+  # - Feature names verified against the workspace manifests:
+  #   sentinelpass-core defines `default = []` + `sync = ["reqwest"]` and is
+  #   the only member with a `sync` feature, so bare `--features sync`
+  #   resolves unambiguously for `--workspace` builds (virtual workspace).
+  # - Mobile is deliberately NOT in this matrix: android.yml / ios.yml are
+  #   the mobile gates (all-ABI JNI builds + the WBS-811 exported-symbol
+  #   check on Android, iOS device/simulator builds + bridge-contract tests
+  #   on iOS). They are PR-path-filtered and do NOT run at tag time, so the
+  #   release manager must dispatch them manually against the tag ref — both
+  #   accept `workflow_dispatch` (release-checklist item in
+  #   docs/OSS_RELEASE_CHECKLIST.md).
+  feature-matrix:
+    name: Feature Matrix (${{ matrix.os }}, ${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        features: ["", "--no-default-features", "--features sync"]
+        # Labels for the checks UI + distinct cache prefixes per leg.
+        include:
+          - features: ""
+            label: default
+          - features: "--no-default-features"
+            label: no-default
+          - features: "--features sync"
+            label: sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-rust-env
+        with:
+          cache-key-prefix: feature-matrix-${{ matrix.os }}-${{ matrix.label }}
+
+      - name: Build workspace (${{ matrix.label }})
+        shell: bash
+        run: cargo build --release --locked --workspace ${{ matrix.features }}
+
   # Create GitHub release and upload assets
   # Crates.io publish for the reusable protocol contract crate: sandhi's
   # sandhi-store pins sentinelpass-protocol, so an unpublished protocol crate
@@ -340,7 +537,9 @@ jobs:
   # crates.io semantics, noted rather than worked around.
   crates-publish:
     name: Publish sentinelpass-protocol to crates.io
-    needs: setup
+    # WBS-901: publishing is irreversible (a yank is permanent) — it waits
+    # for the tag-time security audits the same way the GitHub release does.
+    needs: [setup, security-audit, npm-audit-root, npm-audit-e2e]
     if: >-
       ${{ needs.setup.outputs.is-release == 'true' &&
           github.event_name == 'push' &&
@@ -381,11 +580,23 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p sentinelpass-protocol --locked
 
-  # Create GitHub release and upload assets
+  # Create GitHub release and upload assets. WBS-901: the release REQUIRES
+  # the tag-time security gates — a failed audit aborts the release here,
+  # before anything is published. TD-REL-01/WBS-902: it also REQUIRES the
+  # feature/platform matrix for the same reason — a red matrix leg (default
+  # features, --no-default-features, or the feature-gated `sync` build on any
+  # release platform) aborts the release before anything publishes.
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [setup, bundle-smoke, native-installer-smoke]
+    needs:
+      - setup
+      - bundle-smoke
+      - native-installer-smoke
+      - feature-matrix
+      - security-audit
+      - npm-audit-root
+      - npm-audit-e2e
     if: needs.setup.outputs.is-release == 'true'
     permissions:
       contents: write
@@ -556,3 +767,88 @@ jobs:
   # (update-sentinelpass.yml there); this workflow no longer touches the tap.
   # The push-based job this replaces failed on every release: it committed to
   # main directly, which the tap's checks-only branch protection rejects.
+
+  # ---- WBS-901: tag-time security gates -----------------------------------
+  # security.yml is PR-triggered only, so a tag push previously reached the
+  # `release` job with NO dependency scan at all. These three jobs re-run the
+  # PR gate's audits at tag time and the `release` job now REQUIRES them —
+  # a red audit blocks the release instead of being invisible.
+  #
+  # Design notes:
+  # - Gated on `is-release` (tag pushes and dispatch-on-a-v*-tag) so PR
+  #   preflight runs do NOT double-run the same audits security.yml already
+  #   runs on the PR (the `release` job skips on those runs anyway, so the
+  #   skip state of its needs is consistent).
+  # - Trivy is deliberately NOT repeated here: its DB download is the
+  #   expensive job, and its vuln findings for shipped languages are already
+  #   covered by cargo audit + npm audit below.
+  # - Audit POLICY is the governed .cargo/audit.toml (WBS-909) — no inline
+  #   ignores. A HIGH/CRITICAL advisory with no governed exception fails the
+  #   tag and blocks the release (register: docs/DEPENDENCY_EXCEPTIONS.md).
+  # - These jobs produce no PR check runs, so ci-gate.yml's expectation
+  #   table is unaffected (the Gate is PR-only; tag runs have no Gate).
+  security-audit:
+    name: Release Security Audit (RustSec)
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@55ed588c2f0e092949af25ad4c5873185e476b5c # cargo-audit
+      - name: Run cargo audit (governed policy)
+        run: cargo audit
+
+  npm-audit-root:
+    name: Release Security Audit (npm root)
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Run npm audit (high+)
+        # Same registry-flake retry as security.yml.
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1
+
+  npm-audit-e2e:
+    name: Release Security Audit (npm extension e2e)
+    runs-on: ubuntu-latest
+    needs: setup
+    if: needs.setup.outputs.is-release == 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: browser-extension/e2e/package-lock.json
+      - name: Install e2e dependencies
+        working-directory: browser-extension/e2e
+        run: npm ci
+      - name: Run npm audit (high+)
+        working-directory: browser-extension/e2e
+        run: |
+          for attempt in 1 2 3; do
+            if npm audit --audit-level=high; then exit 0; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::npm audit attempt ${attempt} failed (registry flake?) - retrying in 60s"
+              sleep 60
+            fi
+          done
+          exit 1

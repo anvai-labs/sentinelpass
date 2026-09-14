@@ -14,10 +14,13 @@
 //! in `sentinelpass-core`, not here.
 
 pub mod client;
+pub mod connection;
 pub mod envelope;
 pub mod error;
 pub mod message;
 pub mod paths;
+pub mod service;
+pub mod session;
 pub mod token;
 pub mod transport;
 #[cfg(windows)]
@@ -26,8 +29,13 @@ pub mod windows_frame;
 pub use client::IpcClient;
 pub use envelope::{IpcEnvelope, Origin};
 pub use error::ProtocolError;
-pub use message::{CredentialSummary, ExternalSecretField, IpcMessage};
+pub use message::{CredentialSummary, ExternalSecretField, IpcMessage, SitePermissionSummary};
 pub use paths::{default_ipc_socket_path, default_ipc_token_path, get_config_dir};
+pub use service::{
+    ServiceBiometricStatus, ServiceEntity, ServiceEntry, ServiceEntrySummary, ServiceError,
+    ServiceOutcome, ServiceSyncDeviceInfo, ServiceSyncStatus, ServiceTotpMetadata,
+    ServiceVaultStatus, VaultOp, VaultOpResult,
+};
 pub use token::{load_ipc_token, load_or_create_ipc_token};
 #[cfg(unix)]
 pub use transport::unix::UnixSocketConnection;

@@ -21,7 +21,26 @@ use tracing::warn;
 /// change re-pushed forever). Every local mutation path writes sync
 /// bookkeeping explicitly (repository insert/update, delete, sweeps), so
 /// the trigger is load-bearing for nothing; see `migrate_v8_to_v9`.
-pub const CURRENT_SCHEMA_VERSION: i32 = 9;
+/// v10 (WBS-604/605 / ADR-006): `sync_acked_version` on entries, ssh_keys,
+/// and totp_secrets — the durable per-object record of the version the
+/// relay has ACKNOWLEDGED (the CAS `expected_version` for the next v2
+/// mutation). Seeded from `sync_version` for already-synced rows (v1's
+/// relay held those versions) and 0 for pending rows.
+/// v11 (WBS-607 / ADR-006): `sync_dead_letter` — the bounded durable
+/// disposition for pulled mutations that cannot be applied. Every mutation
+/// in a page gets a disposition (applied or dead-lettered) before the pull
+/// cursor may pass it; the table is hard-capped (fail-closed at overflow).
+/// v12 (WBS-611 / ADR-006): `sync_conflicts` — the durable alternative for
+/// a concurrent edit (one per object; the LOCAL side stays in its own row).
+/// A pull that hits a row with an unsynced local edit records the incoming
+/// mutation here instead of silently overwriting (SR-SYNC-005).
+/// v13 (WBS-613 / ADR-006): `sync_metadata.lineage_high_water` — the
+/// TRUSTED sync-lineage high-water (the max relay vault-log cursor this
+/// device ever accepted). Deliberately DISTINCT from the ADR-004 epoch
+/// sidecar (which protects key-material rollback): this column protects
+/// LOG-lineage rollback — a relay whose log moved backwards (reset, vault
+/// swap) is refused fail-closed and requires re-pairing.
+pub const CURRENT_SCHEMA_VERSION: i32 = 13;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -309,6 +328,7 @@ impl Database {
                 favorite INTEGER NOT NULL DEFAULT 0,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -399,6 +419,7 @@ impl Database {
                 modified_at INTEGER NOT NULL,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -427,6 +448,7 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 sync_id TEXT,
                 sync_version INTEGER NOT NULL DEFAULT 0,
+                sync_acked_version INTEGER NOT NULL DEFAULT 0,
                 sync_state TEXT NOT NULL DEFAULT 'pending',
                 last_synced_at INTEGER,
                 is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -452,7 +474,9 @@ impl Database {
                     last_push_sequence INTEGER NOT NULL DEFAULT 0,
                     last_pull_sequence INTEGER NOT NULL DEFAULT 0,
                     last_sync_at INTEGER,
-                    sync_enabled INTEGER NOT NULL DEFAULT 0
+                    sync_enabled INTEGER NOT NULL DEFAULT 0,
+                    protocol_version INTEGER NOT NULL DEFAULT 0,
+                    lineage_high_water INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS sync_devices (
@@ -474,6 +498,25 @@ impl Database {
                     deleted_at INTEGER NOT NULL,
                     origin_device_id TEXT NOT NULL,
                     pushed INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS sync_dead_letter (
+                    server_sequence INTEGER PRIMARY KEY,
+                    mutation_id TEXT NOT NULL,
+                    object_id TEXT NOT NULL,
+                    object_type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    received_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sync_conflicts (
+                    object_id TEXT PRIMARY KEY,
+                    object_type TEXT NOT NULL,
+                    remote_version INTEGER NOT NULL,
+                    remote_payload BLOB NOT NULL,
+                    origin_device_id TEXT NOT NULL,
+                    is_tombstone INTEGER NOT NULL DEFAULT 0,
+                    received_at INTEGER NOT NULL
                 );",
             )
             .map_err(DatabaseError::Sqlite)?;

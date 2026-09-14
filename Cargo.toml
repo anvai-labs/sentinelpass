@@ -13,8 +13,10 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
+# File::try_lock (WBS-501/503 maintenance lock) stabilized in 1.89 (review F6).
+rust-version = "1.89"
 authors = ["VJ Singh <vijay@anvaiops.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/anvai-labs/sentinelpass"
@@ -80,6 +82,7 @@ tempfile = "3.10"
 ssh-key = { version = "0.6", features = ["crypto", "encryption"] }
 rsa = "0.9"
 ed25519-dalek = "2.0"
+p256 = "0.13"
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
@@ -91,8 +94,8 @@ base64 = "0.23"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 url = "2.5"
 axum = "0.8"
-tower = "0.4"
-tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
 toml_dep = { package = "toml", version = "0.8" }
 
 # System

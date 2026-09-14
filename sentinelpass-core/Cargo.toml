@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+hostname = { workspace = true }
 dirs = { workspace = true }
 url = { workspace = true }
 bincode = { workspace = true }
@@ -62,7 +63,10 @@ windows = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Foundation",
+    "Security_Credentials",
     "Security_Credentials_UI",
+    "Security_Cryptography",
+    "Storage_Streams",
     "Win32_System_IO"
 ] }
 keyring = "2.3"

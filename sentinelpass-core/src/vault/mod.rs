@@ -1,6 +1,10 @@
 //! Vault management - coordinates crypto and database layers
 
 mod activation_ops;
+/// Authenticated portable backup + verified restore (WBS-416/417,
+/// ADR-008). Public: the CLI drives `create_backup`/`restore_bundle`
+/// directly.
+pub mod backup_ops;
 mod biometric_ops;
 pub(crate) mod domain_ops;
 pub(crate) mod envelope_ops;

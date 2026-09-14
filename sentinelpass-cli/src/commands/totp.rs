@@ -1,7 +1,10 @@
+use crate::commands::service_client as sc;
 use anyhow::Result;
 use rpassword::prompt_password;
 use sentinelpass_core::{parse_otpauth_uri, TotpAlgorithm};
+use sentinelpass_protocol::service::{VaultOp, VaultOpResult};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_totp_add(
@@ -52,20 +55,19 @@ pub fn handle_totp_add(
     let issuer_value = issuer.or(uri_issuer);
     let account_value = account.or(uri_account);
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-    let totp_id = vault.add_totp_secret(
+    backend.call(VaultOp::TotpAdd {
         entry_id,
-        &secret_value,
-        algorithm,
-        digits,
-        period,
-        issuer_value.as_deref(),
-        account_value.as_deref(),
-    )?;
+        secret: Zeroizing::new(secret_value),
+        algorithm: Some(algorithm.to_string()),
+        digits: Some(digits),
+        period: Some(period),
+        issuer: issuer_value,
+        account_name: account_value,
+    })?;
 
-    println!("TOTP secret saved (id: {}) for entry {}", totp_id, entry_id);
+    println!("TOTP secret saved for entry {}", entry_id);
     Ok(())
 }
 
@@ -74,12 +76,18 @@ pub fn handle_totp_code(vault_path: PathBuf, entry_id: i64) -> Result<()> {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
 
-    let code = vault.generate_totp_code(entry_id)?;
-    println!("TOTP code: {}", code.code);
-    println!("Valid for: {} seconds", code.seconds_remaining);
+    match backend.call(VaultOp::TotpCode { entry_id })? {
+        VaultOpResult::TotpCode {
+            code,
+            seconds_remaining,
+        } => {
+            println!("TOTP code: {}", code);
+            println!("Valid for: {} seconds", seconds_remaining);
+        }
+        other => anyhow::bail!("Unexpected response: {other:?}"),
+    }
     Ok(())
 }
 
@@ -100,9 +108,8 @@ pub fn handle_totp_remove(vault_path: PathBuf, entry_id: i64, force: bool) -> Re
         }
     }
 
-    let master_password = prompt_password("Enter master password: ")?;
-    let vault = crate::open_vault_with_password(&vault_path, master_password.as_bytes())?;
-    vault.remove_totp_secret(entry_id)?;
+    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
+    backend.call(VaultOp::TotpRemove { entry_id })?;
     println!("TOTP secret removed for entry {}", entry_id);
     Ok(())
 }

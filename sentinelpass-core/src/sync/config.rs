@@ -16,7 +16,22 @@ pub struct SyncConfig {
     pub last_push_sequence: u64,
     pub last_pull_sequence: u64,
     pub last_sync_at: Option<i64>,
+    /// Wire protocol this configuration was established under: 0 =
+    /// legacy (v1-era configuration or never-initialized), 2 = sync
+    /// protocol v2 (ADR-006). The engine REFUSES to run v2 against a
+    /// non-v2 configuration (fail-closed mixed-protocol duty): a v1-era
+    /// vault's relay state lives in different tables, and pushing v2
+    /// mutations into it would silently split the fleet.
+    pub protocol_version: u32,
+    /// TRUSTED sync-lineage high-water (WBS-613, ADR-006): the max relay
+    /// vault-log cursor this device ever accepted. A pull whose cursor is
+    /// below it is refused (relay log reset / vault swap). Deliberately
+    /// distinct from the ADR-004 epoch sidecar (key-material rollback).
+    pub lineage_high_water: u64,
 }
+
+/// The wire protocol version the current engine speaks.
+pub const SYNC_PROTOCOL_VERSION: u32 = 2;
 
 impl SyncConfig {
     /// Load sync config from the database. Returns default if no row exists.
@@ -35,7 +50,8 @@ impl SyncConfig {
 
         let result = conn.query_row(
             "SELECT vault_id, device_id, device_name, relay_url,
-                    last_push_sequence, last_pull_sequence, last_sync_at, sync_enabled
+                    last_push_sequence, last_pull_sequence, last_sync_at, sync_enabled,
+                    protocol_version, lineage_high_water
              FROM sync_metadata WHERE id = 1",
             [],
             |row| {
@@ -47,6 +63,8 @@ impl SyncConfig {
                 let last_pull_sequence: i64 = row.get(5)?;
                 let last_sync_at: Option<i64> = row.get(6)?;
                 let sync_enabled: bool = row.get(7)?;
+                let protocol_version: i64 = row.get(8)?;
+                let lineage_high_water: i64 = row.get(9)?;
 
                 Ok(SyncConfig {
                     sync_enabled,
@@ -57,6 +75,8 @@ impl SyncConfig {
                     last_push_sequence: last_push_sequence as u64,
                     last_pull_sequence: last_pull_sequence as u64,
                     last_sync_at,
+                    protocol_version: protocol_version.max(0) as u32,
+                    lineage_high_water: lineage_high_water.max(0) as u64,
                 })
             },
         );
@@ -72,8 +92,9 @@ impl SyncConfig {
     pub fn save(&self, conn: &rusqlite::Connection) -> Result<()> {
         conn.execute(
             "INSERT INTO sync_metadata (id, vault_id, device_id, device_name, relay_url,
-                                        last_push_sequence, last_pull_sequence, last_sync_at, sync_enabled)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                        last_push_sequence, last_pull_sequence, last_sync_at, sync_enabled,
+                                        protocol_version, lineage_high_water)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 vault_id = excluded.vault_id,
                 device_id = excluded.device_id,
@@ -82,7 +103,9 @@ impl SyncConfig {
                 last_push_sequence = excluded.last_push_sequence,
                 last_pull_sequence = excluded.last_pull_sequence,
                 last_sync_at = excluded.last_sync_at,
-                sync_enabled = excluded.sync_enabled",
+                sync_enabled = excluded.sync_enabled,
+                protocol_version = excluded.protocol_version,
+                lineage_high_water = excluded.lineage_high_water",
             rusqlite::params![
                 self.vault_id.map(|u| u.to_string()),
                 self.device_id.map(|u| u.to_string()),
@@ -92,6 +115,8 @@ impl SyncConfig {
                 self.last_pull_sequence as i64,
                 self.last_sync_at,
                 self.sync_enabled,
+                self.protocol_version as i64,
+                self.lineage_high_water as i64,
             ],
         )
         .map_err(DatabaseError::Sqlite)?;
@@ -262,6 +287,8 @@ mod tests {
             last_push_sequence: 42,
             last_pull_sequence: 37,
             last_sync_at: Some(1700000000),
+            protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
+            lineage_high_water: 7,
         };
 
         config.save(conn).unwrap();
@@ -278,6 +305,15 @@ mod tests {
         assert_eq!(loaded.last_push_sequence, 42);
         assert_eq!(loaded.last_pull_sequence, 37);
         assert_eq!(loaded.last_sync_at, Some(1700000000));
+        assert_eq!(
+            loaded.protocol_version,
+            crate::sync::config::SYNC_PROTOCOL_VERSION,
+            "protocol version round-trips"
+        );
+        assert_eq!(
+            loaded.lineage_high_water, 7,
+            "lineage high-water round-trips"
+        );
     }
 
     #[test]
@@ -289,6 +325,7 @@ mod tests {
             sync_enabled: true,
             device_name: Some("First".to_string()),
             last_push_sequence: 1,
+            protocol_version: crate::sync::config::SYNC_PROTOCOL_VERSION,
             ..Default::default()
         };
         config1.save(conn).unwrap();

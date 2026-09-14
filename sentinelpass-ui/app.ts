@@ -22,7 +22,7 @@ import {
     setCurrentTotpMetadata, setCurrentFilter,
     vaultScreen, entryList, searchInput, noSelection, entryDetail
 } from './state.js';
-import { showToast, togglePasswordVisibility, copyToClipboard } from './utils.js';
+import { showToast, togglePasswordVisibility, copyToClipboard, appClipboard } from './utils.js';
 import { showRegistryDashboard, loadRegistryBadgeCount } from './registry.js';
 import {
     setTotpButtonState, closeTotpModal, copyTotpForEntry,
@@ -540,6 +540,9 @@ async function lockVault() {
         setCurrentTotpMetadata(null);
         setTotpButtonState(false, false);
         closeTotpModal();
+        // WBS-709: a lock must not leave a copied secret pending on the
+        // system clipboard — expire it now if it is still ours.
+        await appClipboard.expireNow();
         await refreshBiometricStatus();
         await refreshDaemonStatus();
         showToast('Vault locked', 'success');

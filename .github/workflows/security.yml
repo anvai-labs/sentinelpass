@@ -21,8 +21,11 @@ jobs:
       - name: Install cargo-audit
         uses: taiki-e/install-action@55ed588c2f0e092949af25ad4c5873185e476b5c # cargo-audit
       - name: Run cargo audit
-        # Temporary exception: RUSTSEC-2023-0071 is transitive via rsa/ssh-key with no patched release yet.
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        # Audit policy (including the governed RUSTSEC-2023-0071 exception)
+        # lives ONLY in .cargo/audit.toml (WBS-909); no inline flags here.
+        # Warning-class findings report without failing and are tracked in
+        # docs/DEPENDENCY_EXCEPTIONS.md.
+        run: cargo audit
 
   npm_audit_root:
     name: npm Audit (Root)

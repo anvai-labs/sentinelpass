@@ -6,10 +6,13 @@
   "permissions": [
     "storage",
     "activeTab",
+    "tabs",
     "notifications",
-    "nativeMessaging"
+    "nativeMessaging",
+    "scripting",
+    "alarms"
   ],
-  "host_permissions": [
+  "optional_host_permissions": [
     "http://*/*",
     "https://*/*"
   ],
@@ -52,8 +55,8 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "sentinelpass@sentinelpass.org",
-      "strict_min_version": "109.0"
+      "id": "sentinelpass@localhost",
+      "strict_min_version": "128.0"
     }
   }
 }

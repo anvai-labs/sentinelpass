@@ -105,23 +105,11 @@ fi
 
 log_info "Building browser extensions..."
 
-# Chrome Extension
-log_info "Building Chrome extension..."
-cd browser-extension/chrome
-if [ -f "package.json" ]; then
-    npm install
-    npm run build
-fi
-cd "$PROJECT_ROOT"
-
-# Firefox Extension
-log_info "Building Firefox extension..."
-cd browser-extension/firefox
-if [ -f "package.json" ]; then
-    npm install
-    npm run build
-fi
-cd "$PROJECT_ROOT"
+# WBS-717: ONE canonical pipeline builds both targets from the shared .ts
+# sources (esbuild-bundled classic content.js; byte-identical artifacts).
+# The old per-extension tsc emits produced ESM content scripts that
+# silently never injected (WBS-719 finding).
+npm run ext:build
 
 log_success "Browser extensions built"
 

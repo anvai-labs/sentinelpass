@@ -84,11 +84,12 @@ fn upper_value(c: u8) -> Option<u8> {
 }
 
 impl RecoveryKey {
-    /// Generate a fresh 256-bit recovery key from the OS CSPRNG.
+    /// Generate a fresh 256-bit recovery key from the OS CSPRNG
+    /// (`rand::rngs::OsRng`).
     pub fn generate() -> Result<Self> {
         use rand::RngCore;
         let mut bytes = Zeroizing::new([0u8; RECOVERY_KEY_BYTES]);
-        rand::thread_rng().fill_bytes(bytes.as_mut_slice());
+        rand::rngs::OsRng.fill_bytes(bytes.as_mut_slice());
         Ok(Self { bytes })
     }
 

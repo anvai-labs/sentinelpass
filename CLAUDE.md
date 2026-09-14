@@ -11,7 +11,7 @@ SentinelPass is a secure, local-first password manager written in Rust with a Ta
 ## Development Environment
 
 **Prerequisites:**
-- Rust 1.70+
+- Rust 1.89+ (workspace `rust-version`; the maintenance lock uses `File::try_lock`)
 - Node.js 20+
 - npm 10+
 
@@ -119,8 +119,8 @@ sentinelpass-daemon
 **sentinelpass-core/** - Core library (all other crates depend on this):
 - `crypto/` - `kdf.rs` (Argon2id), `cipher.rs` (AES-256-GCM), `keyring.rs` (KeyHierarchy/MasterKey/WrappedKey), `password.rs` (generation), `strength.rs` (analysis), zeroize discipline (SecureBuffer/`zero.rs` removed)
 - `daemon/` - `ipc.rs` (IPC server/client), `vault_state.rs` (DaemonVault with auto-lock), `native_messaging.rs` (browser protocol), `autolock.rs`
-- `database/` - `schema.rs` (SQLite ops), `models.rs` (Entry/DomainMapping/TotpSecret), `migrations.rs` (hand-written versioned migration runner), `repository.rs` (row read/write cores), `fault_injection.rs` (test-only SQLite-authorizer harness)
-- `vault/` - `mod.rs` (VaultManager: central CRUD, encryption, lock/unlock, TOTP, SSH keys, biometric, import/export) plus `envelope_ops.rs`, `activation_ops.rs`, `migration_ops.rs`, `slot_ops.rs`, `recovery.rs`, `domain_ops.rs`, `epoch_guard.rs`, `registry_ops.rs`
+- `database/` - `schema.rs` (SQLite ops), `models.rs` (Entry/DomainMapping/TotpSecret), `migrations.rs` (refinery runner)
+- `vault.rs` - VaultManager: central CRUD, encryption, lock/unlock, TOTP, SSH keys, biometric, import/export
 - `sync/` - `models.rs` (SyncEntryBlob/payloads), `crypto.rs` (encrypt/decrypt/pad), `auth.rs` (Ed25519 canonical signing), `device.rs` (DeviceIdentity), `pairing.rs` (HKDF pairing key), `conflict.rs` (LWW resolver), `change_tracker.rs` (pending collection), `config.rs` (SyncConfig), `client.rs` (HTTP client, feature-gated `sync`), `engine.rs` (push/pull orchestrator, feature-gated `sync`)
 - `audit.rs`, `lockout.rs`, `biometric.rs`, `ssh.rs`, `totp.rs`, `import_export.rs`, `platform.rs`
 
@@ -191,12 +191,16 @@ sentinelpass-daemon
 
 ### IPC (Inter-Process Communication)
 
-**Unix (Linux/macOS):** Unix domain socket at `/tmp/sentinelpass.sock` (or `$XDG_RUNTIME_DIR/sentinelpass.sock`)
-**Windows:** Named pipes at `\\.\pipe\SentinelPass-<username>` (per-user ACLs + AES-256-GCM encryption)
-**Legacy TCP:** Custom `tcp://...` paths use loopback TCP with AES-256-GCM encryption
-**Auth:** All IPC requests require a 32-byte hex token from `<config dir>/PasswordManager/ipc.token` (mode 0600; e.g. `~/Library/Application Support/PasswordManager/ipc.token` on macOS — `sentinelpass-protocol/src/paths.rs` is the source of truth). Messages use length-prefixed JSON with an envelope containing the token.
+**Unix (Linux/macOS):** Unix domain socket at `$XDG_RUNTIME_DIR/SentinelPass/sentinelpass.sock` (fallback: `<config dir>/PasswordManager/runtime/sentinelpass.sock`) — the `/tmp` fallback is REMOVED (WBS-507): the socket directory is owner-only (0700, created/verified at bind), both daemon and clients REFUSE sockets outside a private runtime directory, and the server verifies the peer's effective UID (`SO_PEERCRED` / `getpeereid`).
+**Windows:** Named pipes at `\\.\pipe\SentinelPass-<username>` (explicit current-user DACL + first-instance squatting protection + `PIPE_REJECT_REMOTE_CLIENTS`, WBS-508; AES-256-GCM framing)
+**Legacy TCP:** REMOVED in Phase 3 (ADR-007 migration) — `tcp://` paths are no longer accepted by the daemon or clients
+**Auth:** All IPC requests require a 32-byte hex token from `~/.config/sentinelpass/ipc.token` (mode 0600). Messages use length-prefixed JSON with an envelope containing the token.
 
-**Origin gate (browser-surface containment):** browser-autofill IPC (`GetCredential`, `GetTotpCode`, `ListDomainCredentials`, `SaveCredential`) is denied for clients that present no origin marker (pre-0.8 hosts) — denied by default since 0.8.x containment. `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` temporarily restores the legacy path (removed in 1.0). CLI-tagged origins are denied; only `NativeHost` is allowed. External tools must use `GetExternalSecret`/`SaveSecret` grants.
+**Capability gate (browser-surface containment, WBS-504/505):** browser-autofill IPC (`GetCredential`, `GetTotpCode`, `ListDomainCredentials`, `SaveCredential`) requires a valid installation capability for audience `native-host` — presented on every envelope (`capability` field) from the 0600 `native_host.capability` file the daemon provisions; the store (`ipc-capabilities.json`, hashed secrets) supports expiry and revocation. The origin label is provenance only. Legacy windows (both removed in 1.0, both announced): `SENTINELPASS_ALLOW_SELF_ASSERTED_ORIGIN=1` (pre-capability hosts asserting NativeHost) and `SENTINELPASS_ALLOW_LEGACY_ORIGINLESS=1` (originless pre-0.8 hosts). External tools must use `GetExternalSecret`/`SaveSecret` grants (WBS-506, retained).
+
+**Daemon authority (Phase 3, ADR-007):** the daemon is the sole live DEK owner and vault writer. UI/CLI vault operations go through the application-service boundary: `IpcMessage::ServiceCall { op: VaultOp }` → `ServiceResult` (see `sentinelpass-protocol/src/service.rs`; served by `LiveVaultService` in `sentinelpass-core/src/daemon/service.rs`, executed on the blocking pool). WBS-502 rerouted every UI/CLI vault command through it: the CLI picks a backend (`commands/service_client.rs`) — daemon by default, or the FLAGGED `SENTINELPASS_ALLOW_DIRECT_VAULT=1` compat path (lock-guarded, announced on stderr, ADR-007 migration window only); custom `--vault` paths are never daemon-served. The Tauri UI commands call the same ops (`service_call`); a daemon-unavailable fallback exists only for read-only metadata (biometric status). CLI `unlock`/`lock` mean daemon unlock/lock; after a CLI op the vault stays unlocked in the daemon until auto-lock. Still offline-exclusive by design: `init`, `passwd`, `backup create/restore`, `recovery setup/recover`, `sync pair-start/pair-join`.
+
+**Exclusive maintenance (WBS-501/503):** the daemon holds an advisory lock beside the vault (`<vault>.maint-lock`, 0600) for its lifetime; a second daemon refuses to start. Offline operations (`init`, `passwd`, `backup create/restore`, `recovery setup/recover`) take the same lock and refuse while a daemon owns the vault. A daemon started with NO vault enters maintenance mode: it serves only status/bootstrap (`VaultCreate`) over IPC until creation flips it to live.
 
 ### Sync Protocol
 
@@ -423,7 +427,7 @@ sqlite3 ~/Library/Application\ Support/PasswordManager/vault.db ".schema"  # mac
   - Linux: `~/.local/share/PasswordManager/vault.db` (or `$XDG_DATA_HOME`)
   - Windows: `%LOCALAPPDATA%\PasswordManager\vault.db` (`get_data_dir()` tries `data_local_dir` first; the module's own doc comment saying `%APPDATA%` predates this and is also stale)
   - The epoch high-water sidecar (`vault.db.epoch`) and recovery-related state live next to this file; epoch-guard refusal messages that say "delete the sidecar file next to the vault database" mean this path, not `~/.sentinelpass/`.
-- **IPC token:** `<config dir>/PasswordManager/ipc.token` (32-byte hex token for IPC auth; same directory family as the vault data dir, NOT `~/.config/sentinelpass/`)
+- **IPC token:** `~/.config/sentinelpass/ipc.token` (32-byte hex token for IPC auth)
 - **Daemon logs:** Platform-specific (Windows: Event Viewer, Unix: syslog)
 - **Native messaging config:**
   - Windows: `C:\Program Files\PasswordManager\com.passwordmanager.host.json`
@@ -444,17 +448,29 @@ sqlite3 ~/Library/Application\ Support/PasswordManager/vault.db ".schema"  # mac
 
 ## CI/CD Pipeline
 
-The project uses GitHub Actions (`.github/workflows/rust.yml`) with 6 jobs:
+Branch protection on `main`/`develop` requires ONLY the **Gate** check from
+`.github/workflows/ci-gate.yml`. The Gate aggregates every other workflow:
+any failing check on the PR head SHA fails it, and it enforces a fail-closed
+expectation table (a diff touching a workflow's paths must see that
+workflow's anchor check green — see the `expect` list in `ci-gate.yml`; keep
+it in sync when adding or renaming PR-triggered workflows or jobs).
+
+`.github/workflows/rust.yml` (Rust CI) runs on every non-docs PR with 6 jobs:
 - **format** - `cargo fmt --all -- --check`
 - **clippy** - `cargo clippy --workspace --all-targets -- -D warnings`
+- **web_tdd** - TypeScript typecheck + Vitest tests with coverage
+- **build** - `cargo build --release --locked` for CLI/daemon/host/UI (matrix: ubuntu/windows/macos)
 - **test** - `cargo test --workspace --verbose` (matrix: ubuntu/windows/macos)
 - **coverage** - Rust LLVM coverage with 50% minimum threshold
-- **web_tdd** - TypeScript typecheck + Vitest tests with coverage
-- **build** - `cargo build --release --workspace` (matrix: ubuntu/windows/macos)
 
-Additional workflows: `release.yml` (tagged builds + PR preflight runs; docs-only PRs skip packaging), `security.yml` (cargo audit), `extension-e2e.yml`, plus mobile (`android.yml`, `ios.yml`) and `build-all.yml` / `ci-gate.yml` (the Gate).
+Other workflows:
+- `security.yml` - cargo audit (policy: `.cargo/audit.toml`, register: `docs/DEPENDENCY_EXCEPTIONS.md`), npm audit (root + extension e2e), Trivy (PR + manual dispatch)
+- `release.yml` - tag-driven (`v*`) release builds + crates.io publish of `sentinelpass-protocol`; PR runs are preflight only; tag runs are gated by the workflow's own tag-time security-audit jobs (WBS-901)
+- `build-all.yml`, `android.yml`, `ios.yml`, `extension-e2e.yml` - path-filtered PR workflows
+- `chrome-extension-release.yml` - `chrome-v*` tags + manual dispatch
+- `public-overflow-runner-smoke.yml` - self-path pushes + manual dispatch
 
-All checks must pass before merging to main branch.
+All checks must pass (via the Gate) before merging to main branch.
 
 ## Git Workflow
 
@@ -486,7 +502,7 @@ The workspace uses centralized dependency management in `Cargo.toml` [workspace.
 
 Changes touching these paths need extra care and explicit reasoning (see `CONTRIBUTING.md`):
 - `sentinelpass-core/src/crypto/`
-- `sentinelpass-core/src/vault/` (incl. `mod.rs`)
+- `sentinelpass-core/src/vault.rs`
 - `sentinelpass-core/src/daemon/`
 - `sentinelpass-host/`
 - `browser-extension/`

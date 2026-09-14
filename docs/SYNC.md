@@ -7,8 +7,150 @@
 > v2 replacement. See `docs/SECURITY_STATUS_MATRIX.md`, ADR-006, and
 > `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`. The protocol details below remain
 > useful implementation documentation for v1, not target-state security claims.
+>
+> **v2 note (2026-09-10):** sync protocol v2 (ADR-006) stages 1–2 have
+> landed — see "Sync Protocol v2" below. The CLIENT engine now speaks v2
+> exclusively (`/api/v2/*`); relay push and client pull pages are
+> transactional with unappliable mutations dead-lettered (bounded,
+> fail-closed). The v1 relay endpoints remain for older clients until v1
+> retirement (WBS-624), when the relay hard-rejects them. v2 is NOT yet
+> approved for production credentials: conflict preservation, authenticated
+> metadata enforcement on apply, epoch/revocation checks on every request,
+> pairing upgrade, and v1 retirement are still landing (ADR-006 stage
+> plan). Sync stays experimental until the phase gate (model-based + chaos
+> convergence evidence) passes.
 
 End-to-end encrypted sync between SentinelPass devices via a relay server. The relay never sees plaintext — all payloads are encrypted with the vault's DEK before leaving the device.
+
+## Sync Protocol v2 (ADR-006, stages 1–2)
+
+The client engine pushes and pulls over `/api/v2/*`:
+
+- **Mutations, not blobs.** A v2 mutation carries vault UUID + key epoch,
+  stable object UUID/type, `expected_version` and `resulting_version`,
+  origin device, a deterministic idempotency key, authenticated tombstone
+  state, the DEK-encrypted payload, and an HMAC-SHA256 MAC (DEK-derived via
+  HKDF) over the canonical shared metadata. The MAC is deliberately
+  distinct from the ADR-005 per-device storage envelope (which never
+  appears on the wire). ENFORCED on pull (WBS-612): every foreign
+  mutation is verified — MAC plus deterministic-id recomputation — BEFORE
+  application; a mismatch (relay rewriting identity, type, versions,
+  epoch, origin, tombstone state, or payload bytes) is dead-lettered,
+  never applied. The relay stores the MAC opaquely (it cannot compute or
+  invert it).
+- **Distinct counter types.** `DeviceSequence` (per-device push framing —
+  recorded by the relay, never gated on), `ObjectVersion` (per-object CAS
+  domain), and `ServerCursor` (relay vault log position) are distinct
+  newtypes; v1's mixed counter VALUES are gone too: the client's framing
+  counter advances from the relay cursor diagnostic, and nothing gates on
+  it.
+- **Idempotency with durable results.** The relay persists a result row per
+  mutation in the same transaction as the entry/log/sequence writes. A
+  duplicate request replays the ORIGINAL durable result (applied or
+  rejected). Result records age out (`mutation_result_ttl_secs`, default 7
+  days) and are capped per device (`max_mutation_results_per_device`);
+  after expiry a duplicate is re-evaluated by the CAS guard and REJECTED,
+  never replayed. The CLIENT handles every rejection without wedging:
+  an `Applied` ack matching the sent version completes the outbox entry; a
+  conflict at-or-beyond the attempted version adopts the relay baseline
+  (the pull reconciles content); a conflict behind it re-bases the row for
+  a fresh mutation id.
+- **CAS acceptance.** A mutation applies iff its `expected_version` equals
+  the relay's stored current version (0 = create). Same-version overwrites
+  do not exist in v2 — the v1 clock-gamed LWW tie-break is gone.
+- **Conflict preservation (WBS-611 / SR-SYNC-005).** A pulled mutation that
+  hits an object with an UNSYNCED local edit is never silently applied (or
+  deleted by a tombstone): it is recorded as a durable alternative in the
+  local `sync_conflicts` table and the row is marked
+  `sync_state = 'conflict'` — both alternatives preserved. Push conflicts
+  mark the row conflicted too; the same-run pull stores the relay's
+  content as the alternative. The user resolves with
+  `sentinelpass sync conflict-list` / `conflict-resolve --object-id <ID>
+  [--take-remote]`: keep-local re-versions the local content above the
+  peer (next push lands via CAS); take-remote applies the stored
+  alternative ATOMICALLY (sealing under the LOCAL identity; a stored
+  TOMBSTONE alternative deletes the row; applying live content over a
+  locally-deleted row RESURRECTS it — a failed resolution rolls back to
+  the conflicted state with the record intact). A stale incoming blob
+  (version below the local row) is not an alternative and is ignored.
+  A stored alternative is purged once the row applies past it. Conflict
+  counts surface through `sync status` (counted as stored records OR
+  conflicted rows, whichever is larger) and the daemon service contract
+  (`ServiceSyncStatus.conflicts`). Bound: ONE alternative per object
+  (latest wins) — N-way conflicts keep the newest peer's content plus
+  the local edit; older peer content remains in the relay's log.
+- **Per-object acknowledgements.** The client's outbox entry is removed only
+  by its own `Applied` ack (verified against the version the client
+  actually sent), which also advances the object's durable
+  `sync_acked_version` (schema v10) — the CAS `expected_version` of the
+  next mutation. Remote applies record the relay's version the moment they
+  land, so peer-sourced objects are editable without wedging. A lost push
+  response costs one retry (the original result replays); an intervening
+  edit or an expired record resolves through the conflict re-base rules
+  above. The v1 strictly-increasing `device_sequence` checkpoint trap is
+  structurally impossible.
+- **Stale-epoch gate.** Mutations whose `key_epoch` is below the vault's
+  relay-side epoch high-water are rejected (`stale_epoch`); a mutation
+  carrying a higher epoch advances the vault epoch forward-only (bounded
+  jump). Apply-side mirror (WBS-614): a pulled mutation below the LOCAL
+  vault epoch is dead-lettered — a rotation revoked that key's authority
+  here. Device revocation is enforced by the Ed25519 auth middleware on
+  every request, as in v1.
+- **Lineage high-water (WBS-613).** The client retains a TRUSTED
+  sync-lineage high-water — the max relay vault-log cursor it ever
+  accepted (`sync_metadata.lineage_high_water`, schema v13). A pull whose
+  cursor moves below it is REFUSED fail-closed (relay log reset, vault
+  swap): local state is untouched and re-pairing is the remedy.
+  Deliberately distinct from the ADR-004 epoch sidecar (which protects
+  key-material rollback, not log-lineage rollback).
+- **v1 retirement (WBS-624).** The relay mounts v1 endpoints ONLY behind
+  the retirement gate: `allow_v1` (relay.toml) defaults FALSE and every
+  v1 sync/pairing endpoint answers 410 Gone with the re-pair remediation.
+  The authoritative-device migration (`sync migrate-authoritative`)
+  claims ONE fresh relay vault per origin (a second claim is refused —
+  the 409 names the winning device but deliberately not the fresh vault
+  id), re-baselines this device's full local baseline as fresh creates,
+  purges conflict/dead-letter lineage debris, and other devices
+  re-onboard exclusively through its v2 pairing. Old vault blobs persist
+  relay-side as the accepted residual — v1 retirement is client-side
+  abandonment, never a purge. Protocol-neutral management endpoints
+  (device list/revoke, sync status) intentionally remain on their v1-era
+  paths — they are not protocol traffic.
+- **Mixed-protocol gate (fail-closed, client side).** A sync configuration
+  established before v2 (`sync_metadata.protocol_version != 2`) refuses to
+  sync: its relay state lives in the v1 tables, and v2 mutations pushed
+  against it would land in a parallel universe the v1 peers never see.
+  Remediation is the ADR-006 migration (authoritative-device re-baseline)
+  or a fresh v2 init/re-pair. The relay's v1 endpoints remain for older
+  clients until v1 retirement hard-rejects them (WBS-624).
+- **Pull** walks the relay's append-only vault mutation log with a
+  `ServerCursor` and paged responses. Each page is ONE transaction with a
+  per-mutation savepoint: an apply failure rolls its blob back to
+  pre-apply state and records a durable disposition in the bounded
+  `sync_dead_letter` table (hard cap 1,000 — overflow fails closed: the
+  page and cursor roll back until space is freed). The cursor never
+  passes a mutation without a disposition. Order-dependent applies (a
+  TOTP whose parent credential arrives later in the page) get one bounded
+  requeue pass within the run. The v1 skip-and-advance data loss is gone.
+  Inspection/purge is a supported flow, not raw SQL:
+  `sentinelpass sync dead-letter-list` and
+  `sentinelpass sync dead-letter-purge (--server-sequence <SEQ> | --all)`
+  (served through the daemon's application-service boundary).
+
+New relay configuration (TOML, defaults shown): `mutation_result_ttl_secs =
+604800`, `max_mutation_results_per_device = 4096`. New storage tables
+(additive, backward-safe): `sync_entries_v2`, `sync_mutations_v2`,
+`mutation_results`, `vault_epochs` (relay); `sync_dead_letter` (client,
+schema v11).
+
+Stage residuals (tracked, not silently accepted): the v2 mutation LOG
+(`sync_mutations_v2`) and object-state table grow without bound — retention
+compatible with the future lineage high-water is a follow-up; the vault
+epoch high-water advances on client assertion with only a jump bound
+(1,000,000) guarding implausible advances — authenticated epoch
+publication lands with WBS-612/614; a malformed mutation is a
+request-level rejection (the whole request replays idempotently after the
+client's next collection).
 
 ## At a Glance
 
@@ -16,7 +158,7 @@ End-to-end encrypted sync between SentinelPass devices via a relay server. The r
 |----------|-------|
 | Transport encryption | AES-256-GCM (vault DEK, per-blob random nonce) |
 | Request authentication | Ed25519 signatures over canonical request string |
-| Pairing key derivation | HKDF-SHA256 (6-digit code + random salt) |
+| Pairing key derivation | HKDF-SHA256 (256-bit secret, v2) — the six-digit code path is retired |
 | Conflict resolution | Last-Write-Wins (higher version → higher timestamp → keep local) |
 | Feature gate | `sync` (disabled by default; enables `reqwest`, `hkdf`) |
 | Relay default listen | `127.0.0.1:8743` |
@@ -62,39 +204,38 @@ Device A                           Relay
    │◀─────────────────────────────────│
 ```
 
-### 2. Pair a New Device
+### 2. Pair a New Device (v2)
 
 ```text
 Device A (existing)                Relay                   Device B (new)
    │                                 │                          │
-   │  generate pairing code (6 digits)                          │
-   │  derive pairing_key = HKDF(code, salt)                     │
-   │  encrypt VaultBootstrap with pairing_key                   │
+   │  generate 256-bit secret S                                 │
+   │  bootstrap encrypted under HKDF(S)                         │
+   │  transcript = 6 digits from S (display)                    │
    │                                 │                          │
-   │  POST /pairing/bootstrap        │                          │
-   │  { token, encrypted, salt }     │                          │
-   │────────────────────────────────▶│                          │
+   │  POST /api/v2/pairing/bootstrap {secret, encrypted, proof} │
+   │  (relay stores Argon2id(S) + ciphertext; never the key)    │
    │                                 │                          │
-   │  Display code to user ──────────────────(out of band)────▶│
+   │  secret via QR / out-of-band ───────────────────────────▶ │
+   │  transcript via out-of-band ────────────────────────────▶ │
    │                                 │                          │
-   │                                 │  GET /pairing/bootstrap  │
-   │                                 │◀─────────────────────────│
-   │                                 │  { encrypted, salt }     │
-   │                                 │─────────────────────────▶│
+   │                    POST /api/v2/pairing/bootstrap/retrieve
+   │                    {secret}  (body, never URL; attempt-limited,
+   │                     one-use, TTL 300s; Argon2id-verified)
+   │                                 │── encrypted + proof ────▶│
    │                                 │                          │
-   │                                 │  derive pairing_key      │
-   │                                 │  decrypt VaultBootstrap   │
-   │                                 │  extract: kdf_params,     │
-   │                                 │    wrapped_dek, relay_url │
+   │                          transcript comparison (human)      │
    │                                 │                          │
    │                                 │  POST /devices/register  │
-   │                                 │◀─────────────────────────│
-   │                                 │                          │
+   │                                 │  (secret + proof staged) │
    │                                 │  POST /sync/full-pull    │
-   │                                 │◀─────────────────────────│
-   │                                 │  (all encrypted blobs)   │
-   │                                 │─────────────────────────▶│
 ```
+
+The pairing secret is 256 bits of CSPRNG output — the v1 six-digit code
+(~20 bits, offline-guessable once the bootstrap leaked) is retired. The
+relay never sees the derived key; a six-digit transcript is shown on both
+devices purely for human comparison and never encrypts anything. Pairing
+material moves in POST bodies, never URLs.
 
 ### 3. Incremental Push / Pull
 
