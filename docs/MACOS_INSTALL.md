@@ -54,7 +54,7 @@ open /Applications/SentinelPass.app
 ```
 
 5. Unlock the existing vault using its master password. Create a new vault only for a first installation. A running-but-locked daemon is expected until you unlock; the password-strength meter is not an unlock confirmation.
-6. Install the [browser extension](../README.md#browser-extension) if needed, then restart the browser so it reconnects using the host registered by this app. Keep the UI open while using autofill. The UI starts the bundled daemon with `--start-locked`; no `brew services` command or manual native-host launch is needed.
+6. Install the [browser extension](../README.md#browser-extension) if needed, then open its popup to check the connection. If it shows **Unlocked**, a browser restart is unnecessary. Keep the UI open while using autofill. The UI starts the bundled daemon with `--start-locked`; no `brew services` command or manual native-host launch is needed.
 
 The default vault stays at `~/Library/Application Support/PasswordManager/vault.db`. Installing/replacing the app does not require deleting that directory, changing your password, or reinstalling Homebrew.
 
@@ -124,9 +124,11 @@ The `0.11.0` release has no standalone Chrome ZIP asset. Its `sentinelpass-insta
 Copy the extracted `browser-extension/chrome/` folder to a stable location such as `~/Library/Application Support/SentinelPass/chrome-extension`. Keep the folder there: Chrome loads unpacked extensions from that path, so a temporary mount or Downloads cleanup can break the installation.
 
 1. Visit `chrome://extensions/` in the Chrome profile you use.
-2. Turn on **Developer mode**, click **Load unpacked**, and select the stable folder containing `manifest.json`.
+2. Turn on **Developer mode**, click **Load unpacked**, and select the stable folder containing `manifest.json`. If Library is hidden, press **Command + Shift + G** in the folder picker, paste `~/Library/Application Support/SentinelPass/chrome-extension` without quotes, press Return, then click **Select**. In Terminal commands, quote paths containing spaces, for example `open "$HOME/Library/Application Support/SentinelPass/chrome-extension"`.
 3. Confirm the extension ID is `nophfgfiiohedlodfeepjoioljbhggdd`, matching the app's native-host allowlist. Do not broaden that allowlist to work around a mismatched ID.
-4. Pin SentinelPass in the toolbar, reopen/unlock the installed desktop app, and restart Chrome. Grant only the site access you intend to use and verify autofill on a site you choose.
+4. Pin SentinelPass in the toolbar and open its popup while the installed desktop app is running and unlocked. **Unlocked** confirms that the status request reached the native host and daemon; no Chrome restart is needed in that case. Refresh already-open login tabs before testing autofill. Grant only the site access you intend to use and verify autofill on a site you choose.
+
+If the popup does not connect, first check the desktop app is running and unlocked, then click **Reload** on the extension's card and reopen the popup. If connection problems persist after host registration or an upgrade, quit Chrome completely with **Command + Q** and reopen it. A locked vault still needs local unlock; restarting Chrome does not unlock it. Chrome [starts a native host for each `sendNativeMessage` request](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging#native-messaging-protocol), so a full browser restart is a troubleshooting step, not proof of a working connection.
 
 Chrome's supported unpacked-install workflow requires the browser's own confirmation; copying the files alone does not activate the extension. Managed Chrome profiles may prohibit Developer mode or unpacked extensions. See [Chrome's loading instructions](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-unpacked).
 
@@ -148,4 +150,4 @@ On September 14, 2026, an Apple Silicon Mac had Homebrew `0.11.0` alongside an o
 
 The user confirmed the unlock window appeared. Unlock initially refused the legacy vault's `0644` mode; ownership was verified, the file was tightened to `0600`, and no SQLite sidecars were present. The user then confirmed successful unlock. An audit-file scan found no secret-named fields, credential-assignment patterns, or plaintext domain values; this was a heuristic inspection, not proof of absence across all log channels. The existing audit log was also tightened from `0644` to `0600` inside its already-private directory.
 
-The Chrome extension was extracted from the checksum-verified installer archive into a stable user folder, with its manifest key verified against the expected extension ID. Browser activation and end-to-end autofill require separate confirmation. The release's signature assessment failed as described above.
+The Chrome extension was extracted from the checksum-verified installer archive into a stable user folder, with its manifest key verified against the expected extension ID. The user confirmed loading it, and Chrome's stored registration matched the stable folder. A direct, framed native-host status request returned success and an unlocked vault; this verifies host-to-daemon communication separately from the browser. Automated Chrome status inspection was blocked by disabled JavaScript automation/accessibility permissions, so browser-to-host status and end-to-end autofill remain unverified. The release's signature assessment failed as described above.
