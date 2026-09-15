@@ -46,6 +46,15 @@ updates:
     groups:
       npm-dev:
         dependency-type: development
+    # vitest 5 requires Node >= 22.12 while both CI jobs that run it
+    # (rust.yml web_tdd via setup-rust-env, extension-e2e) pin Node 20 —
+    # vitest 5 has no startup guard, so an unsupported-Node run would not
+    # fail loudly. Bump together with a coordinated CI Node 22+ change.
+    ignore:
+      - dependency-name: vitest
+        versions: [">=5"]
+      - dependency-name: "@vitest/coverage-v8"
+        versions: [">=5"]
 
   - package-ecosystem: npm
     directory: /browser-extension/chrome
