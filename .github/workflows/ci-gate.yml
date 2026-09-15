@@ -54,7 +54,7 @@ concurrency:
 jobs:
   gate:
     name: Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 130
     env:
       GH_TOKEN: ${{ github.token }}
@@ -116,8 +116,8 @@ jobs:
               'Check Rust Formatting'
               'Clippy Lint'
               'TypeScript TDD'
-              'Build (ubuntu-latest)'
-              'Run Tests (ubuntu-latest)'
+              'Build (ubuntu-24.04)'
+              'Run Tests (ubuntu-24.04)'
               'RustSec Audit'
               'Release Setup'
             )
@@ -136,7 +136,7 @@ jobs:
 
           if [ "$docs_only" = false ]; then
             if printf '%s\n' "$non_docs" | awk "$build_all_paths"; then
-              expect+=('Desktop (ubuntu-latest)')
+              expect+=('Desktop (ubuntu-24.04)')
             fi
             if printf '%s\n' "$non_docs" | awk "$android_paths"; then
               expect+=('Android Unit Tests')
