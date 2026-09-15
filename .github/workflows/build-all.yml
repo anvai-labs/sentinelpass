@@ -59,7 +59,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
           - os: macos-latest
             platform: macos
@@ -141,7 +141,7 @@ jobs:
 
   mobile-android:
     name: Android
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -214,7 +214,7 @@ jobs:
   # ============================================================================
   web:
     name: Web
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -259,7 +259,7 @@ jobs:
   # ============================================================================
   security:
     name: Security Audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -297,7 +297,7 @@ jobs:
   # ============================================================================
   summary:
     name: Build Summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [desktop, mobile-ios, mobile-android, web, security]
     if: always()
 

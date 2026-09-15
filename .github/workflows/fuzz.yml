@@ -21,7 +21,11 @@ env:
 jobs:
   fuzz:
     name: cargo fuzz (${{ matrix.target }})
+<<<<<<< HEAD
     runs-on: ubuntu-latest
+=======
+    runs-on: ubuntu-24.04
+>>>>>>> origin/main
     timeout-minutes: 30
     strategy:
       fail-fast: false
