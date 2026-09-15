@@ -166,7 +166,16 @@ jobs:
           java-version: '17'
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+        run: |
+          # android-actions/setup-android v4.0.1 (the latest release, previously
+          # pinned here) broke on 2026-09-14: its internal
+          # `sdkmanager --install tools` fails now that Google removed the
+          # deprecated 'tools' package from the sdkmanager repository
+          # (cmdline-tools 20.0 runner image). The runner image already ships
+          # cmdline-tools ANDROID_HOME; all this job needs is license
+          # acceptance + platform-tools for the NDK build below.
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" >/dev/null
 
       - name: Setup Android NDK
         run: |
