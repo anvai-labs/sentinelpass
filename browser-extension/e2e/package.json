@@ -10,7 +10,7 @@
     "@playwright/test": "^1.63.0"
   },
   "dependencies": {
-    "@types/node": "22.20.2",
+    "@types/node": "26.5.1",
     "selfsigned": "5.5.0"
   }
 }
