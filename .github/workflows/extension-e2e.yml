@@ -15,7 +15,7 @@ on:
 jobs:
   browser-e2e:
     name: Run Browser Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
 
