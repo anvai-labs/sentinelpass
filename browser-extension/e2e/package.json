@@ -7,7 +7,7 @@
     "test:e2e:headed": "E2E_HEADED=1 playwright test --config=playwright.config.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1"
+    "@playwright/test": "^1.63.0"
   },
   "dependencies": {
     "@types/node": "22.20.2",
