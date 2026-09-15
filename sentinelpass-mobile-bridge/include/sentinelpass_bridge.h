@@ -411,5 +411,5 @@ enum SPErrorCode sp_vault_is_unlocked(SPVaultHandle handle, bool *out_unlocked);
 enum SPErrorCode sp_vault_lock(SPVaultHandle handle);
 
 #ifdef __cplusplus
-} // extern "C"
-#endif // __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
