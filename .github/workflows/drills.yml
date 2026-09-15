@@ -35,7 +35,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+<<<<<<< HEAD
         os: [ubuntu-latest, macos-latest]
+=======
+        os: [ubuntu-24.04, macos-latest]
+>>>>>>> origin/main
         drill:
           - drill-recovery.sh
           - drill-backup-restore.sh

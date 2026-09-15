@@ -21,7 +21,7 @@ jobs:
   # Build JNI libraries for all Android architectures
   mobile-bridge:
     name: Build JNI Libraries (Android)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -160,7 +160,7 @@ jobs:
   # Android Unit Tests
   unit-tests:
     name: Android Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: mobile-bridge
 
     steps:
@@ -200,9 +200,9 @@ jobs:
   # Android Emulator Tests
   emulator-tests:
     name: Android Emulator Tests
-    # ubuntu-latest is x86_64 and supports KVM hardware acceleration for Android
+    # ubuntu-24.04 is x86_64 and supports KVM hardware acceleration for Android
     # emulators. macos-latest is now arm64 and cannot run x86_64 AVD images.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: mobile-bridge
 
     strategy:
@@ -276,7 +276,7 @@ jobs:
   # Android Lint
   lint:
     name: Android Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -309,7 +309,7 @@ jobs:
   # Integration Tests
   integration-tests:
     name: Android Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: mobile-bridge
 
     steps:
@@ -377,7 +377,7 @@ jobs:
   # Build APK
   build-apk:
     name: Build APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [unit-tests, lint]
 
     steps:
