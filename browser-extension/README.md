@@ -80,7 +80,7 @@ Encrypted SQLite Database
 ## Building
 
 ### Prerequisites
-- Node.js 20+
+- Node.js 24+
 - npm 10+
 - TypeScript 5+
 

@@ -114,7 +114,7 @@ Builds browser extensions and web assets.
 ```
 
 **Requirements:**
-- Node.js 20+
+- Node.js 24+
 - npm
 
 **Outputs:**
