@@ -51,8 +51,8 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
-if [ "$NODE_VERSION" -lt 20 ]; then
-    log_warning "Node.js version 20+ recommended (current: $(node -v))"
+if [ "$NODE_VERSION" -lt 24 ]; then
+    log_warning "Node.js version 24+ recommended (current: $(node -v))"
 fi
 
 # ============================================================================
