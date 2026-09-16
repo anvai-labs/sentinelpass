@@ -46,7 +46,7 @@ cd "$PROJECT_ROOT"
 # ============================================================================
 
 if ! command -v node >/dev/null 2>&1; then
-    log_error "Node.js not found. Please install Node.js 20+"
+    log_error "Node.js not found. Please install Node.js 24+"
     exit 1
 fi
 
