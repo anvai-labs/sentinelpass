@@ -113,7 +113,7 @@ preferred), and remediation guidance.
   `docs/WBS_SECURITY_REMEDIATION_2026-09-04.md`, `TECHNICAL_DEBT.md`) explains
   why each control looks the way it does.
 - **Build:** per `CLAUDE.md` / `BUILD.md` — Rust 1.89+ workspace
-  (`cargo build --workspace`), Node 20 + npm 10 for web assets
+  (`cargo build --workspace`), Node 24 + npm 10 for web assets
   (`npm run web:build`), platform dependencies listed there. Linux reviewers
   need the GTK/WebKit dev packages only for the Tauri UI; all headless surfaces
   (core/CLI/daemon/host/relay) build without them.

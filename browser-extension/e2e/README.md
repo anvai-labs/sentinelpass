@@ -48,4 +48,4 @@ Historical suite; assertions relied on content-script injection that
 Playwright could not perform reliably (all cases skipped). The daemon E2E
 suite above covers the same flows against the real backend.
 
-Setup for local runs: Node.js 20+, Chromium installed by Playwright.
+Setup for local runs: Node.js 24+, Chromium installed by Playwright.

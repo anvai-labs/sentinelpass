@@ -165,7 +165,9 @@ pub enum PasswordManagerError {
     #[error(
         "the vault is owned by a running daemon or an exclusive maintenance process \
          (lock: {lock_path}). Quit the daemon first (or wait for maintenance to finish), \
-         then retry"
+         then retry. If the daemon runs as the macOS login service \
+         (com.sentinelpass.daemon), stop it with: launchctl bootout \
+         gui/$(id -u)/com.sentinelpass.daemon (it auto-restarts ~30s later, re-locked)"
     )]
     MaintenanceLockHeld { lock_path: String },
 
