@@ -36,7 +36,11 @@ jobs:
       fail-fast: false
       matrix:
 <<<<<<< HEAD
+<<<<<<< HEAD
         os: [ubuntu-latest, macos-latest]
+=======
+        os: [ubuntu-24.04, macos-latest]
+>>>>>>> origin/main
 =======
         os: [ubuntu-24.04, macos-latest]
 >>>>>>> origin/main
