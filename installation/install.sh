@@ -137,6 +137,51 @@ elif [[ -f "$BINARY_DIR/sentinelpass.exe" ]]; then
     cp "$BINARY_DIR/sentinelpass.exe" "$INSTALL_DIR/"
 fi
 
+# Linux only: register the daemon as a systemd USER service (the equivalent
+# of the macOS LaunchAgent). Every step fails soft — hosts without a working
+# systemd user session must still get a complete native-host installation.
+if [[ "$PLATFORM" == "linux" ]]; then
+    SYSTEMD_STATE=""
+    if command -v systemctl >/dev/null 2>&1; then
+        SYSTEMD_STATE="$(systemctl --user is-system-running 2>/dev/null || true)"
+    fi
+    if [[ "$SYSTEMD_STATE" == "running" || "$SYSTEMD_STATE" == "degraded" || "$SYSTEMD_STATE" == "starting" ]]; then
+        UNIT_SRC="$PROJECT_ROOT/installation/sentinelpass-daemon.service"
+        UNIT_DIR="$HOME/.config/systemd/user"
+        echo "Installing systemd user service..."
+        # No path substitution is needed: the unit's %h specifier expands to
+        # the user's home directory at activation time, and it already points
+        # at $INSTALL_DIR on Linux ($HOME/.local/share/sentinelpass).
+        if mkdir -p "$UNIT_DIR" && cp "$UNIT_SRC" "$UNIT_DIR/"; then
+            if systemctl --user daemon-reload; then
+                if systemctl --user enable --now sentinelpass-daemon.service; then
+                    echo "Daemon registered as a systemd user service (enabled and started, --start-locked)"
+                    echo "If the daemon should also run without an active login session, run:"
+                    echo "  loginctl enable-linger $USER"
+                else
+                    echo "Warning: could not enable the sentinelpass-daemon user service." >&2
+                    echo "To retry manually:" >&2
+                    echo "  systemctl --user daemon-reload" >&2
+                    echo "  systemctl --user enable --now sentinelpass-daemon" >&2
+                fi
+            else
+                echo "Warning: 'systemctl --user daemon-reload' failed." >&2
+                echo "To finish manually:" >&2
+                echo "  systemctl --user daemon-reload" >&2
+                echo "  systemctl --user enable --now sentinelpass-daemon" >&2
+            fi
+        else
+            echo "Warning: could not install $UNIT_SRC into $UNIT_DIR." >&2
+            echo "To finish manually:" >&2
+            echo "  mkdir -p $UNIT_DIR && cp $UNIT_SRC $UNIT_DIR/" >&2
+            echo "  systemctl --user daemon-reload && systemctl --user enable --now sentinelpass-daemon" >&2
+        fi
+    else
+        echo "systemd user session not detected — skipping daemon service registration."
+        echo "To start the daemon at login manually, see installation/sentinelpass-daemon.service."
+    fi
+fi
+
 # Deploy the Chrome extension to a stable path inside the installation dir.
 # Chrome never auto-updates unpacked extensions, but it re-reads the folder
 # on reload/restart — so an in-place replacement here turns every future

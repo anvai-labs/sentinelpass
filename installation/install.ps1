@@ -47,6 +47,23 @@ if (Test-Path (Join-Path $BinaryDir "sentinelpass.exe")) {
 
 Write-Host "Copied binaries to $InstallDir" -ForegroundColor Cyan
 
+# Register the daemon as a logon scheduled task (the Windows equivalent of
+# the macOS LaunchAgent). Fails soft: task-registration problems must not
+# abort the rest of the installation.
+try {
+    $DaemonTaskAction = New-ScheduledTaskAction -Execute (Join-Path $InstallDir "sentinelpass-daemon.exe") -Argument "--start-locked"
+    $DaemonTaskTrigger = New-ScheduledTaskTrigger -AtLogOn
+    $DaemonTaskSettings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName "SentinelPass Daemon" -Trigger $DaemonTaskTrigger -Action $DaemonTaskAction -Settings $DaemonTaskSettings -Force | Out-Null
+    Write-Host "Registered logon task 'SentinelPass Daemon' (daemon starts locked at logon; restarts up to 3 times on failure)" -ForegroundColor Cyan
+    Write-Host "To remove the task later:" -ForegroundColor White
+    Write-Host "  Unregister-ScheduledTask -TaskName 'SentinelPass Daemon' -Confirm:`$false" -ForegroundColor White
+} catch {
+    Write-Warning "Could not register the daemon scheduled task: $($_.Exception.Message)"
+    Write-Host "To register it manually, run in PowerShell:" -ForegroundColor Yellow
+    Write-Host "  Register-ScheduledTask -TaskName 'SentinelPass Daemon' -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Action (New-ScheduledTaskAction -Execute '$InstallDir\sentinelpass-daemon.exe' -Argument '--start-locked') -Settings (New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)) -Force" -ForegroundColor Yellow
+}
+
 # Generate native messaging host manifest with correct path
 $ManifestDest = Join-Path $InstallDir $NativeHostFileName
 $FirefoxManifestDest = Join-Path $InstallDir $FirefoxHostFileName
