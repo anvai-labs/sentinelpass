@@ -131,6 +131,18 @@ fn init_logging() -> Result<Option<WorkerGuard>> {
     }
 
     let logs_dir = sentinelpass_core::platform::get_data_dir().join("logs");
+    // Tighten the data dir itself first: on fresh service installs this runs
+    // before any other hardening step, and create_private_dir only tightens
+    // the leaf — the parent would otherwise be born 0755 via umask (review
+    // F2), tripping loose-parent warnings on every subsequent vault open.
+    sentinelpass_core::platform::create_private_dir(&sentinelpass_core::platform::get_data_dir())
+        .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to harden data directory {}: {}",
+            sentinelpass_core::platform::get_data_dir().display(),
+            e
+        )
+    })?;
     sentinelpass_core::platform::create_private_dir(&logs_dir).map_err(|e| {
         anyhow::anyhow!(
             "Failed to create log directory {}: {}",
@@ -180,8 +192,11 @@ async fn main() -> Result<()> {
         Ok(guard) => guard,
         Err(e) => {
             error!("Refusing to start: {}", e);
-            // Non-zero exit: a refusal must never look like a clean start to
-            // supervisors waiting on the process (review F4).
+            // Flush the non-blocking log worker before exit: process::exit
+            // skips destructors, so the WorkerGuard would never flush and
+            // this refusal line could be lost from the rotated log (the
+            // crash-loop diagnostic exactly when it is needed).
+            drop(_log_guard);
             std::process::exit(1);
         }
     };
@@ -198,8 +213,9 @@ async fn main() -> Result<()> {
     }
     if let Err(e) = sentinelpass_core::daemon::ensure_native_host_capability() {
         error!("Native-host capability provisioning failed: {}", e);
-        // Non-zero exit: a refusal must never look like a clean start
-        // (stage-6 review F2, matching the lock-refusal rule).
+        // Flush before exit — same WorkerGuard rationale as the
+        // lock-refusal path above (review F1).
+        drop(_log_guard);
         std::process::exit(1);
     }
 

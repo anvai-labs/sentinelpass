@@ -146,6 +146,10 @@ if [[ "$PLATFORM" == "linux" ]]; then
         SYSTEMD_STATE="$(systemctl --user is-system-running 2>/dev/null || true)"
     fi
     if [[ "$SYSTEMD_STATE" == "running" || "$SYSTEMD_STATE" == "degraded" || "$SYSTEMD_STATE" == "starting" ]]; then
+        if [[ ! -x "$INSTALL_DIR/sentinelpass-daemon" ]]; then
+            echo "Warning: $INSTALL_DIR/sentinelpass-daemon is missing or not executable — skipping daemon service registration." >&2
+            echo "Without it, browser autofill and IPC stop working after a reboot." >&2
+        else
         UNIT_SRC="$PROJECT_ROOT/installation/sentinelpass-daemon.service"
         UNIT_DIR="$HOME/.config/systemd/user"
         echo "Installing systemd user service..."
@@ -157,7 +161,9 @@ if [[ "$PLATFORM" == "linux" ]]; then
                 if systemctl --user enable --now sentinelpass-daemon.service; then
                     echo "Daemon registered as a systemd user service (enabled and started, --start-locked)"
                     echo "If the daemon should also run without an active login session, run:"
-                    echo "  loginctl enable-linger $USER"
+                    echo "  loginctl enable-linger ${USER:-$(id -un)}"
+                    echo "Note: if another daemon instance is already running and holding the vault"
+                    echo "lock, the service retries every 30s and takes over when it exits."
                 else
                     echo "Warning: could not enable the sentinelpass-daemon user service." >&2
                     echo "To retry manually:" >&2
@@ -175,6 +181,7 @@ if [[ "$PLATFORM" == "linux" ]]; then
             echo "To finish manually:" >&2
             echo "  mkdir -p $UNIT_DIR && cp $UNIT_SRC $UNIT_DIR/" >&2
             echo "  systemctl --user daemon-reload && systemctl --user enable --now sentinelpass-daemon" >&2
+        fi
         fi
     else
         echo "systemd user session not detected — skipping daemon service registration."
@@ -295,7 +302,7 @@ EOF
         if launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" >/dev/null 2>&1 \
            || launchctl load "$LAUNCHD_PLIST" >/dev/null 2>&1; then
             echo "Daemon installed as a login service: $LAUNCHD_LABEL (auto-starts, restarts on crash)"
-            echo "  logs: $DAEMON_LOG"
+            echo "  logs: rotated daily under \$HOME/Library/Application Support/PasswordManager/logs/ (launchd capture: $DAEMON_LOG)"
             echo "  note: installing/reinstalling restarts the daemon, so the vault re-locks — unlock again from the UI"
             echo "  stop/remove: launchctl bootout gui/\$(id -u)/$LAUNCHD_LABEL && rm '$LAUNCHD_PLIST'"
             sleep 2
