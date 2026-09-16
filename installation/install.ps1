@@ -50,18 +50,30 @@ Write-Host "Copied binaries to $InstallDir" -ForegroundColor Cyan
 # Register the daemon as a logon scheduled task (the Windows equivalent of
 # the macOS LaunchAgent). Fails soft: task-registration problems must not
 # abort the rest of the installation.
+#
+# S4U principal: a non-interactive batch logon — no stored password and no
+# console window flashing in the user's session. The daemon needs no desktop
+# interaction (IPC is a named pipe addressed by path; the vault is a local
+# file), so S4U is safe for it. Caveat: S4U sessions load a minimal
+# environment; the daemon resolves its paths from the system profile
+# (LOCALAPPDATA and friends), which S4U does load.
+#
+# The task name is user-scoped so two accounts on one machine each get their
+# own task instead of overwriting each other's registration.
+$DaemonTaskName = "SentinelPass Daemon ($env:USERNAME)"
 try {
     $DaemonTaskAction = New-ScheduledTaskAction -Execute (Join-Path $InstallDir "sentinelpass-daemon.exe") -Argument "--start-locked"
     $DaemonTaskTrigger = New-ScheduledTaskTrigger -AtLogOn
+    $DaemonTaskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
     $DaemonTaskSettings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName "SentinelPass Daemon" -Trigger $DaemonTaskTrigger -Action $DaemonTaskAction -Settings $DaemonTaskSettings -Force | Out-Null
-    Write-Host "Registered logon task 'SentinelPass Daemon' (daemon starts locked at logon; restarts up to 3 times on failure)" -ForegroundColor Cyan
+    Register-ScheduledTask -TaskName $DaemonTaskName -Trigger $DaemonTaskTrigger -Action $DaemonTaskAction -Principal $DaemonTaskPrincipal -Settings $DaemonTaskSettings -Force | Out-Null
+    Write-Host "Registered logon task '$DaemonTaskName' (daemon starts locked at logon; restarts up to 3 times on failure)" -ForegroundColor Cyan
     Write-Host "To remove the task later:" -ForegroundColor White
-    Write-Host "  Unregister-ScheduledTask -TaskName 'SentinelPass Daemon' -Confirm:`$false" -ForegroundColor White
+    Write-Host "  Unregister-ScheduledTask -TaskName '$DaemonTaskName' -Confirm:`$false" -ForegroundColor White
 } catch {
     Write-Warning "Could not register the daemon scheduled task: $($_.Exception.Message)"
     Write-Host "To register it manually, run in PowerShell:" -ForegroundColor Yellow
-    Write-Host "  Register-ScheduledTask -TaskName 'SentinelPass Daemon' -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Action (New-ScheduledTaskAction -Execute '$InstallDir\sentinelpass-daemon.exe' -Argument '--start-locked') -Settings (New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)) -Force" -ForegroundColor Yellow
+    Write-Host "  Register-ScheduledTask -TaskName '$DaemonTaskName' -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Action (New-ScheduledTaskAction -Execute '$InstallDir\sentinelpass-daemon.exe' -Argument '--start-locked') -Principal (New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited) -Settings (New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)) -Force" -ForegroundColor Yellow
 }
 
 # Generate native messaging host manifest with correct path
