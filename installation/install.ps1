@@ -74,7 +74,7 @@ $FirefoxManifestContent = @{
     path = $BinaryPath
     type = "stdio"
     allowed_extensions = @(
-        "sentinelpass@localhost"
+        "{BDC2D65D-871C-47C0-8824-7F50234E35A8}"
     )
 }
 

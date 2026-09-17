@@ -129,12 +129,27 @@ fi
 # on reload/restart — so an in-place replacement here turns every future
 # upgrade into a single reload click (same folder = same entry = same ID,
 # which the native-host manifest's allowed_origins already pins).
+#
+# Only the built RUNTIME file set is deployed (manifest.json, the built .js
+# modules, static assets) — never the .ts sources, docs, or packaging
+# metadata. This is exactly the set browser-extension/package-chrome.sh
+# zips (WBS-911 F10).
 EXT_SRC="$PROJECT_ROOT/browser-extension/chrome"
 if [[ -f "$EXT_SRC/manifest.json" ]]; then
     EXT_VERSION="$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$EXT_SRC/manifest.json" | head -1)"
     echo "Deploying Chrome extension v${EXT_VERSION:-?} to: $INSTALL_DIR/chrome-extension"
     rm -rf "$INSTALL_DIR/chrome-extension"
-    cp -R "$EXT_SRC" "$INSTALL_DIR/chrome-extension"
+    mkdir -p "$INSTALL_DIR/chrome-extension"
+    shopt -s nullglob
+    runtime_files=("$EXT_SRC"/manifest.json "$EXT_SRC"/popup.html "$EXT_SRC"/styles.css "$EXT_SRC"/icon*.png "$EXT_SRC"/*.js)
+    shopt -u nullglob
+    if [[ ${#runtime_files[@]} -eq 0 ]]; then
+        echo "ERROR: no runtime files found under $EXT_SRC — run 'npm run ext:build' first." >&2
+        exit 1
+    fi
+    for f in "${runtime_files[@]}"; do
+        cp "$f" "$INSTALL_DIR/chrome-extension/"
+    done
 else
     echo "Chrome extension sources not found at $EXT_SRC — skipping extension deployment."
 fi
@@ -170,7 +185,7 @@ cat > "$INSTALL_DIR/$FIREFOX_MANIFEST_FILE" << EOF
   "path": "$BINARY_PATH",
   "type": "stdio",
   "allowed_extensions": [
-    "sentinelpass@localhost"
+    "{BDC2D65D-871C-47C0-8824-7F50234E35A8}"
   ]
 }
 EOF
