@@ -82,7 +82,18 @@ impl InstallationCapabilities {
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
-        std::fs::write(path, json).map_err(PasswordManagerError::Io)?;
+        // WBS-911 F4: owner-only FROM BIRTH — plain `fs::write` + post-hoc
+        // chmod left a umask window on the first save. Same creator as the
+        // sibling site-permissions store (symlink/regular-file checks, 0600
+        // at open); the mode repair below stays for pre-existing files.
+        let mut file = crate::platform::create_owner_only_file(path).map_err(|e| {
+            PasswordManagerError::from(DatabaseError::FileIo(format!(
+                "failed to open capability store owner-only: {e}"
+            )))
+        })?;
+        use std::io::Write;
+        file.write_all(&json).map_err(PasswordManagerError::Io)?;
+        drop(file);
         crate::platform::set_owner_only_mode(path, false).map_err(|e| {
             PasswordManagerError::from(DatabaseError::FileIo(format!(
                 "failed to tighten capability store mode: {e}"
@@ -284,5 +295,30 @@ mod tests {
 
         let loaded = InstallationCapabilities::load_from_path(&path).unwrap();
         assert!(loaded.verify(NATIVE_HOST_AUDIENCE, Some(secret.as_str())));
+    }
+
+    /// WBS-911 F4: saves go through the owner-only creator, so a symlink
+    /// planted at the store path is REFUSED (plain `fs::write` would have
+    /// followed it and clobbered the target).
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_a_symlinked_store_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let victim = tmp.path().join("victim.json");
+        std::fs::write(&victim, b"original").unwrap();
+
+        let link = tmp.path().join("ipc-capabilities.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let store = InstallationCapabilities::default();
+        assert!(
+            store.save_to_path(&link).is_err(),
+            "symlinked capability store path must be refused"
+        );
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"original",
+            "the symlink target must be untouched"
+        );
     }
 }
