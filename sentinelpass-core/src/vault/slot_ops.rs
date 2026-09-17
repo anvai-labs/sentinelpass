@@ -963,7 +963,11 @@ impl VaultManager {
         use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
         use subtle::ConstantTimeEq;
 
-        let wrapped: WrappedKey = bincode::deserialize(dek_wrapped)
+        // Bounded decode (WBS-307 discipline): the wrap blob is
+        // corruption-prone storage read before the registry MAC can be
+        // verified (the MAC key derives from the DEK inside it), so the
+        // legacy bincode shape must not trust its embedded length prefix.
+        let wrapped: WrappedKey = WrappedKey::from_bincode_bytes(dek_wrapped)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         if !wrapped.epoch_bound {
             return Err(PasswordManagerError::InvalidInput(

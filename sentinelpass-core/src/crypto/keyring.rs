@@ -513,7 +513,7 @@ pub fn rotate_master_password(
     use crate::crypto::kdf::derive_master_key;
     use subtle::ConstantTimeEq;
 
-    if new_password == current_password {
+    if bool::from(new_password.ct_eq(current_password)) {
         return Err(CryptoError::EncryptionFailed(
             "New master password must differ from the current password".to_string(),
         ));
