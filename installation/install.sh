@@ -170,7 +170,7 @@ cat > "$INSTALL_DIR/$FIREFOX_MANIFEST_FILE" << EOF
   "path": "$BINARY_PATH",
   "type": "stdio",
   "allowed_extensions": [
-    "sentinelpass@localhost"
+    "{BDC2D65D-871C-47C0-8824-7F50234E35A8}"
   ]
 }
 EOF
