@@ -27,6 +27,16 @@ const OVERSIZED_MARKER: &str = ".oversized-";
 /// unbounded file carried over from the launchd capture) could otherwise
 /// grow without limit.
 const MAX_ACTIVE_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+/// Retention bound for the roller's old daily files: the sweep keeps only
+/// the newest [`KEEP_DAILY_LOGS`] `<LOG_FILE_NAME>.<date>` files. This is a
+/// privacy bound, not just disk hygiene — service logs carry domain-bearing
+/// INFO lines (autofill lookups) plus the vault path, so unbounded daily
+/// files accumulate a per-domain history on disk.
+const KEEP_DAILY_LOGS: usize = 14;
+/// Retention bound for the [`OVERSIZED_MARKER`] archives: the sweep keeps
+/// only the 3 most recent. Archives are rare runaway-day captures; a deeper
+/// history has no diagnostic value against the same privacy cost.
+const KEEP_ARCHIVED_LOGS: usize = 3;
 
 struct GlobalVault {
     vault: Arc<DaemonVault>,
@@ -74,14 +84,107 @@ fn rotate_oversized_log(log_path: &Path) -> std::io::Result<Option<PathBuf>> {
     Ok(Some(archived))
 }
 
-/// Sweep the logs directory before the appender attaches, renaming any
-/// outgrown roller file aside. This covers the ACTIVE (today's) file and
-/// also sweeps earlier daily files that outgrew the cap, without any date
-/// arithmetic: daily files are named `<LOG_FILE_NAME>.<date>` and archived
-/// files carry [`OVERSIZED_MARKER`], so a prefix + marker check separates
-/// the two. Best-effort — a failed sweep only loses the size bound for this
-/// run, never the daemon start. The launcher's stderr capture (launchd
-/// StandardOutPath, journal) receives the notes.
+/// Compute the retention deletion plan for `logs_dir`: daily roller files
+/// beyond the `keep_daily` newest and oversized archives beyond the
+/// `keep_archived` newest, oldest first. Read-only — [`prune_retention`]
+/// executes the plan.
+///
+/// Classification and ordering are name-based with no date parsing: daily
+/// files are `<LOG_FILE_NAME>.<date>` (ISO dates, so lexicographic order is
+/// chronological) and archives order by the unix-ts after
+/// [`OVERSIZED_MARKER`] (fixed-width epoch seconds, so textual order is
+/// numeric). Today's active file is the newest daily file and is never
+/// planned for deletion regardless of `keep_daily` — the roller holds it
+/// open. The bare legacy name (`sentinelpass-daemon.log`, no suffix) and
+/// anything without the log prefix are likewise out of bounds.
+fn retention_deletion_plan(
+    logs_dir: &Path,
+    keep_daily: usize,
+    keep_archived: usize,
+) -> std::io::Result<Vec<PathBuf>> {
+    let mut daily: Vec<String> = Vec::new();
+    let mut archived: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(logs_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = name.strip_prefix(LOG_FILE_NAME) else {
+            continue;
+        };
+        if suffix.contains(OVERSIZED_MARKER) {
+            archived.push(name.to_string());
+        } else if suffix.starts_with('.') {
+            daily.push(name.to_string());
+        }
+        // The bare prefix (no suffix) is an active or legacy capture file —
+        // never a deletion candidate.
+    }
+    daily.sort();
+    // Newest archive = largest unix-ts. An unparsable suffix sorts as the
+    // newest: deletion is irreversible, so an unexpected name is kept, not
+    // dropped.
+    archived.sort_by_key(|name| {
+        name.rsplit(OVERSIZED_MARKER)
+            .next()
+            .and_then(|ts| ts.parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+    // The newest daily file is today's, held open by the roller — floor the
+    // effective keep at 1 so it can never be planned for deletion, whatever
+    // `keep_daily` the caller passes. For `keep_daily >= 1` this is a no-op
+    // (the newest sorts into the kept set anyway).
+    let daily_cut = daily.len().saturating_sub(keep_daily.max(1));
+    let archived_cut = archived.len().saturating_sub(keep_archived);
+    let mut plan: Vec<PathBuf> = daily[..daily_cut]
+        .iter()
+        .map(|n| logs_dir.join(n))
+        .collect();
+    plan.extend(archived[..archived_cut].iter().map(|n| logs_dir.join(n)));
+    Ok(plan)
+}
+
+/// Execute a retention prune over `logs_dir`, returning the number of files
+/// actually deleted. Individual failures (a file locked by an antivirus or
+/// indexer on Windows, say) do not strand the rest of the plan; the first
+/// failure is reported after every planned deletion was attempted.
+fn prune_retention(
+    logs_dir: &Path,
+    keep_daily: usize,
+    keep_archived: usize,
+) -> std::io::Result<usize> {
+    let plan = retention_deletion_plan(logs_dir, keep_daily, keep_archived)?;
+    let mut deleted = 0;
+    let mut first_error = None;
+    for path in &plan {
+        match std::fs::remove_file(path) {
+            Ok(()) => deleted += 1,
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(deleted),
+    }
+}
+
+/// Sweep the logs directory before the appender attaches: rename any
+/// outgrown roller file aside, then apply the retention caps. The size
+/// guard covers the ACTIVE (today's) file and also sweeps earlier daily
+/// files that outgrew the cap, without any date arithmetic: daily files are
+/// named `<LOG_FILE_NAME>.<date>` and archived files carry
+/// [`OVERSIZED_MARKER`], so a prefix + marker check separates the two.
+/// Retention ([`prune_retention`] with [`KEEP_DAILY_LOGS`] /
+/// [`KEEP_ARCHIVED_LOGS`]) then deletes old daily files and oversized
+/// archives past the caps — a privacy bound on the domain-bearing INFO
+/// history on disk, not just disk hygiene. It runs after the size guard so
+/// freshly rotated archives count as new. Best-effort — a failed sweep only
+/// loses the size bound / retention for this run, never the daemon start.
+/// The launcher's stderr capture (launchd StandardOutPath, journal)
+/// receives the notes.
 fn sweep_oversized_logs(logs_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(logs_dir) else {
         return;
@@ -109,6 +212,11 @@ fn sweep_oversized_logs(logs_dir: &Path) {
                 );
             }
         }
+    }
+    match prune_retention(logs_dir, KEEP_DAILY_LOGS, KEEP_ARCHIVED_LOGS) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("pruned {n} old daemon log file(s) past retention"),
+        Err(e) => eprintln!("warning: could not prune old daemon logs: {e}"),
     }
 }
 
@@ -410,5 +518,252 @@ mod log_rotation_tests {
         );
         assert!(foreign.exists(), "foreign files must be untouched");
         assert!(small.exists(), "within-cap daily file must be untouched");
+    }
+}
+
+#[cfg(test)]
+mod log_retention_tests {
+    use super::*;
+
+    /// File names in `dir`, sorted, classified as (daily, archived) the way
+    /// the retention planner classifies them.
+    fn classify_logs(logs_dir: &Path) -> (Vec<String>, Vec<String>) {
+        let mut daily = Vec::new();
+        let mut archived = Vec::new();
+        for entry in std::fs::read_dir(logs_dir).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(LOG_FILE_NAME) {
+                continue;
+            }
+            if name.contains(OVERSIZED_MARKER) {
+                archived.push(name);
+            } else if name != LOG_FILE_NAME {
+                daily.push(name);
+            }
+        }
+        daily.sort();
+        archived.sort();
+        (daily, archived)
+    }
+
+    #[test]
+    fn prunes_past_retention_caps_keeping_the_newest_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir(&logs_dir).unwrap();
+
+        // 20 daily files (zero-padded dates sort chronologically) + 5
+        // archives with growing unix-ts suffixes, plus a bare legacy log
+        // and a foreign file that must both ride along untouched.
+        for day in 1..=20u32 {
+            let daily = logs_dir.join(format!("{LOG_FILE_NAME}.2026-08-{day:02}"));
+            std::fs::write(daily, b"daily").unwrap();
+        }
+        for i in 0..5u64 {
+            let ts = 1_758_000_000 + 100 * i;
+            let archived = logs_dir.join(format!("{LOG_FILE_NAME}{OVERSIZED_MARKER}{ts}"));
+            std::fs::write(archived, b"archived").unwrap();
+        }
+        std::fs::write(logs_dir.join(LOG_FILE_NAME), b"active").unwrap();
+        std::fs::write(logs_dir.join("vault.db"), b"foreign").unwrap();
+
+        let deleted = prune_retention(&logs_dir, KEEP_DAILY_LOGS, KEEP_ARCHIVED_LOGS)
+            .expect("retention prune must not fail");
+        assert_eq!(
+            deleted, 8,
+            "six old dailies and two old archives must be pruned"
+        );
+
+        let (daily, archived) = classify_logs(&logs_dir);
+        assert_eq!(daily.len(), KEEP_DAILY_LOGS, "exactly the cap survives");
+        assert_eq!(
+            daily.first().unwrap(),
+            &format!("{LOG_FILE_NAME}.2026-08-07"),
+            "the OLDEST survivors start right after the pruned range"
+        );
+        assert_eq!(
+            daily.last().unwrap(),
+            &format!("{LOG_FILE_NAME}.2026-08-20"),
+            "the newest daily file always survives"
+        );
+        assert_eq!(
+            archived.len(),
+            KEEP_ARCHIVED_LOGS,
+            "exactly the archive cap survives"
+        );
+        let kept_ts: Vec<u64> = archived
+            .iter()
+            .map(|n| n.rsplit(OVERSIZED_MARKER).next().unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(
+            kept_ts,
+            vec![1_758_000_200, 1_758_000_300, 1_758_000_400],
+            "the NEWEST archives survive, oldest pruned first"
+        );
+        assert!(
+            logs_dir.join(LOG_FILE_NAME).exists(),
+            "the bare active log must never be pruned"
+        );
+        assert!(
+            logs_dir.join("vault.db").exists(),
+            "foreign files must never be pruned"
+        );
+    }
+
+    #[test]
+    fn below_retention_caps_nothing_is_deleted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir(&logs_dir).unwrap();
+
+        for day in 1..=5u32 {
+            let daily = logs_dir.join(format!("{LOG_FILE_NAME}.2026-09-{day:02}"));
+            std::fs::write(daily, b"daily").unwrap();
+        }
+        for ts in [1_758_000_000u64, 1_758_000_100] {
+            let archived = logs_dir.join(format!("{LOG_FILE_NAME}{OVERSIZED_MARKER}{ts}"));
+            std::fs::write(archived, b"archived").unwrap();
+        }
+
+        let plan = retention_deletion_plan(&logs_dir, KEEP_DAILY_LOGS, KEEP_ARCHIVED_LOGS)
+            .expect("planning must not fail");
+        assert!(
+            plan.is_empty(),
+            "below the caps the plan is empty: {plan:?}"
+        );
+
+        let deleted = prune_retention(&logs_dir, KEEP_DAILY_LOGS, KEEP_ARCHIVED_LOGS)
+            .expect("retention prune must not fail");
+        assert_eq!(deleted, 0, "below the caps nothing is deleted");
+        assert_eq!(
+            std::fs::read_dir(&logs_dir).unwrap().count(),
+            7,
+            "directory must be untouched"
+        );
+    }
+
+    #[test]
+    fn retention_never_deletes_the_active_or_bare_log_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir(&logs_dir).unwrap();
+
+        // Even at keep_daily = 0 the newest daily (today's, held open by the
+        // roller) and the bare legacy name must survive.
+        for day in 14..=16u32 {
+            let daily = logs_dir.join(format!("{LOG_FILE_NAME}.2026-09-{day}"));
+            std::fs::write(daily, b"daily").unwrap();
+        }
+        std::fs::write(logs_dir.join(LOG_FILE_NAME), b"active").unwrap();
+        let archived = logs_dir.join(format!("{LOG_FILE_NAME}{OVERSIZED_MARKER}123"));
+        std::fs::write(&archived, b"archived").unwrap();
+        let foreign = logs_dir.join("vault.db");
+        std::fs::write(&foreign, b"foreign").unwrap();
+
+        let deleted = prune_retention(&logs_dir, 0, 0).expect("retention prune must not fail");
+
+        assert_eq!(
+            deleted, 3,
+            "the two older dailies plus the archive go; the newest daily is protected even at keep_daily = 0"
+        );
+        assert!(
+            logs_dir
+                .join(format!("{LOG_FILE_NAME}.2026-09-16"))
+                .exists(),
+            "today's active file is by definition the newest and is never pruned"
+        );
+        assert!(
+            logs_dir.join(LOG_FILE_NAME).exists(),
+            "the bare active log (no date suffix) is never pruned"
+        );
+        assert!(foreign.exists(), "foreign files are never pruned");
+        assert!(!archived.exists(), "archives have no active protection");
+    }
+
+    #[test]
+    fn archive_files_do_not_confuse_daily_pruning() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir(&logs_dir).unwrap();
+
+        // 16 small dailies (one past the cap) + 2 archives, one of which
+        // carries BOTH a date and the oversized marker — it must count as an
+        // archive, never as a daily, and vice versa for the daily count.
+        for day in 1..=16u32 {
+            let daily = logs_dir.join(format!("{LOG_FILE_NAME}.2026-09-{day:02}"));
+            std::fs::write(daily, b"daily").unwrap();
+        }
+        let dated_archive = logs_dir.join(format!(
+            "{LOG_FILE_NAME}.2026-09-10{OVERSIZED_MARKER}1758000000"
+        ));
+        std::fs::write(&dated_archive, b"archived").unwrap();
+        let plain_archive = logs_dir.join(format!("{LOG_FILE_NAME}{OVERSIZED_MARKER}1758000100"));
+        std::fs::write(&plain_archive, b"archived").unwrap();
+
+        let plan = retention_deletion_plan(&logs_dir, KEEP_DAILY_LOGS, KEEP_ARCHIVED_LOGS)
+            .expect("planning must not fail");
+        let mut planned: Vec<String> = plan
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        planned.sort();
+        assert_eq!(
+            planned,
+            vec![
+                format!("{LOG_FILE_NAME}.2026-09-01"),
+                format!("{LOG_FILE_NAME}.2026-09-02"),
+            ],
+            "only the two oldest dailies are planned; archives stay out of the daily count"
+        );
+
+        prune_retention(&logs_dir, KEEP_DAILY_LOGS, KEEP_ARCHIVED_LOGS)
+            .expect("prune must not fail");
+        let (daily, archived) = classify_logs(&logs_dir);
+        assert_eq!(daily.len(), KEEP_DAILY_LOGS);
+        assert_eq!(
+            archived.len(),
+            2,
+            "both archives survive: 2 is within the archive cap"
+        );
+    }
+
+    #[test]
+    fn sweep_applies_retention_after_the_size_guard() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir(&logs_dir).unwrap();
+
+        // 15 within-cap dailies + today's oversized file: the size guard
+        // rotates today's aside (fresh archive), then retention prunes the
+        // roller files back to the cap. The pre-existing archive plus the
+        // fresh one stay under the archive cap.
+        for day in 1..=15u32 {
+            let daily = logs_dir.join(format!("{LOG_FILE_NAME}.2026-09-{day:02}"));
+            std::fs::write(daily, b"tiny").unwrap();
+        }
+        let oversized = logs_dir.join(format!("{LOG_FILE_NAME}.2026-09-16"));
+        std::fs::write(&oversized, vec![0u8; MAX_ACTIVE_LOG_BYTES as usize + 1]).unwrap();
+        let old_archive = logs_dir.join(format!("{LOG_FILE_NAME}{OVERSIZED_MARKER}100"));
+        std::fs::write(&old_archive, b"archived").unwrap();
+
+        sweep_oversized_logs(&logs_dir);
+
+        let (daily, archived) = classify_logs(&logs_dir);
+        assert_eq!(
+            daily.len(),
+            KEEP_DAILY_LOGS,
+            "the sweep must leave exactly the retention cap of daily files"
+        );
+        assert!(
+            !logs_dir
+                .join(format!("{LOG_FILE_NAME}.2026-09-01"))
+                .exists(),
+            "the oldest daily file is pruned"
+        );
+        assert_eq!(
+            archived.len(),
+            2,
+            "the fresh oversized archive joins the old one, under the cap"
+        );
     }
 }
