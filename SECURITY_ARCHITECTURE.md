@@ -78,7 +78,7 @@
 | **Keylogging** | Input capture of master password | • Virtual keyboard option (desktop)<br>• Biometric bypass<br>• Password quality meter | 📋 (virtual keyboard) |
 | **Browser Extension Compromise** | Malicious extension accessing vault | • Native messaging whitelist<br>• Domain matching enforced daemon-side<br>• User approval per domain<br>• No API access to full vault | ✅ |
 | **SQLite File Theft** | Copy of database file | • Per-field AES-256-GCM encryption of secret values (not whole-database encryption)<br>• Per-entry random nonce<br>• Key wrapping with KDF<br>• Identity metadata (domain mappings, SSH/TOTP metadata) is still stored in plaintext and is not yet AAD-bound (ADR-005) | ⚠️ (per-field only; metadata plaintext) |
-| **Offline Brute Force** | Dictionary attacks on DB | • Argon2id: t=3, m=256MB, p=4<br>• Exponential backoff on failures<br>• Account lockout after 10 attempts<br>• No timing leak on password check | ✅ |
+| **Offline Brute Force** | Dictionary attacks on DB | • Argon2id: t=3, m=256MB, p=4<br>• Exponential backoff on failures<br>• Account lockout after 5 failed attempts, then escalating<br>• No timing leak on password check | ✅ |
 | **Timing Attacks** | Response time analysis | • Constant-time comparisons<br>• Fixed delay on auth<br>• Dummy operations for padding | ⚠️ (constant-time only) |
 | **Phishing** | Fake websites requesting credentials | • Domain matching with TLD validation<br>• Visual domain confirmation<br>• URL bar integration | ⚠️ (domain matching only) |
 | **CSRF on Autofill** | Malicious site triggering fill | • User gesture required<br>• Origin validation<br>• Frame depth checking | ✅ |
@@ -514,7 +514,7 @@ See `Cargo.toml` (workspace root) and `CLAUDE.md` § Dependencies Note for the f
 | **Timing** | Constant-time compare | ✅ | `subtle` crate for password checks |
 | **Timing** | Fixed delay on auth | 📋 | Not yet implemented |
 | **Brute Force** | Exponential backoff | ⚠️ | Simple backoff, not exponential |
-| **Brute Force** | Account lockout | ✅ | 10 failed attempts = 5 min lockout (`lockout.rs`) |
+| **Brute Force** | Account lockout | ✅ | 5 failed attempts = 60 s lockout, doubling per further failure (capped at 2^10 s) (`lockout.rs`) |
 | **Auto-lock** | Timeout | ✅ | Default 5 min inactivity (`autolock.rs`) |
 | **Auto-lock** | Lock on sleep | ⚠️ | macOS only |
 | **Auto-lock** | Lock on screen lock | 📋 | Platform-specific APIs planned |
