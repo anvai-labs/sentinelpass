@@ -44,7 +44,7 @@ Extension ID: nophfgfiiohedlodfeepjoioljbhggdd
 
 ### Firefox Add-ons (AMO)
 ```
-Location: browser-extension/dist/sentinelpass-firefox-0.6.3.zip
+Location: browser-extension/dist/sentinelpass-firefox-0.7.0.zip
 Size: 37KB
 Manifest: Manifest V3
 Extension ID: sentinelpass@localhost
