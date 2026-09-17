@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SentinelPass",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Secure, local-first password manager with autofill support",
   "permissions": [
     "storage",
@@ -55,7 +55,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "sentinelpass@localhost",
+      "id": "{BDC2D65D-871C-47C0-8824-7F50234E35A8}",
       "strict_min_version": "128.0"
     }
   }

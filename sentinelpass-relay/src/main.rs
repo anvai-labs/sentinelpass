@@ -67,7 +67,10 @@ async fn main() -> anyhow::Result<()> {
     let app = server::build_router(app_state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr).await?;
-    axum::serve(listener, app).await?;
+    // WBS-911 F2: served via `server::serve`, which attaches
+    // `ConnectInfo<SocketAddr>` — the public rate-limit middleware extracts
+    // it, and a bare `axum::serve(listener, app)` 500s every request.
+    server::serve(app, listener).await?;
 
     Ok(())
 }
