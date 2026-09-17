@@ -1,4 +1,4 @@
-# Browser Extension Submission Checklist v0.6.3
+# Browser Extension Submission Checklist v0.7.0
 
 ## Security Hardening Completed ✅
 
@@ -36,7 +36,7 @@ This release addresses all security vulnerabilities identified in the Chrome Web
 
 ### Chrome Web Store
 ```
-Location: browser-extension/dist/sentinelpass-chrome-0.6.3.zip
+Location: browser-extension/dist/sentinelpass-chrome-0.7.0.zip
 Size: 37KB
 Manifest: Manifest V3
 Extension ID: nophfgfiiohedlodfeepjoioljbhggdd
@@ -55,16 +55,16 @@ Extension ID: {BDC2D65D-871C-47C0-8824-7F50234E35A8}
 ### Chrome Web Store
 1. Go to [Chrome Web Store Developer Dashboard](https://chrome.google.com/webstore/devconsole)
 2. Select "SentinelPass" extension
-3. Upload `browser-extension/dist/sentinelpass-chrome-0.6.3.zip`
+3. Upload `browser-extension/dist/sentinelpass-chrome-0.7.0.zip`
 4. Fill in store listing:
    - **Name**: SentinelPass
    - **Description**: Secure, local-first password manager with autofill support
-   - **Version**: 0.6.3
+   - **Version**: 0.7.0
    - **Privacy**: Emphasize local-only storage, no telemetry
 5. Submit for review
 6. **Review notes** (optional but recommended):
    ```
-   v0.6.3 Security Hardening Release
+   v0.7.0 Security Hardening Release
    
    This release addresses all previously identified security vulnerabilities:
    - Removed credential exposure in DOM (data attributes)
@@ -81,15 +81,15 @@ Extension ID: {BDC2D65D-871C-47C0-8824-7F50234E35A8}
 ### Firefox Add-ons (AMO)
 1. Go to [Firefox Add-ons Developer Dashboard](https://addons.mozilla.org/en-US/developers/)
 2. Click "Submit a New Add-on"
-3. Upload `browser-extension/dist/sentinelpass-firefox-0.6.3.zip`
+3. Upload `browser-extension/dist/sentinelpass-firefox-0.7.0.zip`
 4. Fill in store listing:
    - **Name**: SentinelPass
    - **Description**: Secure, local-first password manager with autofill support
-   - **Version**: 0.6.3
+   - **Version**: 0.7.0
 5. Submit for review
 6. **Review notes** (optional but recommended):
    ```
-   v0.6.3 — Initial Release + Security Hardening
+   v0.7.0 — Initial Release + Security Hardening
    
    This is the first AMO submission of SentinelPass.
    
@@ -114,19 +114,19 @@ Run these commands to verify the packages:
 
 ```bash
 # Verify no TypeScript files leaked
-unzip -l browser-extension/dist/sentinelpass-chrome-0.6.3.zip | grep '\.ts$'
+unzip -l browser-extension/dist/sentinelpass-chrome-0.7.0.zip | grep '\.ts$'
 # Should return empty
 
 # Verify no node_modules leaked
-unzip -l browser-extension/dist/sentinelpass-chrome-0.6.3.zip | grep 'node_modules'
+unzip -l browser-extension/dist/sentinelpass-chrome-0.7.0.zip | grep 'node_modules'
 # Should return empty
 
 # Verify manifest version
-unzip -p browser-extension/dist/sentinelpass-chrome-0.6.3.zip manifest.json | jq '.manifest_version'
+unzip -p browser-extension/dist/sentinelpass-chrome-0.7.0.zip manifest.json | jq '.manifest_version'
 # Should return 3
 
 # Verify no dangerous permissions
-unzip -p browser-extension/dist/sentinelpass-chrome-0.6.3.zip manifest.json | jq '.permissions'
+unzip -p browser-extension/dist/sentinelpass-chrome-0.7.0.zip manifest.json | jq '.permissions'
 # Should show: ["storage", "activeTab", "notifications", "nativeMessaging"]
 ```
 
@@ -165,5 +165,5 @@ For issues or questions:
 ---
 
 **Date**: March 31, 2026  
-**Version**: 0.6.3  
+**Version**: 0.7.0  
 **Status**: Ready for Store Submission ✅
