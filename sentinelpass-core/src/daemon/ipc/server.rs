@@ -1059,10 +1059,12 @@ impl IpcServer {
                 url,
                 save_trigger,
             } => {
+                // WBS-911 F6: the username is more identifying than the
+                // domain the log-retention design bounds — it stays out of
+                // daemon logs entirely.
                 info!(
-                    "IPC: SaveCredential for domain '{}', user '{}', trigger '{}'",
+                    "IPC: SaveCredential for domain '{}', trigger '{}'",
                     domain,
-                    username,
                     save_trigger.as_deref().unwrap_or("unknown")
                 );
 
@@ -1124,6 +1126,16 @@ impl IpcServer {
                     };
                 }
 
+                // WBS-911 F5: hold `site_permissions_lock` across the whole
+                // load-modify-save cycle. The section contains NO awaits, so
+                // the std mutex is safe here; without it, concurrent
+                // grant/revoke on the multi-threaded dispatcher can
+                // interleave their loads and saves (last-writer-wins on the
+                // whole-file write) and resurrect a revoked grant.
+                let _lock = self
+                    .site_permissions_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let result = if allow_insecure {
                     let mut store =
                         crate::daemon::site_permissions::SitePermissionStore::load_from_path(
@@ -1143,6 +1155,7 @@ impl IpcServer {
                         "only allow_insecure grants are supported".to_string(),
                     ))
                 };
+                drop(_lock);
 
                 match result {
                     Ok(true) => IpcMessage::GrantSitePermissionResponse {
@@ -1173,12 +1186,20 @@ impl IpcServer {
                     };
                 }
 
+                // WBS-911 F5: same serialized RMW cycle as the grant path —
+                // no awaits under the lock.
+                let _lock = self
+                    .site_permissions_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let mut store =
                     crate::daemon::site_permissions::SitePermissionStore::load_from_path(
                         &self.site_permissions_path,
                     )
                     .unwrap_or_default();
-                match store.revoke(&self.site_permissions_path, &host) {
+                let revoke = store.revoke(&self.site_permissions_path, &host);
+                drop(_lock);
+                match revoke {
                     Ok(removed) => {
                         info!(
                             "Site permission revoked for '{}' (removed={})",
@@ -1208,20 +1229,30 @@ impl IpcServer {
                     };
                 }
 
+                // WBS-911 F5: list reads inside the same lock so it cannot
+                // observe a half-applied grant/revoke cycle. The summaries
+                // are cloned inside; the lock is dropped before the response
+                // is built.
+                let _lock = self
+                    .site_permissions_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let store = crate::daemon::site_permissions::SitePermissionStore::load_from_path(
                     &self.site_permissions_path,
                 )
                 .unwrap_or_default();
+                let summaries: Vec<sentinelpass_protocol::SitePermissionSummary> = store
+                    .list()
+                    .into_iter()
+                    .map(|p| sentinelpass_protocol::SitePermissionSummary {
+                        host: p.host,
+                        allow_insecure: p.allow_insecure,
+                        granted_at: p.granted_at,
+                    })
+                    .collect();
+                drop(_lock);
                 IpcMessage::ListSitePermissionsResponse {
-                    permissions: store
-                        .list()
-                        .into_iter()
-                        .map(|p| sentinelpass_protocol::SitePermissionSummary {
-                            host: p.host,
-                            allow_insecure: p.allow_insecure,
-                            granted_at: p.granted_at,
-                        })
-                        .collect(),
+                    permissions: summaries,
                     locked: None,
                 }
             }
@@ -1457,6 +1488,15 @@ impl IpcServer {
                     "vault is locked; unlock it first",
                 )),
                 Some(vault) => {
+                    // WBS-911 F8: an unlocked service op is user activity —
+                    // reset the auto-lock timer. Without this, active
+                    // UI/CLI use (EntryList/EntryGet ServiceCalls) never
+                    // touched the timer and the vault auto-locked mid-use
+                    // after 5 minutes; the browser-surface credential/TOTP/
+                    // save handlers already record activity the same way.
+                    // Locked-op paths (BiometricStatusGet, VAULT_LOCKED
+                    // errors) intentionally do not reset anything.
+                    self.vault.record_activity().await;
                     // `spawn_blocking` needs 'static: DaemonVault hands out an
                     // Arc'd manager. Serialization of vault ops comes from
                     // VaultManager's internal db mutex (review F5: the Arc
@@ -2368,5 +2408,307 @@ mod autofill_origin_gate_tests {
         )
         .unwrap();
         assert!(!store.allows_insecure("example.com"));
+    }
+}
+
+/// WBS-911 F5/F8 — dispatch-level behavior around the daemon's shared
+/// locks: the site-permission RMW serialization and the auto-lock activity
+/// reset on the service surface.
+#[cfg(test)]
+mod dispatch_lock_tests {
+    use super::*;
+    use crate::daemon::capabilities::{InstallationCapabilities, NATIVE_HOST_AUDIENCE};
+    use crate::daemon::DaemonVault;
+    use sentinelpass_protocol::{IpcEnvelope, Origin};
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    struct Harness {
+        _tmp: TempDir,
+        server: IpcServer,
+        vault: Arc<DaemonVault>,
+        capability: String,
+        permissions_path: std::path::PathBuf,
+    }
+
+    /// A LIVE-mode server over a LOCKED vault. Tests that need the vault
+    /// unlocked MUST call `unlock` inside THEIR OWN runtime: the auto-lock
+    /// task is spawned on the unlocker's runtime, so unlocking on a
+    /// short-lived harness runtime would kill the timer before the test
+    /// starts observing.
+    fn harness_with_timeout(timeout_secs: u64) -> Harness {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let vault = VaultManager::create(&vault_path, b"test_password").unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path), timeout_secs).unwrap();
+
+        let capability_store = tmp.path().join("ipc-capabilities.json");
+        let mut store = InstallationCapabilities::default();
+        let capability = store
+            .mint(&capability_store, NATIVE_HOST_AUDIENCE, None)
+            .unwrap();
+
+        let permissions_path = tmp.path().join("site_permissions.json");
+        let vault_arc = Arc::new(daemon_vault);
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("test.sock"),
+            Arc::clone(&vault_arc),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_capability_store_path(capability_store)
+        .with_site_permissions_path(permissions_path.clone());
+
+        Harness {
+            _tmp: tmp,
+            server,
+            vault: vault_arc,
+            capability: capability.to_string(),
+            permissions_path,
+        }
+    }
+
+    async fn unlock(vault: &DaemonVault) {
+        vault.unlock(b"test_password").await.unwrap();
+    }
+
+    fn envelope(message: IpcMessage, capability: Option<String>) -> IpcEnvelope {
+        IpcEnvelope {
+            token: "test-token".to_string(),
+            client_token: None,
+            origin: Some(Origin::NativeHost),
+            capability,
+            message,
+        }
+    }
+
+    /// WBS-911 F5 (deterministic lock probe): while the permissions lock is
+    /// held, a GrantSitePermission handler CANNOT complete — proving the
+    /// handler actually takes the mutex around its load-modify-save. Before
+    /// the fix the grant finished immediately and the `is_finished` probe
+    /// failed.
+    ///
+    /// `allow(await_holding_lock)` is the POINT of this test: it holds the
+    /// std mutex across an await on purpose. Production code paths drop the
+    /// guard before any await (no awaits inside the RMW sections).
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn grant_blocks_while_the_permissions_lock_is_held() {
+        let Harness {
+            _tmp,
+            server,
+            capability,
+            ..
+        } = harness_with_timeout(300);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let server = Arc::new(server);
+            let guard = server.site_permissions_lock.lock().unwrap();
+
+            let task_server = Arc::clone(&server);
+            let capability_for_task = capability.clone();
+            let task = tokio::spawn(async move {
+                task_server
+                    .handle_message(envelope(
+                        IpcMessage::GrantSitePermission {
+                            host: "example.com".to_string(),
+                            allow_insecure: true,
+                        },
+                        Some(capability_for_task),
+                    ))
+                    .await
+            });
+
+            // Generous window for a buggy handler to (wrongly) finish.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                !task.is_finished(),
+                "grant handler must BLOCK while the permissions lock is held"
+            );
+
+            drop(guard);
+            let response = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("grant must complete once the lock is released")
+                .unwrap();
+            match response {
+                IpcMessage::GrantSitePermissionResponse { success, error } => {
+                    assert!(success, "grant failed after lock release: {error:?}");
+                }
+                other => panic!("wrong response: {other:?}"),
+            }
+        });
+    }
+
+    /// WBS-911 F5 (concurrency hammer): interleaved grant/revoke/list ops
+    /// serialize on the lock, so the store never holds duplicate entries for
+    /// a host (two unsynchronized RMW cycles could both load a store without
+    /// the host and both push it) — and a revoke that completes after every
+    /// op has finished is final: no in-flight grant copy can resurrect it.
+    #[test]
+    fn concurrent_grant_revoke_and_list_ops_stay_consistent() {
+        let Harness {
+            _tmp,
+            server,
+            capability,
+            permissions_path,
+            ..
+        } = harness_with_timeout(300);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let server = Arc::new(server);
+            let mut tasks = Vec::new();
+            for i in 0..24 {
+                let server = Arc::clone(&server);
+                let capability = capability.clone();
+                tasks.push(tokio::spawn(async move {
+                    if i % 4 == 3 {
+                        server
+                            .handle_message(envelope(
+                                IpcMessage::ListSitePermissions,
+                                Some(capability),
+                            ))
+                            .await
+                    } else if i % 2 == 0 {
+                        server
+                            .handle_message(envelope(
+                                IpcMessage::GrantSitePermission {
+                                    host: "example.com".to_string(),
+                                    allow_insecure: true,
+                                },
+                                Some(capability),
+                            ))
+                            .await
+                    } else {
+                        server
+                            .handle_message(envelope(
+                                IpcMessage::RevokeSitePermission {
+                                    host: "example.com".to_string(),
+                                },
+                                Some(capability),
+                            ))
+                            .await
+                    }
+                }));
+            }
+            for task in tasks {
+                tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .expect("permission op must not stall")
+                    .unwrap();
+            }
+
+            // Final word, deterministic: a grant completes (lock held), then
+            // a revoke completes AFTER it — serialized, so the revoke saw
+            // the grant and removed it. Nothing is in flight afterwards that
+            // could hold a stale pre-revoke copy, so the host must stay
+            // denied on disk.
+            let final_grant = server
+                .handle_message(envelope(
+                    IpcMessage::GrantSitePermission {
+                        host: "example.com".to_string(),
+                        allow_insecure: true,
+                    },
+                    Some(capability.clone()),
+                ))
+                .await;
+            match final_grant {
+                IpcMessage::GrantSitePermissionResponse { success, error } => {
+                    assert!(success, "final grant failed: {error:?}");
+                }
+                other => panic!("wrong response: {other:?}"),
+            }
+            let final_revoke = server
+                .handle_message(envelope(
+                    IpcMessage::RevokeSitePermission {
+                        host: "example.com".to_string(),
+                    },
+                    Some(capability),
+                ))
+                .await;
+            match final_revoke {
+                IpcMessage::RevokeSitePermissionResponse {
+                    success, removed, ..
+                } => {
+                    assert!(success);
+                    assert!(
+                        removed,
+                        "the revoke must see the grant it is serialized after"
+                    );
+                }
+                other => panic!("wrong response: {other:?}"),
+            }
+
+            let store = crate::daemon::site_permissions::SitePermissionStore::load_from_path(
+                &permissions_path,
+            )
+            .expect("store file must parse (no torn write)");
+            let entries = store
+                .permissions
+                .iter()
+                .filter(|p| p.host == "example.com")
+                .count();
+            assert_eq!(
+                entries, 0,
+                "a completed revoke must not be resurrected by in-flight grants"
+            );
+        });
+    }
+
+    /// WBS-911 F8: an EntryList ServiceCall (active UI use) resets the
+    /// inactivity timer. Timeout 2s; unlock at t=0, EntryList at t≈1s. The
+    /// t≈2s auto-lock tick must NOT lock (without the fix, elapsed-since-
+    /// unlock hit the timeout there and the vault locked mid-use); the
+    /// t≈4s tick, 3s after the last activity, must lock.
+    #[test]
+    fn entry_list_service_call_resets_the_autolock_timer() {
+        let Harness {
+            _tmp,
+            server,
+            vault,
+            capability,
+            ..
+        } = harness_with_timeout(2);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            // Unlock on THIS runtime so the auto-lock task it spawns stays
+            // alive for the whole test (see harness_with_timeout).
+            unlock(&vault).await; // t = 0
+            let server = Arc::new(server);
+            tokio::time::sleep(Duration::from_millis(1000)).await; // t ≈ 1s
+
+            let response = server
+                .handle_message(envelope(
+                    IpcMessage::ServiceCall {
+                        op: VaultOp::EntryList,
+                    },
+                    Some(capability),
+                ))
+                .await;
+            match response {
+                IpcMessage::ServiceResult {
+                    outcome: ServiceOutcome::Ok { .. },
+                } => {}
+                other => panic!("EntryList must succeed on the unlocked vault: {other:?}"),
+            }
+
+            tokio::time::sleep(Duration::from_millis(1400)).await; // t ≈ 2.4s
+            assert!(
+                vault.is_unlocked().await,
+                "vault must still be unlocked at t≈2.4s: the EntryList at t≈1s \
+                 reset the inactivity timer"
+            );
+
+            tokio::time::sleep(Duration::from_millis(2100)).await; // t ≈ 4.5s
+            assert!(
+                !vault.is_unlocked().await,
+                "auto-lock must still fire after renewed inactivity"
+            );
+        });
     }
 }
