@@ -477,7 +477,7 @@ fn unlock_debug_log(_message: &str) {}
 // browser-extension/chrome/manifest.json.  Keep these in sync.
 const CHROME_EXTENSION_ID: &str = "nophfgfiiohedlodfeepjoioljbhggdd";
 const NATIVE_HOST_NAME: &str = "com.passwordmanager.host";
-const FIREFOX_EXTENSION_ID: &str = "sentinelpass@localhost";
+const FIREFOX_EXTENSION_ID: &str = "{BDC2D65D-871C-47C0-8824-7F50234E35A8}";
 
 /// Directories where Chrome/Chromium/Firefox look for native messaging host
 /// manifests on the current platform.

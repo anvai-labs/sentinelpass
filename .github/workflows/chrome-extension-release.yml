@@ -1,5 +1,13 @@
 name: Chrome Extension Release
 
+# SECURITY: this workflow publishes extension artifacts to users, so its
+# trigger set is deliberately restricted to events a fork pull request
+# cannot cause (push of a reviewed `chrome-v*` tag, maintainer
+# workflow_dispatch). Never add `pull_request`/`pull_request_target` here.
+# This repo's branches require 1 approving review, which is the
+# precondition this design depends on (see the SECURITY header in
+# public-overflow-runner-smoke.yml for the shared threat model).
+
 on:
   push:
     tags:
@@ -19,12 +27,14 @@ on:
           - test
           - production
 
+# contents: write is the minimum required to publish the GitHub release
+# (zips + SHA256 checksums) on tag pushes; no other permission is granted.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-and-publish:
-    name: Build and Publish Chrome Extension
+    name: Build and Publish Browser Extensions
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -40,13 +50,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build web artifacts
-        run: npm run web:build
+      - name: Build extension artifacts (canonical pipeline)
+        run: npm run ext:build
 
-      - name: Copy web artifacts to extension
-        run: |
-          cp dist/bundle.js browser-extension/chrome/
-          cp dist/bundle.css browser-extension/chrome/
+      - name: Extension pipeline drift gate
+        # Refuse to release from a tree whose checked-in artifacts have
+        # drifted from the canonical pipeline (WBS-717/WBS-719 gate).
+        run: npx vitest run tests/web/extension-pipeline.test.ts
 
       - name: Determine extension version
         id: version
@@ -58,49 +68,108 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Update manifest version
-        working-directory: browser-extension/chrome
+      - name: Update manifest versions
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          # Update version in manifest.json
-          jq --arg version "$VERSION" '.version = $version' manifest.json > manifest.json.tmp
-          mv manifest.json.tmp manifest.json
-          echo "Updated manifest version to $VERSION"
-          cat manifest.json | jq '{version, name}'
+          for target in chrome firefox; do
+            jq --arg version "$VERSION" '.version = $version' \
+              "browser-extension/${target}/manifest.json" > manifest.json.tmp
+            mv manifest.json.tmp "browser-extension/${target}/manifest.json"
+            echo "Updated ${target} manifest version to ${VERSION}"
+            jq '{version, name}' "browser-extension/${target}/manifest.json"
+          done
 
-      - name: Package extension
-        working-directory: browser-extension
+      - name: Package extensions (build-output derived)
+        # The packaging scripts rebuild via `npm run ext:build` (idempotent,
+        # .js only — the manifest version bump above survives) and zip the
+        # runtime file set derived from the build output, the same set
+        # installation/install.sh deploys (WBS-911 F2/F10).
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          mkdir -p dist
-          zip -r "dist/sentinelpass-chrome-${VERSION}.zip" chrome/ \
-            -x "chrome/*.ts" \
-            -x "chrome/dist/*" \
-            -x "chrome/DEBUGGING.md" \
-            -x "chrome/INSTALLATION.md"
-          ls -lh dist/
+          bash browser-extension/package-chrome.sh "$VERSION"
+          bash browser-extension/package-firefox.sh "$VERSION"
+          ls -lh browser-extension/dist/
 
       - name: Verify package contents
-        working-directory: browser-extension
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          echo "Package contents:"
-          unzip -l "dist/sentinelpass-chrome-${VERSION}.zip"
-          echo ""
-          echo "Checking for TypeScript files..."
-          if unzip -l "dist/sentinelpass-chrome-${VERSION}.zip" | grep -q "\.ts$"; then
-            echo "ERROR: TypeScript files found in package!"
-            exit 1
-          else
-            echo "✓ No TypeScript files in package"
-          fi
+          for target in chrome firefox; do
+            ZIP_FILE="browser-extension/dist/sentinelpass-${target}-${VERSION}.zip"
+            echo "== ${ZIP_FILE} =="
+            unzip -l "$ZIP_FILE"
+
+            echo "Checking for TypeScript files..."
+            if unzip -l "$ZIP_FILE" | grep -q "\.ts$"; then
+              echo "ERROR: TypeScript files found in ${ZIP_FILE}!"
+              exit 1
+            fi
+
+            echo "Checking every built .js artifact is present (WBS-911 F2)..."
+            for f in "browser-extension/${target}"/*.js; do
+              base="$(basename "$f")"
+              if ! unzip -l "$ZIP_FILE" | grep -q "[[:space:]]${base}\$"; then
+                echo "ERROR: built artifact ${base} missing from ${ZIP_FILE}!"
+                exit 1
+              fi
+            done
+
+            echo "Checking packaged manifest version..."
+            unzip -p "$ZIP_FILE" manifest.json | jq -e --arg v "$VERSION" '.version == $v' > /dev/null \
+              || { echo "ERROR: ${ZIP_FILE} manifest version != ${VERSION}"; exit 1; }
+            echo "OK: ${ZIP_FILE}"
+          done
+
+      - name: Generate SHA256 checksums
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd browser-extension/dist
+          sha256sum \
+            "sentinelpass-chrome-${VERSION}.zip" \
+            "sentinelpass-firefox-${VERSION}.zip" > sha256sums.txt
+          cat sha256sums.txt
 
       - name: Upload extension artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: chrome-extension
-          path: browser-extension/dist/*.zip
+          name: browser-extensions
+          path: |
+            browser-extension/dist/*.zip
+            browser-extension/dist/sha256sums.txt
           retention-days: 30
+
+      - name: Create GitHub Release (tag pushes)
+        # Release publication is tied to a reviewed tag; manual dispatch
+        # runs still produce the uploaded artifact and webstore uploads.
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cd browser-extension/dist
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Browser Extensions ${VERSION}" \
+            --notes "Browser extension release ${VERSION}.
+
+          ## Chrome / Chromium
+
+          Download \`sentinelpass-chrome-${VERSION}.zip\`, unzip, then load the
+          folder via \`chrome://extensions\` -> \`Load unpacked\`.
+
+          ## Firefox
+
+          Download \`sentinelpass-firefox-${VERSION}.zip\` and install via
+          \`about:debugging#/runtime/this-firefox\` -> \`Load Temporary Add-on\`,
+          or submit through AMO.
+
+          ## Verify downloads
+
+          \`\`\`bash
+          sha256sum -c sha256sums.txt
+          \`\`\`"
+          gh release upload "${GITHUB_REF_NAME}" --clobber \
+            "sentinelpass-chrome-${VERSION}.zip" \
+            "sentinelpass-firefox-${VERSION}.zip" \
+            sha256sums.txt
 
       - name: Publish to Chrome Web Store (Test)
         if: github.event.inputs.publish_target != 'production'
