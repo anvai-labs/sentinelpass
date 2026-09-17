@@ -123,8 +123,8 @@ pub fn build_router(app_state: RelayAppState) -> Router {
 /// every public route, so the make-service layer MUST supply it: serving
 /// the bare `Router` 500s each request ("Missing request extension")
 /// before any handler runs. The binary calls this same function, so the
-/// full serve stack stays covered by `public_routes_survive_the_full_
-/// serve_stack`.
+/// full serve stack stays covered by the
+/// `public_routes_survive_the_full_serve_stack` regression test.
 pub async fn serve(app: Router, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(
         listener,
