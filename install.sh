@@ -9,6 +9,7 @@ INSTALL_SCRIPT="$SCRIPT_DIR/installation/install.sh"
 CHROME_EXTENSION_ID=""
 SKIP_BUILD=0
 BINARY_DIR=""
+NO_LAUNCHD=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-build)
       SKIP_BUILD=1
+      shift
+      ;;
+    --no-launchd)
+      NO_LAUNCHD=1
       shift
       ;;
     --binary-dir)
@@ -39,6 +44,7 @@ Usage: ./install.sh [options]
 Options:
   --chrome-extension-id <id>   32-char Chrome extension id to write into allowed_origins.
   --skip-build                 Skip cargo build --release.
+  --no-launchd                 Do not install the macOS login LaunchAgent for the daemon.
   --binary-dir <path>          Override binary directory (default: ./target/release).
   -h, --help                   Show help.
 USAGE
@@ -66,6 +72,11 @@ else
 fi
 
 echo "[2/2] Installing user-level binaries + native host manifests..."
+# Pass the launchd opt-out ONLY when the flag was given, so an externally
+# exported SENTINELPASS_NO_LAUNCHD (e.g. from a shell profile) is honored.
+if [[ "$NO_LAUNCHD" == "1" ]]; then
+  export SENTINELPASS_NO_LAUNCHD=1
+fi
 if [[ -n "$CHROME_EXTENSION_ID" ]]; then
   SENTINELPASS_CHROME_EXTENSION_ID="$CHROME_EXTENSION_ID" \
     SENTINELPASS_BINARY_DIR="$BINARY_DIR" \

@@ -1,0 +1,20 @@
+# SentinelPass daemon — systemd USER unit (Linux equivalent of the macOS
+# LaunchAgent from PR #144). installation/install.sh copies this file to
+# ~/.config/systemd/user/ and enables it with
+# `systemctl --user enable --now sentinelpass-daemon`.
+#
+# This is a USER unit, so it must NOT set User=: user units always run as
+# the invoking user. %h expands to that user's home directory in systemd
+# user units, which keeps the installed path correct without templating.
+
+[Unit]
+Description=SentinelPass daemon (vault broker, starts locked)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/share/sentinelpass/sentinelpass-daemon --start-locked
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

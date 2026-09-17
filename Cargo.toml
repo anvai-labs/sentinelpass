@@ -13,7 +13,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.11.0"
+version = "0.11.1"
 edition = "2021"
 # File::try_lock (WBS-501/503 maintenance lock) stabilized in 1.89 (review F6).
 rust-version = "1.89"
@@ -51,6 +51,7 @@ thiserror = "1.0"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # UUID
 uuid = { version = "1.6", features = ["v4", "serde"] }

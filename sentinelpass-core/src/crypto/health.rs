@@ -3,7 +3,10 @@
 //! This module provides functionality to analyze vault passwords and identify:
 //! - Weak passwords (low entropy, predictable patterns)
 //! - Reused passwords (same password across multiple sites)
-//! - Compromised passwords (found in data breaches via HaveIBeenPwned)
+//! - Compromised passwords (breach-correlation via HaveIBeenPwned —
+//!   NOT YET IMPLEMENTED: `is_compromised` is a stub returning false;
+//!   no network call exists. Wire to the k-anonymity range-query API or
+//!   remove the claim before advertising breach checking)
 
 use crate::crypto::strength::PasswordAnalysis;
 use crate::vault::{Entry, VaultManager};
