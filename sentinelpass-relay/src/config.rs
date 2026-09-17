@@ -36,12 +36,24 @@ pub struct RelayConfig {
     /// replayed to duplicate requests before the record ages out. Post-expiry
     /// duplicates are RE-evaluated by the CAS guard, which rejects them
     /// rather than replaying them.
-    #[serde(default)]
+    // WBS-911 F9: a pre-v2 relay.toml predates these fields — a bare
+    // `#[serde(default)]` deserialized them as 0 and `validate()` then
+    // rejected the upgrade with a confusing "must be greater than zero".
+    // Per-field default functions keep upgrades on the documented values.
+    #[serde(default = "default_mutation_result_ttl_secs")]
     pub mutation_result_ttl_secs: u64,
     /// v2: per-device cap on stored mutation results (bounded idempotency
     /// state; oldest records beyond the cap are pruned).
-    #[serde(default)]
+    #[serde(default = "default_max_mutation_results_per_device")]
     pub max_mutation_results_per_device: usize,
+}
+
+fn default_mutation_result_ttl_secs() -> u64 {
+    7 * 24 * 3600
+}
+
+fn default_max_mutation_results_per_device() -> usize {
+    4_096
 }
 
 impl Default for RelayConfig {
@@ -61,8 +73,8 @@ impl Default for RelayConfig {
             nonce_window_secs: 300,
             allow_v1: false,
             trusted_proxies: Vec::new(),
-            mutation_result_ttl_secs: 7 * 24 * 3600,
-            max_mutation_results_per_device: 4_096,
+            mutation_result_ttl_secs: default_mutation_result_ttl_secs(),
+            max_mutation_results_per_device: default_max_mutation_results_per_device(),
         }
     }
 }
@@ -194,6 +206,51 @@ nonce_window_secs = 300
         let err = RelayConfig::load(&path).unwrap_err();
 
         assert!(err.to_string().contains("rate_limit_per_minute"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// WBS-911 F9: a pre-v2 relay.toml predates `mutation_result_ttl_secs`
+    /// and `max_mutation_results_per_device`. The upgrade path must fill
+    /// them with the documented defaults — NOT the bare-serde zeros that
+    /// `validate()` then rejects with a confusing error.
+    #[test]
+    fn pre_v2_config_file_upgrades_to_documented_defaults() {
+        let default = RelayConfig::default();
+        let path = std::env::temp_dir().join(format!(
+            "sentinelpass-relay-prev2-config-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+listen_addr = "127.0.0.1:8743"
+storage_path = "relay.db"
+max_entries_per_vault = 10000
+max_payload_size = 65536
+rate_limit_per_minute = 60
+pairing_ttl_secs = 300
+max_active_pairings = 5
+pairing_fetch_attempt_limit = 5
+pairing_fetch_backoff_base_secs = 5
+pairing_fetch_backoff_max_secs = 300
+tombstone_retention_days = 90
+nonce_window_secs = 300
+"#,
+        )
+        .unwrap();
+
+        let config = RelayConfig::load(&path).expect("pre-v2 config must load unchanged");
+
+        assert_eq!(
+            config.mutation_result_ttl_secs,
+            default.mutation_result_ttl_secs
+        );
+        assert_eq!(
+            config.max_mutation_results_per_device,
+            default.max_mutation_results_per_device
+        );
+        // The whole default set still validates.
+        config.validate().unwrap();
         let _ = std::fs::remove_file(path);
     }
 }
