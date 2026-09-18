@@ -18,7 +18,12 @@ impl RelayStorage {
     pub fn open(path: &Path) -> Result<Self, anyhow::Error> {
         let conn = Connection::open(path)?;
         conn.execute("PRAGMA foreign_keys = ON", [])?;
-        conn.execute("PRAGMA journal_mode = WAL", [])?;
+        // WBS-911 F1: journal_mode ALWAYS returns a row, so rusqlite's
+        // `execute()` rejects it with ExecuteReturnedResults — every file
+        // back-end open failed while the in-memory tests (which skipped the
+        // pragma) passed. `pragma_update` is the correct setter for pragmas
+        // that echo their value.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
 
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),

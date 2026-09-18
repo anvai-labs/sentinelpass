@@ -38,6 +38,46 @@ pub fn trim_optional(value: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// v0.13: username is optional for API-key entries (stored as `""`); every
+/// other creatable type still requires one. Password entries are REJECTED
+/// here — never prompted — so the user learns the mistake immediately.
+pub fn resolve_add_username(
+    username: Option<&str>,
+    credential_type: CredentialType,
+) -> Result<String> {
+    match credential_type {
+        CredentialType::ApiKey => Ok(username.unwrap_or("").trim().to_string()),
+        CredentialType::Password => require_non_empty(username.unwrap_or(""), "Username"),
+        CredentialType::PasskeyReference => anyhow::bail!(
+            "passkey-reference entries cannot be created with 'add' (use 'passkey add')"
+        ),
+    }
+}
+
+/// Edit semantics: absent flag keeps the existing username; `--username ""`
+/// clears an api-key username but is rejected for password/passkey entries;
+/// non-empty values are trimmed (matching `resolve_add_username` so both
+/// surfaces store the same form).
+pub fn resolve_edit_username(
+    new_username: Option<&str>,
+    existing_username: &str,
+    credential_type: CredentialType,
+) -> Result<String> {
+    let Some(proposed) = new_username else {
+        return Ok(existing_username.to_string());
+    };
+    if proposed.trim().is_empty() {
+        if credential_type == CredentialType::ApiKey {
+            return Ok(String::new());
+        }
+        anyhow::bail!(
+            "username must not be empty for {} entries",
+            credential_type_label(credential_type)
+        );
+    }
+    Ok(proposed.trim().to_string())
+}
+
 /// Wire summaries -> core summaries (one conversion point for renders).
 fn to_core_summaries(result: VaultOpResult) -> Result<Vec<EntrySummary>> {
     match result {
@@ -54,7 +94,7 @@ fn to_core_summaries(result: VaultOpResult) -> Result<Vec<EntrySummary>> {
 pub fn handle_add(
     vault_path: PathBuf,
     title: &str,
-    username: &str,
+    username: Option<&str>,
     password: Option<&str>,
     credential_type: CredentialType,
     url: Option<String>,
@@ -64,6 +104,10 @@ pub fn handle_add(
     if !vault_path.exists() {
         anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
     }
+
+    // Resolve per-type username semantics BEFORE any prompt or connection
+    // so a missing username fails fast.
+    let username = resolve_add_username(username, credential_type)?;
 
     let password_str = match password {
         Some(p) => p.to_string(),
@@ -78,7 +122,7 @@ pub fn handle_add(
     let entry = sentinelpass_protocol::service::ServiceEntry {
         entry_id: None,
         title: title.to_string(),
-        username: username.to_string(),
+        username,
         password: password_str.into(),
         url,
         notes,
@@ -307,9 +351,8 @@ pub fn handle_edit(
 
     // Determine new values (use existing if not provided)
     let new_title = title.unwrap_or(existing_entry.title.as_str()).to_string();
-    let new_username = username
-        .unwrap_or(existing_entry.username.as_str())
-        .to_string();
+    let existing_type = CredentialType::parse(&existing_entry.credential_type)?;
+    let new_username = resolve_edit_username(username, &existing_entry.username, existing_type)?;
 
     // Handle password
     let new_password_value = if new_password {
@@ -356,5 +399,70 @@ mod tests {
         for value in ["password", "api_key", "passkey_reference"] {
             assert!(CredentialType::parse(value).is_ok());
         }
+    }
+
+    #[test]
+    fn resolve_add_username_requires_username_for_password_entries() {
+        let err = resolve_add_username(None, CredentialType::Password).unwrap_err();
+        assert!(err.to_string().contains("Username must not be empty"));
+        assert!(resolve_add_username(Some("   "), CredentialType::Password).is_err());
+        // Non-empty values are trimmed, matching require_non_empty.
+        assert_eq!(
+            resolve_add_username(Some(" user@example.com "), CredentialType::Password).unwrap(),
+            "user@example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_add_username_allows_empty_for_api_key_entries() {
+        assert_eq!(
+            resolve_add_username(None, CredentialType::ApiKey).unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_add_username(Some("   "), CredentialType::ApiKey).unwrap(),
+            ""
+        );
+        assert_eq!(
+            resolve_add_username(Some("ops-team"), CredentialType::ApiKey).unwrap(),
+            "ops-team"
+        );
+    }
+
+    #[test]
+    fn resolve_add_username_rejects_passkey_reference() {
+        assert!(resolve_add_username(Some("x"), CredentialType::PasskeyReference).is_err());
+    }
+
+    #[test]
+    fn resolve_edit_username_semantics_per_type() {
+        // Absent flag keeps the existing value for every type.
+        assert_eq!(
+            resolve_edit_username(None, "kept", CredentialType::Password).unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            resolve_edit_username(None, "kept", CredentialType::ApiKey).unwrap(),
+            "kept"
+        );
+        // Empty clears an api-key username...
+        assert_eq!(
+            resolve_edit_username(Some(""), "old", CredentialType::ApiKey).unwrap(),
+            ""
+        );
+        // ...but is rejected for password and passkey entries.
+        assert!(resolve_edit_username(Some(""), "old", CredentialType::Password).is_err());
+        assert!(
+            resolve_edit_username(Some("  "), "old", CredentialType::PasskeyReference).is_err()
+        );
+        // Non-empty values are trimmed, matching resolve_add_username.
+        assert_eq!(
+            resolve_edit_username(Some("new-name"), "old", CredentialType::ApiKey).unwrap(),
+            "new-name"
+        );
+        assert_eq!(
+            resolve_edit_username(Some(" padded "), "old", CredentialType::Password).unwrap(),
+            "padded"
+        );
     }
 }

@@ -85,6 +85,11 @@ pub struct SitePermissionData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialData {
+    /// v0.13: optional for API-key entries (stored as `""`). Defaults on
+    /// deserialization so a save payload that OMITS the key (the shipped
+    /// extension always sends a string, but third-party capability-holding
+    /// native-host clients may not) does not fail the whole message.
+    #[serde(default)]
     pub username: String,
     pub password: String,
     #[serde(default)]
@@ -791,6 +796,19 @@ mod tests {
         let json = r#"{"username": "u", "password": "p"}"#;
         let data: CredentialData = serde_json::from_str(json).unwrap();
         assert_eq!(data.username, "u");
+        assert!(data.title.is_none());
+        assert!(data.url.is_none());
+    }
+
+    /// v0.13: username is optional for API keys, and the extension's
+    /// `JSON.stringify` DROPS undefined keys — a save payload without a
+    /// `username` key must deserialize to `""` instead of failing.
+    #[test]
+    fn credential_data_missing_username_key_defaults_to_empty() {
+        let json = r#"{"password": "p"}"#;
+        let data: CredentialData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.username, "");
+        assert_eq!(data.password, "p");
         assert!(data.title.is_none());
         assert!(data.url.is_none());
     }

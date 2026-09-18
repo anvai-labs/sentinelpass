@@ -117,6 +117,22 @@ pub fn build_router(app_state: RelayAppState) -> Router {
         .with_state(app_state)
 }
 
+/// Serve `app` with the per-connection peer address attached (WBS-911 F2).
+///
+/// `public_rate_limit_middleware` extracts `ConnectInfo<SocketAddr>` on
+/// every public route, so the make-service layer MUST supply it: serving
+/// the bare `Router` 500s each request ("Missing request extension")
+/// before any handler runs. The binary calls this same function, so the
+/// full serve stack stays covered by the
+/// `public_routes_survive_the_full_serve_stack` regression test.
+pub async fn serve(app: Router, listener: tokio::net::TcpListener) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -270,6 +286,97 @@ mod tests {
             "10.0.0.9"
         );
         assert_eq!(effective_client_ip("10.0.0.9", None, trusted), "10.0.0.9");
+    }
+
+    /// WBS-911 F1 regression: the FILE-BACKED storage backend must open and
+    /// reach WAL mode, and the router built over it must serve a public
+    /// request end-to-end. The bug was invisible to the test fleet because
+    /// every test used `in_memory()`, which skips the journal_mode pragma —
+    /// while `RelayStorage::open` (the only path the binary uses) failed on
+    /// `execute("PRAGMA journal_mode = WAL")` (rusqlite refuses statements
+    /// that return rows).
+    #[tokio::test]
+    async fn file_backed_storage_opens_and_serves_a_public_request() {
+        use tower::util::ServiceExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("relay.db");
+        let state = RelayAppState::new(
+            RelayStorage::open(&db_path).expect("file-backed relay storage must open"),
+            RelayConfig::default(),
+        );
+        assert!(db_path.exists(), "storage file must be created");
+
+        // WAL must actually be in effect on the file backend.
+        let mode: String = state
+            .storage
+            .conn()
+            .unwrap()
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            mode.to_ascii_lowercase(),
+            "wal",
+            "file backend must run in WAL mode"
+        );
+
+        let app = build_router(state);
+
+        // ConnectInfo exactly as `into_make_service_with_connect_info`
+        // attaches it for a real connection.
+        let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .extension(ConnectInfo(addr))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// WBS-911 F2 regression: the public middleware stack extracts
+    /// `ConnectInfo<SocketAddr>`, so the server MUST be served through
+    /// `into_make_service_with_connect_info` (`server::serve` — the exact
+    /// function main.rs calls). Serving the bare `Router` answered 500
+    /// "Missing request extension" on every route before any handler ran.
+    /// This boots a REAL loopback listener over a FILE-BACKED store and
+    /// drives one raw HTTP request through the full stack.
+    #[tokio::test]
+    async fn public_routes_survive_the_full_serve_stack() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = RelayAppState::new(
+            RelayStorage::open(&tmp.path().join("relay.db")).unwrap(),
+            RelayConfig::default(),
+        );
+        let app = build_router(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = serve(app, listener).await;
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: relay\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "expected 200 through the full serve stack, got: {}",
+            response.lines().next().unwrap_or("<empty>")
+        );
+
+        server_task.abort();
     }
 
     /// TD-NET-06 (context for the enforcement point): the body-limit layer
