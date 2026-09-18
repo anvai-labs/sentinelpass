@@ -752,6 +752,40 @@ mod tests {
         assert!(credentials.is_empty());
     }
 
+    /// v0.13: a browser save without a username (username-less login form)
+    /// stores `""` and never takes the dedup path — repeated saves create
+    /// separate entries rather than silently overwriting one another.
+    #[tokio::test]
+    async fn save_credential_with_empty_username_creates_entry_and_skips_dedup() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+
+        let vault = VaultManager::create(&vault_path, password).unwrap();
+        drop(vault);
+
+        let daemon_vault = DaemonVault::new(Some(vault_path.clone()), 300).unwrap();
+        daemon_vault.unlock(password).await.unwrap();
+
+        daemon_vault
+            .save_credential("api.example.com", "", "token-1", None)
+            .await
+            .unwrap();
+        daemon_vault
+            .save_credential("api.example.com", "", "token-2", None)
+            .await
+            .unwrap();
+
+        let vault = VaultManager::open(&vault_path, password).unwrap();
+        let entries = vault.list_entries().unwrap();
+        assert_eq!(entries.len(), 2, "blank-username saves must not dedup");
+        for summary in &entries {
+            let entry = vault.get_entry(summary.entry_id).unwrap();
+            assert_eq!(entry.username, "");
+            assert_eq!(entry.credential_type, CredentialType::Password);
+        }
+    }
+
     #[test]
     fn test_vault_state() {
         let state = VaultState::Locked;

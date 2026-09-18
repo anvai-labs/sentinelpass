@@ -81,6 +81,10 @@ use zeroize::Zeroizing;
 /// secret-class. `notes` is user free text that MAY embed secrets; it stays
 /// plain for now (redacting it would break existing debug flows) and is
 /// tracked in docs/SECRET_LIFETIME_AUDIT.md as a follow-up decision.
+///
+/// v0.13: username is optional for API-key entries; the wire convention is
+/// `""` = absent. The key itself stays REQUIRED on the wire (no serde
+/// default) so v0.8.x peers with a plain-`String` field keep working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialPayload {
     pub title: String,
@@ -470,6 +474,42 @@ mod wire_compat_tests {
         let peer_json = r#"{"title":"t","username":"u","password":"hunter2","credential_type":"password","url":null,"notes":null,"favorite":false,"domains":[],"created_at":1,"modified_at":2}"#;
         let round_tripped: CredentialPayload = serde_json::from_str(peer_json).unwrap();
         assert_eq!(round_tripped.password.as_str(), "hunter2");
+    }
+
+    /// v0.13: username is optional for API-key entries — the wire convention
+    /// is an empty string (`""` = absent). The field stays a plain `String`
+    /// with no serde default: omitting the key must keep FAILING so a v0.8.x
+    /// peer's plain-`String` struct continues to deserialize our payloads.
+    #[test]
+    fn credential_payload_empty_username_round_trips_as_empty_string() {
+        let payload = CredentialPayload {
+            title: "Stripe API".into(),
+            username: String::new(),
+            password: Zeroizing::new("sk-test-51fe".into()),
+            credential_type: CredentialType::ApiKey,
+            url: None,
+            notes: None,
+            favorite: false,
+            domains: vec![],
+            created_at: 1,
+            modified_at: 2,
+        };
+        let text = String::from_utf8(serde_json::to_vec(&payload).unwrap()).unwrap();
+        assert!(
+            text.contains(r#""username":""#),
+            "empty username must serialize as an empty JSON string, never be omitted: {text}"
+        );
+        let round_tripped: CredentialPayload = serde_json::from_str(&text).unwrap();
+        assert_eq!(round_tripped.username, "");
+        assert_eq!(round_tripped.credential_type, CredentialType::ApiKey);
+        // And absence is still a deserialization error (wire shape pinned).
+        let absent: Result<CredentialPayload, _> = serde_json::from_str(
+            r#"{"title":"t","password":"x","credential_type":"api_key","url":null,"notes":null,"favorite":false,"domains":[],"created_at":1,"modified_at":2}"#,
+        );
+        assert!(
+            absent.is_err(),
+            "username key must remain required on the wire"
+        );
     }
 
     /// WBS-308 / SR-CRYPTO-004: Debug over the payload must not leak the
