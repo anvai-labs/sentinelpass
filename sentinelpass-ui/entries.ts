@@ -20,6 +20,7 @@ import {
     credentialTypeLabel,
     credentialTypeUiState,
     buildEntrySaveDraft,
+    entryDraftValidationError,
     isPasskeyReferenceEntry
 } from './credential-types.js';
 
@@ -245,7 +246,7 @@ export function renderEntryList(filteredEntries: any[] | null = null) {
                 <div class="entry-item-title">${escapeHtml(entry.title)}</div>
                 <span class="entry-type-pill">${escapeHtml(credentialTypeLabel(credentialTypeForEntry(entry)))}</span>
             </div>
-            <div class="entry-item-username">${escapeHtml(entry.username)}</div>
+            <div class="entry-item-username">${escapeHtml(entry.username || '—')}</div>
         </div>
     `).join('');
 
@@ -351,9 +352,10 @@ export function createNewEntry() {
 /**
  * Persist the current detail-pane contents as a new or updated entry.
  *
- * Validates required fields (title, username, password), then calls
- * `add_entry` or `update_entry` as appropriate.  Refreshes the entry list
- * and re-selects the saved entry on success.
+ * Validates per-type required fields (title and secret always; username
+ * except for API-key entries), then calls `add_entry` or `update_entry`
+ * as appropriate.  Refreshes the entry list and re-selects the saved
+ * entry on success.
  */
 export async function saveEntry() {
     const typeSelect = document.getElementById('detail-credential-type') as HTMLSelectElement | null;
@@ -366,7 +368,7 @@ export async function saveEntry() {
     const entry = {
         entry_id: currentEntry?.entry_id || null,
         title: (document.getElementById('detail-title') as HTMLInputElement).value,
-        username: (document.getElementById('detail-username') as HTMLInputElement).value,
+        username: (document.getElementById('detail-username') as HTMLInputElement).value.trim(),
         password: saveDraft.password,
         url: (document.getElementById('detail-url') as HTMLInputElement).value || null,
         notes: (document.getElementById('detail-notes') as HTMLTextAreaElement).value || null,
@@ -376,8 +378,16 @@ export async function saveEntry() {
         modified_at: new Date().toISOString()
     };
 
-    if (!entry.title || !entry.username || !entry.password) {
-        showToast('Please fill in all required fields', 'warning');
+    // v0.13: per-type validation — the username is optional for API-key
+    // entries (stored as ""). Trim here to match the CLI's stored form.
+    const validationError = entryDraftValidationError({
+        credentialType: saveDraft.credentialType,
+        title: entry.title,
+        username: entry.username,
+        password: entry.password
+    });
+    if (validationError) {
+        showToast(validationError, 'warning');
         return;
     }
 
