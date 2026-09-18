@@ -56,7 +56,8 @@ pub fn resolve_add_username(
 
 /// Edit semantics: absent flag keeps the existing username; `--username ""`
 /// clears an api-key username but is rejected for password/passkey entries;
-/// non-empty values are stored verbatim.
+/// non-empty values are trimmed (matching `resolve_add_username` so both
+/// surfaces store the same form).
 pub fn resolve_edit_username(
     new_username: Option<&str>,
     existing_username: &str,
@@ -74,7 +75,7 @@ pub fn resolve_edit_username(
             credential_type_label(credential_type)
         );
     }
-    Ok(proposed.to_string())
+    Ok(proposed.trim().to_string())
 }
 
 /// Wire summaries -> core summaries (one conversion point for renders).
@@ -454,10 +455,14 @@ mod tests {
         assert!(
             resolve_edit_username(Some("  "), "old", CredentialType::PasskeyReference).is_err()
         );
-        // Non-empty values are stored verbatim.
+        // Non-empty values are trimmed, matching resolve_add_username.
         assert_eq!(
             resolve_edit_username(Some("new-name"), "old", CredentialType::ApiKey).unwrap(),
             "new-name"
+        );
+        assert_eq!(
+            resolve_edit_username(Some(" padded "), "old", CredentialType::Password).unwrap(),
+            "padded"
         );
     }
 }

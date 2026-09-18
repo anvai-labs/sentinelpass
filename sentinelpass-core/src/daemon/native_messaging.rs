@@ -85,8 +85,10 @@ pub struct SitePermissionData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialData {
-    /// v0.13: optional for API-key entries. Defaults to `""` because the
-    /// extension's `JSON.stringify` drops undefined keys.
+    /// v0.13: optional for API-key entries (stored as `""`). Defaults on
+    /// deserialization so a save payload that OMITS the key (the shipped
+    /// extension always sends a string, but third-party capability-holding
+    /// native-host clients may not) does not fail the whole message.
     #[serde(default)]
     pub username: String,
     pub password: String,

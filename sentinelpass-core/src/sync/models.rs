@@ -496,7 +496,7 @@ mod wire_compat_tests {
         };
         let text = String::from_utf8(serde_json::to_vec(&payload).unwrap()).unwrap();
         assert!(
-            text.contains(r#""username":""#),
+            text.contains(r##""username":""##),
             "empty username must serialize as an empty JSON string, never be omitted: {text}"
         );
         let round_tripped: CredentialPayload = serde_json::from_str(&text).unwrap();
