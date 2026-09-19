@@ -224,9 +224,9 @@ enum Commands {
         #[arg(long)]
         title: String,
 
-        /// Username
+        /// Username (optional for API-key entries)
         #[arg(long)]
-        username: String,
+        username: Option<String>,
 
         /// Password (will prompt if not provided)
         #[arg(long)]
@@ -1234,7 +1234,7 @@ fn main() -> Result<()> {
             commands::credentials::handle_add(
                 vault_path,
                 title,
-                username,
+                username.as_deref(),
                 password.as_deref(),
                 credential_type,
                 url.clone(),
@@ -1907,7 +1907,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(title, "Anthropic API");
-                assert_eq!(username, "ANTHROPIC_API_KEY");
+                assert_eq!(username, Some("ANTHROPIC_API_KEY".to_string()));
                 assert_eq!(password, Some("sk-ant-test".to_string()));
                 assert_eq!(url, Some("anthropic".to_string()));
                 assert_eq!(credential_type, CliCredentialType::ApiKey);
@@ -1915,6 +1915,63 @@ mod tests {
                     CredentialType::from(credential_type),
                     CredentialType::ApiKey
                 );
+            }
+            _ => panic!("expected add command"),
+        }
+    }
+
+    /// v0.13: `--username` is optional for API-key entries.
+    #[test]
+    fn parses_add_api_key_without_username() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "add",
+            "--title",
+            "Stripe API",
+            "--password",
+            "sk-test-51fe",
+            "--credential-type",
+            "api-key",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Add {
+                username,
+                credential_type,
+                ..
+            } => {
+                assert_eq!(username, None);
+                assert_eq!(
+                    CredentialType::from(credential_type),
+                    CredentialType::ApiKey
+                );
+            }
+            _ => panic!("expected add command"),
+        }
+    }
+
+    /// An explicitly empty `--username ""` is distinct from absent but both
+    /// resolve to the stored empty-string convention for API keys.
+    #[test]
+    fn parses_add_api_key_with_empty_username() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "add",
+            "--title",
+            "Stripe API",
+            "--username",
+            "",
+            "--password",
+            "sk-test-51fe",
+            "--credential-type",
+            "api-key",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Add { username, .. } => {
+                assert_eq!(username, Some(String::new()));
             }
             _ => panic!("expected add command"),
         }

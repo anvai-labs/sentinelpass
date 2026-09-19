@@ -74,6 +74,45 @@ fn test_vault_add_and_get_api_key_entry_type() {
     assert_eq!(retrieved.password.as_str(), "sk-ant-test");
 }
 
+/// v0.13: username is optional for API-key entries — the stored convention
+/// is an empty string. The vault layer stays tolerant (no per-type
+/// rejection); the per-type requirement is enforced at the CLI/UI gates.
+#[test]
+fn test_vault_add_and_get_api_key_entry_with_empty_username() {
+    let temp_path = ":memory:";
+    let password = b"test_password";
+
+    let vault = VaultManager::create(temp_path, password).unwrap();
+
+    let entry = Entry {
+        entry_id: None,
+        title: "Stripe API".to_string(),
+        username: String::new(),
+        password: "sk-test-51fe".to_string().into(),
+        url: Some("https://api.stripe.com".to_string()),
+        notes: None,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+        credential_type: CredentialType::ApiKey,
+    };
+
+    let entry_id = vault.add_entry(&entry).unwrap();
+    let retrieved = vault.get_entry(entry_id).unwrap();
+
+    assert_eq!(retrieved.credential_type, CredentialType::ApiKey);
+    assert_eq!(retrieved.username, "");
+    assert_eq!(retrieved.password.as_str(), "sk-test-51fe");
+
+    // Updating with the username still empty is tolerated.
+    let mut updated = retrieved.clone();
+    updated.notes = Some("rotated".to_string());
+    vault.update_entry(entry_id, &updated).unwrap();
+    let reloaded = vault.get_entry(entry_id).unwrap();
+    assert_eq!(reloaded.username, "");
+    assert_eq!(reloaded.notes, Some("rotated".to_string()));
+}
+
 #[test]
 fn test_vault_add_and_get_passkey_reference_entry_type() {
     let temp_path = ":memory:";

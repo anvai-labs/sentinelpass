@@ -7,6 +7,7 @@ import {
   credentialTypeForEntry,
   credentialTypeLabel,
   credentialTypeUiState,
+  entryDraftValidationError,
   isPasskeyReferenceEntry,
   parsePasskeyReferenceMetadata,
   secretLabelForType
@@ -73,7 +74,7 @@ describe('desktop credential type contract', () => {
     expect(state).toMatchObject({
       credentialType: API_KEY_CREDENTIAL_TYPE,
       typeSelectDisabled: false,
-      usernameLabel: 'Username',
+      usernameLabel: 'Key owner / label (optional)',
       secretLabel: 'API key',
       secretPlaceholder: 'API key',
       secretGroupHidden: false,
@@ -199,5 +200,94 @@ describe('desktop credential type contract', () => {
       credentialType: PASSWORD_CREDENTIAL_TYPE,
       password: 'new'
     });
+  });
+});
+
+describe('entry draft validation (v0.13 username-optional API keys)', () => {
+  it('requires a username for password entries', () => {
+    expect(entryDraftValidationError({
+      credentialType: PASSWORD_CREDENTIAL_TYPE,
+      title: 'Bank',
+      username: '',
+      password: 'pw'
+    })).toBe('Username is required');
+    expect(entryDraftValidationError({
+      credentialType: PASSWORD_CREDENTIAL_TYPE,
+      title: 'Bank',
+      username: '   ',
+      password: 'pw'
+    })).toBe('Username is required');
+    expect(entryDraftValidationError({
+      credentialType: PASSWORD_CREDENTIAL_TYPE,
+      title: 'Bank',
+      username: undefined,
+      password: 'pw'
+    })).toBe('Username is required');
+  });
+
+  it('allows an empty username for API-key entries', () => {
+    expect(entryDraftValidationError({
+      credentialType: API_KEY_CREDENTIAL_TYPE,
+      title: 'Stripe API',
+      username: '',
+      password: 'sk-test-51fe'
+    })).toBeNull();
+    expect(entryDraftValidationError({
+      credentialType: API_KEY_CREDENTIAL_TYPE,
+      title: 'Stripe API',
+      username: '   ',
+      password: 'sk-test-51fe'
+    })).toBeNull();
+    expect(entryDraftValidationError({
+      credentialType: API_KEY_CREDENTIAL_TYPE,
+      title: 'Stripe API',
+      username: undefined,
+      password: 'sk-test-51fe'
+    })).toBeNull();
+    expect(entryDraftValidationError({
+      credentialType: API_KEY_CREDENTIAL_TYPE,
+      title: 'Stripe API',
+      username: 'ops-team',
+      password: 'sk-test-51fe'
+    })).toBeNull();
+  });
+
+  it('still validates title and secret for every type', () => {
+    expect(entryDraftValidationError({
+      credentialType: API_KEY_CREDENTIAL_TYPE,
+      title: '',
+      username: '',
+      password: 'sk-test-51fe'
+    })).toBe('Title is required');
+    expect(entryDraftValidationError({
+      credentialType: API_KEY_CREDENTIAL_TYPE,
+      title: 'Stripe API',
+      username: '',
+      password: '   '
+    })).toBe('API key is required');
+    expect(entryDraftValidationError({
+      credentialType: PASSWORD_CREDENTIAL_TYPE,
+      title: 'Bank',
+      username: 'user@example.com',
+      password: null
+    })).toBe('Password is required');
+  });
+
+  it('requires a username (account label) for passkey reference entries', () => {
+    expect(entryDraftValidationError({
+      credentialType: PASSKEY_REFERENCE_TYPE,
+      title: 'GitHub',
+      username: '',
+      password: '{"kind":"passkey_reference"}'
+    })).toBe('Username is required');
+  });
+
+  it('accepts whitespace-padded but non-empty values', () => {
+    expect(entryDraftValidationError({
+      credentialType: PASSWORD_CREDENTIAL_TYPE,
+      title: '  Bank  ',
+      username: ' user@example.com ',
+      password: 'pw'
+    })).toBeNull();
   });
 });

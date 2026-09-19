@@ -10,9 +10,9 @@ Secure, local-first password manager browser extensions for Chrome and Firefox.
 
 ## Current Version
 
-**v0.6.3** — Security Hardening Release (March 31, 2026)
+**v0.7.0** — Security Hardening Release (March 31, 2026)
 
-### What's New in v0.6.3
+### What's New in v0.7.0
 
 This release addresses all security vulnerabilities identified in the Chrome Web Store review and prepares Firefox for AMO submission.
 
@@ -91,7 +91,7 @@ Encrypted SQLite Database
 npm install
 
 # Build TypeScript to JavaScript
-npm run web:build
+npm run ext:build
 
 # Run tests
 npm run test:ts
@@ -100,8 +100,8 @@ npm run test:ts
 npm run web:typecheck
 
 # Package extensions
-./browser-extension/package-chrome.sh 0.6.3
-./browser-extension/package-firefox.sh 0.6.3
+./browser-extension/package-chrome.sh 0.7.0
+./browser-extension/package-firefox.sh 0.7.0
 ```
 
 ### Build Artifacts
@@ -148,7 +148,7 @@ npm run test:e2e:headed      # Run with visible browser
 ### Adding New Features
 
 1. Update TypeScript source files in `browser-extension/chrome/` or `browser-extension/firefox/`
-2. Run `npm run web:build` to compile
+2. Run `npm run ext:build` to compile
 3. Test changes by loading unpacked extension
 4. Commit both `.ts` and compiled `.js` files
 
@@ -247,6 +247,6 @@ MIT License — See project root for details.
 
 ---
 
-**Version**: 0.6.3  
+**Version**: 0.7.0  
 **Last Updated**: March 31, 2026  
 **Status**: Ready for Store Submission ✅

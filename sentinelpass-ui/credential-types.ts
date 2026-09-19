@@ -123,7 +123,11 @@ export function credentialTypeUiState(
         typeSelectTitle: isPasskey
             ? 'Passkey references are metadata-only and cannot be converted into password entries'
             : 'Credential type',
-        usernameLabel: isPasskey ? 'Account label' : 'Username',
+        usernameLabel: isPasskey
+            ? 'Account label'
+            : credentialType === API_KEY_CREDENTIAL_TYPE
+                ? 'Key owner / label (optional)'
+                : 'Username',
         secretLabel: secretLabelForType(credentialType),
         secretPlaceholder: credentialType === API_KEY_CREDENTIAL_TYPE ? 'API key' : 'Password',
         secretGroupHidden: isPasskey,
@@ -154,4 +158,35 @@ export function buildEntrySaveDraft({
         credentialType,
         password: credentialType === PASSKEY_REFERENCE_TYPE ? currentEntry?.password : formPassword
     };
+}
+
+export type EntryDraftInput = {
+    credentialType: CredentialType;
+    title: string | null | undefined;
+    username: string | null | undefined;
+    password: string | null | undefined;
+};
+
+/**
+ * Per-type required-field validation for the entry form. v0.13: the
+ * username is optional for API-key entries (stored as `""` = absent);
+ * password and passkey entries still require one. Returns the first
+ * error message, or null when the draft is valid.
+ */
+export function entryDraftValidationError({
+    credentialType,
+    title,
+    username,
+    password
+}: EntryDraftInput): string | null {
+    if (!title || !title.trim()) {
+        return 'Title is required';
+    }
+    if (credentialType !== API_KEY_CREDENTIAL_TYPE && (!username || !username.trim())) {
+        return 'Username is required';
+    }
+    if (!password || !password.trim()) {
+        return `${secretLabelForType(credentialType)} is required`;
+    }
+    return null;
 }
