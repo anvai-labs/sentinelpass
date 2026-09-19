@@ -188,6 +188,25 @@ You can also re-register the native host manually:
 | Git tag `v*` | `Release CI` | cross-platform binaries + installer bundles |
 | Push / PR | `Rust CI`, `Security CI`, `extension-e2e` | lint, tests, security scans, extension e2e |
 
+### What each release channel includes
+
+Verified per release against the published archives:
+
+| Component | Homebrew formula | DMG (app bundle) | Installer archive |
+| --- | --- | --- | --- |
+| CLI (`sentinelpass`) | ✓ macOS + Linux | ✗ | ✓ |
+| Desktop UI (`sentinelpass-ui`) | ✓ | ✓ — the `.app` itself | ✓ |
+| Native host (`sentinelpass-host`) | ✓ | ✓ — sidecar inside the `.app` | ✓ |
+| Daemon (`sentinelpass-daemon`) | ✓ **Linux only** — deliberately omitted on macOS | ✓ — sidecar inside the `.app` | ✓ |
+| Browser extensions (Chrome/Firefox) | ✗ | ✗ | ✓ |
+| LaunchAgent / auto-start + native-host manifests | ✗ — binaries only | manifests auto-register when the UI launches; no service setup | ✓ — full setup |
+
+Coexistence notes:
+
+- The daemon's exclusive maintenance lock means only one daemon can run per vault at a time; the Homebrew formula omits the macOS daemon on purpose so it never competes with the app-managed LaunchAgent daemon.
+- Whichever `sentinelpass-ui` launched last re-registers the native-host manifests. Running a different channel's UI re-points the extension at that channel's host binary (it still reaches the same daemon socket — harmless, but keep all installed channels on the same version).
+- Browser extensions version independently of app releases: they ship in the installer archive and are published via the separate `chrome-v*` tag train (`chrome-extension-release.yml`); an app release does not bump them.
+
 ## OSS and Contribution Docs
 
 | Topic | File |
