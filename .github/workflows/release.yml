@@ -448,6 +448,69 @@ jobs:
             find sentinelpass-ui/target/release/bundle target/release/bundle -type f 2>/dev/null | head -40 || true
           fi
 
+      # Developer ID signing + notarization (ADR-010, upstream issue #148).
+      # Entirely dormant until org secrets exist: without
+      # APPLE_SIGNING_IDENTITY this step no-ops and the release ships
+      # ad-hoc signed exactly as before. The identity is deliberately NOT
+      # exposed to `cargo tauri build` (env above) — the bundler would
+      # auto-sign only the outer bundle; we sign inside-out (embedded
+      # sidecar Mach-Os first, then the bundle) so notarytool accepts the
+      # upload, then staple both artifacts.
+      - name: Sign and notarize the app and DMG (no-op until APPLE_* secrets exist)
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "APPLE_SIGNING_IDENTITY not configured; shipping ad-hoc signed (issue #148)"
+            exit 0
+          fi
+          for v in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            test -n "${!v:-}" || { echo "::error::$v must be set once APPLE_SIGNING_IDENTITY is configured"; exit 1; }
+          done
+          app=$(find sentinelpass-ui/target/release/bundle/macos target/release/bundle/macos -maxdepth 2 -name '*.app' 2>/dev/null | head -1 || true)
+          test -n "$app" || { echo "::error::no .app bundle to sign"; exit 1; }
+
+          # 1. Temporary keychain holding the Developer ID Application cert.
+          security create-keychain -p ci-sign build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci-sign build.keychain
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci-sign build.keychain >/dev/null
+
+          # 2. Inside-out signing: hardened runtime + secure timestamp; no
+          #    entitlements needed (Tauri/WKWebView, no JIT plugins).
+          find "$app/Contents/Resources" -type f -perm -111 \
+            -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} +
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # 3. Notarize the DMG (the user-facing artifact), staple app + DMG,
+          #    then the ADR-010 acceptance gate. The zip step below runs on
+          #    the stapled app.
+          dmg=$(find sentinelpass-ui/target/release/bundle/dmg target/release/bundle/dmg -name '*.dmg' 2>/dev/null | head -1 || true)
+          test -n "$dmg" || { echo "::error::no .dmg bundle to notarize"; exit 1; }
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$dmg"
+          xcrun stapler staple "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
+          xcrun stapler validate "$dmg"
+          echo "Signed and notarized: $app + $dmg"
+
       # Target-suffixed zip of the verified .app: the Homebrew cask's future
       # artifact and the direct-download form of the desktop app. A .app is a
       # directory and cannot be attached to a release directly; ditto is the
