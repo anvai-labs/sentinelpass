@@ -764,12 +764,6 @@ jobs:
           brew install --cask anvai-labs/tap/sentinelpass   # desktop app
           \`\`\`
 
-          ### macOS (Desktop .app, direct download)
-          \`\`\`bash
-          curl -LO https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-macos.dmg
-          open sentinelpass-${VERSION}-macos.dmg
-          \`\`\`
-
           ### Ubuntu/Debian (.deb, Tauri desktop app)
           \`\`\`bash
           wget https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass_${VERSION}_amd64.deb
