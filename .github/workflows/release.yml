@@ -448,6 +448,27 @@ jobs:
             find sentinelpass-ui/target/release/bundle target/release/bundle -type f 2>/dev/null | head -40 || true
           fi
 
+      # Target-suffixed zip of the verified .app: the Homebrew cask's future
+      # artifact and the direct-download form of the desktop app. A .app is a
+      # directory and cannot be attached to a release directly; ditto is the
+      # canonical .app zipper (keeps symlinks/resource forks, --keepParent so
+      # the zip unarchives to SentinelPass.app).
+      - name: Zip the verified .app for the cask and direct download
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.setup.outputs.version }}"
+          app=$(find sentinelpass-ui/target/release/bundle/macos target/release/bundle/macos -maxdepth 2 -name '*.app' 2>/dev/null | head -1 || true)
+          if [ -z "$app" ]; then
+            echo "::error::no .app bundle found to zip"
+            exit 1
+          fi
+          zip_path="sentinelpass-ui/target/release/bundle/sentinelpass-${VERSION}-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$zip_path"
+          echo "Zipped $app -> $zip_path"
+          shasum -a 256 "$zip_path"
+
       - name: Upload Tauri bundle artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -457,6 +478,7 @@ jobs:
             sentinelpass-ui/target/release/bundle/appimage/*.AppImage
             sentinelpass-ui/target/release/bundle/dmg/*.dmg
             sentinelpass-ui/target/release/bundle/macos/*.app
+            sentinelpass-ui/target/release/bundle/*.zip
             sentinelpass-ui/target/release/bundle/msi/*.msi
             sentinelpass-ui/target/release/bundle/nsis/*.exe
             target/release/bundle/deb/*.deb
@@ -683,11 +705,14 @@ jobs:
           # Also copy other bundle types
           find_and_copy_bundles "*.deb" ""
           find_and_copy_bundles "*.AppImage" ""
-          find_and_copy_bundles "*.app" ""
           find_and_copy_bundles "*.exe" ""
+          # Target-suffixed .app zip (Homebrew cask + direct download). NOTE:
+          # a bare "*.app" can never be copied or attached here — a .app is a
+          # directory, not a file; the zip below is its shippable form.
+          find_and_copy_bundles "*-macos-arm64.zip" ""
 
           echo "Tauri bundles copied:"
-          ls -la release-assets/ | grep -E '\.(dmg|msi|deb|AppImage|exe)$' || echo "No bundle files found"
+          ls -la release-assets/ | grep -E '\.(dmg|msi|deb|AppImage|exe|zip)$' || echo "No bundle files found"
 
       - name: Regenerate SHA256 checksums with Tauri bundles
         shell: bash
@@ -735,7 +760,14 @@ jobs:
           ### macOS (Homebrew)
           \`\`\`bash
           brew tap anvai-labs/tap https://github.com/anvai-labs/homebrew-tap
-          brew install anvai-labs/tap/sentinelpass
+          brew install anvai-labs/tap/sentinelpass          # CLI tools
+          brew install --cask anvai-labs/tap/sentinelpass   # desktop app
+          \`\`\`
+
+          ### macOS (Desktop .app, direct download)
+          \`\`\`bash
+          curl -LO https://github.com/anvai-labs/sentinelpass/releases/download/v${VERSION}/sentinelpass-${VERSION}-macos.dmg
+          open sentinelpass-${VERSION}-macos.dmg
           \`\`\`
 
           ### Ubuntu/Debian (.deb, Tauri desktop app)
