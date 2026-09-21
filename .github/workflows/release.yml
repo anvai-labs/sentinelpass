@@ -488,26 +488,44 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k ci-sign build.keychain >/dev/null
 
           # 2. Inside-out signing: hardened runtime + secure timestamp; no
-          #    entitlements needed (Tauri/WKWebView, no JIT plugins).
+          #    entitlements needed (Tauri/WKWebView, no JIT plugins). Nested
+          #    executables in Frameworks are covered too (none today — the
+          #    guard keeps future additions from failing notarization).
           find "$app/Contents/Resources" -type f -perm -111 \
             -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} +
+          if [ -d "$app/Contents/Frameworks" ]; then
+            find "$app/Contents/Frameworks" -type f -perm -111 \
+              -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} +
+          fi
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
 
-          # 3. Notarize the DMG (the user-facing artifact), staple app + DMG,
-          #    then the ADR-010 acceptance gate. The zip step below runs on
-          #    the stapled app.
+          # 3. Staple the app, then REGENERATE the DMG from the stapled app.
+          #    tauri built the DMG before this step ran, so the on-disk image
+          #    still contains the UNSIGNED app — notarizing it as-is would
+          #    submit the wrong bytes. A plain UDZO image at the same path
+          #    keeps the release job's copy/checksum flow unchanged; tauri's
+          #    DMG styling is traded for a provably-signed artifact. The zip
+          #    step below then ships the stapled app.
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
           dmg=$(find sentinelpass-ui/target/release/bundle/dmg target/release/bundle/dmg -name '*.dmg' 2>/dev/null | head -1 || true)
-          test -n "$dmg" || { echo "::error::no .dmg bundle to notarize"; exit 1; }
+          test -n "$dmg" || { echo "::error::no .dmg bundle to regenerate"; exit 1; }
+          stage=$(mktemp -d)
+          cp -R "$app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname "SentinelPass" -srcfolder "$stage" -ov -format UDZO "$dmg"
+          rm -rf "$stage"
+
+          # 4. Notarize the regenerated DMG (the user-facing artifact), then
+          #    staple it and run the ADR-010 acceptance gate.
           xcrun notarytool submit "$dmg" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
           xcrun stapler staple "$dmg"
-          xcrun stapler staple "$app"
           spctl --assess --type execute --verbose=4 "$app"
-          xcrun stapler validate "$app"
           xcrun stapler validate "$dmg"
           echo "Signed and notarized: $app + $dmg"
 
