@@ -179,6 +179,117 @@ fn deleting_all_rows_outside_the_vault_is_detected_by_listing() {
     );
 }
 
+fn vault_with_unauthorized_entry_deletion() -> (TempDir, VaultManager, i64) {
+    let tmp = TempDir::new().unwrap();
+    let vault =
+        VaultManager::create(tmp.path().join("vault.db"), uuid::Uuid::new_v4().as_bytes()).unwrap();
+    let id = vault
+        .add_entry(&Entry {
+            entry_id: None,
+            title: "synthetic entry".into(),
+            username: String::new(),
+            password: uuid::Uuid::new_v4().to_string().into(),
+            url: None,
+            notes: None,
+            credential_type: CredentialType::ApiKey,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            favorite: false,
+        })
+        .unwrap();
+    vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .execute("UPDATE entries SET is_deleted=1 WHERE entry_id=?1", [id])
+        .unwrap();
+    (tmp, vault, id)
+}
+
+#[test]
+fn entry_set_tampering_is_refused_by_registry_views_and_sweep() {
+    let (_tmp, vault, _) = vault_with_unauthorized_entry_deletion();
+    let light_refused = vault.registry_overview(false).is_err();
+    let full_refused = vault.registry_overview(true).is_err();
+    let sweep_refused = vault.sweep_registry_index().is_err();
+    assert!(
+        light_refused && full_refused && sweep_refused,
+        "deleted entry set accepted: light={light_refused}, full={full_refused}, sweep={sweep_refused}"
+    );
+    let count: i64 = vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .query_row("SELECT count(*) FROM secret_equality_index", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "a refused sweep must not prune authenticated entry state"
+    );
+}
+
+#[test]
+fn entry_set_tampering_is_not_reported_as_a_normal_missing_entry() {
+    let (_tmp, vault, id) = vault_with_unauthorized_entry_deletion();
+    assert!(matches!(
+        vault.get_entry(id),
+        Err(PasswordManagerError::InvalidInput(reason)) if reason.contains("entry integrity")
+    ));
+}
+
+#[test]
+fn entry_set_tampering_is_refused_by_envelope_verification() {
+    let (_tmp, vault, _) = vault_with_unauthorized_entry_deletion();
+    assert!(vault.verify_vault_envelopes().is_err());
+}
+
+#[test]
+fn entry_set_tampering_is_refused_by_domain_lookup() {
+    let (_tmp, vault, _) = vault_with_unauthorized_entry_deletion();
+    assert!(vault
+        .find_entries_by_domain("receipt.example.invalid")
+        .is_err());
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn entry_set_tampering_cannot_retarget_a_pending_sync_tombstone() {
+    let (tmp, vault, id) = vault_with_unauthorized_entry_deletion();
+    // Restore the original state, then delete through the authenticated path.
+    vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .execute("UPDATE entries SET is_deleted=0 WHERE entry_id=?1", [id])
+        .unwrap();
+    vault.delete_entry(id).unwrap();
+    let db = vault.lock_db().unwrap();
+    let dek = vault.key_hierarchy.dek().unwrap();
+    let device = uuid::Uuid::new_v4();
+    assert_eq!(
+        crate::sync::change_tracker::collect_pending_credential_blobs(db.conn(), dek, device,)
+            .unwrap()
+            .len(),
+        1
+    );
+    db.conn()
+        .execute(
+            "UPDATE entries SET sync_id=?1 WHERE entry_id=?2",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+        )
+        .unwrap();
+    assert!(
+        crate::sync::change_tracker::collect_pending_credential_blobs(db.conn(), dek, device,)
+            .is_err(),
+        "a modified tombstone must not be authenticated for another object"
+    );
+    drop(db);
+    drop(vault);
+    drop(tmp);
+}
+
 #[test]
 fn acknowledged_entry_update_rejects_replayed_ciphertext_after_reopen() {
     let tmp = TempDir::new().unwrap();
@@ -2780,11 +2891,9 @@ mod wbs304_adoption {
                 .unwrap();
         }
 
-        // A still opens (untouched).
-        assert_eq!(
-            vault.get_entry(id_a).unwrap().password.as_str(),
-            "password-a"
-        );
+        // A's bytes are untouched, but a persisted vault refuses every read
+        // once its authenticated snapshot differs, including reads of A.
+        assert!(vault.get_entry(id_a).is_err());
         // B now carries A's blob: the identity mismatch (different
         // sync_id) must be caught structurally.
         let err = vault.get_entry(id_b).unwrap_err();
@@ -3340,12 +3449,20 @@ fn domain_mapping_backfill_runs_at_open() {
     // Pre-v8 shape: plaintext-only mapping row (domain_enc NULL, no tags).
     {
         let db = vault.db.lock().unwrap();
-        db.conn()
+        // Enroll the legacy fixture in its baseline. An out-of-band insert
+        // after enrollment is tampering, not a historical upgrade fixture.
+        let tx = super::content_guard::ContentTransaction::begin(
+            db.conn(),
+            vault.key_hierarchy.dek().unwrap(),
+        )
+        .unwrap();
+        tx
             .execute(
                 "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, 'open.example', 1)",
                 [entry_id],
             )
             .unwrap();
+        tx.commit().unwrap();
     }
 
     // Pre-reopen: legacy fallback is exact-match only, so the suffix query

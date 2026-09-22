@@ -372,6 +372,27 @@ mod tests {
             favorite: true,
         };
         let id = original.add_entry(&entry).unwrap();
+        {
+            let db = original.lock_db().unwrap();
+            let dek = original.key_hierarchy.dek().unwrap();
+            let tag_key = crate::crypto::keyring::derive_domain_tag_key(dek).unwrap();
+            let ctx = crate::vault::domain_ops::MappingSealCtx {
+                dek,
+                vault_uuid: original.vault_uuid_str().unwrap(),
+                epoch: original.session_epoch(),
+                tag_key: &tag_key,
+            };
+            let tx = content_guard::ContentTransaction::begin(db.conn(), dek).unwrap();
+            crate::vault::domain_ops::insert_sealed_domain_mapping(
+                &tx,
+                &ctx,
+                id,
+                "rekey.example.invalid",
+                true,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
         let ssh_material = uuid::Uuid::new_v4().to_string();
         let ssh_id = original
             .add_ssh_key_plaintext(
@@ -418,6 +439,13 @@ mod tests {
             entry.password.as_str()
         );
         assert!(rotated.get_entry(id).unwrap().username.is_empty());
+        assert_eq!(
+            rotated
+                .find_entries_by_domain("rekey.example.invalid")
+                .unwrap()[0]
+                .entry_id,
+            Some(id)
+        );
         assert_eq!(
             rotated.export_ssh_private_key(ssh_id).unwrap(),
             ssh_material

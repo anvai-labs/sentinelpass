@@ -704,6 +704,10 @@ impl VaultManager {
         // reentrant — the sweep's discipline).
         let db = self.lock_db()?;
         let conn = db.conn();
+        let _read = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        super::content_guard::verify_snapshot(conn, dek)?;
         let mut report = VaultVerificationReport::default();
         verify_entry_rows(conn, dek, &vault_uuid, &mut report)?;
         let (ssh_scanned, ssh_verified) = verify_three_part_rows(

@@ -16,6 +16,14 @@ pub fn collect_pending_credential_blobs(
     dek: &DataEncryptionKey,
     device_id: Uuid,
 ) -> Result<Vec<SyncEntryBlob>> {
+    let _read = if conn.is_autocommit() {
+        Some(
+            conn.unchecked_transaction()
+                .map_err(DatabaseError::Sqlite)?,
+        )
+    } else {
+        None
+    };
     crate::vault::content_guard::verify_snapshot(conn, dek)?;
     let mut stmt = conn
         .prepare(
@@ -74,26 +82,7 @@ pub fn collect_pending_credential_blobs(
         let sync_id = Uuid::parse_str(&sync_id_str)
             .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
-        if is_deleted {
-            // Tombstone: empty encrypted payload
-            let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let encrypted = encrypt_for_sync(dek, &tombstone_data)
-                .map_err(crate::PasswordManagerError::Crypto)?;
-
-            blobs.push(SyncEntryBlob {
-                sync_id,
-                entry_type: SyncEntryType::Credential,
-                sync_version: sync_version as u64,
-                modified_at,
-                encrypted_payload: encrypted,
-                is_tombstone: true,
-                origin_device_id: device_id,
-            });
-            continue;
-        }
-
-        crate::vault::content_guard::verify_row(
+        crate::vault::content_guard::verify_stored_row(
             conn,
             dek,
             &crate::database::RawEntryRow {
@@ -112,7 +101,27 @@ pub fn collect_pending_credential_blobs(
                 entry_nonce: Vec::new(),
                 auth_tag: Vec::new(),
             },
+            is_deleted,
         )?;
+
+        if is_deleted {
+            // Tombstone: empty encrypted payload
+            let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+            let encrypted = encrypt_for_sync(dek, &tombstone_data)
+                .map_err(crate::PasswordManagerError::Crypto)?;
+
+            blobs.push(SyncEntryBlob {
+                sync_id,
+                entry_type: SyncEntryType::Credential,
+                sync_version: sync_version as u64,
+                modified_at,
+                encrypted_payload: encrypted,
+                is_tombstone: true,
+                origin_device_id: device_id,
+            });
+            continue;
+        }
 
         // Load domain mappings for this entry (dual-read, WBS-306: the
         // sealed domain opens; legacy plaintext rows pass through).

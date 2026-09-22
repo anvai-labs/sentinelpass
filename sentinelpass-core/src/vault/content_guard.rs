@@ -1,6 +1,7 @@
 //! Authenticated entry receipts outside SQLite. A valid GCM blob is not
 //! necessarily the latest blob. Receipts bind all columns (including NULLs)
-//! and the active-row set to the last acknowledged transaction.
+//! and the complete entry and domain-mapping sets to the last acknowledged
+//! transaction, including tombstones and mapping ownership.
 //!
 //! The two-state journal is durable BEFORE SQLite commits; recovery accepts
 //! only the complete old or complete new snapshot. Successful writes finalize
@@ -23,7 +24,7 @@ use zeroize::Zeroizing;
 
 const MARKER: &str = "entry_receipts_v1";
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
-type Receipts = BTreeMap<i64, String>;
+type Receipts = BTreeMap<String, String>;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,7 +165,7 @@ fn acquire(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn fingerprint(row: &RawEntryRow) -> Result<String> {
+fn fingerprint(row: &RawEntryRow, is_deleted: bool) -> Result<String> {
     let bytes = serde_json::to_vec(&(
         row.entry_id,
         &row.sync_id,
@@ -177,22 +178,75 @@ fn fingerprint(row: &RawEntryRow) -> Result<String> {
         row.created_at,
         row.modified_at,
         row.favorite,
+        is_deleted,
     ))
     .map_err(|_| refusal())?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn snapshot(conn: &Connection) -> Result<Receipts> {
-    let mut stmt = conn.prepare("SELECT entry_id,title,username,password,url,notes,credential_type,entry_nonce,auth_tag,created_at,modified_at,favorite,sync_id,sync_version FROM entries WHERE is_deleted=0 ORDER BY entry_id")
+    let mut stmt = conn.prepare("SELECT entry_id,title,username,password,url,notes,credential_type,entry_nonce,auth_tag,created_at,modified_at,favorite,sync_id,sync_version,is_deleted FROM entries ORDER BY entry_id")
         .map_err(DatabaseError::Sqlite)?;
     let rows = stmt
-        .query_map([], SqliteEntryRepository::parse_row)
+        .query_map([], |r| {
+            Ok((SqliteEntryRepository::parse_row(r)?, r.get::<_, bool>(14)?))
+        })
         .map_err(DatabaseError::Sqlite)?;
-    rows.map(|r| {
-        let r = r.map_err(DatabaseError::Sqlite)?;
-        Ok((r.entry_id, fingerprint(&r)?))
-    })
-    .collect()
+    let mut receipts: Receipts = rows
+        .map(|r| {
+            let (r, deleted) = r.map_err(DatabaseError::Sqlite)?;
+            Ok((format!("entry:{}", r.entry_id), fingerprint(&r, deleted)?))
+        })
+        .collect::<Result<_>>()?;
+    // Domain identity alone does not authenticate which credential owns it.
+    // Bind the relationship and complete mapping set before lookups or sync
+    // can turn an attacker-edited entry_id into a credential disclosure.
+    let mut stmt = conn.prepare("SELECT mapping_id,entry_id,domain,is_primary,sync_id,domain_enc FROM domain_mappings ORDER BY mapping_id")
+        .map_err(DatabaseError::Sqlite)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<Vec<u8>>>(5)?,
+            ))
+        })
+        .map_err(DatabaseError::Sqlite)?;
+    for row in rows {
+        let row = row.map_err(DatabaseError::Sqlite)?;
+        let bytes = serde_json::to_vec(&row).map_err(|_| refusal())?;
+        receipts.insert(
+            format!("mapping:{}", row.0),
+            hex::encode(Sha256::digest(bytes)),
+        );
+    }
+    // Missing tags otherwise suppress candidates before envelope verification
+    // can inspect them. Authenticate the index set as well as each mapping.
+    let mut stmt = conn.prepare("SELECT tag_id,mapping_id,tag,is_chain_root,equality_key_id FROM domain_mapping_tags ORDER BY tag_id")
+        .map_err(DatabaseError::Sqlite)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(DatabaseError::Sqlite)?;
+    for row in rows {
+        let row = row.map_err(DatabaseError::Sqlite)?;
+        let bytes = serde_json::to_vec(&row).map_err(|_| refusal())?;
+        receipts.insert(
+            format!("domain-tag:{}", row.0),
+            hex::encode(Sha256::digest(bytes)),
+        );
+    }
+    Ok(receipts)
 }
 
 fn vault_id(conn: &Connection) -> Result<String> {
@@ -347,6 +401,15 @@ pub(crate) fn verify_row(
     dek: &DataEncryptionKey,
     row: &RawEntryRow,
 ) -> Result<()> {
+    verify_stored_row(conn, dek, row, false)
+}
+
+pub(crate) fn verify_stored_row(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    row: &RawEntryRow,
+    is_deleted: bool,
+) -> Result<()> {
     let Some((path, lock)) = paths(conn) else {
         return Ok(());
     };
@@ -369,7 +432,7 @@ pub(crate) fn verify_row(
     } else {
         &state.stable
     };
-    if expected.get(&row.entry_id) != Some(&fingerprint(row)?) {
+    if expected.get(&format!("entry:{}", row.entry_id)) != Some(&fingerprint(row, is_deleted)?) {
         return Err(refusal());
     }
     Ok(())
@@ -455,6 +518,10 @@ mod tests {
         conn.execute_batch("CREATE TABLE db_metadata(id INTEGER, vault_uuid TEXT);
             INSERT INTO db_metadata VALUES(1,'synthetic-vault');
             CREATE TABLE registry_state(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE domain_mappings(mapping_id INTEGER PRIMARY KEY, entry_id INTEGER,
+            domain TEXT NOT NULL, is_primary INTEGER, sync_id TEXT, domain_enc BLOB);
+            CREATE TABLE domain_mapping_tags(tag_id INTEGER PRIMARY KEY, mapping_id INTEGER,
+            tag BLOB, is_chain_root INTEGER, equality_key_id INTEGER);
             CREATE TABLE entries(entry_id INTEGER PRIMARY KEY, title BLOB, username BLOB,
             password BLOB, url BLOB, notes BLOB, credential_type TEXT, entry_nonce BLOB,
             auth_tag BLOB, created_at INTEGER, modified_at INTEGER, favorite INTEGER,

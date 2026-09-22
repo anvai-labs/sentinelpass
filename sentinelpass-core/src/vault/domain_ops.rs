@@ -30,8 +30,7 @@
 //! ONE transaction: a crash mid-sweep rolls back to the fully-legacy state
 //! and retries on the next open, never leaving a half-tagged row.
 //!
-//! Transition: legacy rows keep their plaintext `domain` until WBS-404's
-//! bulk migration clears the column. Reads are dual (envelope preferred,
+//! Transition: sealing clears the legacy plaintext `domain`. Reads are dual (envelope preferred,
 //! plaintext fallback restricted to `domain_enc IS NULL` rows); writes are
 //! always sealed. The plaintext INDEX is dropped by the v8 migration —
 //! lookups no longer have a plaintext search structure.
@@ -76,8 +75,7 @@ pub(crate) struct MappingSealCtx<'a> {
 /// `mapping_sync_id` is the envelope's object identity — the mapping row's
 /// `sync_id`, minted when absent. The row's `domain_enc` column receives
 /// the envelope; the `domain_mapping_tags` rows are replaced wholesale.
-/// Does NOT touch the legacy plaintext `domain` column (dual-read keeps it
-/// for pre-backfill compatibility; WBS-404 clears it).
+/// Clears the legacy plaintext `domain` column in the same transaction.
 ///
 /// Caller owns the transaction (or accepts auto-commit semantics); the
 /// envelope and tags land on the same connection so they are always
@@ -100,7 +98,7 @@ pub(crate) fn seal_mapping_and_write_tags(
     )?;
 
     conn.execute(
-        "UPDATE domain_mappings SET domain_enc = ?1, sync_id = ?2 WHERE mapping_id = ?3",
+        "UPDATE domain_mappings SET domain_enc = ?1, sync_id = ?2, domain = '' WHERE mapping_id = ?3",
         rusqlite::params![&domain_enc, mapping_sync_id, mapping_id],
     )
     .map_err(DatabaseError::Sqlite)?;
@@ -112,10 +110,8 @@ pub(crate) fn seal_mapping_and_write_tags(
 /// domain and tag set — the ONE write path for new mappings (sync apply).
 /// Returns the new mapping_id.
 ///
-/// The legacy plaintext `domain` column is NOT NULL and stays populated on
-/// new rows for the transition (it is inert for post-v8 lookups: the
-/// plaintext fallback only reads `domain_enc IS NULL` rows). WBS-404's
-/// bulk migration clears the column.
+/// The legacy NOT NULL column receives an empty string; new mappings never
+/// persist a plaintext copy of the domain.
 ///
 /// `cfg` mirror of the sync module's own gating: its only production
 /// caller is the feature-gated sync apply path; tests exercise it
@@ -144,7 +140,7 @@ pub(crate) fn insert_sealed_domain_mapping(
          VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             entry_id,
-            domain,
+            "",
             is_primary as i64,
             &mapping_sync_id,
             &domain_enc
@@ -457,7 +453,7 @@ pub(crate) fn domain_backfill_needed(conn: &Connection) -> Result<bool> {
     let unsealed: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM domain_mappings
-             WHERE domain_enc IS NULL AND domain IS NOT NULL",
+             WHERE domain_enc IS NULL OR domain <> ''",
             [],
             |row| row.get(0),
         )
@@ -501,8 +497,8 @@ impl VaultManager {
     /// tag key id changed (label migration). Idempotent: a completed sweep
     /// is a no-op scan.
     ///
-    /// This sweep only SEALS (from plaintext it already holds) — it never
-    /// opens stored envelopes — so it cannot wedge on tampered rows.
+    /// Existing envelopes are the authority for retagging. A stale index
+    /// must never turn a forged legacy plaintext value into a trusted seal.
     pub fn sweep_domain_mappings(&self) -> Result<DomainSweepReport> {
         if !self.is_unlocked() {
             return Err(PasswordManagerError::VaultLocked);
@@ -519,10 +515,7 @@ impl VaultManager {
         };
 
         let db = self.lock_db()?;
-        let tx = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
+        let tx = super::content_guard::ContentTransaction::begin(db.conn(), dek)?;
 
         let mut report = DomainSweepReport::default();
 
@@ -554,7 +547,32 @@ impl VaultManager {
         };
 
         for (mapping_id, domain, sync_id, domain_enc) in rows {
-            if domain_enc.is_some() && !key_id_stale {
+            if let Some(sealed) = domain_enc {
+                if !key_id_stale && domain.as_deref().unwrap_or_default().is_empty() {
+                    continue;
+                }
+                let sid = sync_id.ok_or_else(|| {
+                    PasswordManagerError::InvalidInput(
+                        "sealed domain mapping has no stable identity".into(),
+                    )
+                })?;
+                let authenticated = envelope_ops::open_object_field(
+                    dek,
+                    Some(&vault_uuid),
+                    Some(&sid),
+                    ObjectType::DomainMapping,
+                    EnvelopePurpose::Summary,
+                    &sealed,
+                )?;
+                if key_id_stale {
+                    write_mapping_tags(&tx, mapping_id, &authenticated, &tag_key)?;
+                    report.retagged += 1;
+                }
+                tx.execute(
+                    "UPDATE domain_mappings SET domain='' WHERE mapping_id=?1",
+                    [mapping_id],
+                )
+                .map_err(DatabaseError::Sqlite)?;
                 continue;
             }
             let Some(domain) = domain else {
@@ -565,15 +583,11 @@ impl VaultManager {
                 None => uuid::Uuid::new_v4().to_string(),
             };
             seal_mapping_and_write_tags(&tx, &ctx, mapping_id, &mapping_sync_id, &domain)?;
-            if domain_enc.is_some() {
-                report.retagged += 1;
-            } else {
-                report.sealed += 1;
-            }
+            report.sealed += 1;
         }
 
         set_domain_state(&tx, "domain_tag_key_id", &DOMAIN_TAG_KEY_ID.to_string())?;
-        tx.commit().map_err(DatabaseError::Sqlite)?;
+        tx.commit()?;
 
         if report.sealed > 0 || report.retagged > 0 {
             if let Some(ref logger) = self.audit_logger {
@@ -626,6 +640,10 @@ impl VaultManager {
 
         let db = self.lock_db()?;
         let conn = db.conn();
+        let _read = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        super::content_guard::verify_snapshot(conn, dek)?;
 
         let mut entry_ids = verified_tag_candidate_entry_ids(
             conn,
@@ -807,10 +825,20 @@ mod tests {
             insert_sealed_domain_mapping(db.conn(), &ctx, entry_id, "app.example.com", true)
                 .unwrap();
 
-        // Transition contract: the legacy plaintext column is NOT NULL, so
-        // new rows keep a COPY until WBS-404 clears it. That copy must be
-        // INERT for lookups: rewrite it to a different domain and prove a
-        // query for that other domain does not match through it.
+        let legacy: String = db
+            .conn()
+            .query_row(
+                "SELECT domain FROM domain_mappings WHERE mapping_id=?1",
+                [mapping_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            legacy.is_empty(),
+            "new sealed mappings must not retain a plaintext copy"
+        );
+
+        // Even an injected legacy value must be inert for sealed-row lookup.
         db.conn()
             .execute(
                 "UPDATE domain_mappings SET domain = 'inert.example' WHERE mapping_id = ?1",
@@ -834,6 +862,129 @@ mod tests {
             .is_empty());
         let found = vault.find_entries_by_domain("app.example.com").unwrap();
         assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn persisted_domain_mapping_tampering_cannot_redirect_credentials() {
+        for attack in [
+            "UPDATE domain_mappings SET entry_id=2",
+            "UPDATE domain_mappings SET domain='forged.example', domain_enc=NULL",
+            "DELETE FROM domain_mappings",
+            "DELETE FROM domain_mapping_tags",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let vault =
+                VaultManager::create(tmp.path().join("vault.db"), uuid::Uuid::new_v4().as_bytes())
+                    .unwrap();
+            let id = vault
+                .add_entry(&test_entry("original", &uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+            vault
+                .add_entry(&test_entry("other", &uuid::Uuid::new_v4().to_string()))
+                .unwrap();
+            {
+                let db = vault.lock_db().unwrap();
+                let dek = vault.key_hierarchy.dek().unwrap();
+                let tag_key = derive_domain_tag_key(dek).unwrap();
+                let ctx = MappingSealCtx {
+                    dek,
+                    vault_uuid: vault.vault_uuid_str().unwrap(),
+                    epoch: vault.session_epoch(),
+                    tag_key: &tag_key,
+                };
+                let tx =
+                    super::super::content_guard::ContentTransaction::begin(db.conn(), dek).unwrap();
+                insert_sealed_domain_mapping(&tx, &ctx, id, "original.example", true).unwrap();
+                tx.commit().unwrap();
+                db.conn().execute(attack, []).unwrap();
+            }
+            let query = if attack.contains("forged") {
+                "forged.example"
+            } else {
+                "original.example"
+            };
+            assert!(
+                vault.find_entries_by_domain(query).is_err(),
+                "mapping tampering must fail closed: {attack}"
+            );
+            assert!(
+                vault.sweep_domain_mappings().is_err(),
+                "sweep must not bless changed relationships"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_domain_retag_ignores_forged_legacy_plaintext() {
+        let vault = test_vault();
+        let id = vault
+            .add_entry(&test_entry("synthetic", &uuid::Uuid::new_v4().to_string()))
+            .unwrap();
+        let mapping = insert_legacy_mapping(&vault, id, "original.example");
+        vault.sweep_domain_mappings().unwrap();
+        {
+            let db = vault.lock_db().unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE domain_mappings SET domain='forged.example' WHERE mapping_id=?1",
+                    [mapping],
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "DELETE FROM registry_state WHERE key='domain_tag_key_id'",
+                    [],
+                )
+                .unwrap();
+        }
+        vault.sweep_domain_mappings().unwrap();
+        assert!(
+            vault
+                .find_entries_by_domain("forged.example")
+                .unwrap()
+                .is_empty(),
+            "index rebuild must not authenticate attacker-written plaintext as a domain"
+        );
+        assert_eq!(
+            vault
+                .find_entries_by_domain("original.example")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn sealed_domain_upgrade_clears_plaintext_without_changing_ciphertext() {
+        let vault = test_vault();
+        let id = vault
+            .add_entry(&test_entry("synthetic", &uuid::Uuid::new_v4().to_string()))
+            .unwrap();
+        let mapping = insert_legacy_mapping(&vault, id, "retained.example");
+        vault.sweep_domain_mappings().unwrap();
+        let sealed = mapping_row(&vault, mapping).0;
+        vault
+            .lock_db()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE domain_mappings SET domain='retained.example' WHERE mapping_id=?1",
+                [mapping],
+            )
+            .unwrap();
+        assert!(vault.domain_backfill_needed().unwrap());
+        vault.sweep_domain_mappings().unwrap();
+        let (after, legacy) = mapping_row(&vault, mapping);
+        assert_eq!(after, sealed);
+        assert_eq!(legacy.as_deref(), Some(""));
+        assert!(!vault.domain_backfill_needed().unwrap());
+        assert_eq!(
+            vault
+                .find_entries_by_domain("retained.example")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

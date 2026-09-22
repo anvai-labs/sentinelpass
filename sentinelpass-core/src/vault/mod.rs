@@ -925,19 +925,21 @@ impl VaultManager {
         }
 
         let db = self.lock_db()?;
-        let repo = SqliteEntryRepository::new(&db);
-        let raw_row = repo
-            .get_raw(entry_id)?
-            .ok_or_else(|| PasswordManagerError::NotFound(format!("Entry {}", entry_id)))?;
-
-        // Decrypt FIRST, then audit with the real title. The former
-        // shape (from_utf8_lossy of the raw column) was harmless when
-        // columns held v1 bincode mojibake, but a v2 envelope document is
-        // readable JSON — logging it would leak vault UUID, entry
-        // sync_id, purpose/type, epoch, and ciphertext into the long-lived
-        // plaintext audit log on every credential view (adoption review,
-        // finding 4).
-        let entry = match self.decrypt_entry_row(db.conn(), &raw_row) {
+        let _read = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        // Receipt checks must precede missing-entry results, and a refused
+        // snapshot must take the same audit path as a failed envelope open.
+        let result = (|| {
+            content_guard::verify_snapshot(db.conn(), self.key_hierarchy.dek()?)?;
+            let repo = SqliteEntryRepository::new(&db);
+            let raw_row = repo
+                .get_raw(entry_id)?
+                .ok_or_else(|| PasswordManagerError::NotFound(format!("Entry {}", entry_id)))?;
+            self.decrypt_entry_row(db.conn(), &raw_row)
+        })();
+        let entry = match result {
             Ok(entry) => entry,
             // A FAILED view is the security-interesting case (tamper
             // probing, corruption) — it must leave an audit trace too,

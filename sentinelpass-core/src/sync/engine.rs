@@ -1845,14 +1845,44 @@ mod tests {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
                     .conn()
-                    .prepare("SELECT domain FROM domain_mappings ORDER BY mapping_id")
+                    .prepare(
+                        "SELECT domain,domain_enc,sync_id FROM domain_mappings ORDER BY mapping_id",
+                    )
                     .unwrap();
                 let rows = stmt
-                    .query_map([], |r| r.get::<_, String>(0))
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<Vec<u8>>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })
                     .unwrap()
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .unwrap();
-                rows
+                let (vault_uuid, _) =
+                    crate::vault::envelope_ops::read_local_identity(conn.conn()).unwrap();
+                rows.into_iter()
+                    .map(|(legacy, sealed, id)| match sealed {
+                        Some(blob) => {
+                            assert!(
+                                legacy.is_empty(),
+                                "committed sealed mapping has no plaintext copy"
+                            );
+                            crate::vault::envelope_ops::open_object_field(
+                                &dek,
+                                Some(&vault_uuid),
+                                id.as_deref(),
+                                crate::crypto::aad::ObjectType::DomainMapping,
+                                crate::crypto::aad::EnvelopePurpose::Summary,
+                                &blob,
+                            )
+                            .unwrap()
+                            .to_string()
+                        }
+                        None => legacy,
+                    })
+                    .collect()
             };
             let index: i64 = {
                 let conn = db.lock().unwrap();

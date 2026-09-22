@@ -355,6 +355,11 @@ impl VaultManager {
         let mut report = SweepReport::default();
 
         let db = self.lock_db()?;
+        let tx = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        super::content_guard::verify_snapshot(db.conn(), dek)?;
         {
             let repo = SqliteEntryRepository::new(&db);
             let raw_rows = repo.list_raw(EntryFilter::default())?;
@@ -427,6 +432,7 @@ impl VaultManager {
         set_registry_state(db.conn(), "backfill_complete", "1")?;
         set_registry_state(db.conn(), "equality_key_id", &EQUALITY_KEY_ID.to_string())?;
 
+        tx.commit().map_err(DatabaseError::Sqlite)?;
         drop(db);
 
         if let Some(ref logger) = self.audit_logger {
@@ -458,6 +464,10 @@ impl VaultManager {
 
         let db = self.lock_db()?;
         let conn = db.conn();
+        let _read = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        super::content_guard::verify_snapshot(conn, dek)?;
 
         let entities = load_entities(conn, dek, self.vault_uuid.as_deref())?;
         let entity_by_id: HashMap<&str, &Entity> =
