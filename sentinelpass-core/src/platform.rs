@@ -740,3 +740,54 @@ mod base_dir_override_tests {
         assert!(base.join("PasswordManager/audit").exists());
     }
 }
+/// Prevent process crash dumps from persisting unlocked key material. Linux
+/// also disables ordinary same-user ptrace attachment. This does not replace
+/// encrypted swap or protection against privileged debuggers.
+pub fn disable_core_dumps() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: a valid rlimit pointer is passed for a process-local resource.
+        if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limits) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        #[cfg(target_os = "linux")]
+        // SAFETY: PR_SET_DUMPABLE takes an integer argument, no pointers.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn disables_dump_limits_in_an_isolated_process() {
+    const CHILD: &str = "SENTINELPASS_DUMP_LIMIT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        disable_core_dumps().unwrap();
+        let mut limits = libc::rlimit {
+            rlim_cur: 1,
+            rlim_max: 1,
+        };
+        // SAFETY: getrlimit initializes a correctly sized, writable structure.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limits) },
+            0
+        );
+        assert_eq!((limits.rlim_cur, limits.rlim_max), (0, 0));
+        return;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "platform::disables_dump_limits_in_an_isolated_process",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

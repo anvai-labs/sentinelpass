@@ -1,20 +1,11 @@
-//! Entry-field envelope adoption (WBS-304 second half): routes entry
-//! field encryption through the authenticated v2 envelope while keeping
-//! dual-read compatibility with v1 (`EncryptedEntry` bincode) rows.
+//! Authenticated field envelopes and explicit legacy migration readers.
 //!
-//! Format policy:
-//! - NEW rows (`add_entry`) seal ALL sensitive fields as v2 envelopes.
-//!   Every new row carries a `sync_id` (the stable object identity the
-//!   AAD binds), so this is always possible.
-//! - EXISTING v1 rows keep the v1 write path on `update_entry` — a row is
-//!   never mixed-format (determined by the magic prefix of its existing
-//!   password blob). Bulk v1→v2 re-encryption is WBS-404's migration.
-//! - READS are dual: a blob with the SPENV magic prefix opens as a v2
-//!   envelope against the row's identity; anything else falls back to the
-//!   v1 bincode path. Wrong-class blobs that are neither fail closed.
-//! - SYNC paths (push collect, pull apply) use the same free functions
-//!   with the vault UUID read from db_metadata — a v2 payload pulled from
-//!   a peer is re-sealed under the local identity, never downgraded to v1.
+//! New entries use schema-2 column purposes. Ordinary entry and TOTP
+//! metadata reads require those purposes and never retry a weaker context
+//! after authentication failure. The migration path accepts legacy bincode
+//! and schema-1 Summary/Secret contexts, verifies them, and reseals them.
+//! SSH and other single-purpose object fields retain their schema-1 context.
+//! Sync receives logical values and seals them under the local identity.
 //!
 //! Epoch policy: entry envelopes use
 //! [`open_envelope_relaxed_epoch`] — the DEK is rotation-invariant, so an
@@ -89,7 +80,11 @@ fn identity_context(
         .object(object)
         .purpose(purpose)
         .object_type(object_type)
-        .schema_version(ENTRY_ENVELOPE_SCHEMA)
+        .schema_version(if purpose.is_entry_field() {
+            2
+        } else {
+            ENTRY_ENVELOPE_SCHEMA
+        })
         .crypto_version(crate::crypto::SUPPORTED_CRYPTO_VERSION)
         .epoch(epoch)
         .build()
@@ -148,9 +143,10 @@ pub(crate) fn seal_object_field(
     plaintext: &str,
     epoch: i64,
 ) -> Result<Vec<u8>> {
-    let max = match purpose {
+    let max = match purpose.legacy() {
         EnvelopePurpose::Summary => MAX_SUMMARY_PLAINTEXT,
         EnvelopePurpose::Secret => MAX_SECRET_PLAINTEXT,
+        _ => unreachable!("legacy purpose is summary or secret"),
     };
     let ctx = identity_context(vault_uuid, object_id, object_type, purpose, epoch)?;
     seal_envelope(dek, ctx, plaintext.as_bytes(), max).map_err(PasswordManagerError::from)
@@ -191,12 +187,53 @@ pub(crate) fn open_object_field(
         })?;
         Ok(Zeroizing::new(s))
     } else {
+        if purpose.is_entry_field() {
+            return Err(PasswordManagerError::InvalidInput(
+                "entry field requires authenticated column binding; migrate the legacy row first"
+                    .to_string(),
+            ));
+        }
         // v1 legacy path: context-free bincode EncryptedEntry.
         let encrypted: crate::crypto::EncryptedEntry = bincode::deserialize(blob)
             .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
         crate::crypto::cipher::decrypt_to_string(dek, &encrypted)
             .map_err(PasswordManagerError::from)
     }
+}
+
+/// Migration-only compatibility reader. Normal readers never fall back to
+/// a weaker field identity after authentication fails.
+pub(crate) fn open_entry_field_for_migration(
+    dek: &crate::crypto::DataEncryptionKey,
+    identity: EntryFieldIdentity<'_>,
+    purpose: EnvelopePurpose,
+    blob: &[u8],
+) -> Result<Zeroizing<String>> {
+    let stored_purpose = if is_envelope_blob(blob) {
+        if blob.len() > crate::crypto::envelope::MAX_ENVELOPE_BYTES {
+            return Err(PasswordManagerError::InvalidInput(
+                "oversized entry envelope".into(),
+            ));
+        }
+        let document: crate::crypto::Envelope = serde_json::from_slice(blob)
+            .map_err(|_| PasswordManagerError::InvalidInput("malformed entry envelope".into()))?;
+        if document.context.schema_version == ENTRY_ENVELOPE_SCHEMA
+            && document.context.purpose == purpose.legacy()
+        {
+            purpose.legacy()
+        } else {
+            purpose
+        }
+    } else {
+        purpose.legacy()
+    };
+    open_entry_field_with_identity(dek, Some(identity), stored_purpose, blob)
+}
+
+pub(crate) fn has_field_binding(blob: &[u8], purpose: EnvelopePurpose) -> bool {
+    blob.len() <= crate::crypto::envelope::MAX_ENVELOPE_BYTES
+        && serde_json::from_slice::<crate::crypto::Envelope>(blob)
+            .is_ok_and(|e| e.context.schema_version == 2 && e.context.purpose == purpose)
 }
 
 /// Dual-read one ENTRY field (identity expressed via
@@ -241,23 +278,26 @@ pub(crate) fn open_metadata_text_field(
     vault_uuid: Option<&str>,
     object_id: Option<&str>,
     object_type: ObjectType,
+    purpose: EnvelopePurpose,
     value: Option<rusqlite::types::Value>,
 ) -> Result<Option<String>> {
     use rusqlite::types::Value;
     match value {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::Text(_)) if purpose.is_entry_field() => {
+            Err(PasswordManagerError::InvalidInput(
+                "metadata requires authenticated column binding; migrate first".into(),
+            ))
+        }
         Some(Value::Text(s)) => Ok(Some(s)),
         Some(Value::Blob(blob)) => {
             if blob.starts_with(ENVELOPE_MAGIC) {
-                open_object_field(
-                    dek,
-                    vault_uuid,
-                    object_id,
-                    object_type,
-                    EnvelopePurpose::Summary,
-                    &blob,
-                )
-                .map(|z| Some(z.to_string()))
+                open_object_field(dek, vault_uuid, object_id, object_type, purpose, &blob)
+                    .map(|z| Some(z.to_string()))
+            } else if purpose.is_entry_field() {
+                Err(PasswordManagerError::InvalidInput(
+                    "metadata requires authenticated column binding; migrate first".into(),
+                ))
             } else {
                 String::from_utf8(blob).map(Some).map_err(|_| {
                     PasswordManagerError::from(DatabaseError::Serialization(
@@ -287,8 +327,7 @@ pub(crate) struct SealedEntryFields {
 }
 
 /// Seal ALL sensitive fields of one entry (the single owner of the
-/// field→purpose classification: title/username = Summary,
-/// password/url/notes = Secret). Used by add_entry, update_entry (v2
+/// column-specific purpose classification). Used by add_entry, update_entry (v2
 /// rows), and sync apply.
 pub(crate) fn seal_entry_fields(
     dek: &crate::crypto::DataEncryptionKey,
@@ -305,7 +344,7 @@ pub(crate) fn seal_entry_fields(
             vault_uuid,
             sync_id,
             ot,
-            EnvelopePurpose::Summary,
+            EnvelopePurpose::EntryTitle,
             &entry.title,
             epoch,
         )?,
@@ -314,7 +353,7 @@ pub(crate) fn seal_entry_fields(
             vault_uuid,
             sync_id,
             ot,
-            EnvelopePurpose::Summary,
+            EnvelopePurpose::EntryUsername,
             &entry.username,
             epoch,
         )?,
@@ -323,7 +362,7 @@ pub(crate) fn seal_entry_fields(
             vault_uuid,
             sync_id,
             ot,
-            EnvelopePurpose::Secret,
+            EnvelopePurpose::EntryPassword,
             entry.password.as_str(),
             epoch,
         )?,
@@ -336,7 +375,7 @@ pub(crate) fn seal_entry_fields(
                     vault_uuid,
                     sync_id,
                     ot,
-                    EnvelopePurpose::Secret,
+                    EnvelopePurpose::EntryUrl,
                     u,
                     epoch,
                 )
@@ -351,7 +390,7 @@ pub(crate) fn seal_entry_fields(
                     vault_uuid,
                     sync_id,
                     ot,
-                    EnvelopePurpose::Secret,
+                    EnvelopePurpose::EntryNotes,
                     n,
                     epoch,
                 )

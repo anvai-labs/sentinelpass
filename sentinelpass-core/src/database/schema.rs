@@ -57,7 +57,9 @@ pub const CURRENT_SCHEMA_VERSION: i32 = 13;
 /// discipline as the schema gate (SR-CRYPTO-005 / TD-ROB-07): a newer
 /// content format's rows must never be interpreted by an older binary.
 /// Absent column (pre-v6 schemas) and NULL both read as legacy `1`.
-pub const CURRENT_VAULT_FORMAT_VERSION: i64 = 2;
+/// Format 3 adds column-specific entry purposes and external entry receipts.
+/// The SPENV document remains version 2; its authenticated entry schema is 2.
+pub const CURRENT_VAULT_FORMAT_VERSION: i64 = 3;
 
 /// Main database connection and schema manager
 pub struct Database {
@@ -117,7 +119,17 @@ impl Database {
                 Ok(_) => {
                     Self::validate_vault_file(path)?;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => created = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    drop(options.open(path)?);
+                    created = true;
+                }
                 // A stat error on a real path is allowed through (matching
                 // the create-path precedent): Connection::open below
                 // surfaces any genuine problem.
@@ -125,23 +137,10 @@ impl Database {
             }
         }
 
-        // Hold a private umask across open + PRAGMAs so a freshly created
-        // database and its WAL/SHM sidecars are born owner-only (same
-        // technique as the daemon's Unix-socket bind). Unix-only: the
-        // umask swap is a libc operation; on non-Unix the guard (and its
-        // drop) never existed, so the restore is cfg-gated to match
-        // (Windows CI compile failure, gate-review fix cycle).
-        // The guard restores at the end of the cfg block; the connection
-        // outlives it (umask only needs to cover the CREATE).
-        #[cfg(unix)]
-        let conn = {
-            let _umask_guard = UmaskGuard::if_created(created);
-            let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
-            Self::apply_pragmas(&conn)?;
-            conn
-        };
-        #[cfg(not(unix))]
+        // Pre-created owner-only database above; SQLite's Unix VFS derives
+        // WAL/SHM permissions from that file. Avoid process-global umask races.
         let conn = Connection::open(path).map_err(DatabaseError::Sqlite)?;
+        Self::apply_pragmas(&conn)?;
 
         if created && fs_guarded {
             // Belt-and-braces: explicit owner-only mode even if another
@@ -207,8 +206,8 @@ impl Database {
     /// WAL mode — allows concurrent readers while a writer is active.
     /// busy_timeout — retries for up to 5 s before returning SQLITE_BUSY instead
     ///   of failing immediately under concurrent daemon access.
-    /// synchronous = NORMAL — safe with WAL (the WAL itself is always fsynced);
-    ///   faster than FULL without sacrificing durability for typical workloads.
+    /// synchronous = FULL — commit WAL data durably before acknowledging a
+    ///   write or finalizing its external integrity receipt.
     /// cache_size = -16000 — 16 MB page cache; avoids repeated disk reads for
     ///   large vaults and outperforms SQLite's 2 MB default.
     /// temp_store = MEMORY — temp tables and indexes stay in memory instead of
@@ -224,7 +223,7 @@ impl Database {
             .map_err(DatabaseError::Sqlite)?;
         conn.pragma_update(None, "busy_timeout", 5000i64)
             .map_err(DatabaseError::Sqlite)?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
+        conn.pragma_update(None, "synchronous", "FULL")
             .map_err(DatabaseError::Sqlite)?;
         // Negative value = kibibytes; -16000 ≈ 16 MB.
         conn.pragma_update(None, "cache_size", -16000i64)
@@ -776,38 +775,6 @@ fn sidecar_path(db_path: &Path, ext: &str) -> PathBuf {
     let mut s = db_path.as_os_str().to_os_string();
     s.push(ext);
     PathBuf::from(s)
-}
-
-/// (Unix) RAII guard holding a private umask (0o077) so files created while
-/// it is held are born owner-only; the previous umask is restored on drop.
-#[cfg(unix)]
-struct UmaskGuard {
-    previous: libc::mode_t,
-}
-
-#[cfg(unix)]
-impl UmaskGuard {
-    /// Holds the private umask only when a fresh vault database is about to
-    /// be created; existing-file opens leave the process umask untouched.
-    fn if_created(created: bool) -> Option<Self> {
-        if created {
-            // SAFETY: umask is process-global with no preconditions; the
-            // previous value is restored on drop.
-            Some(Self {
-                previous: unsafe { libc::umask(0o077) },
-            })
-        } else {
-            None
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for UmaskGuard {
-    fn drop(&mut self) {
-        // SAFETY: see if_created.
-        unsafe { libc::umask(self.previous) };
-    }
 }
 
 #[cfg(test)]

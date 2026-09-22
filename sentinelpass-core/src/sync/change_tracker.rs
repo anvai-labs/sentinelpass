@@ -16,6 +16,7 @@ pub fn collect_pending_credential_blobs(
     dek: &DataEncryptionKey,
     device_id: Uuid,
 ) -> Result<Vec<SyncEntryBlob>> {
+    crate::vault::content_guard::verify_snapshot(conn, dek)?;
     let mut stmt = conn
         .prepare(
             "SELECT entry_id, sync_id, sync_version, modified_at, is_deleted,
@@ -92,6 +93,27 @@ pub fn collect_pending_credential_blobs(
             continue;
         }
 
+        crate::vault::content_guard::verify_row(
+            conn,
+            dek,
+            &crate::database::RawEntryRow {
+                entry_id,
+                sync_id: Some(sync_id_str.clone()),
+                sync_version,
+                title: title_blob.clone(),
+                username: username_blob.clone(),
+                password: password_blob.clone(),
+                url: url_blob.clone(),
+                notes: notes_blob.clone(),
+                credential_type: credential_type.clone(),
+                favorite,
+                created_at,
+                modified_at,
+                entry_nonce: Vec::new(),
+                auth_tag: Vec::new(),
+            },
+        )?;
+
         // Load domain mappings for this entry (dual-read, WBS-306: the
         // sealed domain opens; legacy plaintext rows pass through).
         let domains = load_domain_mappings(conn, dek, &vault_uuid, entry_id)?;
@@ -112,20 +134,26 @@ pub fn collect_pending_credential_blobs(
                 continue;
             }
         };
-        let identity = Some(crate::vault::envelope_ops::EntryFieldIdentity {
+        let identity = crate::vault::envelope_ops::EntryFieldIdentity {
             vault_uuid: &vault_uuid,
             sync_id: &sync_id_str,
             cred,
-        });
+        };
         let open = |purpose, blob: &Vec<u8>| {
             // Zeroizing plaintext straight from the envelope open (WBS-308);
             // identity metadata fields are unguarded explicitly below.
-            crate::vault::envelope_ops::open_entry_field_with_identity(dek, identity, purpose, blob)
+            crate::vault::envelope_ops::open_entry_field_for_migration(dek, identity, purpose, blob)
         };
         let (title, username, password) = match (
-            open(crate::crypto::aad::EnvelopePurpose::Summary, &title_blob),
-            open(crate::crypto::aad::EnvelopePurpose::Summary, &username_blob),
-            open(crate::crypto::aad::EnvelopePurpose::Secret, &password_blob),
+            open(crate::crypto::aad::EnvelopePurpose::EntryTitle, &title_blob),
+            open(
+                crate::crypto::aad::EnvelopePurpose::EntryUsername,
+                &username_blob,
+            ),
+            open(
+                crate::crypto::aad::EnvelopePurpose::EntryPassword,
+                &password_blob,
+            ),
         ) {
             (Ok(t), Ok(u), Ok(p)) => (t.to_string(), u.to_string(), p),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
@@ -144,11 +172,13 @@ pub fn collect_pending_credential_blobs(
         // lose fields).
         let url = url_blob
             .filter(|b| !b.is_empty())
-            .map(|b| open(crate::crypto::aad::EnvelopePurpose::Secret, &b).map(|z| z.to_string()))
+            .map(|b| open(crate::crypto::aad::EnvelopePurpose::EntryUrl, &b).map(|z| z.to_string()))
             .transpose();
         let notes = notes_blob
             .filter(|b| !b.is_empty())
-            .map(|b| open(crate::crypto::aad::EnvelopePurpose::Secret, &b).map(|z| z.to_string()))
+            .map(|b| {
+                open(crate::crypto::aad::EnvelopePurpose::EntryNotes, &b).map(|z| z.to_string())
+            })
             .transpose();
         let (url, notes) = match (url, notes) {
             (Ok(u), Ok(n)) => (u, n),
@@ -322,6 +352,7 @@ pub fn collect_pending_ssh_key_blobs(
             Some(vault_uuid.as_str()),
             Some(&sync_id_str),
             crate::crypto::aad::ObjectType::SshKey,
+            crate::crypto::aad::EnvelopePurpose::Summary,
             comment,
         )?;
 
@@ -488,6 +519,7 @@ pub fn collect_pending_totp_blobs(
             Some(vault_uuid.as_str()),
             Some(&sync_id_str),
             crate::crypto::aad::ObjectType::TotpSecret,
+            crate::crypto::aad::EnvelopePurpose::TotpIssuer,
             issuer,
         )?;
         let account_name = crate::vault::envelope_ops::open_metadata_text_field(
@@ -495,6 +527,7 @@ pub fn collect_pending_totp_blobs(
             Some(vault_uuid.as_str()),
             Some(&sync_id_str),
             crate::crypto::aad::ObjectType::TotpSecret,
+            crate::crypto::aad::EnvelopePurpose::TotpAccount,
             account_name,
         )?;
 
@@ -663,6 +696,7 @@ fn load_domain_mappings(
                     Some(vault_uuid),
                     sync_id.as_deref(),
                     crate::crypto::aad::ObjectType::DomainMapping,
+                    crate::crypto::aad::EnvelopePurpose::Summary,
                     Some(blob),
                 ) {
                     Ok(domain) => domain,
@@ -810,13 +844,34 @@ mod tests {
         let sync_id = Uuid::new_v4();
         let now = chrono::Utc::now().timestamp();
 
+        let (vault, epoch) = crate::vault::envelope_ops::read_local_identity(conn).unwrap();
+        let issuer = crate::vault::envelope_ops::seal_object_field(
+            dek,
+            &vault,
+            &sync_id.to_string(),
+            crate::crypto::aad::ObjectType::TotpSecret,
+            crate::crypto::aad::EnvelopePurpose::TotpIssuer,
+            "Test",
+            epoch,
+        )
+        .unwrap();
+        let account = crate::vault::envelope_ops::seal_object_field(
+            dek,
+            &vault,
+            &sync_id.to_string(),
+            crate::crypto::aad::ObjectType::TotpSecret,
+            crate::crypto::aad::EnvelopePurpose::TotpAccount,
+            "user@test.com",
+            epoch,
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO totp_secrets (
                 entry_id, secret_encrypted, nonce, auth_tag,
                 algorithm, digits, period, issuer, account_name, created_at,
                 sync_id, sync_version, sync_state, is_deleted
             ) VALUES (?1, ?2, ?3, ?4,
-                      'SHA1', 6, 30, 'Test', 'user@test.com', ?5,
+                      'SHA1', 6, 30, ?8, ?9, ?5,
                       ?6, 1, 'pending', ?7)",
             rusqlite::params![
                 entry_id,
@@ -825,7 +880,9 @@ mod tests {
                 auth_tag,
                 now,
                 sync_id.to_string(),
-                is_deleted
+                is_deleted,
+                issuer,
+                account
             ],
         )
         .unwrap();

@@ -6,6 +6,7 @@ mod activation_ops;
 /// directly.
 pub mod backup_ops;
 mod biometric_ops;
+pub(crate) mod content_guard;
 pub(crate) mod domain_ops;
 pub(crate) mod envelope_ops;
 pub(crate) mod epoch_guard;
@@ -13,6 +14,7 @@ mod health_ops;
 pub(crate) mod migration_ops;
 pub mod recovery;
 mod registry_ops;
+mod rekey_ops;
 pub(crate) mod slot_ops;
 
 pub use activation_ops::{V2ActivationOutcome, VaultVerificationFailure, VaultVerificationReport};
@@ -450,19 +452,10 @@ impl VaultManager {
             );
         }
 
-        // Registry index backfill (ADR-001): repair the equality index when
-        // it is incomplete (post-migration, post-restore). Bounded full
-        // decrypt — runs only when the sweep bookkeeping says so, never on
-        // every unlock. Best-effort: a failed backfill retries on the next
-        // open or registry read.
-        if vault_manager.registry_backfill_needed().unwrap_or(false) {
-            if let Err(e) = vault_manager.sweep_registry_index() {
-                tracing::warn!(
-                    error = %e,
-                    "registry index backfill failed; will retry on next open"
-                );
-            }
-        }
+        content_guard::initialize(
+            vault_manager.lock_db()?.conn(),
+            vault_manager.key_hierarchy.dek()?,
+        )?;
 
         // Domain-mapping index backfill (WBS-306): seal legacy plaintext
         // mappings + write their lookup tags post-unlock (the migration is
@@ -490,6 +483,20 @@ impl VaultManager {
                 tracing::warn!(
                     error = %e,
                     "v1→v2 blob sweep failed; will retry on next open"
+                );
+            }
+        }
+
+        // Registry index backfill (ADR-001): repair the equality index when
+        // it is incomplete (post-migration, post-restore). Bounded full
+        // decrypt — runs only when the sweep bookkeeping says so, never on
+        // every unlock. Best-effort: a failed backfill retries on the next
+        // open or registry read.
+        if vault_manager.registry_backfill_needed().unwrap_or(false) {
+            if let Err(e) = vault_manager.sweep_registry_index() {
+                tracing::warn!(
+                    error = %e,
+                    "registry index backfill failed; will retry on next open"
                 );
             }
         }
@@ -523,10 +530,13 @@ impl VaultManager {
             }
         }
 
+        content_guard::initialize(
+            vault_manager.lock_db()?.conn(),
+            vault_manager.key_hierarchy.dek()?,
+        )?;
         if let Some(lease) = audit_lease {
             lease.defuse();
         }
-
         Ok(vault_manager)
     }
 
@@ -706,13 +716,18 @@ impl VaultManager {
     }
 
     /// Convert raw entry row to summary (decrypt only title and username)
-    fn row_to_summary(&self, row: &RawEntryRow) -> Result<EntrySummary> {
+    fn row_to_summary(
+        &self,
+        conn: &rusqlite::Connection,
+        row: &RawEntryRow,
+    ) -> Result<EntrySummary> {
+        content_guard::verify_row(conn, self.key_hierarchy.dek()?, row)?;
         let cred = CredentialType::parse(&row.credential_type)?;
         let title = self
             .open_entry_field(
                 row.sync_id.as_deref(),
                 cred,
-                crate::crypto::aad::EnvelopePurpose::Summary,
+                crate::crypto::aad::EnvelopePurpose::EntryTitle,
                 &row.title,
             )?
             .to_string();
@@ -720,7 +735,7 @@ impl VaultManager {
             .open_entry_field(
                 row.sync_id.as_deref(),
                 cred,
-                crate::crypto::aad::EnvelopePurpose::Summary,
+                crate::crypto::aad::EnvelopePurpose::EntryUsername,
                 &row.username,
             )?
             .to_string();
@@ -735,14 +750,15 @@ impl VaultManager {
     }
 
     /// Decrypt a raw entry row from the database
-    fn decrypt_entry_row(&self, row: &RawEntryRow) -> Result<Entry> {
+    fn decrypt_entry_row(&self, conn: &rusqlite::Connection, row: &RawEntryRow) -> Result<Entry> {
+        content_guard::verify_row(conn, self.key_hierarchy.dek()?, row)?;
         let cred = CredentialType::parse(&row.credential_type)?;
         let sid = row.sync_id.as_deref();
         let title = self
             .open_entry_field(
                 sid,
                 cred,
-                crate::crypto::aad::EnvelopePurpose::Summary,
+                crate::crypto::aad::EnvelopePurpose::EntryTitle,
                 &row.title,
             )?
             .to_string();
@@ -750,14 +766,14 @@ impl VaultManager {
             .open_entry_field(
                 sid,
                 cred,
-                crate::crypto::aad::EnvelopePurpose::Summary,
+                crate::crypto::aad::EnvelopePurpose::EntryUsername,
                 &row.username,
             )?
             .to_string();
         let password = self.open_entry_field(
             sid,
             cred,
-            crate::crypto::aad::EnvelopePurpose::Secret,
+            crate::crypto::aad::EnvelopePurpose::EntryPassword,
             &row.password,
         )?;
 
@@ -771,8 +787,13 @@ impl VaultManager {
             .as_ref()
             .filter(|blob| !blob.is_empty())
             .map(|blob| {
-                self.open_entry_field(sid, cred, crate::crypto::aad::EnvelopePurpose::Secret, blob)
-                    .map(|z| z.to_string())
+                self.open_entry_field(
+                    sid,
+                    cred,
+                    crate::crypto::aad::EnvelopePurpose::EntryUrl,
+                    blob,
+                )
+                .map(|z| z.to_string())
             })
             .transpose()?;
 
@@ -781,8 +802,13 @@ impl VaultManager {
             .as_ref()
             .filter(|blob| !blob.is_empty())
             .map(|blob| {
-                self.open_entry_field(sid, cred, crate::crypto::aad::EnvelopePurpose::Secret, blob)
-                    .map(|z| z.to_string())
+                self.open_entry_field(
+                    sid,
+                    cred,
+                    crate::crypto::aad::EnvelopePurpose::EntryNotes,
+                    blob,
+                )
+                .map(|z| z.to_string())
             })
             .transpose()?;
 
@@ -848,10 +874,7 @@ impl VaultManager {
         // deliberately not part of this transaction (audit.rs boundary).
         let dek = self.key_hierarchy.dek()?;
         let db = self.lock_db()?;
-        let tx = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
+        let tx = content_guard::ContentTransaction::begin(db.conn(), self.key_hierarchy.dek()?)?;
 
         let params = NewEntryParams {
             title: title_blob,
@@ -879,7 +902,7 @@ impl VaultManager {
             now,
         )?;
 
-        tx.commit().map_err(DatabaseError::Sqlite)?;
+        tx.commit()?;
         drop(db);
 
         // Log credential creation. Context is deliberately free of the
@@ -907,9 +930,6 @@ impl VaultManager {
             .get_raw(entry_id)?
             .ok_or_else(|| PasswordManagerError::NotFound(format!("Entry {}", entry_id)))?;
 
-        // Drop the database lock before decrypting (decrypt doesn't need the DB)
-        drop(db);
-
         // Decrypt FIRST, then audit with the real title. The former
         // shape (from_utf8_lossy of the raw column) was harmless when
         // columns held v1 bincode mojibake, but a v2 envelope document is
@@ -917,7 +937,7 @@ impl VaultManager {
         // sync_id, purpose/type, epoch, and ciphertext into the long-lived
         // plaintext audit log on every credential view (adoption review,
         // finding 4).
-        let entry = match self.decrypt_entry_row(&raw_row) {
+        let entry = match self.decrypt_entry_row(db.conn(), &raw_row) {
             Ok(entry) => entry,
             // A FAILED view is the security-interesting case (tamper
             // probing, corruption) — it must leave an audit trace too,
@@ -951,16 +971,18 @@ impl VaultManager {
         }
 
         let db = self.lock_db()?;
+        let _read_snapshot = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        content_guard::verify_snapshot(db.conn(), self.key_hierarchy.dek()?)?;
         let repo = SqliteEntryRepository::new(&db);
         let raw_rows = repo.list_raw(EntryFilter::default())?;
-
-        // Drop the database lock before decrypting
-        drop(db);
 
         // Convert raw rows to summaries
         let mut entries = raw_rows
             .iter()
-            .map(|row| self.row_to_summary(row))
+            .map(|row| self.row_to_summary(db.conn(), row))
             .collect::<Result<Vec<_>>>()?;
 
         // Sort entries alphabetically by title
@@ -998,6 +1020,11 @@ impl VaultManager {
         }
 
         let db = self.lock_db()?;
+        let _read_snapshot = db
+            .conn()
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        content_guard::verify_snapshot(db.conn(), self.key_hierarchy.dek()?)?;
         let repo = SqliteEntryRepository::new(&db);
 
         // Get total count
@@ -1011,13 +1038,10 @@ impl VaultManager {
         };
         let raw_rows = repo.list_raw(filter)?;
 
-        // Drop the database lock before decrypting
-        drop(db);
-
         // Convert raw rows to summaries
         let items = raw_rows
             .iter()
-            .map(|row| self.row_to_summary(row))
+            .map(|row| self.row_to_summary(db.conn(), row))
             .collect::<Result<Vec<_>>>()?;
 
         // Calculate if there are more results
@@ -1053,10 +1077,7 @@ impl VaultManager {
 
         let now = chrono::Utc::now().timestamp();
 
-        let tx = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
+        let tx = content_guard::ContentTransaction::begin(db.conn(), self.key_hierarchy.dek()?)?;
 
         // Get sync_id and sync_version before soft-deleting
         let sync_info: Option<(String, i64)> = tx
@@ -1106,7 +1127,7 @@ impl VaultManager {
         // here, mirroring the domain_mappings cleanup above.
         Self::registry_purge_in_tx(&tx, entry_id)?;
 
-        tx.commit().map_err(DatabaseError::Sqlite)?;
+        tx.commit()?;
 
         // Log credential deletion (no raw id in context: the event payload
         // carries the opaque token, WBS-414).
@@ -1225,24 +1246,27 @@ impl VaultManager {
             let seal =
                 |purpose, plaintext: &str| self.seal_entry_field(sid, cred, purpose, plaintext);
             (
-                seal(crate::crypto::aad::EnvelopePurpose::Summary, &entry.title)?,
                 seal(
-                    crate::crypto::aad::EnvelopePurpose::Summary,
+                    crate::crypto::aad::EnvelopePurpose::EntryTitle,
+                    &entry.title,
+                )?,
+                seal(
+                    crate::crypto::aad::EnvelopePurpose::EntryUsername,
                     &entry.username,
                 )?,
                 seal(
-                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    crate::crypto::aad::EnvelopePurpose::EntryPassword,
                     entry.password.as_str(),
                 )?,
                 entry
                     .url
                     .as_ref()
-                    .map(|u| seal(crate::crypto::aad::EnvelopePurpose::Secret, u))
+                    .map(|u| seal(crate::crypto::aad::EnvelopePurpose::EntryUrl, u))
                     .transpose()?,
                 entry
                     .notes
                     .as_ref()
-                    .map(|n| seal(crate::crypto::aad::EnvelopePurpose::Secret, n))
+                    .map(|n| seal(crate::crypto::aad::EnvelopePurpose::EntryNotes, n))
                     .transpose()?,
                 // Deprecated v1 columns — zero-filled on v2 rows.
                 zero_nonce,
@@ -1296,10 +1320,7 @@ impl VaultManager {
         // registry equality-index upsert (a changed tag stamps the rotation
         // in entry_lifecycle). Title-only edits leave the tag unchanged and
         // stamp nothing.
-        let tx = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
+        let tx = content_guard::ContentTransaction::begin(db.conn(), self.key_hierarchy.dek()?)?;
 
         let params = UpdateEntryParams {
             title: Some(title_blob),
@@ -1326,7 +1347,7 @@ impl VaultManager {
             now,
         )?;
 
-        tx.commit().map_err(DatabaseError::Sqlite)?;
+        tx.commit()?;
         drop(db);
 
         // Log credential modification (no title in context: WBS-414).
@@ -1830,6 +1851,7 @@ impl VaultManager {
 pub struct Entry {
     pub entry_id: Option<i64>,
     pub title: String,
+    #[serde(default)]
     pub username: String,
     pub password: Zeroizing<String>,
     pub url: Option<String>,

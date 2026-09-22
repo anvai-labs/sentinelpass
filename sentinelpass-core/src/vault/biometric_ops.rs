@@ -118,10 +118,6 @@ impl VaultManager {
 
         Self::clear_failed_attempts(&db)?;
 
-        if let Some(lease) = audit_lease {
-            lease.defuse();
-        }
-
         let audit_logger = early_logger;
 
         let vault_manager = Self {
@@ -139,6 +135,20 @@ impl VaultManager {
                 AuditEventType::VaultUnlocked { success: true },
                 "Vault unlocked via platform slot",
             );
+        }
+
+        super::content_guard::initialize(
+            vault_manager.lock_db()?.conn(),
+            vault_manager.key_hierarchy.dek()?,
+        )?;
+        if vault_manager.v2_blob_sweep_needed()? {
+            vault_manager.sweep_v1_blobs_to_v2()?;
+        }
+        if vault_manager.v2_activation_needed()? {
+            vault_manager.activate_v2_format()?;
+        }
+        if let Some(lease) = audit_lease {
+            lease.defuse();
         }
 
         Ok(vault_manager)

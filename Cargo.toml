@@ -13,7 +13,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.13.0"
+version = "0.13.1"
 edition = "2021"
 # File::try_lock (WBS-501/503 maintenance lock) stabilized in 1.89 (review F6).
 rust-version = "1.89"
@@ -27,7 +27,7 @@ categories = ["command-line-utilities", "authentication"]
 
 [workspace.dependencies]
 # Cryptography
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["zeroize"] }
 aes-gcm = "0.10"
 rand = "0.8"
 zeroize = { version = "1.7", features = ["zeroize_derive", "serde"] }

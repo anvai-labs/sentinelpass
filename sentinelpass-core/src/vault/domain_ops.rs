@@ -648,7 +648,7 @@ impl VaultManager {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(PasswordManagerError::from)?
             .iter()
-            .map(|row| self.decrypt_entry_row(row))
+            .map(|row| self.decrypt_entry_row(db.conn(), row))
             .collect()
     }
 }

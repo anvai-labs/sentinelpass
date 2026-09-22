@@ -361,6 +361,7 @@ impl VaultManager {
             report.scanned = raw_rows.len();
 
             for row in &raw_rows {
+                super::content_guard::verify_row(db.conn(), dek, row)?;
                 let credential_type = match super::CredentialType::parse(&row.credential_type) {
                     Ok(credential_type) => credential_type,
                     Err(_) => continue,
@@ -376,7 +377,7 @@ impl VaultManager {
                 let secret = match self.open_entry_field(
                     row.sync_id.as_deref(),
                     credential_type,
-                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    crate::crypto::aad::EnvelopePurpose::EntryPassword,
                     &row.password,
                 ) {
                     Ok(secret) => secret.to_string(),
@@ -464,6 +465,9 @@ impl VaultManager {
 
         let repo = SqliteEntryRepository::new(&db);
         let raw_rows = repo.list_raw(EntryFilter::default())?;
+        for row in &raw_rows {
+            super::content_guard::verify_row(conn, dek, row)?;
+        }
 
         // Equality tags → reuse groups (decrypted in memory only)
         let mut tag_groups: HashMap<String, Vec<i64>> = HashMap::new();
@@ -582,7 +586,7 @@ impl VaultManager {
                             match self.open_entry_field(
                                 row.sync_id.as_deref(),
                                 cred,
-                                crate::crypto::aad::EnvelopePurpose::Summary,
+                                crate::crypto::aad::EnvelopePurpose::EntryTitle,
                                 &row.title,
                             ) {
                                 Ok(t) => Some(t.to_string()),
@@ -618,7 +622,7 @@ impl VaultManager {
             let title = match self.open_entry_field(
                 row.sync_id.as_deref(),
                 credential_type,
-                crate::crypto::aad::EnvelopePurpose::Summary,
+                crate::crypto::aad::EnvelopePurpose::EntryTitle,
                 &row.title,
             ) {
                 Ok(t) => t.to_string(),
@@ -650,7 +654,7 @@ impl VaultManager {
                 let secret = match self.open_entry_field(
                     row.sync_id.as_deref(),
                     credential_type,
-                    crate::crypto::aad::EnvelopePurpose::Secret,
+                    crate::crypto::aad::EnvelopePurpose::EntryPassword,
                     &row.password,
                 ) {
                     Ok(s) => s.to_string(),
