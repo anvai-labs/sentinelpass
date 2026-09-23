@@ -113,5 +113,12 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Exercise production-strength Argon2 without unoptimized KDF runtimes
+# exhausting CI's aggregate deadline. Retain test-only safety checks.
+[profile.test]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
 # Mobile bridge build-only (not in workspace dependencies to avoid optional issues)
 # These are added directly to sentinelpass-mobile-bridge/Cargo.toml
