@@ -449,9 +449,9 @@ jobs:
           fi
 
       # Developer ID signing + notarization (ADR-010, upstream issue #148).
-      # Entirely dormant until org secrets exist: without
-      # APPLE_SIGNING_IDENTITY this step no-ops and the release ships
-      # ad-hoc signed exactly as before. The identity is deliberately NOT
+      # Without APPLE_SIGNING_IDENTITY, Tauri's configured ad-hoc identity
+      # seals the entire app; the final-DMG gate below still verifies it.
+      # The Developer ID identity is deliberately NOT
       # exposed to `cargo tauri build` (env above) — the bundler would
       # auto-sign only the outer bundle; we sign inside-out (embedded
       # sidecar Mach-Os first, then the bundle) so notarytool accepts the
@@ -469,7 +469,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "APPLE_SIGNING_IDENTITY not configured; shipping ad-hoc signed (issue #148)"
+            echo "APPLE_SIGNING_IDENTITY not configured; verifying ad-hoc bundle below (issue #148)"
             exit 0
           fi
           for v in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
@@ -500,9 +500,20 @@ jobs:
           codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
 
-          # 3. Staple the app, then REGENERATE the DMG from the stapled app.
+          # 3. Submit the signed app BEFORE stapling: no ticket exists until
+          #    notarization succeeds. ZIPs cannot themselves be stapled.
+          notary_dir=$(mktemp -d)
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$notary_dir/app.zip"
+          xcrun notarytool submit "$notary_dir/app.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --output-format json > "$notary_dir/app-result.json"
+          jq -e '.status == "Accepted"' "$notary_dir/app-result.json"
+
+          # Staple the app, then REGENERATE the DMG from the stapled app.
           #    tauri built the DMG before this step ran, so the on-disk image
-          #    still contains the UNSIGNED app — notarizing it as-is would
+          #    still contains the pre-notarization app — using it as-is would
           #    submit the wrong bytes. A plain UDZO image at the same path
           #    keeps the release job's copy/checksum flow unchanged; tauri's
           #    DMG styling is traded for a provably-signed artifact. The zip
@@ -516,6 +527,7 @@ jobs:
           ln -s /Applications "$stage/Applications"
           hdiutil create -volname "SentinelPass" -srcfolder "$stage" -ov -format UDZO "$dmg"
           rm -rf "$stage"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
 
           # 4. Notarize the regenerated DMG (the user-facing artifact), then
           #    staple it and run the ADR-010 acceptance gate.
@@ -523,11 +535,38 @@ jobs:
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --wait --output-format json > "$notary_dir/dmg-result.json"
+          jq -e '.status == "Accepted"' "$notary_dir/dmg-result.json"
           xcrun stapler staple "$dmg"
           spctl --assess --type execute --verbose=4 "$app"
           xcrun stapler validate "$dmg"
+          rm -rf "$notary_dir"
           echo "Signed and notarized: $app + $dmg"
+
+      - name: Verify sealed app inside final DMG
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg=$(find sentinelpass-ui/target/release/bundle/dmg target/release/bundle/dmg -name '*.dmg' 2>/dev/null | head -1 || true)
+          test -n "$dmg" || { echo "::error::no final DMG to verify"; exit 1; }
+          verification_dir=$(mktemp -d)
+          mounted=0
+          cleanup() {
+            if [ "$mounted" = 1 ]; then
+              hdiutil detach "$verification_dir/mount" || return 1
+            fi
+            rm -rf "$verification_dir"
+          }
+          trap cleanup EXIT
+          mkdir "$verification_dir/mount"
+          hdiutil verify "$dmg"
+          hdiutil attach -readonly -nobrowse -mountpoint "$verification_dir/mount" "$dmg"
+          mounted=1
+          bash scripts/verify-macos-app.sh "$verification_dir/mount/SentinelPass.app" "${{ needs.setup.outputs.version }}"
+          bash scripts/test-macos-app-seal.sh "$verification_dir/mount/SentinelPass.app" "${{ needs.setup.outputs.version }}"
+          hdiutil detach "$verification_dir/mount"
+          mounted=0
 
       # Target-suffixed zip of the verified .app: the Homebrew cask's future
       # artifact and the direct-download form of the desktop app. A .app is a
@@ -728,7 +767,8 @@ jobs:
         shell: bash
         run: |
           cd release-assets
-          find . -type f -exec sha256sum {} + > sha256sums.txt
+          find . -type f ! -name sha256sums.txt -exec sha256sum {} + > sha256sums.txt
+          sha256sum --check --strict sha256sums.txt
           cat sha256sums.txt
 
       - name: Copy Tauri bundles to release assets
@@ -799,7 +839,8 @@ jobs:
         shell: bash
         run: |
           cd release-assets
-          find . -type f -exec sha256sum {} + > sha256sums.txt
+          find . -type f ! -name sha256sums.txt -exec sha256sum {} + > sha256sums.txt
+          sha256sum --check --strict sha256sums.txt
           cat sha256sums.txt
 
       - name: Create GitHub Release
