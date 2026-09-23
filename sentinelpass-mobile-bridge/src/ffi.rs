@@ -1362,9 +1362,6 @@ mod abi_contract_tests {
 mod ownership_tests {
     use super::*;
     use std::ffi::CString;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
 
     fn cstr(s: &str) -> CString {
         CString::new(s).expect("test strings contain no NUL")
@@ -1372,12 +1369,7 @@ mod ownership_tests {
 
     /// Create a fresh unlocked temp vault and return (dir, handle).
     fn temp_vault() -> (std::path::PathBuf, VaultHandle) {
-        let dir = std::env::temp_dir().join(format!(
-            "sp_ffi_ownership_{}_{}",
-            std::process::id(),
-            TEST_SEQ.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = crate::test_support::vault_dir();
         let vault_path = dir.join("vault.db");
         let mut handle: VaultHandle = 0;
         let code = unsafe {
