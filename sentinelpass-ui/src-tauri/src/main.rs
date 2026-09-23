@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{Manager, State};
 
 mod clipboard_secret;
+mod native_host_manifest;
 
 // Application state
 struct AppState {
@@ -564,11 +565,8 @@ fn build_firefox_manifest(host_path: &std::path::Path) -> String {
 }
 
 fn write_manifest(dir: &std::path::Path, filename: &str, contents: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create dir {}: {}", dir.display(), e))?;
+    native_host_manifest::write_manifest(dir, filename, contents)?;
     let path = dir.join(filename);
-    std::fs::write(&path, contents)
-        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     unlock_debug_log(&format!("write_manifest: wrote {}", path.display()));
     Ok(())
 }
