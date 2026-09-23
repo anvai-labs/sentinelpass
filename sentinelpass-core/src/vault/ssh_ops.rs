@@ -205,6 +205,7 @@ impl VaultManager {
                     self.vault_uuid.as_deref(),
                     sync_id.as_deref(),
                     crate::crypto::aad::ObjectType::SshKey,
+                    crate::crypto::aad::EnvelopePurpose::Summary,
                     comment_blob,
                 )?;
                 let key_type = match key_type_str.as_str() {
@@ -292,6 +293,7 @@ impl VaultManager {
                 self.vault_uuid.as_deref(),
                 sync_id.as_deref(),
                 crate::crypto::aad::ObjectType::SshKey,
+                crate::crypto::aad::EnvelopePurpose::Summary,
                 comment,
             )?;
             keys_out.push(crate::ssh::SshKeySummary {
@@ -368,6 +370,7 @@ impl VaultManager {
                 self.vault_uuid.as_deref(),
                 sync_id.as_deref(),
                 crate::crypto::aad::ObjectType::SshKey,
+                crate::crypto::aad::EnvelopePurpose::Summary,
                 comment,
             )?;
             items_out.push(crate::ssh::SshKeySummary {

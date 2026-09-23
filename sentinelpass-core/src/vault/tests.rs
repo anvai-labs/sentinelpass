@@ -3,6 +3,342 @@ use crate::database::Database;
 use tempfile::TempDir;
 
 #[test]
+fn field_substitution_is_rejected_within_an_entry() {
+    let vault = VaultManager::create(":memory:", uuid::Uuid::new_v4().as_bytes()).unwrap();
+    let entry = Entry {
+        entry_id: None,
+        title: "synthetic title".into(),
+        username: "synthetic account".into(),
+        password: uuid::Uuid::new_v4().to_string().into(),
+        url: Some("https://example.invalid".into()),
+        notes: Some("synthetic note".into()),
+        credential_type: CredentialType::ApiKey,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+    // Exercise every directed substitution, including fields in the same
+    // confidentiality class. The expected identity must come from the column.
+    for source in ["title", "username", "password", "url", "notes"] {
+        for target in ["title", "username", "password", "url", "notes"] {
+            if source == target {
+                continue;
+            }
+            let id = vault.add_entry(&entry).unwrap();
+            vault
+                .lock_db()
+                .unwrap()
+                .conn()
+                .execute(
+                    &format!("UPDATE entries SET {target} = {source} WHERE entry_id = ?1"),
+                    [id],
+                )
+                .unwrap();
+            assert!(
+                vault.get_entry(id).is_err(),
+                "accepted {source} in {target}"
+            );
+        }
+    }
+}
+
+#[test]
+fn api_key_without_username_survives_update_and_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("vault.db");
+    let master = uuid::Uuid::new_v4();
+    let vault = VaultManager::create(&path, master.as_bytes()).unwrap();
+    let mut entry = Entry {
+        entry_id: None,
+        title: "service".into(),
+        username: String::new(),
+        password: uuid::Uuid::new_v4().to_string().into(),
+        url: None,
+        notes: None,
+        credential_type: CredentialType::ApiKey,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+    let id = vault.add_entry(&entry).unwrap();
+    entry.notes = Some("updated".into());
+    vault.update_entry(id, &entry).unwrap();
+    drop(vault);
+    let reopened = VaultManager::open(&path, master.as_bytes()).unwrap();
+    assert!(reopened.get_entry(id).unwrap().username.is_empty());
+}
+
+#[test]
+fn legacy_field_envelopes_migrate_and_cannot_be_replayed_afterward() {
+    use crate::crypto::aad::{EnvelopePurpose, ObjectType};
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("vault.db");
+    let master = uuid::Uuid::new_v4();
+    let vault = VaultManager::create(&path, master.as_bytes()).unwrap();
+    let entry = Entry {
+        entry_id: None,
+        title: "legacy title".into(),
+        username: String::new(),
+        password: uuid::Uuid::new_v4().to_string().into(),
+        url: None,
+        notes: None,
+        credential_type: CredentialType::ApiKey,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+    let id = vault.add_entry(&entry).unwrap();
+    let legacy_password;
+    {
+        let db = vault.lock_db().unwrap();
+        let sid: String = db
+            .conn()
+            .query_row("SELECT sync_id FROM entries WHERE entry_id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let seal = |purpose, text: &str| {
+            super::envelope_ops::seal_object_field(
+                vault.key_hierarchy.dek().unwrap(),
+                vault.vault_uuid_str().unwrap(),
+                &sid,
+                ObjectType::ApiKey,
+                purpose,
+                text,
+                1,
+            )
+            .unwrap()
+        };
+        legacy_password = seal(EnvelopePurpose::Secret, entry.password.as_str());
+        db.conn()
+            .execute(
+                "UPDATE entries SET title=?1, username=?2, password=?3 WHERE entry_id=?4",
+                rusqlite::params![
+                    seal(EnvelopePurpose::Summary, &entry.title),
+                    seal(EnvelopePurpose::Summary, ""),
+                    legacy_password,
+                    id
+                ],
+            )
+            .unwrap();
+        db.conn().execute("INSERT OR REPLACE INTO registry_state(key,value) VALUES ('v2_blob_sweep_complete','old')", []).unwrap();
+        // Trusted legacy fixture construction, before receipt enrollment existed.
+        db.conn()
+            .execute(
+                "DELETE FROM registry_state WHERE key='entry_receipts_v1'",
+                [],
+            )
+            .unwrap();
+        std::fs::remove_file(format!("{}.contents", path.display())).unwrap();
+    }
+    drop(vault);
+    let vault = VaultManager::open(&path, master.as_bytes()).unwrap();
+    let read = vault.get_entry(id).unwrap();
+    assert_eq!(read.password.as_str(), entry.password.as_str());
+    assert!(read.username.is_empty());
+    vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .execute(
+            "UPDATE entries SET password=?1 WHERE entry_id=?2",
+            rusqlite::params![legacy_password, id],
+        )
+        .unwrap();
+    assert!(vault.get_entry(id).is_err());
+}
+
+#[test]
+fn deleting_all_rows_outside_the_vault_is_detected_by_listing() {
+    let tmp = TempDir::new().unwrap();
+    let master = uuid::Uuid::new_v4();
+    let vault = VaultManager::create(tmp.path().join("vault.db"), master.as_bytes()).unwrap();
+    let id = vault
+        .add_entry(&Entry {
+            entry_id: None,
+            title: "service".into(),
+            username: String::new(),
+            password: uuid::Uuid::new_v4().to_string().into(),
+            url: None,
+            notes: None,
+            credential_type: CredentialType::ApiKey,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            favorite: false,
+        })
+        .unwrap();
+    vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .execute("UPDATE entries SET is_deleted=1 WHERE entry_id=?1", [id])
+        .unwrap();
+    assert!(
+        vault.list_entries().is_err(),
+        "deleting the last row must not produce a trusted empty list"
+    );
+}
+
+fn vault_with_unauthorized_entry_deletion() -> (TempDir, VaultManager, i64) {
+    let tmp = TempDir::new().unwrap();
+    let vault =
+        VaultManager::create(tmp.path().join("vault.db"), uuid::Uuid::new_v4().as_bytes()).unwrap();
+    let id = vault
+        .add_entry(&Entry {
+            entry_id: None,
+            title: "synthetic entry".into(),
+            username: String::new(),
+            password: uuid::Uuid::new_v4().to_string().into(),
+            url: None,
+            notes: None,
+            credential_type: CredentialType::ApiKey,
+            created_at: Utc::now(),
+            modified_at: Utc::now(),
+            favorite: false,
+        })
+        .unwrap();
+    vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .execute("UPDATE entries SET is_deleted=1 WHERE entry_id=?1", [id])
+        .unwrap();
+    (tmp, vault, id)
+}
+
+#[test]
+fn entry_set_tampering_is_refused_by_registry_views_and_sweep() {
+    let (_tmp, vault, _) = vault_with_unauthorized_entry_deletion();
+    let light_refused = vault.registry_overview(false).is_err();
+    let full_refused = vault.registry_overview(true).is_err();
+    let sweep_refused = vault.sweep_registry_index().is_err();
+    assert!(
+        light_refused && full_refused && sweep_refused,
+        "deleted entry set accepted: light={light_refused}, full={full_refused}, sweep={sweep_refused}"
+    );
+    let count: i64 = vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .query_row("SELECT count(*) FROM secret_equality_index", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "a refused sweep must not prune authenticated entry state"
+    );
+}
+
+#[test]
+fn entry_set_tampering_is_not_reported_as_a_normal_missing_entry() {
+    let (_tmp, vault, id) = vault_with_unauthorized_entry_deletion();
+    assert!(matches!(
+        vault.get_entry(id),
+        Err(PasswordManagerError::InvalidInput(reason)) if reason.contains("entry integrity")
+    ));
+}
+
+#[test]
+fn entry_set_tampering_is_refused_by_envelope_verification() {
+    let (_tmp, vault, _) = vault_with_unauthorized_entry_deletion();
+    assert!(vault.verify_vault_envelopes().is_err());
+}
+
+#[test]
+fn entry_set_tampering_is_refused_by_domain_lookup() {
+    let (_tmp, vault, _) = vault_with_unauthorized_entry_deletion();
+    assert!(vault
+        .find_entries_by_domain("receipt.example.invalid")
+        .is_err());
+}
+
+#[cfg(feature = "sync")]
+#[test]
+fn entry_set_tampering_cannot_retarget_a_pending_sync_tombstone() {
+    let (tmp, vault, id) = vault_with_unauthorized_entry_deletion();
+    // Restore the original state, then delete through the authenticated path.
+    vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .execute("UPDATE entries SET is_deleted=0 WHERE entry_id=?1", [id])
+        .unwrap();
+    vault.delete_entry(id).unwrap();
+    let db = vault.lock_db().unwrap();
+    let dek = vault.key_hierarchy.dek().unwrap();
+    let device = uuid::Uuid::new_v4();
+    assert_eq!(
+        crate::sync::change_tracker::collect_pending_credential_blobs(db.conn(), dek, device,)
+            .unwrap()
+            .len(),
+        1
+    );
+    db.conn()
+        .execute(
+            "UPDATE entries SET sync_id=?1 WHERE entry_id=?2",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+        )
+        .unwrap();
+    assert!(
+        crate::sync::change_tracker::collect_pending_credential_blobs(db.conn(), dek, device,)
+            .is_err(),
+        "a modified tombstone must not be authenticated for another object"
+    );
+    drop(db);
+    drop(vault);
+    drop(tmp);
+}
+
+#[test]
+fn acknowledged_entry_update_rejects_replayed_ciphertext_after_reopen() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("vault.db");
+    let master = uuid::Uuid::new_v4();
+    let vault = VaultManager::create(&path, master.as_bytes()).unwrap();
+    let mut entry = Entry {
+        entry_id: None,
+        title: "replay target".into(),
+        username: String::new(),
+        password: uuid::Uuid::new_v4().to_string().into(),
+        url: None,
+        notes: None,
+        credential_type: CredentialType::ApiKey,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    };
+    let id = vault.add_entry(&entry).unwrap();
+    let old: Vec<u8> = vault
+        .lock_db()
+        .unwrap()
+        .conn()
+        .query_row(
+            "SELECT password FROM entries WHERE entry_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    entry.password = uuid::Uuid::new_v4().to_string().into();
+    vault.update_entry(id, &entry).unwrap();
+    drop(vault);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE entries SET password=?1 WHERE entry_id=?2",
+        rusqlite::params![old, id],
+    )
+    .unwrap();
+    drop(conn);
+    match VaultManager::open(&path, master.as_bytes()) {
+        Err(_) => {}
+        Ok(vault) => assert!(
+            vault.get_entry(id).is_err(),
+            "accepted replay of an acknowledged old value"
+        ),
+    }
+}
+
+#[test]
 fn test_vault_create_and_open() {
     let temp_path = ":memory:"; // Use in-memory database for testing
 
@@ -412,6 +748,36 @@ fn test_import_pairing_bootstrap_into_empty_vault() {
     assert_eq!(target_wrapped_blob, bootstrap.wrapped_dek_blob);
     assert_eq!(sync_device_count, 0);
     assert!(target.key_hierarchy.dek().is_ok());
+}
+
+#[test]
+fn pairing_replaces_receipt_key_for_a_previously_opened_empty_vault() {
+    let tmp = TempDir::new().unwrap();
+    let master = uuid::Uuid::new_v4().to_string();
+    let source = VaultManager::create(":memory:", master.as_bytes()).unwrap();
+    let identity = crate::sync::device::DeviceIdentity::generate("source");
+    source
+        .init_sync(
+            "https://relay.example.invalid",
+            "source",
+            uuid::Uuid::new_v4(),
+            &identity,
+        )
+        .unwrap();
+    let bootstrap = source.export_pairing_bootstrap().unwrap();
+    let path = tmp.path().join("join.db");
+    drop(VaultManager::create(&path, master.as_bytes()).unwrap());
+    let mut target = VaultManager::open(&path, master.as_bytes()).unwrap();
+    target
+        .import_pairing_bootstrap(master.as_bytes(), &bootstrap)
+        .unwrap();
+    assert!(target.list_entries().unwrap().is_empty());
+    drop(target);
+    assert!(VaultManager::open(&path, master.as_bytes())
+        .unwrap()
+        .list_entries()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1374,7 +1740,6 @@ fn pair_join_from_a_multi_rotated_source_rebases_the_sidecar() {
 fn pair_join_sidecar_failure_leaves_a_consistent_not_bricked_vault() {
     use crate::VaultManager;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     let dir = std::env::temp_dir().join(format!(
         "sp-pairjoin-sidecarfail-{}",
@@ -1403,19 +1768,18 @@ fn pair_join_sidecar_failure_leaves_a_consistent_not_bricked_vault() {
 
     let mut target = VaultManager::create(&target_path, b"target-throwaway-password").unwrap();
 
-    // Force the post-commit sidecar rebase to fail: make the vault directory
-    // read-only so the sidecar's temp-file create (and any rename) cannot
-    // happen. The dir mode is restored before cleanup regardless of outcome.
-    let dir_mode = fs::metadata(&dir).unwrap().permissions().mode();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    // Fail ONLY the epoch publication. Making the whole directory read-only
+    // now correctly refuses before key adoption because receipt publication
+    // is a prerequisite of that commit.
+    let epoch_path = crate::vault::epoch_guard::sidecar_path(&target_path);
+    fs::remove_file(&epoch_path).unwrap();
+    fs::create_dir(&epoch_path).unwrap();
 
     let import_result = target.import_pairing_bootstrap(b"password-two-b", &bootstrap);
 
-    fs::set_permissions(&dir, fs::Permissions::from_mode(dir_mode)).unwrap();
-
     assert!(
         import_result.is_err(),
-        "the sidecar rebase must fail under a read-only directory"
+        "publishing the epoch over a directory must fail after key adoption"
     );
     drop(target);
 
@@ -1425,7 +1789,7 @@ fn pair_join_sidecar_failure_leaves_a_consistent_not_bricked_vault() {
     // refusal error instructs) must let the vault open with the IMPORTED
     // password. A buggy partial-revert would make this open fail with a
     // registry integrity error even after the sidecar is removed.
-    fs::remove_file(crate::vault::epoch_guard::sidecar_path(&target_path)).unwrap();
+    fs::remove_dir(&epoch_path).unwrap();
     let reopened = VaultManager::open(&target_path, b"password-two-b").expect(
         "vault must remain internally consistent and openable with the imported password \
          after a sidecar-rebase failure — a partial DB-level revert would desync the wrap \
@@ -1435,7 +1799,6 @@ fn pair_join_sidecar_failure_leaves_a_consistent_not_bricked_vault() {
     assert_eq!(reopened.list_key_slots().unwrap().len(), 1);
     drop(reopened);
 
-    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(dir_mode));
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -2431,7 +2794,7 @@ mod wbs304_adoption {
     /// Legacy v1 rows (context-free bincode blobs) still read via the
     /// dual-read fallback — a pre-adoption vault opens unchanged.
     #[test]
-    fn legacy_v1_rows_read_through_the_fallback() {
+    fn legacy_v1_rows_require_migration_before_reading() {
         let path = temp_vault("v1row");
         let vault = VaultManager::create(&path, b"correct-horse-battery").unwrap();
         let dek = vault.key_hierarchy.dek().unwrap().clone();
@@ -2463,6 +2826,8 @@ mod wbs304_adoption {
             db.conn().last_insert_rowid()
         };
 
+        assert!(vault.get_entry(entry_id).is_err());
+        vault.sweep_v1_blobs_to_v2().unwrap();
         let fetched = vault.get_entry(entry_id).unwrap();
         assert_eq!(fetched.title, "Legacy Site");
         assert_eq!(fetched.password.as_str(), "legacy-pass");
@@ -2482,7 +2847,10 @@ mod wbs304_adoption {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert!(!blob.starts_with(ENVELOPE_MAGIC), "v1 row must stay v1");
+            assert!(
+                blob.starts_with(ENVELOPE_MAGIC),
+                "migrated rows remain authenticated envelopes"
+            );
         }
         assert_eq!(vault.get_entry(entry_id).unwrap().title, "Legacy Renamed");
         drop(vault);
@@ -2523,16 +2891,16 @@ mod wbs304_adoption {
                 .unwrap();
         }
 
-        // A still opens (untouched).
-        assert_eq!(
-            vault.get_entry(id_a).unwrap().password.as_str(),
-            "password-a"
-        );
+        // A's bytes are untouched, but a persisted vault refuses every read
+        // once its authenticated snapshot differs, including reads of A.
+        assert!(vault.get_entry(id_a).is_err());
         // B now carries A's blob: the identity mismatch (different
         // sync_id) must be caught structurally.
         let err = vault.get_entry(id_b).unwrap_err();
         assert!(
-            err.to_string().contains("moved or swapped") || err.to_string().contains("identity"),
+            err.to_string().contains("moved or swapped")
+                || err.to_string().contains("identity")
+                || err.to_string().contains("integrity receipt"),
             "expected the relocation refusal, got: {err}"
         );
         drop(vault);
@@ -2562,7 +2930,8 @@ mod wbs304_adoption {
 
         match vault.get_entry(entry_id) {
             Err(e) => assert!(
-                e.to_string().contains("no stable identity"),
+                e.to_string().contains("no stable identity")
+                    || e.to_string().contains("integrity receipt"),
                 "expected the NULL-sync_id refusal, got: {e}"
             ),
             Ok(_) => panic!("v2 blob with NULL sync_id must refuse, not fall back to v1"),
@@ -3080,12 +3449,20 @@ fn domain_mapping_backfill_runs_at_open() {
     // Pre-v8 shape: plaintext-only mapping row (domain_enc NULL, no tags).
     {
         let db = vault.db.lock().unwrap();
-        db.conn()
+        // Enroll the legacy fixture in its baseline. An out-of-band insert
+        // after enrollment is tampering, not a historical upgrade fixture.
+        let tx = super::content_guard::ContentTransaction::begin(
+            db.conn(),
+            vault.key_hierarchy.dek().unwrap(),
+        )
+        .unwrap();
+        tx
             .execute(
                 "INSERT INTO domain_mappings (entry_id, domain, is_primary) VALUES (?1, 'open.example', 1)",
                 [entry_id],
             )
             .unwrap();
+        tx.commit().unwrap();
     }
 
     // Pre-reopen: legacy fallback is exact-match only, so the suffix query

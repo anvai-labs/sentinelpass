@@ -88,18 +88,12 @@ impl IpcServer {
             Ok(dir) => match AuditLogger::new(dir) {
                 Ok(lg) => Some(Arc::new(lg)),
                 Err(e) => {
-                    warn!(
-                        "IpcServer: audit logger unavailable — audit events will be dropped: {}",
-                        e
-                    );
+                    warn!(error_kind = ?std::any::type_name_of_val(&e), "IpcServer: audit logger unavailable — audit events will be dropped");
                     None
                 }
             },
             Err(e) => {
-                warn!(
-                    "IpcServer: audit log directory unavailable — audit events will be dropped: {}",
-                    e
-                );
+                warn!(error_kind = ?std::any::type_name_of_val(&e), "IpcServer: audit log directory unavailable — audit events will be dropped");
                 None
             }
         };
@@ -202,7 +196,7 @@ impl IpcServer {
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     if let Err(e) = server.run_connection(conn.into()).await {
-                                        debug!("IPC connection ended: {}", e);
+                                        debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
                                     }
                                 });
                             }
@@ -281,7 +275,7 @@ impl IpcServer {
                                 tokio::spawn(async move {
                                     let _permit = permit;
                                     if let Err(e) = server.run_connection(pipe_conn.into()).await {
-                                        debug!("IPC connection ended: {}", e);
+                                        debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
                                     }
                                 });
                             }
@@ -343,7 +337,7 @@ impl IpcServer {
                     break;
                 }
                 Err(e) => {
-                    debug!("IPC connection read ended: {}", e);
+                    debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection read ended");
                     break;
                 }
             };
@@ -372,13 +366,13 @@ impl IpcServer {
                 match serde_json::to_vec(&response) {
                     Ok(response_bytes) => Some(response_bytes),
                     Err(e) => {
-                        error!("Failed to serialize response: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to serialize response");
                         None
                     }
                 }
             }
             Err(e) => {
-                error!("Failed to parse IPC envelope: {}", e);
+                error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to parse IPC envelope");
                 None
             }
         }
@@ -543,12 +537,7 @@ impl IpcServer {
                         locked: Some(true),
                     };
                 }
-                debug!(
-                    "IPC: GetExternalSecret client='{}' domain='{}' field='{}'",
-                    client_id,
-                    domain,
-                    field.as_str()
-                );
+                debug!("IPC: GetExternalSecret");
 
                 let purpose = purpose.unwrap_or_else(|| "external-secret-access".to_string());
                 let allowlist =
@@ -610,7 +599,7 @@ impl IpcServer {
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to get external secret: {}", e);
+                                error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to get external secret");
                                 log_external_secret_audit(
                                     self.audit_logger.as_deref(),
                                     Some(&client_id),
@@ -659,7 +648,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to load external secret allowlist: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to load external secret allowlist");
                         IpcMessage::GetExternalSecretResponse {
                             value: None,
                             authorized: false,
@@ -744,7 +733,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to save external secret: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to save external secret");
                         IpcMessage::SaveSecretResponse {
                             success: false,
                             locked: None,
@@ -753,14 +742,14 @@ impl IpcServer {
                     }
                 }
             }
-            IpcMessage::DeleteSecret { client_id, domain } => {
+            IpcMessage::DeleteSecret {
+                client_id: _,
+                domain,
+            } => {
                 // Deletion is rejected until entries carry ownership metadata
                 // (schema v5): a write-grant must never be able to delete a
                 // human-created login.
-                debug!(
-                    "IPC: DeleteSecret from client '{}' for '{}' rejected (unsupported)",
-                    client_id, domain
-                );
+                debug!("IPC: DeleteSecret");
                 let _ = domain;
                 IpcMessage::DeleteSecretResponse {
                     deleted: false,
@@ -776,7 +765,7 @@ impl IpcServer {
                 page_url,
                 username,
             } => {
-                debug!("IPC: GetCredential for domain '{}'", domain);
+                debug!("IPC: GetCredential");
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::GetCredentialResponse {
@@ -804,11 +793,7 @@ impl IpcServer {
                 let validated_host = match self.autofill_origin_decision(page_url.as_deref()) {
                     Ok(host) => host,
                     Err(reason) => {
-                        warn!(
-                            "denied autofill credential delivery for claimed domain \
-                             '{}' ({})",
-                            domain, reason
-                        );
+                        warn!("denied autofill credential delivery");
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
                             None,
@@ -852,7 +837,7 @@ impl IpcServer {
                         }
                     }
                     Ok(None) => {
-                        debug!("No credential found for domain '{}'", domain);
+                        debug!("No credential found");
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
                             None,
@@ -871,7 +856,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to get credential: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to get credential");
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
                             None,
@@ -895,10 +880,7 @@ impl IpcServer {
                 base_domain,
                 page_url,
             } => {
-                debug!(
-                    "IPC: ListDomainCredentials for base domain '{}'",
-                    base_domain
-                );
+                debug!("IPC: ListDomainCredentials");
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::ListDomainCredentialsResponse {
@@ -921,11 +903,7 @@ impl IpcServer {
                 let validated_host = match self.autofill_origin_decision(page_url.as_deref()) {
                     Ok(host) => host,
                     Err(reason) => {
-                        warn!(
-                            "denied domain-credential listing for claimed domain \
-                             '{}' ({})",
-                            base_domain, reason
-                        );
+                        warn!("denied domain-credential listing");
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
                             None,
@@ -960,7 +938,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to list domain credentials: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to list domain credentials");
                         IpcMessage::ListDomainCredentialsResponse {
                             credentials: Vec::new(),
                             locked: None,
@@ -974,7 +952,7 @@ impl IpcServer {
                 page_url,
                 username,
             } => {
-                debug!("IPC: GetTotpCode for domain '{}'", domain);
+                debug!("IPC: GetTotpCode");
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::GetTotpCodeResponse {
@@ -999,10 +977,7 @@ impl IpcServer {
                 let validated_host = match self.autofill_origin_decision(page_url.as_deref()) {
                     Ok(host) => host,
                     Err(reason) => {
-                        warn!(
-                            "denied TOTP code delivery for claimed domain '{}' ({})",
-                            domain, reason
-                        );
+                        warn!("denied TOTP code delivery");
                         log_external_secret_audit(
                             self.audit_logger.as_deref(),
                             None,
@@ -1033,7 +1008,7 @@ impl IpcServer {
                         denied_reason: None,
                     },
                     Ok(None) => {
-                        debug!("No TOTP code found for domain '{}'", domain);
+                        debug!("No TOTP code found");
                         IpcMessage::GetTotpCodeResponse {
                             code: None,
                             seconds_remaining: None,
@@ -1042,7 +1017,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to get TOTP code: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to get TOTP code");
                         IpcMessage::GetTotpCodeResponse {
                             code: None,
                             seconds_remaining: None,
@@ -1057,14 +1032,9 @@ impl IpcServer {
                 username,
                 password,
                 url,
-                save_trigger,
+                save_trigger: _,
             } => {
-                info!(
-                    "IPC: SaveCredential for domain '{}', user '{}', trigger '{}'",
-                    domain,
-                    username,
-                    save_trigger.as_deref().unwrap_or("unknown")
-                );
+                info!("IPC: SaveCredential");
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::SaveCredentialResponse {
@@ -1090,7 +1060,7 @@ impl IpcServer {
                     .await
                 {
                     Ok(_) => {
-                        info!("Credential saved successfully for domain '{}'", domain);
+                        info!("Credential saved successfully");
                         IpcMessage::SaveCredentialResponse {
                             success: true,
                             error: None,
@@ -1098,7 +1068,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to save credential: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to save credential");
                         IpcMessage::SaveCredentialResponse {
                             success: false,
                             error: Some(e.to_string()),
@@ -1132,7 +1102,7 @@ impl IpcServer {
                         .unwrap_or_default();
                     match store.grant_insecure(&self.site_permissions_path, &host) {
                         Ok(true) => {
-                            info!("Site permission granted (allow_insecure) for '{}'", host);
+                            info!("Site permission granted (allow_insecure) for");
                             Ok(true)
                         }
                         Ok(false) => Ok(false),
@@ -1154,7 +1124,7 @@ impl IpcServer {
                         error: Some("invalid host".to_string()),
                     },
                     Err(e) => {
-                        error!("Failed to grant site permission: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to grant site permission");
                         IpcMessage::GrantSitePermissionResponse {
                             success: false,
                             error: Some("grant failed".to_string()),
@@ -1180,10 +1150,7 @@ impl IpcServer {
                     .unwrap_or_default();
                 match store.revoke(&self.site_permissions_path, &host) {
                     Ok(removed) => {
-                        info!(
-                            "Site permission revoked for '{}' (removed={})",
-                            host, removed
-                        );
+                        info!("Site permission revoked for");
                         IpcMessage::RevokeSitePermissionResponse {
                             success: true,
                             removed,
@@ -1191,7 +1158,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to revoke site permission: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to revoke site permission");
                         IpcMessage::RevokeSitePermissionResponse {
                             success: false,
                             removed: false,
@@ -1243,7 +1210,7 @@ impl IpcServer {
                         error: None,
                     },
                     Err(e) => {
-                        warn!("Failed to unlock vault via IPC: {}", e);
+                        warn!(error_kind = ?std::any::type_name_of_val(&e), "Failed to unlock vault via IPC");
                         IpcMessage::UnlockVaultResponse {
                             success: false,
                             error: Some(e.to_string()),
@@ -1268,7 +1235,7 @@ impl IpcServer {
                         }
                     }
                     Err(e) => {
-                        warn!("Failed biometric unlock via IPC: {}", e);
+                        warn!(error_kind = ?std::any::type_name_of_val(&e), "Failed biometric unlock via IPC");
                         log_daemon_audit(
                             self.audit_logger.as_deref(),
                             AuditEventType::BiometricUnlockRequested { success: false },
@@ -1332,7 +1299,7 @@ impl IpcServer {
                             }
                         }
                         Err(e) => {
-                            error!("Failed to run sync: {}", e);
+                            error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to run sync");
                             IpcMessage::SyncNowResponse {
                                 success: false,
                                 pushed: 0,
@@ -1362,7 +1329,7 @@ impl IpcServer {
                         pending_changes: status.pending_changes,
                     },
                     Err(e) => {
-                        error!("Failed to get sync status: {}", e);
+                        error!(error_kind = ?std::any::type_name_of_val(&e), "Failed to get sync status");
                         IpcMessage::SyncStatusResponse {
                             enabled: false,
                             device_id: None,
@@ -1585,7 +1552,7 @@ impl IpcServer {
                         }
                     }
                     Ok(Err(e)) => {
-                        warn!("IPC: vault creation refused: {}", e);
+                        warn!(error_kind = ?std::any::type_name_of_val(&e), "IPC: vault creation refused");
                         IpcMessage::ServiceResult {
                             outcome: ServiceOutcome::from(ServiceError::from(e)),
                         }
@@ -1753,6 +1720,63 @@ mod autofill_origin_gate_tests {
     use chrono::Utc;
     use sentinelpass_protocol::{IpcEnvelope, Origin};
     use tempfile::TempDir;
+
+    #[test]
+    fn credential_diagnostics_do_not_disclose_request_values() {
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let h = harness_with_vault();
+        let capture = Capture(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            for capability in [None, Some(h.capability.clone())] {
+                let _ = handle(
+                    &rt,
+                    &h.server,
+                    envelope(
+                        IpcMessage::SaveCredential {
+                            domain: "private-canary.invalid".into(),
+                            username: "private-user-canary".into(),
+                            password: "private-secret-canary".into(),
+                            url: Some("https://private-canary.invalid".into()),
+                            save_trigger: Some("private-trigger-canary".into()),
+                        },
+                        capability,
+                    ),
+                );
+            }
+        });
+        let bytes = capture.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.is_empty(), "logging capture must observe events");
+        for canary in [
+            "private-canary",
+            "private-user",
+            "private-secret",
+            "private-trigger",
+        ] {
+            assert!(!text.contains(canary), "diagnostic log disclosed {canary}");
+        }
+    }
 
     // --- pure gate decision -------------------------------------------------
 

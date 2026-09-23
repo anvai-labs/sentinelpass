@@ -4,6 +4,7 @@ use crate::{CredentialType, DatabaseError, Entry, PasswordManagerError, Result, 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use zeroize::Zeroizing;
 
 const PLAINTEXT_EXPORT_WARNING: &str = "WARNING: This file contains UNENCRYPTED passwords. \
      Treat it like a master password. Delete it immediately after use.";
@@ -25,11 +26,14 @@ fn create_export_file(output: &Path) -> Result<std::fs::File> {
 }
 
 /// Export format for vault data
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ExportEntry {
     pub title: String,
+    #[serde(default)]
     pub username: String,
-    pub password: String,
+    pub password: zeroize::Zeroizing<String>,
+    #[serde(default)]
+    pub credential_type: CredentialType,
     pub url: Option<String>,
     pub notes: Option<String>,
     pub created_at: String,
@@ -42,7 +46,8 @@ impl From<Entry> for ExportEntry {
         Self {
             title: entry.title,
             username: entry.username,
-            password: entry.password.as_str().to_string(),
+            password: entry.password,
+            credential_type: entry.credential_type,
             url: entry.url,
             notes: entry.notes,
             created_at: entry.created_at.to_rfc3339(),
@@ -58,8 +63,10 @@ impl From<Entry> for ExportEntry {
 /// clients call it directly with entries obtained via `VaultOp::ExportAll`
 /// so the file format stays byte-compatible with the pre-split writer.
 pub fn render_json_export(export_entries: &[ExportEntry], output: &Path) -> Result<()> {
-    let json = serde_json::to_string_pretty(export_entries)
-        .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
+    let json =
+        Zeroizing::new(serde_json::to_string_pretty(export_entries).map_err(|e| {
+            PasswordManagerError::from(DatabaseError::Serialization(e.to_string()))
+        })?);
 
     let mut file = create_export_file(output)?;
 
@@ -200,6 +207,7 @@ pub fn parse_json_import(input: &Path) -> Result<Vec<Entry>> {
             e
         )))
     })?;
+    let bytes = Zeroizing::new(bytes);
     parse_json_import_bytes(&bytes)
 }
 
@@ -209,6 +217,9 @@ pub fn parse_json_import(input: &Path) -> Result<Vec<Entry>> {
 /// `serde_json::from_slice` performs the UTF-8 validation, so error
 /// behavior matches the former reader-based path.
 pub fn parse_json_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
+    // Accept our own explicit warning line while keeping ordinary JSON strict.
+    let warning = format!("// {PLAINTEXT_EXPORT_WARNING}\n");
+    let data = data.strip_prefix(warning.as_bytes()).unwrap_or(data);
     let export_entries: Vec<ExportEntry> = serde_json::from_slice(data).map_err(|e| {
         PasswordManagerError::from(DatabaseError::Serialization(format!(
             "Failed to parse JSON: {}",
@@ -222,10 +233,10 @@ pub fn parse_json_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
             entry_id: None,
             title: export_entry.title,
             username: export_entry.username,
-            password: export_entry.password.into(),
+            password: export_entry.password,
             url: export_entry.url,
             notes: export_entry.notes,
-            credential_type: CredentialType::Password,
+            credential_type: export_entry.credential_type,
             created_at: export_entry.created_at.parse().map_err(|e| {
                 PasswordManagerError::from(DatabaseError::Serialization(format!(
                     "Invalid created_at date: {}",
@@ -243,6 +254,26 @@ pub fn parse_json_import_bytes(data: &[u8]) -> Result<Vec<Entry>> {
     }
 
     Ok(entries)
+}
+
+#[cfg(test)]
+#[test]
+fn api_key_json_import_accepts_missing_username_and_preserves_type() {
+    let secret = uuid::Uuid::new_v4().to_string();
+    let json = serde_json::json!([{
+        "title": "service", "password": secret, "credential_type": "api_key",
+        "created_at": "2026-01-01T00:00:00Z", "modified_at": "2026-01-01T00:00:00Z",
+        "favorite": false
+    }]);
+    let entries = parse_json_import_bytes(&serde_json::to_vec(&json).unwrap()).unwrap();
+    assert_eq!(entries[0].credential_type, crate::CredentialType::ApiKey);
+    assert!(entries[0].username.is_empty());
+    let exported = ExportEntry::from(entries.into_iter().next().unwrap());
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("export.json");
+    render_json_export(&[exported], &path).unwrap();
+    let roundtrip = parse_json_import(&path).unwrap();
+    assert_eq!(roundtrip[0].credential_type, crate::CredentialType::ApiKey);
 }
 
 /// Import entries from JSON format
@@ -269,6 +300,7 @@ pub fn parse_csv_import(input: &Path) -> Result<Vec<Entry>> {
             e
         )))
     })?;
+    let bytes = Zeroizing::new(bytes);
     parse_csv_import_bytes(&bytes)
 }
 

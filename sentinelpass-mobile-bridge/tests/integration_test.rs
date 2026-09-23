@@ -10,7 +10,8 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+
+mod support;
 
 use sentinelpass_mobile_bridge::{
     sp_bridge_info, sp_entry_add, sp_entry_delete, sp_entry_get_by_id, sp_entry_list_all,
@@ -19,8 +20,6 @@ use sentinelpass_mobile_bridge::{
     sp_vault_is_unlocked, sp_vault_lock, BridgeInfo, Entry, EntrySummary, ErrorCode,
     PasswordAnalysis, SyncStatus, TotpCode, VaultHandle,
 };
-
-static TEST_SEQ: AtomicU32 = AtomicU32::new(0);
 
 fn cstr(s: &str) -> CString {
     CString::new(s).expect("test strings contain no NUL")
@@ -35,12 +34,7 @@ struct TestVault {
 
 impl TestVault {
     fn create() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "sp_integration_{}_{}",
-            std::process::id(),
-            TEST_SEQ.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let dir = support::vault_dir();
         let vault_path = dir.join("vault.db");
         let mut handle: VaultHandle = 0;
         let code = unsafe {
@@ -90,6 +84,18 @@ impl Drop for TestVault {
 const MASTER: &str = "integration-master-password";
 
 #[test]
+fn fixture_cleanup_preserves_process_data_directory() {
+    let v = TestVault::create();
+    let process_data = sentinelpass_core::platform::get_data_dir();
+    assert!(process_data.is_dir());
+    drop(v);
+    assert!(
+        process_data.is_dir(),
+        "one vault fixture must not delete the process-wide mobile data directory"
+    );
+}
+
+#[test]
 fn vault_lifecycle_create_unlock_lock_destroy() {
     let v = TestVault::create();
 
@@ -106,12 +112,7 @@ fn vault_lifecycle_create_unlock_lock_destroy() {
 
 #[test]
 fn double_destroy_and_use_after_destroy_are_refused() {
-    let dir = std::env::temp_dir().join(format!(
-        "sp_integration_{}_{}",
-        std::process::id(),
-        TEST_SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = support::vault_dir();
     let mut handle: VaultHandle = 0;
     let code = unsafe {
         sp_vault_init(
@@ -166,12 +167,7 @@ fn unknown_handle_and_null_out_params_are_refused() {
 
 #[test]
 fn vault_reopen_requires_master_password() {
-    let dir = std::env::temp_dir().join(format!(
-        "sp_integration_{}_{}",
-        std::process::id(),
-        TEST_SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = support::vault_dir();
     let path = dir.join("vault.db");
 
     let mut handle: VaultHandle = 0;

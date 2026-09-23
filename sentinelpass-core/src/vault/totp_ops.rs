@@ -88,7 +88,7 @@ impl VaultManager {
                     self.vault_uuid_str()?,
                     &sync_id,
                     crate::crypto::aad::ObjectType::TotpSecret,
-                    crate::crypto::aad::EnvelopePurpose::Summary,
+                    crate::crypto::aad::EnvelopePurpose::TotpIssuer,
                     value,
                     self.session_epoch(),
                 )
@@ -101,7 +101,7 @@ impl VaultManager {
                     self.vault_uuid_str()?,
                     &sync_id,
                     crate::crypto::aad::ObjectType::TotpSecret,
-                    crate::crypto::aad::EnvelopePurpose::Summary,
+                    crate::crypto::aad::EnvelopePurpose::TotpAccount,
                     value,
                     self.session_epoch(),
                 )
@@ -222,6 +222,7 @@ impl VaultManager {
                     self.vault_uuid.as_deref(),
                     sync_id.as_deref(),
                     crate::crypto::aad::ObjectType::TotpSecret,
+                    crate::crypto::aad::EnvelopePurpose::TotpIssuer,
                     issuer_blob,
                 )?;
                 let account_name = crate::vault::envelope_ops::open_metadata_text_field(
@@ -229,6 +230,7 @@ impl VaultManager {
                     self.vault_uuid.as_deref(),
                     sync_id.as_deref(),
                     crate::crypto::aad::ObjectType::TotpSecret,
+                    crate::crypto::aad::EnvelopePurpose::TotpAccount,
                     account_blob,
                 )?;
 
@@ -425,6 +427,33 @@ mod tests {
     }
 
     #[test]
+    fn issuer_account_substitution_is_rejected() {
+        let vault = test_vault();
+        let id = add_entry(&vault);
+        vault
+            .add_totp_secret(
+                id,
+                SECRET,
+                TotpAlgorithm::Sha1,
+                6,
+                30,
+                Some("issuer"),
+                Some("account"),
+            )
+            .unwrap();
+        vault
+            .lock_db()
+            .unwrap()
+            .conn()
+            .execute(
+                "UPDATE totp_secrets SET issuer=account_name WHERE entry_id=?1",
+                [id],
+            )
+            .unwrap();
+        assert!(vault.get_totp_metadata(id).is_err());
+    }
+
+    #[test]
     fn absent_issuer_stays_absent() {
         let vault = test_vault();
         let entry_id = add_entry(&vault);
@@ -438,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plaintext_metadata_still_reads() {
+    fn legacy_plaintext_metadata_requires_migration() {
         let vault = test_vault();
         let entry_id = add_entry(&vault);
         vault
@@ -463,6 +492,8 @@ mod tests {
                 )
                 .unwrap();
         }
+        assert!(vault.get_totp_metadata(entry_id).is_err());
+        vault.sweep_v1_blobs_to_v2().unwrap();
         let meta = vault.get_totp_metadata(entry_id).unwrap();
         assert_eq!(meta.issuer.as_deref(), Some("PlainIssuer"));
         assert_eq!(meta.account_name.as_deref(), Some("plain@example.com"));

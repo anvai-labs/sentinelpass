@@ -1,5 +1,7 @@
 # Security Status Matrix
 
+See [2026-09-22 at-rest remediation](SECURITY_REMEDIATION_2026-09-22.md) for the latest implementation delta, validation scope and remaining local rollback/memory/platform limits.
+
 **Last reviewed:** 2026-09-11
 
 **Workspace baseline:** 0.11 (development cycle; last tagged release 0.10.0). The in-tree manifest version lags by design — release.yml injects the tag version into the manifest at release time.

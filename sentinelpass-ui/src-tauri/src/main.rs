@@ -1461,6 +1461,10 @@ pub struct TotpMetadataResponse {
 }
 
 fn main() {
+    if sentinelpass_core::platform::disable_core_dumps().is_err() {
+        eprintln!("Unable to disable process crash dumps; refusing to open the vault");
+        std::process::exit(1);
+    }
     unlock_debug_log("startup: sentinelpass-ui main() entered");
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

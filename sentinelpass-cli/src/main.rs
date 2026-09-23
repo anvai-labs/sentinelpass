@@ -57,6 +57,13 @@ enum Commands {
     /// Rotate the vault master password (re-wraps the data key; entries untouched)
     Passwd,
 
+    /// Create a verified replacement vault with a fresh data-encryption key
+    Rekey {
+        /// New directory for the replacement vault (must not exist)
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+
     /// Show vault schema version, key epoch, and daemon reachability
     /// (no master password required)
     Status,
@@ -987,6 +994,7 @@ mod maintenance_lock_tests {
 }
 
 fn main() -> Result<()> {
+    sentinelpass_core::platform::disable_core_dumps()?;
     // Initialize logging
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::WARN) // Reduce noise in CLI
@@ -1123,6 +1131,10 @@ fn main() -> Result<()> {
         Commands::Passwd => {
             let vault_path = get_vault_path(&cli, false);
             commands::vault::handle_passwd(vault_path)?;
+        }
+
+        Commands::Rekey { ref output_dir } => {
+            commands::vault::handle_rekey(get_vault_path(&cli, false), output_dir)?;
         }
 
         Commands::Status => {
