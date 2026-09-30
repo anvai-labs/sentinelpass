@@ -1,4 +1,4 @@
-# ADR-011: shared private-file custody
+# ADR-012: shared private-file custody
 
 Date: 2026-09-30. Status: implemented for Linux allowlist storage; review pending.
 

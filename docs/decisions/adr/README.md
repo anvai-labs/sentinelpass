@@ -34,4 +34,4 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-011](ADR-011-service-credentials-systemd.md) | Restart-safe service credentials via systemd | Accepted |
 
 
-- [ADR-011: Shared private-file custody](ADR-011-shared-private-file-custody.md) — Linux extraction and allowlist adoption.
+| [ADR-012](ADR-012-shared-private-file-custody.md) | Shared private-file custody | Proposed |
