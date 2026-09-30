@@ -33,3 +33,5 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-010](ADR-010-release-assurance-and-provenance.md) | Release assurance and provenance | Accepted (rev 2) |
 | [ADR-011](ADR-011-service-credentials-systemd.md) | Restart-safe service credentials via systemd | Accepted |
 
+
+- [ADR-011: Shared private-file custody](ADR-011-shared-private-file-custody.md) — Linux extraction and allowlist adoption.
