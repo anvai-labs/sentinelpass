@@ -25,11 +25,13 @@ the current effective UID and have no group/other or special permission bits.
 New directories start at 0700; new files at 0600, subject to a restrictive umask.
 Do not chmod arbitrary existing directories or repair loose files implicitly.
 
-Regular files must belong to the effective UID, have one hard link, no
+Regular files must belong to the effective UID, have at most one hard link, no
 group/other permissions and no special mode bits. Reads are bounded both before
 allocation and while reading, return zero-on-drop bytes, and never block opening
 a FIFO. A requested bound is 1 byte through 16 MiB. Writes also cap at 16 MiB.
-Names inside a retained directory are single components. Parent traversal in
+A reader may retain a complete old inode after concurrent replacement removes
+its last directory link; that zero-link read is valid. New files and lock handles
+still require exactly one link. Names inside a retained directory are single components. Parent traversal in
 the initial directory path is resolved by handles, never by removing a prior
 component lexically. Symlinked homes/ancestors are intentionally refused; use
 the actual trusted path.

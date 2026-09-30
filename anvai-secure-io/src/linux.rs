@@ -42,12 +42,12 @@ fn leaf(name: &Path) -> Result<()> {
     }
 }
 
-fn check_file(file: &File) -> Result<()> {
+fn check_file(file: &File, allow_unlinked: bool) -> Result<()> {
     let meta = file.metadata().map_err(|_| Error::Io)?;
     if !meta.is_file()
         || meta.uid() != geteuid().as_raw()
         || meta.mode() & 0o7077 != 0
-        || meta.nlink() != 1
+        || (meta.nlink() != 1 && !(allow_unlinked && meta.nlink() == 0))
     {
         return Err(Error::NotPrivate);
     }
@@ -124,7 +124,7 @@ impl PrivateDir {
         check_dir(&self.file, true)?;
         let file =
             File::from(fs::openat(&self.file, name, FILE_FLAGS, Mode::empty()).map_err(errno)?);
-        check_file(&file)?;
+        check_file(&file, true)?;
         Ok(file)
     }
 
@@ -184,7 +184,7 @@ impl PrivateDir {
         }
         let (temporary, mut file) = temporary.ok_or(Error::Busy)?;
         let result = (|| {
-            check_file(&file)?;
+            check_file(&file, false)?;
             file.write_all(bytes)
                 .and_then(|()| file.sync_all())
                 .map_err(|_| Error::Io)?;
@@ -231,11 +231,38 @@ impl PrivateDir {
             )
             .map_err(errno)?,
         );
-        check_file(&file)?;
+        check_file(&file, false)?;
         file.try_lock().map_err(|error| match error {
             std::fs::TryLockError::WouldBlock => Error::Busy,
             std::fs::TryLockError::Error(_) => Error::Io,
         })?;
         Ok(file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn already_open_replaced_inode_is_readable_but_not_a_valid_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = PrivateDir::open(tmp.path()).unwrap();
+        directory
+            .write(Path::new("file"), b"old", Publish::CreateNew)
+            .unwrap();
+        let mut opened = directory.open_file(Path::new("file")).unwrap();
+        directory
+            .write(Path::new("file"), b"new", Publish::ReplaceExisting)
+            .unwrap();
+        assert_eq!(opened.metadata().unwrap().nlink(), 0);
+        check_file(&opened, true).unwrap();
+        assert_eq!(check_file(&opened, false), Err(Error::NotPrivate));
+        let mut bytes = Vec::new();
+        opened.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"old");
+        assert_eq!(&*directory.read(Path::new("file"), 3).unwrap(), b"new");
     }
 }
