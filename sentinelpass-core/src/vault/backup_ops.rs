@@ -630,6 +630,7 @@ impl VaultManager {
         let snapshot_path = staging.join("snapshot.db");
         let snapshot_bytes = {
             let db = self.lock_db()?;
+            super::content_guard::verify_snapshot(db.conn(), self.key_hierarchy.dek()?)?;
             // VACUUM INTO: a consistent WAL-inclusive read snapshot of
             // the live database into a standalone file (ADR-008's
             // sanctioned mechanism; the output has no sidecars).
@@ -637,6 +638,14 @@ impl VaultManager {
             db.conn()
                 .execute("VACUUM INTO ?1", rusqlite::params![vacuum_path])
                 .map_err(DatabaseError::Sqlite)?;
+            {
+                let copy = rusqlite::Connection::open_with_flags(
+                    &snapshot_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(DatabaseError::Sqlite)?;
+                super::content_guard::verify_copy(db.conn(), &copy, self.key_hierarchy.dek()?)?;
+            }
             let bytes = fs::read(&snapshot_path).map_err(|e| {
                 PasswordManagerError::Io(std::io::Error::other(format!(
                     "cannot read staged backup snapshot: {e}"
@@ -1984,6 +1993,11 @@ impl VaultManager {
                 }
             }
         }
+        {
+            let restored = crate::database::Database::open(vault_path)?;
+            let (_, dek) = unwrap_manifest_dek(&manifest, master_password)?;
+            super::content_guard::rebase_verified_restore(restored.conn(), &dek)?;
+        }
         if faults.abort_after == Some(SwapPhase::SidecarRebaseline) {
             return Err(refuse(
                 PasswordManagerError::InvalidInput(
@@ -1997,6 +2011,7 @@ impl VaultManager {
         // unlock, registry verify, backfills) proves the restored state
         // end to end under the bundle password.
         let from_epoch = live.as_ref().and_then(|s| s.key_epoch);
+
         if let Err(e) = VaultManager::open(vault_path, master_password) {
             let preserved = stg
                 .pre_tmp

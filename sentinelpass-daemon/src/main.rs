@@ -270,6 +270,7 @@ fn init_logging() -> Result<Option<WorkerGuard>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    sentinelpass_core::platform::disable_core_dumps()?;
     // Initialize logging. The returned guard MUST live to the end of main:
     // dropping it stops the non-blocking worker before final flushes.
     let _log_guard = init_logging()?;

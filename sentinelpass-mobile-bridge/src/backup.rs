@@ -91,18 +91,9 @@ pub fn bridge_backup_restore(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static SEQ: AtomicU32 = AtomicU32::new(0);
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sp_backup_test_{}_{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+        crate::test_support::vault_dir()
     }
 
     #[test]

@@ -210,6 +210,7 @@ impl VaultManager {
 
         let db = self.lock_db()?;
         let conn = db.conn();
+        let tx = super::content_guard::ContentTransaction::begin(conn, self.key_hierarchy.dek()?)?;
 
         let entry_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
@@ -284,10 +285,6 @@ impl VaultManager {
         // surgery, found by re-deriving the MAC-key/DEK relationship under
         // adversarial review). One transaction; no partial DB-level
         // compensation on later failures.
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
-
         let rows = tx
             .execute(
                 "UPDATE db_metadata
@@ -297,7 +294,7 @@ impl VaultManager {
             )
             .map_err(DatabaseError::Sqlite)?;
         if rows == 0 {
-            let _ = tx.rollback();
+            drop(tx);
             return Err(PasswordManagerError::NotFound("Vault metadata".to_string()));
         }
 
@@ -319,7 +316,7 @@ impl VaultManager {
             bootstrap.key_epoch,
             true,
         ) {
-            let _ = tx.rollback();
+            drop(tx);
             return Err(e);
         }
         // Throwaway sync state from the pre-join vault is part of the
@@ -331,7 +328,7 @@ impl VaultManager {
             .map_err(DatabaseError::Sqlite)?;
         tx.execute("DELETE FROM sync_tombstones", [])
             .map_err(DatabaseError::Sqlite)?;
-        tx.commit().map_err(DatabaseError::Sqlite)?;
+        tx.commit_empty_key_change(imported_hierarchy.dek()?)?;
         drop(db);
 
         // From here the adoption is DURABLE: the in-memory hierarchy must

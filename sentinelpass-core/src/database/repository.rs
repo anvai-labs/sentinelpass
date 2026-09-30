@@ -248,7 +248,7 @@ impl<'a> SqliteEntryRepository<'a> {
         Self { db }
     }
 
-    fn parse_row(row: &Row) -> rusqlite::Result<RawEntryRow> {
+    pub(crate) fn parse_row(row: &Row) -> rusqlite::Result<RawEntryRow> {
         Ok(RawEntryRow {
             entry_id: row.get(0)?,
             title: row.get(1)?,

@@ -45,6 +45,31 @@ pub enum EnvelopePurpose {
     Summary,
     /// The sensitive payload (password, key material) — decrypted on demand.
     Secret,
+    /// Field-specific entry purposes (entry envelope schema 2). The legacy
+    /// Summary/Secret purposes remain readable only by the migration path.
+    EntryTitle,
+    EntryUsername,
+    EntryPassword,
+    EntryUrl,
+    EntryNotes,
+    TotpIssuer,
+    TotpAccount,
+}
+
+impl EnvelopePurpose {
+    pub(crate) fn legacy(self) -> Self {
+        match self {
+            Self::EntryTitle | Self::EntryUsername | Self::TotpIssuer | Self::TotpAccount => {
+                Self::Summary
+            }
+            Self::EntryPassword | Self::EntryUrl | Self::EntryNotes => Self::Secret,
+            other => other,
+        }
+    }
+
+    pub(crate) fn is_entry_field(self) -> bool {
+        self != self.legacy()
+    }
 }
 
 /// What kind of object this envelope belongs to. Deliberately covers every
@@ -77,6 +102,7 @@ pub enum ObjectType {
 /// adding/removing a field changes every future AAD byte sequence; that is
 /// exactly why the golden vectors below exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AadContext {
     /// AAD encoding format version — independent of `crypto_version` (the
     /// envelope's algorithm/format) and `schema_version` (the database

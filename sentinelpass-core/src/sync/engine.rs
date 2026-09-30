@@ -206,24 +206,27 @@ fn prepare_credential_blobs(
             epoch,
         )
     };
-    let title = seal(crate::crypto::aad::EnvelopePurpose::Summary, &payload.title)?;
+    let title = seal(
+        crate::crypto::aad::EnvelopePurpose::EntryTitle,
+        &payload.title,
+    )?;
     let username = seal(
-        crate::crypto::aad::EnvelopePurpose::Summary,
+        crate::crypto::aad::EnvelopePurpose::EntryUsername,
         &payload.username,
     )?;
     let password = seal(
-        crate::crypto::aad::EnvelopePurpose::Secret,
+        crate::crypto::aad::EnvelopePurpose::EntryPassword,
         &payload.password,
     )?;
     let url = payload
         .url
         .as_ref()
-        .map(|u| seal(crate::crypto::aad::EnvelopePurpose::Secret, u))
+        .map(|u| seal(crate::crypto::aad::EnvelopePurpose::EntryUrl, u))
         .transpose()?;
     let notes = payload
         .notes
         .as_ref()
-        .map(|n| seal(crate::crypto::aad::EnvelopePurpose::Secret, n))
+        .map(|n| seal(crate::crypto::aad::EnvelopePurpose::EntryNotes, n))
         .transpose()?;
     // Deprecated v1 columns — zero-filled on v2 rows (see envelope_ops).
     let (nonce, auth_tag) = crate::vault::envelope_ops::zeroed_legacy_v1_columns();
@@ -361,9 +364,7 @@ pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
     // locally-tampered stored payload) must leave the row conflicted with
     // the record intact, never half-resolved into a state where the next
     // sync would overwrite the local edit without a completed resolution.
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(DatabaseError::Sqlite)?;
+    let tx = crate::vault::content_guard::ContentTransaction::begin(conn, dek)?;
     tx.execute(
         &format!(
             "UPDATE {table} SET sync_state = 'synced',
@@ -390,7 +391,7 @@ pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
     match engine.apply_remote_entry_in_tx(&tx, dek, &blob) {
         Ok(()) => {}
         Err(e) => {
-            let _ = tx.rollback();
+            drop(tx);
             return Err(e);
         }
     }
@@ -399,7 +400,7 @@ pub fn resolve_conflict_take_remote<T: SyncTransport + 'static>(
         [object_id.to_string()],
     )
     .map_err(DatabaseError::Sqlite)?;
-    tx.commit().map_err(DatabaseError::Sqlite)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -645,10 +646,8 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     .db
                     .lock()
                     .map_err(|_| DatabaseError::LockPoisoned("apply pull".to_string()))?;
-                let mut tx = db
-                    .conn()
-                    .unchecked_transaction()
-                    .map_err(DatabaseError::Sqlite)?;
+                let mut tx =
+                    crate::vault::content_guard::ContentTransaction::begin(db.conn(), dek)?;
 
                 // WBS-612: every foreign mutation is authenticated BEFORE
                 // application — the DEK-derived metadata MAC over the
@@ -813,7 +812,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 config.lineage_high_water = config.lineage_high_water.max(observed_max);
                 config.save(&tx)?;
 
-                tx.commit().map_err(DatabaseError::Sqlite)?;
+                tx.commit()?;
                 high_water = config.lineage_high_water;
 
                 if still_deferred > 0 {
@@ -856,16 +855,14 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
         dek: &DataEncryptionKey,
         blob: &SyncEntryBlob,
     ) -> Result<()> {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
+        let tx = crate::vault::content_guard::ContentTransaction::begin(conn, dek)?;
         let result = self.apply_remote_entry_in_tx(&tx, dek, blob);
         if let Err(e) = result {
             // tx drops on return: the whole blob rolls back.
-            let _ = tx.rollback();
+            drop(tx);
             return Err(e);
         }
-        Ok(tx.commit().map_err(DatabaseError::Sqlite)?)
+        tx.commit()
     }
 
     /// The apply core WITHOUT its own transaction — the caller's transaction
@@ -1369,7 +1366,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         &vault_uuid,
                         &sync_id_str,
                         crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        crate::crypto::aad::EnvelopePurpose::TotpIssuer,
                         c,
                         epoch,
                     )
@@ -1384,7 +1381,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         &vault_uuid,
                         &sync_id_str,
                         crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        crate::crypto::aad::EnvelopePurpose::TotpAccount,
                         c,
                         epoch,
                     )
@@ -1472,7 +1469,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         &vault_uuid,
                         &sync_id_str,
                         crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        crate::crypto::aad::EnvelopePurpose::TotpIssuer,
                         c,
                         epoch,
                     )
@@ -1487,7 +1484,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         &vault_uuid,
                         &sync_id_str,
                         crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::Summary,
+                        crate::crypto::aad::EnvelopePurpose::TotpAccount,
                         c,
                         epoch,
                     )
@@ -1848,14 +1845,44 @@ mod tests {
                 let conn = db.lock().unwrap();
                 let mut stmt = conn
                     .conn()
-                    .prepare("SELECT domain FROM domain_mappings ORDER BY mapping_id")
+                    .prepare(
+                        "SELECT domain,domain_enc,sync_id FROM domain_mappings ORDER BY mapping_id",
+                    )
                     .unwrap();
                 let rows = stmt
-                    .query_map([], |r| r.get::<_, String>(0))
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<Vec<u8>>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    })
                     .unwrap()
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .unwrap();
-                rows
+                let (vault_uuid, _) =
+                    crate::vault::envelope_ops::read_local_identity(conn.conn()).unwrap();
+                rows.into_iter()
+                    .map(|(legacy, sealed, id)| match sealed {
+                        Some(blob) => {
+                            assert!(
+                                legacy.is_empty(),
+                                "committed sealed mapping has no plaintext copy"
+                            );
+                            crate::vault::envelope_ops::open_object_field(
+                                &dek,
+                                Some(&vault_uuid),
+                                id.as_deref(),
+                                crate::crypto::aad::ObjectType::DomainMapping,
+                                crate::crypto::aad::EnvelopePurpose::Summary,
+                                &blob,
+                            )
+                            .unwrap()
+                            .to_string()
+                        }
+                        None => legacy,
+                    })
+                    .collect()
             };
             let index: i64 = {
                 let conn = db.lock().unwrap();
@@ -2232,7 +2259,7 @@ mod tests {
             Some(vault_uuid.as_str()),
             Some(blobs[0].sync_id.to_string().as_str()),
             crate::crypto::aad::ObjectType::Password,
-            crate::crypto::aad::EnvelopePurpose::Secret,
+            crate::crypto::aad::EnvelopePurpose::EntryUrl,
             url_blob.as_deref().unwrap(),
         )
         .unwrap();
@@ -2242,7 +2269,7 @@ mod tests {
             Some(vault_uuid.as_str()),
             Some(blobs[0].sync_id.to_string().as_str()),
             crate::crypto::aad::ObjectType::Password,
-            crate::crypto::aad::EnvelopePurpose::Secret,
+            crate::crypto::aad::EnvelopePurpose::EntryNotes,
             notes_blob.as_deref().unwrap(),
         )
         .unwrap();

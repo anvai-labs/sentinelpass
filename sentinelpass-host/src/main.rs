@@ -6,6 +6,7 @@ use tracing_subscriber::FmtSubscriber;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> Result<()> {
+    sentinelpass_core::platform::disable_core_dumps()?;
     // Initialize logging to stderr (native messaging uses stdout)
     let subscriber = FmtSubscriber::builder()
         .with_writer(std::io::stderr)
@@ -24,8 +25,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            error!("Native messaging host error: {}", e);
-            anyhow::bail!("Native messaging host failed: {}", e)
+            error!(error_kind = ?std::any::type_name_of_val(&e), "Native messaging host error");
+            anyhow::bail!(
+                "Native messaging host failed; request values are omitted from diagnostics"
+            )
         }
     }
 }

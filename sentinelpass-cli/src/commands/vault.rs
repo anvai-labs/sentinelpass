@@ -5,6 +5,24 @@ use sentinelpass_core::VaultManager;
 use std::path::{Path, PathBuf};
 use tracing::error;
 
+pub fn handle_rekey(vault_path: PathBuf, output_dir: &Path) -> Result<()> {
+    let current = zeroize::Zeroizing::new(prompt_password("Current master password: ")?);
+    let replacement = zeroize::Zeroizing::new(crate::prompt_master_password(true)?);
+    if current.as_bytes() == replacement.as_bytes() {
+        anyhow::bail!("Use a different master password for compromise recovery");
+    }
+    crate::with_maintenance_lock(&vault_path, || {
+        let source = VaultManager::open(&vault_path, current.as_bytes())?;
+        let path = source.rekey_to(output_dir, replacement.as_bytes())?;
+        println!("Verified replacement vault: {}", path.display());
+        println!("The source is retained. Enroll recovery and biometric access again, and pair sync devices with the replacement vault.");
+        println!(
+            "Previously exposed passwords and API keys must also be rotated at their providers."
+        );
+        Ok(())
+    })
+}
+
 /// Best-effort daemon reachability probe: attempts a real IPC round trip
 /// (`CheckVault`) rather than checking whether the socket path exists.
 ///

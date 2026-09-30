@@ -264,9 +264,6 @@ mod tests {
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static SEQ: AtomicU32 = AtomicU32::new(0);
 
     /// The fake "platform": deterministic signatures over the challenge
     /// (what RSA-PKCS1 in a real Keystore/Secure Enclave promises).
@@ -289,12 +286,7 @@ mod tests {
     }
 
     fn temp_vault_path() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sp_slot_test_{}_{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
+        let dir = crate::test_support::vault_dir();
         dir.join("vault.db")
     }
 

@@ -27,9 +27,9 @@ pub use dbwire::{
     KDF_MAGIC_STR, MAX_DBWIRE_BYTES, NONCE_MAGIC, NONCE_MAGIC_STR, WRAP_MAGIC, WRAP_MAGIC_STR,
 };
 pub use envelope::{
-    open_envelope, open_envelope_relaxed_epoch, seal_envelope, seal_envelope_with_nonce, Envelope,
-    ALG_A256GCM, ENVELOPE_MAGIC, ENVELOPE_MAGIC_STR, ENVELOPE_VERSION, MAX_CIPHERTEXT_BYTES,
-    MAX_ENVELOPE_BYTES, SUPPORTED_CRYPTO_VERSION,
+    open_envelope, open_envelope_relaxed_epoch, seal_envelope, Envelope, ALG_A256GCM,
+    ENVELOPE_MAGIC, ENVELOPE_MAGIC_STR, ENVELOPE_VERSION, MAX_CIPHERTEXT_BYTES, MAX_ENVELOPE_BYTES,
+    SUPPORTED_CRYPTO_VERSION,
 };
 pub use health::{
     HealthScore, PasswordHealth, PasswordHealthAnalyzer, PasswordStrengthInfo,
