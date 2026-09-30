@@ -37,7 +37,7 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 # JNI (Android)
-jni = { version = "0.21", optional = true }
+jni = { version = "0.22", optional = true }
 
 # Logging
 tracing = { workspace = true }
