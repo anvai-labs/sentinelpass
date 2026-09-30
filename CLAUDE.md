@@ -139,7 +139,7 @@ sentinelpass-daemon
 
 **sentinelpass-cli/** - Command-line interface (binary: `sentinelpass`):
 - Clap-based CLI with subcommands
-- Commands: init, add, list, search, edit, delete, generate, totp-add/code/remove, ssh-key-add/list/get/delete, export, import, check, biometric-enable/disable
+- Commands: init, add, list, search, edit, delete, generate, totp-add/code/remove, ssh-key-add/list/get/delete, export, import, check, biometric-enable/disable, service-credential install/verify/list/remove (restart-safe systemd encrypted credentials; see docs/SERVICE_CREDENTIALS.md)
 - Sync subcommands: sync init/now/status/device-list/device-revoke/pair-start/pair-join/disable
 
 **sentinelpass-ui/** - Tauri v2 desktop application (binary: `sentinelpass-ui`):

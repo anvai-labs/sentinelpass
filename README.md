@@ -217,6 +217,7 @@ Coexistence notes:
 | OSS release checklist | `docs/OSS_RELEASE_CHECKLIST.md` |
 | Build details | `BUILD.md` |
 | Sync protocol & relay | `docs/SYNC.md` |
+| Service credentials (systemd) runbook | `docs/SERVICE_CREDENTIALS.md` |
 | Security internals | `SECURITY_ARCHITECTURE.md` |
 | Architecture decisions (ADRs) | `docs/decisions/adr/README.md` |
 | Roadmap | `ROADMAP.md` |
