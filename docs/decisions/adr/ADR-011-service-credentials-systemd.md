@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Proposed (acceptance requested with this change's review; flip to Accepted before merge) |
+| Status | Accepted (2026-09-30, after two independent review rounds — adversarial + proxy; remediation folded into the same change) |
 | Date | 2026-09-30 |
 | Owners | Core maintainer, security lead |
 | Related | ADR-003; ADR-007 (§ secrets broker); [#191](https://github.com/anvai-labs/sentinelpass/issues/191) |
@@ -57,6 +57,11 @@ in a local manifest.
    temporary file (0600, fsynced), verified there, then renamed over the
    target and the directory fsynced. Crash or failure mid-run leaves either
    the old credential or no credential — never a torn or unverified one.
+   The temp name is **unique per attempt** (random suffix, created
+   `O_EXCL | O_NOFOLLOW`): concurrent installs of the same credential each
+   verify exactly the bytes they publish — the deterministic-name variant
+   was demonstrated (adversarial review) to let one run rename another's
+   unverified ciphertext over a working credential.
 4. **Manifest, not secrets.** `<config>/service-credentials.json` (0600)
    records client id, domain, field, credential name, protection mode,
    directory, size, and timestamp — enough to drive `list`, `verify`,
@@ -137,10 +142,18 @@ plaintext at runtime.
 
 - **MVP:** `service-credential install|verify|list|remove`; host-key and
   TPM2 protection modes; `--not-after` pass-through; verify-before-publish;
-  atomic replacement; manifest; runbook with rotation/revocation and failure
-  recovery; synthetic-credential tests (fake `systemd-creds` tool).
+  atomic replacement (unique `O_EXCL` temp — concurrency-safe); capped tool
+  output with `SENTINELPASS_*` environment scrubbing and plaintext redaction
+  in tool-error excerpts; credstore ownership/writability validation;
+  manifest; runbook with rotation/revocation and failure recovery;
+  synthetic-credential tests (fake `systemd-creds` tool) including
+  concurrency, environment-scrub and redaction regressions. Operates the
+  *server provisioning profile*: on host-key hosts the daemon, vault, and
+  CLI share one UID (root), stated in the runbook.
 - **Later:** opt-in exe-digest grant binding + peer provenance in audit
-  (Linux, follow-up change); `--user` scope (systemd ≥ 256); TPM2 PCR
+  (Linux, follow-up change); decoupling broker resolution (vault user) from
+  credstore publication (root) so a non-root daemon can serve provisioning
+  without a peer-policy change; `--user` scope (systemd ≥ 256); TPM2 PCR
   policies; `SetCredentialEncrypted=` embedded-in-unit variant for
   template-ish deploys.
 

@@ -61,9 +61,22 @@ fn resolve_credstore_dir(explicit: Option<&PathBuf>) -> Result<PathBuf> {
 }
 
 fn tool_path(explicit: Option<&PathBuf>) -> PathBuf {
-    explicit
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("systemd-creds"))
+    if let Some(explicit) = explicit {
+        return explicit.clone();
+    }
+    // Prefer an absolute, root-owned location over PATH lookup: this process
+    // typically runs as root, and a preserved user PATH would let a planted
+    // ~/bin/systemd-creds receive the plaintext (adversarial review F3).
+    // --systemd-creds always wins for exotic layouts and tests.
+    if cfg!(target_os = "linux") {
+        for candidate in ["/usr/bin/systemd-creds", "/usr/local/bin/systemd-creds"] {
+            let candidate = PathBuf::from(candidate);
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("systemd-creds")
 }
 
 /// Fetch the secret through the audited broker (grant + client token) and
@@ -93,8 +106,12 @@ pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
     let credstore_dir = resolve_credstore_dir(args.credstore_dir.as_ref())?;
     let tool = SystemdCredsTool::new(tool_path(args.systemd_creds.as_ref()));
 
-    // Fail fast on bad names BEFORE touching the daemon or the vault.
+    // Fail fast on bad names and an unusable credential store BEFORE
+    // touching the daemon or the vault (a doomed run should not consume an
+    // audited broker fetch — adversarial review nit).
     sentinelpass_core::validate_credential_name(&args.cred_name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    sentinelpass_core::preflight_credstore_dir(&credstore_dir)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let plaintext = resolve_secret_bytes(
@@ -135,9 +152,15 @@ pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
         cipher_len: receipt.cipher_len,
         not_after: args.not_after.clone(),
     });
-    manifest
-        .save_to_path(&manifest_path)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    manifest.save_to_path(&manifest_path).map_err(|e| {
+        // The credential IS published; the manifest is not. Make that state
+        // explicit instead of letting `list` silently miss it (review nit).
+        anyhow::anyhow!(
+            "credential PUBLISHED at {} but recording it failed: {e} — re-run \
+             'service-credential install' (idempotent) or 'remove' to reconcile",
+            receipt.path.display()
+        )
+    })?;
 
     println!("Installed service credential:");
     println!("  credential : {}", args.cred_name);
@@ -177,7 +200,19 @@ pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
 
 /// Returns a process exit code: 0 = match, 3 = mismatch/absent.
 pub(crate) fn handle_verify(args: VerifyArgs) -> Result<i32> {
-    let credstore_dir = resolve_credstore_dir(args.credstore_dir.as_ref())?;
+    // Directory precedence: explicit flag, else the manifest's recorded dir
+    // for this credential, else the platform default (matches the `Verify`
+    // help text and `remove`'s behavior — proxy review finding 5).
+    let manifest =
+        ServiceCredentialManifest::load_from_path(&ServiceCredentialManifest::default_path())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let credstore_dir = match &args.credstore_dir {
+        Some(explicit) => explicit.clone(),
+        None => manifest
+            .find(&args.cred_name)
+            .map(|record| PathBuf::from(&record.credstore_dir))
+            .map_or_else(|| resolve_credstore_dir(None), Ok)?,
+    };
     let tool = SystemdCredsTool::new(tool_path(args.systemd_creds.as_ref()));
 
     let plaintext = resolve_secret_bytes(
@@ -252,11 +287,35 @@ pub(crate) fn handle_remove(cred_name: String, credstore_dir: Option<PathBuf>) -
         (None, None) => resolve_credstore_dir(None)?,
     };
 
+    // An explicit --credstore-dir that disagrees with the manifest's
+    // recorded directory removes THAT file but keeps the row: silently
+    // dropping it would orphan the recorded-dir ciphertext (proxy review
+    // finding 7).
+    let recorded_dir: Option<String> = manifest.find(&cred_name).map(|r| r.credstore_dir.clone());
+    let keep_row = match &recorded_dir {
+        Some(recorded) if dir.to_string_lossy() != *recorded => {
+            println!(
+                "Note: --credstore-dir {} differs from the manifest's recorded {}; \
+                 the row for the recorded directory is kept",
+                dir.display(),
+                recorded
+            );
+            true
+        }
+        _ => false,
+    };
+
     let removed_file = remove_credential(&cred_name, &dir).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let removed_record = manifest.remove(&cred_name);
-    manifest
-        .save_to_path(&manifest_path)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let removed_record = if keep_row {
+        None
+    } else {
+        manifest.remove(&cred_name)
+    };
+    if !keep_row {
+        manifest
+            .save_to_path(&manifest_path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
 
     if !removed_file && removed_record.is_none() {
         println!("No service credential named '{cred_name}' found");

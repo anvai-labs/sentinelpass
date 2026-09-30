@@ -29,6 +29,12 @@ const MANIFEST_FILE: &str = "service-credentials.json";
 /// systemd loads service credentials into memory; keep provisioning bounded.
 pub const MAX_CREDENTIAL_BYTES: usize = 512 * 1024;
 
+/// Hard caps on buffered tool output (base64 of the max credential is
+/// ~700 KiB; diagnostics are tiny). Past the cap the output is drained and
+/// discarded and the run fails (adversarial review F7).
+pub const MAX_TOOL_STDOUT: usize = 1024 * 1024;
+pub const MAX_TOOL_STDERR: usize = 64 * 1024;
+
 /// Default encrypted-credential store for system units (systemd ≥ 254
 /// searches it for bare `LoadCredentialEncrypted=<name>`). Only meaningful
 /// on Linux — elsewhere the caller must pass an explicit directory (tests,
@@ -199,6 +205,9 @@ impl ServiceCredentialManifest {
                 "Failed to publish service credential manifest: {e}"
             ))
         })?;
+        // Durably record the rename itself (a crash after the file-level
+        // sync must not silently drop the row).
+        sync_directory(path.parent().unwrap_or_else(|| Path::new(".")));
         Ok(())
     }
 
@@ -272,7 +281,17 @@ impl SystemdCredsTool {
         if output.status.success() {
             Ok(output.stdout)
         } else {
-            Err(tool_error("encrypt", &self.program, &output))
+            // Redact the plaintext from the excerpt: real systemd-creds never
+            // echoes the payload, but a replaced/hostile tool might, and the
+            // error must not become a leak channel (adversarial review F3).
+            let mut stderr = output.stderr;
+            redact_bytes(&mut stderr, plaintext);
+            Err(tool_error(
+                "encrypt",
+                &self.program,
+                &output.status,
+                &stderr,
+            ))
         }
     }
 
@@ -289,14 +308,27 @@ impl SystemdCredsTool {
         if output.status.success() {
             Ok(Zeroizing::new(output.stdout))
         } else {
-            Err(tool_error("decrypt", &self.program, &output))
+            Err(tool_error(
+                "decrypt",
+                &self.program,
+                &output.status,
+                &output.stderr,
+            ))
         }
     }
 
-    /// Run the tool with `plaintext` on stdin. The write happens on its own
-    /// thread so a large payload cannot deadlock against unread stdout.
-    fn run(mut command: std::process::Command, plaintext: &[u8]) -> Result<std::process::Output> {
+    /// Run the tool with `plaintext` on stdin. Hardening (adversarial review
+    /// F3/F7): all `SENTINELPASS_*` environment variables (notably the grant
+    /// token) are scrubbed from the child environment, and stdout/stderr are
+    /// read under hard caps — a broken or replaced tool cannot memory-exhaust
+    /// the (root) CLI by streaming unbounded output.
+    fn run(mut command: std::process::Command, plaintext: &[u8]) -> Result<ToolOutput> {
         use std::process::Stdio;
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("SENTINELPASS_") {
+                command.env_remove(&key);
+            }
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -316,22 +348,115 @@ impl SystemdCredsTool {
             // Drop closes the pipe → EOF for the tool.
         });
 
-        let output = child.wait_with_output().map_err(|e| {
+        // Capped readers on their own threads. Past the cap they keep
+        // DRAINING (discarding) until EOF: the child can never block on a
+        // full pipe, so a tool streaming unbounded output still terminates
+        // cleanly and we merely refuse to buffer it (adversarial review F7).
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+        let stdout_reader = std::thread::spawn(move || read_capped(stdout_handle, MAX_TOOL_STDOUT));
+        let stderr_reader = std::thread::spawn(move || read_capped(stderr_handle, MAX_TOOL_STDERR));
+
+        let join_capped =
+            |handle: std::thread::JoinHandle<std::io::Result<CappedRead>>| -> Result<CappedRead> {
+                handle.join().map_err(|_| thread_panic())?.map_err(|e| {
+                    PasswordManagerError::InvalidInput(format!(
+                        "failed reading systemd-creds output: {e}"
+                    ))
+                })
+            };
+        let stdout = join_capped(stdout_reader)?;
+        let stderr = join_capped(stderr_reader)?;
+        if stdout.over_cap || stderr.over_cap {
+            let _ = writer.join();
+            return Err(PasswordManagerError::InvalidInput(format!(
+                "systemd-creds output exceeded its byte cap (stdout {}, stderr {}) — \
+                 refusing to buffer it (is the tool at {} really systemd-creds?)",
+                MAX_TOOL_STDOUT,
+                MAX_TOOL_STDERR,
+                command.get_program().to_string_lossy()
+            )));
+        }
+        let status = child.wait().map_err(|e| {
             PasswordManagerError::InvalidInput(format!(
                 "systemd-creds did not run to completion: {e}"
             ))
         })?;
         let _ = writer.join();
-        Ok(output)
+        Ok(ToolOutput {
+            status,
+            stdout: stdout.data,
+            stderr: stderr.data,
+        })
     }
 }
 
-fn tool_error(phase: &str, program: &Path, output: &std::process::Output) -> PasswordManagerError {
-    // Bounded stderr excerpt; the tool's errors never contain the payload.
-    let stderr = String::from_utf8_lossy(&output.stderr);
+struct ToolOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn thread_panic() -> PasswordManagerError {
+    PasswordManagerError::InvalidInput("tool output reader thread failed".to_string())
+}
+
+fn read_capped<R: std::io::Read>(mut reader: Option<R>, cap: usize) -> std::io::Result<CappedRead> {
+    let mut data = Vec::new();
+    let mut over_cap = false;
+    let mut chunk = [0u8; 8192];
+    if let Some(reader) = &mut reader {
+        loop {
+            let n = reader.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            if over_cap {
+                continue; // drain and discard
+            }
+            if data.len() + n > cap {
+                over_cap = true;
+                continue;
+            }
+            data.extend_from_slice(&chunk[..n]);
+        }
+    }
+    Ok(CappedRead { data, over_cap })
+}
+
+struct CappedRead {
+    data: Vec<u8>,
+    over_cap: bool,
+}
+
+/// Replace every occurrence of `secret` in `data` with `[redacted]`.
+fn redact_bytes(data: &mut Vec<u8>, secret: &[u8]) {
+    if secret.is_empty() || data.len() < secret.len() {
+        return;
+    }
+    let replacement = b"[redacted]";
+    let mut i = 0;
+    while i + secret.len() <= data.len() {
+        if &data[i..i + secret.len()] == secret {
+            data.splice(i..i + secret.len(), replacement.iter().copied());
+            i += replacement.len();
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn tool_error(
+    phase: &str,
+    program: &Path,
+    status: &std::process::ExitStatus,
+    stderr: &[u8],
+) -> PasswordManagerError {
+    // Bounded, plaintext-redacted stderr excerpt (adversarial review F3).
+    let stderr = String::from_utf8_lossy(stderr);
     let excerpt: String = stderr.chars().take(300).collect();
     PasswordManagerError::InvalidInput(format!(
-        "systemd-creds {phase} failed ({}): {excerpt}",
+        "systemd-creds {phase} failed ({status}) ({}): {excerpt}",
         program.display(),
     ))
 }
@@ -399,20 +524,23 @@ pub fn install_credential(plaintext: &[u8], opts: &InstallOptions<'_>) -> Result
         opts.tool
             .encrypt(opts.cred_name, opts.protection, opts.not_after, plaintext)?;
 
-    // Deterministic same-directory temp name: a stale temp from a crashed
-    // run is simply replaced, and cleanup on failure is unambiguous.
-    let temp_path = dir.join(format!(".{}.tmp", opts.cred_name));
+    // Unique-per-attempt temp name, created EXCLUSIVE + NOFOLLOW. A
+    // deterministic name let two concurrent installs of the same credential
+    // interleave: run B truncated the temp between run A's successful
+    // decrypt-verification and A's rename, publishing B's never-verified
+    // ciphertext (adversarial review F1, demonstrated). Uniqueness plus
+    // O_EXCL makes each run verify exactly the bytes it renames.
+    let (temp_path, mut temp_file) = create_exclusive_temp(&dir, opts.cred_name)?;
     let install_result = (|| -> Result<()> {
-        let mut file = crate::platform::create_owner_only_file(&temp_path)
-            .map_err(PasswordManagerError::from)?;
-        file.write_all(&ciphertext)
-            .and_then(|_| file.sync_all())
+        temp_file
+            .write_all(&ciphertext)
+            .and_then(|_| temp_file.sync_all())
             .map_err(|e| {
                 PasswordManagerError::InvalidInput(format!(
                     "Failed to write credential temp file: {e}"
                 ))
             })?;
-        drop(file);
+        drop(temp_file);
 
         if opts.verify {
             let decrypted = opts.tool.decrypt_path(opts.cred_name, &temp_path)?;
@@ -445,7 +573,8 @@ pub fn install_credential(plaintext: &[u8], opts: &InstallOptions<'_>) -> Result
 }
 
 /// Decrypt the installed credential and compare against `plaintext` in
-/// constant time. `Ok(true)` = match.
+/// constant time. `Ok(true)` = match. A symlink at the credential path is
+/// REFUSED (consistent with install/remove — review symmetry finding).
 pub fn verify_installed(
     plaintext: &[u8],
     cred_name: &str,
@@ -454,11 +583,19 @@ pub fn verify_installed(
 ) -> Result<bool> {
     validate_credential_name(cred_name).map_err(PasswordManagerError::InvalidInput)?;
     let path = credstore_dir.join(cred_name);
-    if !path.is_file() {
-        return Ok(false);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(PasswordManagerError::InvalidInput(format!(
+                "{} is a symlink; refusing to verify through it — inspect it manually",
+                path.display()
+            )))
+        }
+        Ok(meta) if meta.is_file() => {
+            let decrypted = tool.decrypt_path(cred_name, &path)?;
+            Ok(constant_time_equal(&decrypted, plaintext))
+        }
+        _ => Ok(false),
     }
-    let decrypted = tool.decrypt_path(cred_name, &path)?;
-    Ok(constant_time_equal(&decrypted, plaintext))
 }
 
 /// Remove the installed ciphertext and return whether a file was removed.
@@ -506,7 +643,10 @@ fn prepare_credstore_dir(dir: &Path) -> Result<PathBuf> {
                 dir.display()
             )))
         }
-        Ok(meta) if meta.is_dir() => Ok(dir.to_path_buf()),
+        Ok(meta) if meta.is_dir() => {
+            validate_existing_credstore_dir(dir, &meta)?;
+            Ok(dir.to_path_buf())
+        }
         Ok(_) => Err(PasswordManagerError::InvalidInput(format!(
             "credential store path {} exists and is not a directory",
             dir.display()
@@ -521,6 +661,92 @@ fn prepare_credstore_dir(dir: &Path) -> Result<PathBuf> {
             Ok(dir.to_path_buf())
         }
     }
+}
+
+/// Validate an existing credential store (adversarial review F4):
+/// group/world-writable or foreign-owned stores are REFUSED — writability
+/// is the attack surface for temp planting and final-path symlink DoS. A
+/// merely group/world-readable store only earns a warning: the ciphertext
+/// is not secret without the decryption key.
+#[cfg(unix)]
+fn validate_existing_credstore_dir(dir: &Path, meta: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let euid = unsafe { libc::geteuid() };
+    let mode = meta.permissions().mode() & 0o777;
+    if meta.uid() != euid {
+        return Err(PasswordManagerError::InvalidInput(format!(
+            "credential store {} is owned by uid {} (we are uid {euid}); refusing to \
+             provision into a foreign-owned directory",
+            dir.display(),
+            meta.uid()
+        )));
+    }
+    if mode & 0o022 != 0 {
+        return Err(PasswordManagerError::InvalidInput(format!(
+            "credential store {} is group/world-writable (mode {mode:o}); refusing to \
+             provision into it — fix with: chmod go-w {}",
+            dir.display(),
+            dir.display()
+        )));
+    }
+    if mode & 0o044 != 0 {
+        tracing::warn!(
+            "credential store {} is group/world-readable (mode {mode:o}); the \
+             ciphertext is not secret without the decryption key, but tightening \
+             it is recommended: chmod go-rwx {}",
+            dir.display(),
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_existing_credstore_dir(_dir: &Path, _meta: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+/// Same-directory temp file with a random suffix, created O_EXCL (never
+/// clobbering, never following a symlink at the chosen name) and born 0600.
+/// Uniqueness is what closes the concurrent-install race (adversarial review
+/// F1): each run verifies exactly the bytes it renames.
+fn create_exclusive_temp(dir: &Path, cred_name: &str) -> Result<(PathBuf, std::fs::File)> {
+    use rand::RngCore;
+    use std::io::ErrorKind;
+    let mut suffix = [0u8; 4];
+    for _ in 0..16 {
+        rand::thread_rng().fill_bytes(&mut suffix);
+        let candidate = dir.join(format!(".{cred_name}.{}.tmp", hex::encode(suffix)));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // O_NOFOLLOW: the random name is unguessable, but never write
+            // through a symlink should one exist (defense in depth).
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "Failed to create credential temp file in {}: {e}",
+                    dir.display()
+                )))
+            }
+        }
+    }
+    Err(PasswordManagerError::InvalidInput(
+        "could not find a free temp name in the credential store after 16 attempts".to_string(),
+    ))
+}
+
+/// Validate (and create when missing) the credential store directory without
+/// provisioning anything. The CLI calls this BEFORE resolving the secret so a
+/// doomed run fails fast without consuming an audited broker fetch.
+pub fn preflight_credstore_dir(dir: &Path) -> Result<()> {
+    prepare_credstore_dir(dir).map(|_| ())
 }
 
 /// Length is compared first only because ciphertext size is already public
@@ -565,7 +791,10 @@ mod tests {
                 "#!/bin/sh\ncase \"$1\" in encrypt) base64 ;; decrypt) echo bm90LXRoZS1zZWNyZXQ= ;; *) exit 2 ;; esac\n"
             }
             "spy" => {
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/argv.log\"\ncase \"$1\" in\n  encrypt) base64 ;;\n  decrypt) base64 -d < \"$3\" ;;\nesac\n"
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/argv.log\"\nenv | grep '^SENTINELPASS_' >> \"$(dirname \"$0\")/env.log\" || true\ncase \"$1\" in\n  encrypt) base64 ;;\n  decrypt) base64 -d < \"$3\" ;;\nesac\n"
+            }
+            "leak" => {
+                "#!/bin/sh\ncase \"$1\" in\n  encrypt) cat >&2; exit 1 ;;\n  decrypt) exit 2 ;;\nesac\n"
             }
             _ => "#!/bin/sh\ncase \"$1\" in\n  encrypt) base64 ;;\n  decrypt) base64 -d < \"$3\" ;;\nesac\n",
         };
@@ -627,6 +856,9 @@ mod tests {
         assert!(!store.path().join(".sandhi.provider.apikey.tmp").exists());
     }
 
+    // Scope note: with the fake tool this is a PLAINTEXT-AT-REST guard (the
+    // fake "ciphertext" is base64) — it proves the pipeline never writes the
+    // resolved secret to disk, not anything about real encryption.
     #[test]
     fn ciphertext_at_rest_is_not_the_plaintext() {
         let (tool, _tool_dir) = fake_tool("ok");
@@ -696,10 +928,159 @@ mod tests {
         let first = install(&tool, store.path(), true).unwrap();
         let first_bytes = std::fs::read(&first.path).unwrap();
 
+        // Same secret: bytes stable, nothing left behind.
         let _second = install(&tool, store.path(), true).unwrap();
         let second_bytes = std::fs::read(store.path().join("sandhi.provider.apikey")).unwrap();
-        assert_eq!(first_bytes, second_bytes); // same fake tool, same secret
-        assert!(!store.path().join(".sandhi.provider.apikey.tmp").exists());
+        assert_eq!(first_bytes, second_bytes);
+        assert!(store.path().read_dir().unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')));
+
+        // DIFFERENT secret (proxy review finding 3): the on-disk bytes must
+        // actually change and the new value must verify while the old fails.
+        let rotated = "rotated-synthetic-secret-4b7c";
+        install_credential(
+            rotated.as_bytes(),
+            &InstallOptions {
+                cred_name: "sandhi.provider.apikey",
+                protection: ProtectionMode::HostKey,
+                credstore_dir: store.path(),
+                not_after: None,
+                verify: true,
+                tool: &tool,
+            },
+        )
+        .unwrap();
+        let third_bytes = std::fs::read(store.path().join("sandhi.provider.apikey")).unwrap();
+        assert_ne!(second_bytes, third_bytes, "rotation must replace content");
+        assert!(verify_installed(
+            rotated.as_bytes(),
+            "sandhi.provider.apikey",
+            store.path(),
+            &tool
+        )
+        .unwrap());
+        assert!(!verify_installed(
+            SYNTHETIC_SECRET,
+            "sandhi.provider.apikey",
+            store.path(),
+            &tool
+        )
+        .unwrap());
+    }
+
+    /// Adversarial review F1 regression: two overlapping installs of the same
+    /// credential must never publish unverified or torn content. With
+    /// unique-per-attempt temp files both runs succeed independently and the
+    /// final file is exactly one run's verified ciphertext.
+    #[test]
+    fn concurrent_installs_never_publish_unverified_content() {
+        use std::sync::Arc;
+        let (tool, _tool_dir) = fake_tool("ok");
+        let tool = Arc::new(tool);
+        let store = Arc::new(credstore());
+        let secret_a = b"concurrent-secret-A-1111".to_vec();
+        let secret_b = b"concurrent-secret-B-2222".to_vec();
+
+        let mut joins = Vec::new();
+        for secret in [secret_a.clone(), secret_b.clone()] {
+            let tool = Arc::clone(&tool);
+            let store = Arc::clone(&store);
+            joins.push(std::thread::spawn(move || {
+                install_credential(
+                    &secret,
+                    &InstallOptions {
+                        cred_name: "sandhi.provider.apikey",
+                        protection: ProtectionMode::HostKey,
+                        credstore_dir: store.path(),
+                        not_after: None,
+                        verify: true,
+                        tool: &tool,
+                    },
+                )
+            }));
+        }
+        for join in joins {
+            join.join().expect("install thread panicked").unwrap();
+        }
+
+        // The published ciphertext decrypts to exactly one of the two inputs.
+        let match_a =
+            verify_installed(&secret_a, "sandhi.provider.apikey", store.path(), &tool).unwrap();
+        let match_b =
+            verify_installed(&secret_b, "sandhi.provider.apikey", store.path(), &tool).unwrap();
+        assert!(
+            match_a ^ match_b,
+            "final credential must decrypt to exactly one installed value"
+        );
+        // No temp litter from either run.
+        assert!(store.path().read_dir().unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')));
+    }
+
+    /// Adversarial review F3: a replaced/hostile tool must not see the grant
+    /// token (or any SENTINELPASS_* state) in its environment.
+    #[test]
+    fn child_environment_is_scrubbed_of_sentinelpass_state() {
+        let (tool, tool_dir) = fake_tool("spy");
+        let store = credstore();
+        std::env::set_var("SENTINELPASS_CLIENT_TOKEN", "synthetic-token-do-not-leak");
+        let result = install(&tool, store.path(), true);
+        std::env::remove_var("SENTINELPASS_CLIENT_TOKEN");
+        result.unwrap();
+
+        let env_log = tool_dir.path().join("env.log");
+        let leaked = if env_log.exists() {
+            std::fs::read_to_string(&env_log).unwrap()
+        } else {
+            String::new()
+        };
+        assert!(
+            !leaked.contains("synthetic-token-do-not-leak"),
+            "grant token leaked into tool environment"
+        );
+    }
+
+    /// Adversarial review F3: a tool echoing the payload to stderr must not
+    /// turn our error output into a leak channel.
+    #[test]
+    fn encrypt_error_redacts_the_plaintext_from_stderr() {
+        let (tool, _tool_dir) = fake_tool("leak");
+        let store = credstore();
+        let err = install(&tool, store.path(), true).unwrap_err();
+        let rendered = err.to_string();
+        let secret = String::from_utf8_lossy(SYNTHETIC_SECRET).to_string();
+        assert!(
+            !rendered.contains(&secret),
+            "stderr excerpt leaked the secret"
+        );
+        assert!(rendered.contains("[redacted]"));
+    }
+
+    /// Adversarial review F4: group/world-writable stores are refused;
+    /// world-readable ones are accepted (ciphertext is not secret).
+    #[test]
+    fn refuses_group_writable_credstore() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tool, _tool_dir) = fake_tool("ok");
+        let store = credstore();
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        let err = install(&tool, store.path(), true).unwrap_err();
+        assert!(err.to_string().contains("group/world-writable"));
+    }
+
+    #[test]
+    fn accepts_world_readable_credstore() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tool, _tool_dir) = fake_tool("ok");
+        let store = credstore();
+        std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        install(&tool, store.path(), true).unwrap();
     }
 
     #[test]

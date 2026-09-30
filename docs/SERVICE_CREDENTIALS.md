@@ -32,9 +32,21 @@ vault (locked outside provisioning) → daemon broker → GetExternalSecret
 
 ## Install (and rotate)
 
-Unlock the daemon's vault for the provisioning window (`sentinelpass unlock`
-as the vault's user; headless hosts have no biometric path), then run **on
-the target host** as root:
+**Prerequisite — same-UID rule.** The CLI resolves the daemon socket, IPC
+token, grant allowlist, and the manifest from the **invoking user's**
+directories, and the daemon refuses foreign peer UIDs by design (WBS-507
+peer-credential check). On host-key hosts, encryption additionally requires
+root (the host key `/var/lib/systemd/credential.secret` is root-only) and
+`/etc/credstore.encrypted` is root-owned. Therefore, on a host-key host the
+daemon — and its vault — run as **root** (the *server provisioning
+profile*), and every `service-credential`, `secret allow`, and `secret
+token mint` command for this flow runs under the same `sudo`. On TPM2 hosts,
+any OS user that can reach the TPM and write the credstore directory works.
+Decoupling broker resolution (vault user) from publication (root) is
+designed follow-up work (ADR-011 "Later").
+
+Unlock the daemon's vault for the provisioning window
+(`sudo sentinelpass unlock`; headless hosts have no biometric path), then:
 
 ```bash
 sudo sentinelpass service-credential install \
@@ -44,7 +56,13 @@ sudo sentinelpass service-credential install \
 # client token: --token or $SENTINELPASS_CLIENT_TOKEN
 ```
 
-Re-lock when done (`sentinelpass lock`) — nothing later needs the vault.
+Re-lock when done (`sudo sentinelpass lock`) — nothing later needs the
+vault. All provisioning state (manifest, grants, tokens) lives under the
+same root profile, so inspection commands are sudo'd too:
+
+```bash
+sudo sentinelpass service-credential list
+```
 
 What it does: resolves the secret through the audited broker, encrypts it
 (`--with-key=host` or `--with-key=tpm2` — the mode is **required**), decrypts
@@ -123,7 +141,8 @@ Also remove/rotate the grant if the tooling no longer needs it:
 | Daemon locked/unreachable | Nothing written | Unlock/start daemon, re-run `install` |
 | `systemd-creds encrypt` fails | Temp file removed; installed credential untouched | Check root, host key presence, systemd version |
 | Verify mismatch (decrypt ≠ secret) | Temp file removed; installed credential untouched | Re-run; persistent mismatch = file a bug, do not `--no-verify` |
-| Crash mid-run | Temp file may remain (never published) | Re-run `install`; stale `.tmp` files in the credstore can be deleted |
+| Crash mid-run | Temp file may remain (never published) | Re-run `install`; stale `.<name>.*.tmp` files in the credstore can be deleted |
+| Manifest save failed after publish | Credential installed but unrecorded (`list` misses it) | Re-run `install` (idempotent) or `remove` — the error names the published path |
 | Host key lost/regenerated | All encrypted credentials undecryptable; units fail to start | Re-run `install` for every manifest row (`list` shows them); restart units |
 | Unit fails to start | Check `systemctl status` / `journalctl -u <unit>` — a missing/undecryptable credential is a start failure with an explicit message | Fix credential (`install`/`verify`), restart |
 
@@ -141,8 +160,9 @@ contains secret material or secret hashes.
   chip and is the recommended mode wherever available.
 - Root on the server can decrypt everything (it can also just read the
   running service's memory).
-- systemd credentials are size-limited (the installer caps provisioning at
-  512 KiB per credential).
+- systemd credentials are size-limited: the installer caps provisioning at
+  512 KiB per credential, and systemd enforces an overall ~1 MiB credential
+  budget per service — several large credentials on one unit can exceed it.
 - User-scope (`--user`) credentials and TPM2 PCR policies are not yet
   supported (ADR-011 "Later").
 
