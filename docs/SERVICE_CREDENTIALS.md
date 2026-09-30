@@ -43,7 +43,12 @@ profile*), and every `service-credential`, `secret allow`, and `secret
 token mint` command for this flow runs under the same `sudo`. On TPM2 hosts,
 any OS user that can reach the TPM and write the credstore directory works.
 Decoupling broker resolution (vault user) from publication (root) is
-designed follow-up work (ADR-011 "Later").
+designed follow-up work (ADR-011 "Later"). On TPM2 hosts a non-root
+provisioner additionally needs `--credstore-dir` pointing at a directory
+**it owns** (the store validation refuses foreign-owned directories), and
+the unit must then use the explicit-path form
+`LoadCredentialEncrypted=<name>:<dir>/<name>` — the bare-name lookup only
+searches the standard directories.
 
 Unlock the daemon's vault for the provisioning window
 (`sudo sentinelpass unlock`; headless hosts have no biometric path), then:

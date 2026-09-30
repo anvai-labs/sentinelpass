@@ -187,18 +187,25 @@ impl ServiceCredentialManifest {
             )))
         })?;
 
-        let temp = path.with_extension("json.tmp");
+        // Same unique-temp discipline as the credential itself (verification
+        // round N2): a deterministic temp let two overlapping installs
+        // interleave truncate-writes and publish an invalid-JSON manifest.
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "service-credentials.json".to_string());
+        let (temp, mut file) = create_exclusive_temp(parent, &file_name)?;
+        if let Err(e) = file
+            .write_all(contents.as_bytes())
+            .and_then(|_| file.sync_all())
         {
-            let mut file = crate::platform::create_owner_only_file(&temp)
-                .map_err(PasswordManagerError::from)?;
-            file.write_all(contents.as_bytes())
-                .and_then(|_| file.sync_all())
-                .map_err(|e| {
-                    PasswordManagerError::InvalidInput(format!(
-                        "Failed to write service credential manifest: {e}"
-                    ))
-                })?;
+            let _ = std::fs::remove_file(&temp);
+            return Err(PasswordManagerError::InvalidInput(format!(
+                "Failed to write service credential manifest: {e}"
+            )));
         }
+        drop(file);
         std::fs::rename(&temp, path).map_err(|e| {
             let _ = std::fs::remove_file(&temp);
             PasswordManagerError::InvalidInput(format!(
@@ -365,18 +372,33 @@ impl SystemdCredsTool {
                     ))
                 })
             };
-        let stdout = join_capped(stdout_reader)?;
-        let stderr = join_capped(stderr_reader)?;
-        if stdout.over_cap || stderr.over_cap {
+        let stdout = join_capped(stdout_reader);
+        let stderr = join_capped(stderr_reader);
+        let over_cap = matches!(&stdout, Ok(read) if read.over_cap)
+            || matches!(&stderr, Ok(read) if read.over_cap);
+        if over_cap || stdout.is_err() || stderr.is_err() {
+            // Reap the child FIRST (verification round N1): killing it closes
+            // the pipes, which unblocks the writer thread (EPIPE) — otherwise
+            // a hostile tool that overflows a cap and then ignores its stdin
+            // wedges the writer's join() forever, and the child stays a
+            // zombie on the reader-error paths.
+            let _ = child.kill();
+            let _ = child.wait();
             let _ = writer.join();
-            return Err(PasswordManagerError::InvalidInput(format!(
-                "systemd-creds output exceeded its byte cap (stdout {}, stderr {}) — \
-                 refusing to buffer it (is the tool at {} really systemd-creds?)",
-                MAX_TOOL_STDOUT,
-                MAX_TOOL_STDERR,
-                command.get_program().to_string_lossy()
-            )));
+            return if over_cap {
+                Err(PasswordManagerError::InvalidInput(format!(
+                    "systemd-creds output exceeded its byte cap (stdout {}, stderr {}) — \
+                     refusing to buffer it (is the tool at {} really systemd-creds?)",
+                    MAX_TOOL_STDOUT,
+                    MAX_TOOL_STDERR,
+                    command.get_program().to_string_lossy()
+                )))
+            } else {
+                Err(stdout.err().or(stderr.err()).unwrap_or_else(thread_panic))
+            };
         }
+        let stdout = stdout.unwrap();
+        let stderr = stderr.unwrap();
         let status = child.wait().map_err(|e| {
             PasswordManagerError::InvalidInput(format!(
                 "systemd-creds did not run to completion: {e}"
@@ -443,6 +465,13 @@ fn redact_bytes(data: &mut Vec<u8>, secret: &[u8]) {
         } else {
             i += 1;
         }
+    }
+    // Verification round N3: the scan skips past each inserted marker, so a
+    // secret that is itself a substring of "[redacted]" could survive. If
+    // anything secret-looking remains, suppress the whole buffer.
+    if data.windows(secret.len()).any(|w| w == secret) {
+        data.clear();
+        data.extend_from_slice(b"[stderr suppressed]");
     }
 }
 
@@ -1062,6 +1091,32 @@ mod tests {
         assert!(rendered.contains("[redacted]"));
     }
 
+    /// Verification round N3: a secret that is itself a substring of the
+    /// "[redacted]" marker must not survive in the rendered error.
+    #[test]
+    fn redaction_suppresses_stderr_when_secret_is_a_marker_substring() {
+        let (tool, _tool_dir) = fake_tool("leak");
+        let store = credstore();
+        let err = install_credential(
+            b"act",
+            &InstallOptions {
+                cred_name: "tiny.secret",
+                protection: ProtectionMode::HostKey,
+                credstore_dir: store.path(),
+                not_after: None,
+                verify: true,
+                tool: &tool,
+            },
+        )
+        .unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("act"),
+            "marker-substring secret survived: {rendered}"
+        );
+        assert!(rendered.contains("[stderr suppressed]"));
+    }
+
     /// Adversarial review F4: group/world-writable stores are refused;
     /// world-readable ones are accepted (ciphertext is not secret).
     #[test]
@@ -1225,7 +1280,11 @@ mod tests {
             let mode = path.metadata().unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
-        assert!(!dir.path().join("service-credentials.json.tmp").exists());
+        assert!(dir.path().read_dir().unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with('.')));
 
         let loaded = ServiceCredentialManifest::load_from_path(&path).unwrap();
         assert_eq!(loaded, manifest);

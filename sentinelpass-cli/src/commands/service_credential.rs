@@ -11,7 +11,7 @@ use sentinelpass_core::{
     PasswordManagerError, ProtectionMode as CoreProtectionMode, ServiceCredentialManifest,
     ServiceCredentialRecord, SystemdCredsTool,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use crate::{SecretField, ServiceProtection};
@@ -290,10 +290,11 @@ pub(crate) fn handle_remove(cred_name: String, credstore_dir: Option<PathBuf>) -
     // An explicit --credstore-dir that disagrees with the manifest's
     // recorded directory removes THAT file but keeps the row: silently
     // dropping it would orphan the recorded-dir ciphertext (proxy review
-    // finding 7).
+    // finding 7). Compared by path components so a trailing slash or other
+    // equivalent spelling does not spuriously keep the row (verification N4).
     let recorded_dir: Option<String> = manifest.find(&cred_name).map(|r| r.credstore_dir.clone());
     let keep_row = match &recorded_dir {
-        Some(recorded) if dir.to_string_lossy() != *recorded => {
+        Some(recorded) if !Path::new(recorded).components().eq(dir.components()) => {
             println!(
                 "Note: --credstore-dir {} differs from the manifest's recorded {}; \
                  the row for the recorded directory is kept",
