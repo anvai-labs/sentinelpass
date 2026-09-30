@@ -1,0 +1,21 @@
+[package]
+name = "anvai-secure-io"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "Bounded private-file operations for Anvai applications"
+repository = "https://github.com/anvai-labs/sentinelpass"
+publish = false
+
+[dependencies]
+zeroize = "1.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[lints.rust]
+unsafe_code = "forbid"

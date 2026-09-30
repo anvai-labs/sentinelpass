@@ -32,3 +32,5 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-009](ADR-009-mobile-abi-and-platform-keystore.md) | Mobile ABI and platform-keystore boundary | Accepted (rev 2) |
 | [ADR-010](ADR-010-release-assurance-and-provenance.md) | Release assurance and provenance | Accepted (rev 2) |
 
+
+- [ADR-011: Shared private-file custody](ADR-011-shared-private-file-custody.md) — Linux extraction and allowlist adoption.

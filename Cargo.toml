@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "anvai-secure-io",
     "sentinelpass-protocol",
     "sentinelpass-core",
     "sentinelpass-cli",
