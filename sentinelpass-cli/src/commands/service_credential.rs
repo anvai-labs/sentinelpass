@@ -357,11 +357,24 @@ mod tests {
     }
 
     #[test]
-    fn tool_defaults_to_path_lookup() {
-        assert_eq!(tool_path(None), PathBuf::from("systemd-creds"));
+    fn tool_default_prefers_absolute_location_then_path_lookup() {
+        // Explicit --systemd-creds always wins.
         assert_eq!(
             tool_path(Some(&PathBuf::from("/opt/fake/systemd-creds"))),
             PathBuf::from("/opt/fake/systemd-creds")
         );
+        let default = tool_path(None);
+        if cfg!(target_os = "linux") {
+            // First existing absolute candidate (ubuntu CI images actually
+            // ship /usr/bin/systemd-creds), else the PATH fallback.
+            let expected = ["/usr/bin/systemd-creds", "/usr/local/bin/systemd-creds"]
+                .into_iter()
+                .find(|candidate| Path::new(candidate).is_file())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("systemd-creds"));
+            assert_eq!(default, expected);
+        } else {
+            assert_eq!(default, PathBuf::from("systemd-creds"));
+        }
     }
 }
