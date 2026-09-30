@@ -29,7 +29,7 @@ categories = ["command-line-utilities", "authentication"]
 # Cryptography
 argon2 = { version = "0.5", features = ["zeroize"] }
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.9"
 zeroize = { version = "1.7", features = ["zeroize_derive", "serde"] }
 subtle = "2.5"
 hex = "0.4"
