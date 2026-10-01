@@ -79,3 +79,19 @@ extension ID (`nophfgfiiohedlodfeepjoioljbhggdd`) across all machines.
 If Chrome reports native host permission errors, restart the browser after the UI has
 launched at least once.
 
+
+## Local DMG builds must stage daemon/host sidecars (WBS-905)
+
+`cargo tauri build` alone bundles an EMPTY `resources/bin` — `tauri.conf.json`
+declares `resources: ["src-tauri/resources/bin/*"]` and the bundler silently
+tolerates the empty glob, producing a DMG whose app has no daemon or native
+host (extension autofill and daemon-backed CLI access dead). The release
+workflow stages the binaries and fails closed (`.github/workflows/release.yml`
+"Stage daemon/host sidecars"). For a local DMG:
+
+```bash
+cargo build --release --bin sentinelpass-daemon --bin sentinelpass-host --bin sentinelpass
+cp target/release/sentinelpass-daemon target/release/sentinelpass-host \
+   sentinelpass-ui/src-tauri/resources/bin/
+cd sentinelpass-ui && cargo tauri build   # then verify the sidecars inside the .app
+```
