@@ -14,7 +14,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 # File::try_lock (WBS-501/503 maintenance lock) stabilized in 1.89 (review F6).
 rust-version = "1.89"
@@ -47,7 +47,7 @@ tokio = { version = "1.35", features = ["full"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Logging
 tracing = "0.1"
