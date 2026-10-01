@@ -1,36 +1,100 @@
-# ADR-012: shared private-file custody
+# ADR-012: Shared Private-File Custody (`anvai-secure-io`)
 
-Date: 2026-09-30. Status: implemented for Linux allowlist storage; review pending.
+| Field | Value |
+|-------|-------|
+| Status | Accepted (2026-09-30, after adversarial review; remediation folded into the same change) |
+| Date | 2026-09-30 |
+| Owners | Core maintainer, security lead |
+| Related | ADR-011 (service credentials consume the allowlist broker); ADR-007 (§11 file hygiene lineage, WBS-412/413) |
+| Implementation | `anvai-secure-io/` (crate README documents operational limits and recovery) |
 
-Extract the bounded Linux file-custody contract into the Apache-2.0
-`anvai-secure-io` workspace crate. It owns handle-relative traversal, owner/mode
-and regular-file checks, bounded zeroizing reads, atomic durable publication
-and advisory locks. It has no vault, crypto, database, UI or networking dependency.
-Other Anvai applications consume a pinned Git revision without depending on core.
+## Summary
 
-The first SentinelPass consumer is `ExternalSecretAllowlist` on Linux. JSON and
-legacy/enforced/revoked token semantics do not change. Atomic publication fixes
-the prior save path that configured 0600 `OpenOptions` but called `fs::write`.
-The new reader bounds files to 1 MiB, rejects dangling links and fails closed on
-unsafe metadata. It no longer repairs loose permissions implicitly. Operators
-must check actual owned paths and set the configuration directory to 0700 and
-allowlist to 0600 before upgrading. See the crate README for limits and recovery.
+Extract the bounded Linux private-file-custody contract into an Apache-2.0
+workspace crate, `anvai-secure-io`, and adopt it for the external-secret
+allowlist on Linux. The crate owns handle-relative traversal, owner/mode and
+regular-file checks, bounded zeroizing reads, atomic durable publication, and
+advisory locks — with no vault, crypto, database, UI, or networking
+dependency, so other Anvai applications can consume a pinned Git revision
+without depending on `sentinelpass-core`.
 
-Non-Linux platforms retain their platform path; the save function now uses the
-configured options. No Windows ACL or macOS handle/durability guarantee is added.
-Shared crate calls return Unsupported outside Linux. Existing vault platform
-helpers, SQLite paths, cryptographic policy and token authorization stay separate.
+## Context
 
-A universal common crate or direct core dependency would conflate unrelated
-trust boundaries. Copying helpers would leave patches divergent. This small
-crate allows two independent products to use one tested file contract. Security
-fixes need coordinated version updates; no public package depends on private code.
+Sensitive-file hygiene in `platform.rs` (WBS-412/413) grew path-based checks
+with two structural weaknesses on Linux: check-then-open TOCTOU (validate by
+path, then reopen by path — two resolutions an attacker can race) and a save
+path that configured 0600 `OpenOptions` but then called `fs::write`, so
+freshly written allowlists inherited umask-default permissions (a real defect
+shipped through 0.14.0). A second Anvai product needs the same custody rules;
+copying helpers would leave patches divergent.
 
-Linux tests cover file/directory links, permissions, bounded reads, directory
-replacement, concurrent writes, lock exclusion and process crashes around
-publication. MSRV 1.89 is exercised separately. Process-crash evidence is not a
-power-loss certification. User-namespace ownership remapping, Windows ACLs,
-other filesystems and transactional read-modify-write remain explicit limits.
-A locked update must hold the same lock across read, mutation and save; atomic
-save alone does not prevent lost updates. Tokenless legacy grants remain outside
-this refactor and must be rejected by any new token-required integration profile.
+## Decision
+
+One small, `#![forbid(unsafe_code)]`, `publish = false` crate implements the
+Linux contract: `O_NOFOLLOW`-walked ancestor verification (every operation,
+not just creation), owner + mode enforcement on files and directories
+(group/world bits refused), regular-file/nlink/hardlink/FIFO discipline,
+bounded (caller-capped) zeroizing reads, O_EXCL temp + fsync + rename + dir
+fsync publication with honest `CommitUncertain` durability reporting, and
+cross-process advisory locks. The first SentinelPass consumer is
+`ExternalSecretAllowlist` on Linux; JSON, legacy/enforced/revoked token
+semantics, and authorization decisions are unchanged — only I/O moves.
+
+Options considered:
+
+- **Keep the helpers in `platform.rs`** — rejected: duplicates the contract
+  for the second consumer; the path-based checks carry the TOCTOU and
+  umask-birth weaknesses by construction.
+- **A universal "common" crate or a direct dependency on core** — rejected:
+  conflates unrelated trust boundaries (vault/crypto/DB would drag into a
+  leaf product).
+- **Copy the helpers per product** — rejected: divergent patches.
+- **Extracted leaf crate** — chosen: two independent products share one
+  tested contract; security fixes need coordinated version updates and no
+  public package depends on private code.
+
+## Threat Model
+
+Strengthens against: symlink/hardlink planting and swap races (handle-relative
+walks, single-resolution validate+read on one fd), umask-exposed birth modes,
+torn publications (old-or-new only, crash-tested), unbounded reads, and
+stale-inode lock retention (a replaced-away inode can never satisfy a lock).
+
+Does not defeat: root (explicitly trusted), user-namespace UID remapping,
+NFS/container id-mapped mounts (no claims made), power loss beyond fsync
+semantics (crash evidence is not a power-loss certification), or a
+compromised same-user process (the OS-user boundary remains the trust root,
+as everywhere in this codebase). Windows ACLs and macOS handle/durability
+guarantees are unchanged — non-Linux callers keep their existing paths (the
+retained save path is improved: it now honors its configured options).
+
+## MVP vs. Later
+
+- **MVP (this change):** Linux allowlist load/save adoption; crate with 13
+  adversarial tests (links, permissions, bounds, concurrency, crash
+  publication, redaction) plus an MSRV-1.89 CI leg wired into the Gate's
+  fail-closed expectation table.
+- **Later:** adoption by further core surfaces (vault DB sidecars, receipt
+  files — each needs its own failure-mode review); a transactional
+  read-modify-write API; Windows ACL and macOS equivalents; possibly
+  publishing for external consumers.
+
+## Migration and Rollout
+
+Behavioral drift is fail-closed and must be operator-visible: Linux allowlists
+with group/world bits — including those born umask-loose through 0.14.0 — are
+now refused instead of warned about and repaired. Operators upgrading Linux
+hosts should pre-repair (`chmod 600` the allowlist, `chmod 700` the config
+directory); the load error names the remediation, and
+`docs/SERVICE_CREDENTIALS.md` carries the upgrade note for the 0.14.0
+server-provisioning profile. Tokenless legacy grants are unchanged by this
+refactor and remain outside its scope.
+
+## Consequences
+
+One custody contract, doubly consumed and adversarially tested; the cost is a
+new workspace member to keep MSRV-clean and a coordinated-updates
+responsibility across products. The prior validate-then-read ABA window and
+the umask-birth bug are closed on Linux; stricter refusals (writable
+ancestors, symlinked homes, dangling links) trade availability for fail-closed
+safety by design.

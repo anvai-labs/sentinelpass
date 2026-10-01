@@ -94,7 +94,8 @@ impl ExternalSecretAllowlist {
             Err(anvai_secure_io::Error::Missing) => return Ok(Self::default()),
             Err(error) => {
                 return Err(PasswordManagerError::InvalidInput(format!(
-                    "External secret allowlist: {error}"
+                    "External secret allowlist: {error}. If this file was written by                      SentinelPass <= 0.14.0 it may carry group/world-readable birth                      permissions (fixed since); repair with: chmod 600 {}",
+                    path.display()
                 )))
             }
         };
