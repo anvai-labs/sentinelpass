@@ -84,6 +84,64 @@ impl ExternalSecretAllowlist {
         Self::load_from_path(&Self::default_path())
     }
 
+    /// Linux profile: bounded, handle-relative reads; invalid metadata fails
+    /// closed. Legacy JSON remains valid, but loose permissions need explicit
+    /// operator repair (see the shared secure-I/O migration note).
+    #[cfg(target_os = "linux")]
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let bytes = match anvai_secure_io::read_private(path, 1_048_576) {
+            Ok(bytes) => bytes,
+            Err(anvai_secure_io::Error::Missing) => return Ok(Self::default()),
+            Err(error) => {
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "External secret allowlist: {error}. If this file was written by \
+                     SentinelPass <= 0.14.0 it may carry group/world-readable birth \
+                     permissions (fixed since). Repair once with chmod 600 {}, or, if \
+                     a symlink is planted at that path, remove the symlink and \
+                     restore the file",
+                    path.display()
+                )))
+            }
+        };
+        serde_json::from_slice(&bytes).map_err(|_| {
+            PasswordManagerError::from(DatabaseError::Serialization(
+                "Invalid external secret allowlist structure".to_owned(),
+            ))
+        })
+    }
+
+    /// Publishes a complete JSON document atomically; preserves the existing
+    /// file on failures before publication. This is not a read-modify-write
+    /// transaction: callers must serialize updates at the application layer.
+    #[cfg(target_os = "linux")]
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        let contents = zeroize::Zeroizing::new(serde_json::to_vec_pretty(self).map_err(|_| {
+            PasswordManagerError::from(DatabaseError::Serialization(
+                "Cannot serialize external secret allowlist".to_owned(),
+            ))
+        })?);
+        if contents.len() > 1_048_576 {
+            return Err(PasswordManagerError::InvalidInput(
+                "External secret allowlist exceeds 1 MiB".to_owned(),
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = path.file_name().ok_or_else(|| {
+            PasswordManagerError::InvalidInput(
+                "External secret allowlist needs a file name".to_owned(),
+            )
+        })?;
+        anvai_secure_io::PrivateDir::open_or_create(parent)
+            .and_then(|dir| dir.write(Path::new(name), &contents, anvai_secure_io::Publish::Upsert))
+            .map_err(|error| {
+                PasswordManagerError::InvalidInput(format!("External secret allowlist: {error}"))
+            })
+    }
+
+    #[cfg(not(target_os = "linux"))]
     pub fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -109,6 +167,7 @@ impl ExternalSecretAllowlist {
         })
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         // WBS-413: never write THROUGH a symlink planted at the allowlist
         // path (it would hand grant-control to whatever the link targets).
@@ -149,12 +208,16 @@ impl ExternalSecretAllowlist {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        std::fs::write(path, contents).map_err(|e| {
-            PasswordManagerError::from(DatabaseError::FileIo(format!(
-                "Failed to write external secret allowlist: {}",
-                e
-            )))
-        })?;
+        use std::io::Write;
+        options
+            .open(path)
+            .and_then(|mut file| file.write_all(contents.as_bytes()))
+            .map_err(|e| {
+                PasswordManagerError::from(DatabaseError::FileIo(format!(
+                    "Failed to write external secret allowlist: {}",
+                    e
+                )))
+            })?;
 
         Ok(())
     }
@@ -445,6 +508,16 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn private_tempdir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
     #[test]
     fn allow_grant_authorizes_exact_client_domain_and_field() {
         let mut allowlist = ExternalSecretAllowlist::default();
@@ -564,7 +637,7 @@ mod tests {
 
     #[test]
     fn save_and_load_preserves_grants_with_private_file_permissions() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         let path = tmp.path().join("allowlist.json");
         let mut allowlist = ExternalSecretAllowlist::default();
         allowlist
@@ -586,13 +659,19 @@ mod tests {
 
     #[test]
     fn load_accepts_legacy_grants_without_expiry() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         let path = tmp.path().join("allowlist.json");
         std::fs::write(
             &path,
             r#"{"grants":[{"client_id":"victor","domain":"anthropic","field":"password"}]}"#,
         )
         .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         let loaded = ExternalSecretAllowlist::load_from_path(&path).unwrap();
 
@@ -698,7 +777,7 @@ mod tests {
 
     #[test]
     fn allow_write_grants_round_trip_through_file() {
-        let dir = TempDir::new().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("allowlist.json");
 
         let mut allowlist = ExternalSecretAllowlist::default();
@@ -764,7 +843,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_refuses_symlinked_allowlist() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         let target = tmp.path().join("target.json");
         std::fs::write(&target, "{}").unwrap();
         let link = tmp.path().join("allowlist.json");
@@ -780,7 +859,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn save_refuses_to_write_through_symlinked_allowlist() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = private_tempdir();
         let target = tmp.path().join("target.json");
         std::fs::write(&target, "{}").unwrap();
         let link = tmp.path().join("allowlist.json");
@@ -798,5 +877,52 @@ mod tests {
         );
         // The link target is untouched.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_is_default_but_dangling_and_oversized_are_errors() {
+        let dir = private_tempdir();
+        let path = dir.path().join("allowlist.json");
+        assert_eq!(
+            ExternalSecretAllowlist::load_from_path(&path).unwrap(),
+            ExternalSecretAllowlist::default()
+        );
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(ExternalSecretAllowlist::load_from_path(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let root = anvai_secure_io::PrivateDir::open(dir.path()).unwrap();
+        root.write(
+            Path::new("allowlist.json"),
+            &vec![b' '; 1_048_577],
+            anvai_secure_io::Publish::CreateNew,
+        )
+        .unwrap();
+        assert!(ExternalSecretAllowlist::load_from_path(&path).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn loose_allowlist_fails_without_mutation_or_disclosure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = private_tempdir();
+        let path = dir.path().join("allowlist.json");
+        let allowlist = ExternalSecretAllowlist::default();
+        allowlist.save_to_path(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(ExternalSecretAllowlist::load_from_path(&path).is_err());
+        assert!(allowlist.save_to_path(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let private_marker = b"private-invalid-json-marker";
+        std::fs::write(&path, private_marker).unwrap();
+        let error = ExternalSecretAllowlist::load_from_path(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("private-invalid-json-marker"));
     }
 }

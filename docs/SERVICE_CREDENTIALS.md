@@ -154,6 +154,23 @@ Also remove/rotate the grant if the tooling no longer needs it:
 The manifest lives at `<config>/service-credentials.json` (0600) and never
 contains secret material or secret hashes.
 
+## Upgrading a Linux host from <= 0.14.0
+
+The shared private-file custody hardening (ADR-012) tightens the broker's
+allowlist storage: files with group/world permission bits are now REFUSED
+instead of warned about. Allowlists written by SentinelPass **0.14.0 and
+earlier** on Linux could be born group/world-readable (a birth-mode bug
+that hardening fixes), so after upgrading, `service-credential` /
+`secret` operations can fail closed with an allowlist permissions error
+until repaired once:
+
+```bash
+chmod 600 "<config>/external-secret-access.json"   # typically /root/.config/PasswordManager/
+```
+
+The daemon denies external-secret access (including service-credential
+provisioning) until the repair — fail-closed by design.
+
 ## Limitations (read before trusting host-key mode)
 
 - **A complete disk snapshot defeats host-key encryption.** The encryption

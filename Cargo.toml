@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "anvai-secure-io",
     "sentinelpass-protocol",
     "sentinelpass-core",
     "sentinelpass-cli",
@@ -13,7 +14,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 # File::try_lock (WBS-501/503 maintenance lock) stabilized in 1.89 (review F6).
 rust-version = "1.89"
@@ -78,6 +79,8 @@ home = "0.5"
 # Testing
 proptest = "1.4"
 tempfile = "3.10"
+# Linux private-file custody (anvai-secure-io); fs+process for openat/uid.
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 # SSH keys
 ssh-key = { version = "0.6", features = ["crypto", "encryption"] }

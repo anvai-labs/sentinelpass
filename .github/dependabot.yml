@@ -4,6 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Ground rules (CLAUDE.md/AGENTS.md): integration happens on develop;
+    # promotion to main is the single-commit release train.
+    target-branch: develop
     groups:
       cargo-minor-patch:
         update-types:
@@ -29,11 +32,26 @@ updates:
     # exercising the migration ladder and the v6/v7/v8 restore fixtures.
       - dependency-name: rusqlite
         versions: [">=0.31"]
+    # jni 0.22 changes the JNIEnv/JString APIs the mobile bridge pins
+    # (Android/iOS CI legs fail to build) — migrate via a dedicated
+    # mobile-bridge slice with the JNI contract tests.
+      - dependency-name: jni
+        versions: [">=0.22"]
+    # rand 0.9 reorganizes the RngCore/trait stack (fill_bytes bounds fail
+    # workspace-wide, incl. anvai crypto + 0.14.0 service credentials).
+    # Worth a real migration slice someday; not a dependabot bump.
+      - dependency-name: rand
+        versions: [">=0.9"]
+    # sha1 0.11 sits on the pre-release digest-0.11 trait stack and would
+    # dual sha2/hmac (same class as the hmac 0.13 rule above).
+      - dependency-name: sha1
+        versions: [">=0.11"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       actions:
         patterns:
@@ -43,6 +61,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       npm-dev:
         dependency-type: development
@@ -51,6 +70,7 @@ updates:
     directory: /browser-extension/chrome
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       npm-dev:
         dependency-type: development
@@ -59,6 +79,7 @@ updates:
     directory: /browser-extension/e2e
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       npm-dev:
         dependency-type: development

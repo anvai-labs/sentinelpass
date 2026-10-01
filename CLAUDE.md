@@ -493,12 +493,21 @@ Gotchas:
 - Browser extensions are a separate train (`chrome-v*` tags); app releases do not bump them.
 - The Homebrew tap's formula bumps are automated via `anvai-labs/homebrew-tap`'s dispatch (Actions → Update SentinelPass Formula); its CI runs a contract test against LIVE upstream registries (e.g. PyPI for the `victor` formula), so an upstream release can redden all tap PRs until that formula's bump PR merges.
 
-## Git Workflow
+## Git Workflow — ground rules (mandatory)
 
-- **Main branch:** `main` (protected, requires CI + review)
-- **Development branch:** `develop`
+1. **Features and fixes integrate into `develop`.** Every feature/fix PR
+   targets `develop` (CI-gated + review). Do NOT open feature/fix PRs
+   directly against `main` — direct-to-main merges starve `develop` and
+   force conflict-laden catch-up syncs (this happened through 0.13.1–0.14.0;
+   see PR #196 for the cleanup that motivated this rule).
+2. **`develop` → `main` is promotion only**: a single-commit (squash) release
+   PR or the release train itself; releases are tagged on `main` afterwards.
+   `main` never receives feature work except through that promotion.
+3. **`main` → `develop` resyncs** are only for repair after a hotfix was
+   genuinely cut on `main`; they must resolve develop wholly to main's tree
+   and be verified byte-identical (`git diff origin/main` empty).
 - **Commit format:** `type(scope): imperative summary` (e.g., `fix(daemon): gate save path when vault is locked`)
-- **Branch protection:** CI required, 1 approval, no force pushes
+- **Branch protection:** CI required, 1 approval, no force pushes (both `main` and `develop`)
 - **Pre-commit hook:** `.githooks/pre-commit` runs lint + test scripts for changed Rust/TS files. Configure with `git config core.hooksPath .githooks`
 
 See `CONTRIBUTING.md` for the full contribution workflow and pull request checklist.
@@ -533,6 +542,6 @@ Check `TECHNICAL_DEBT.md` for known issues and verified technical debt before du
 
 # Branching & Releases
 
-- **`develop`** is the integration branch: feature branches open PRs into `develop` (CI-gated).
-- **Promotion is explicit**: `develop` -> `main` via a release PR (CI-gated); releases are tagged on `main`.
+- **`develop`** is the integration branch: feature branches open PRs into `develop` (CI-gated). See "Git Workflow — ground rules" above; the short form is *features/fixes → `develop`, `develop` → `main` as a single-commit/release promotion*.
+- **Promotion is explicit**: `develop` -> `main` via a single-commit (squash) release PR (CI-gated); releases are tagged on `main`.
 - `main` always reflects the last promoted, releasable state.

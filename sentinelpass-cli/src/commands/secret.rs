@@ -191,12 +191,13 @@ pub fn list_external_secret_grants(client_id: Option<&str>) -> Result<Vec<Extern
         .map_err(|e| anyhow::anyhow!("Failed to load external secret allowlist: {}", e))
 }
 
-pub fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
+pub fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> Result<String> {
     if grants.is_empty() {
-        return "No external secret grants configured".to_string();
+        return Ok("No external secret grants configured".to_string());
     }
 
-    let allowlist = ExternalSecretAllowlist::load_default().unwrap_or_default();
+    let allowlist = ExternalSecretAllowlist::load_default()
+        .map_err(|e| anyhow::anyhow!("Failed to load external secret allowlist: {e}"))?;
 
     let mut output = format!(
         "{:<20} {:<30} {:<10} {:<10} Write Expires\n",
@@ -228,7 +229,7 @@ pub fn render_external_secret_grants(grants: &[ExternalSecretGrant]) -> String {
     }
 
     output.push_str(&format!("Total: {} grants", grants.len()));
-    output
+    Ok(output)
 }
 
 pub fn render_client_tokens(client_id: Option<&str>) -> String {
@@ -487,7 +488,7 @@ pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
         crate::SecretCommands::Token { command } => handle_secret_token_command(command)?,
         crate::SecretCommands::List { ref client_id } => {
             let grants = list_external_secret_grants(client_id.as_deref())?;
-            println!("{}", render_external_secret_grants(&grants));
+            println!("{}", render_external_secret_grants(&grants)?);
         }
         crate::SecretCommands::Audit {
             ref client_id,
