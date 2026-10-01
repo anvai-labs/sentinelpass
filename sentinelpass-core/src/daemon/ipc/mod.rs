@@ -84,7 +84,7 @@ mod tests {
         }
         let socket_path = socket_dir.join("s.sock");
         let allowlist_path =
-            std::env::temp_dir().join(format!("sentinelpass_ipc_allowlist_{short_suffix}.json"));
+            socket_dir.join(format!("sentinelpass_ipc_allowlist_{short_suffix}.json"));
         let password = b"test_password_123!";
         let auth_token = format!("test-token-{short_suffix}");
 
@@ -241,8 +241,7 @@ mod tests {
             std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let socket_path = socket_dir.join("s.sock");
-        let allowlist_path =
-            std::env::temp_dir().join(format!("sentinelpass_tok_allow_{short_suffix}.json"));
+        let allowlist_path = socket_dir.join(format!("sentinelpass_tok_allow_{short_suffix}.json"));
         let password = b"test_password_123!";
         let auth_token = format!("test-token-{short_suffix}");
 
@@ -398,7 +397,7 @@ mod tests {
         }
         let socket_path = socket_dir.join("s.sock");
         let allowlist_path =
-            std::env::temp_dir().join(format!("sentinelpass_lock_allow_{short_suffix}.json"));
+            socket_dir.join(format!("sentinelpass_lock_allow_{short_suffix}.json"));
         let password = b"test_password_123!";
         let auth_token = format!("test-token-{short_suffix}");
 
