@@ -8,10 +8,21 @@ use std::{
 use tempfile::TempDir;
 
 fn dir() -> (TempDir, PrivateDir) {
-    let tmp = TempDir::new().unwrap();
-    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let tmp = private_tempdir();
     let dir = PrivateDir::open(tmp.path()).unwrap();
     (tmp, dir)
+}
+
+/// tempfile >= 3.27 creates its directory through the process umask, so on
+/// hosts with a permissive shared-group umask (002) the tempdir is born
+/// group-writable and the crate correctly refuses it. Tests that need a
+/// traversable base must normalize it explicitly instead of depending on
+/// the ambient umask or the tempfile version (found on the dataserver3
+/// Linux smoke host; CI runners' 022 umask masked it).
+fn private_tempdir() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    tmp
 }
 
 #[test]
@@ -49,7 +60,7 @@ fn private_creation_bounds_and_no_clobber() {
 
 #[test]
 fn missing_nested_directories_are_private_from_creation() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = private_tempdir();
     let nested = tmp.path().join("a/b");
     PrivateDir::open_or_create(&nested).unwrap();
     for path in [tmp.path().join("a"), nested] {
@@ -157,7 +168,7 @@ fn writable_ancestor_is_rejected() {
 
 #[test]
 fn held_directory_handle_cannot_be_retargeted_by_path_swap() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = private_tempdir();
     let first = tmp.path().join("first");
     let moved = tmp.path().join("moved");
     let dir = PrivateDir::open_or_create(&first).unwrap();
