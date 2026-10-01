@@ -4991,7 +4991,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-cli"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -5016,7 +5016,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-core"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "aes-gcm",
  "anvai-secure-io",
@@ -5051,7 +5051,7 @@ dependencies = [
  "ssh-key",
  "subtle",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -5064,7 +5064,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-daemon"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -5080,7 +5080,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-host"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "sentinelpass-core",
@@ -5091,7 +5091,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-mobile-bridge"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "cbindgen",
  "chrono",
@@ -5102,14 +5102,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tracing",
  "zeroize",
 ]
 
 [[package]]
 name = "sentinelpass-protocol"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "aes-gcm",
  "dirs 5.0.1",
@@ -5121,7 +5121,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "zeroize",
@@ -5129,7 +5129,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-relay"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5158,7 +5158,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-ui"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "arboard",
