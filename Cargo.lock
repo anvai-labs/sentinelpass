@@ -145,6 +145,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvai-secure-io"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5010,6 +5019,7 @@ name = "sentinelpass-core"
 version = "0.14.0"
 dependencies = [
  "aes-gcm",
+ "anvai-secure-io",
  "argon2",
  "base64 0.23.1",
  "bincode",

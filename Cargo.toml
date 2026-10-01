@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "anvai-secure-io",
     "sentinelpass-protocol",
     "sentinelpass-core",
     "sentinelpass-cli",
@@ -78,6 +79,8 @@ home = "0.5"
 # Testing
 proptest = "1.4"
 tempfile = "3.10"
+# Linux private-file custody (anvai-secure-io); fs+process for openat/uid.
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 # SSH keys
 ssh-key = { version = "0.6", features = ["crypto", "encryption"] }
