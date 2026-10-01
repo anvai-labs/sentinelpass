@@ -125,8 +125,8 @@ pub struct MasterKey {
 
 impl MasterKey {
     /// Create a master key from raw bytes
-    pub fn from_bytes(key: [u8; 32]) -> Self {
-        Self { key }
+    pub fn from_bytes(key: Zeroizing<[u8; 32]>) -> Self {
+        Self { key: *key }
     }
 
     /// Get a reference to the key bytes (use sparingly)

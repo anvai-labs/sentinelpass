@@ -32,10 +32,7 @@
 //! module as claiming it has been performed).
 
 use crate::crypto::{CryptoError, Result};
-use argon2::{
-    password_hash::{PasswordHasher, SaltString},
-    Algorithm, Argon2, Params, Version,
-};
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -214,7 +211,7 @@ impl KdfParams {
 /// - Uses Argon2id which is resistant to both GPU and ASIC attacks
 /// - Parameters chosen to require ~200ms on modern hardware
 /// - Constant-time comparison prevents timing attacks
-pub fn derive_master_key(password: &[u8], params: &KdfParams) -> Result<[u8; 32]> {
+pub fn derive_master_key(password: &[u8], params: &KdfParams) -> Result<Zeroizing<[u8; 32]>> {
     params.validate()?;
 
     // Build Argon2id parameters
@@ -226,38 +223,21 @@ pub fn derive_master_key(password: &[u8], params: &KdfParams) -> Result<[u8; 32]
     )
     .map_err(|e| CryptoError::KdfFailed(format!("Invalid parameters: {}", e)))?;
 
+    // Own and wipe both the memory-hard workspace and the complete output.
+    // Avoid PasswordHash/Output, whose internal derived-key copy cannot be wiped.
+    let mut blocks = Zeroizing::new(vec![argon2::Block::default(); params_obj.block_count()]);
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params_obj);
+    let mut hash_bytes = Zeroizing::new(vec![0u8; params.output_length as usize]);
+    argon2
+        .hash_password_into_with_memory(
+            password,
+            &params.salt,
+            hash_bytes.as_mut_slice(),
+            blocks.as_mut_slice(),
+        )
+        .map_err(|e| CryptoError::KdfFailed(format!("Hashing failed: {e}")))?;
 
-    // Convert salt to SaltString - use raw salt bytes directly
-    let salt = SaltString::encode_b64(&params.salt)
-        .map_err(|e| CryptoError::KdfFailed(format!("Failed to encode salt: {}", e)))?;
-
-    // Hash the password
-    let password_hash = argon2
-        .hash_password(password, &salt)
-        .map_err(|e| CryptoError::KdfFailed(format!("Hashing failed: {}", e)))?;
-
-    // Extract the output hash. The intermediate byte buffer IS derived key
-    // material (WBS-308 / SR-CRYPTO-004): it is zeroized on drop instead of
-    // being silently discarded. (The argon2 crate's own `PasswordHash`/
-    // `Output` cannot be zeroized here — upstream type, no mutable access;
-    // tracked in docs/SECRET_LIFETIME_AUDIT.md as a follow-up.)
-    let hash_bytes = Zeroizing::new(
-        password_hash
-            .hash
-            .as_ref()
-            .map(|h| h.as_bytes().to_vec())
-            .ok_or_else(|| CryptoError::KdfFailed("No hash output".to_string()))?,
-    );
-
-    if hash_bytes.len() < 32 {
-        return Err(CryptoError::KdfFailed(format!(
-            "Hash output too short: {} bytes",
-            hash_bytes.len()
-        )));
-    }
-
-    let mut master_key = [0u8; 32];
+    let mut master_key = Zeroizing::new([0u8; 32]);
     master_key.copy_from_slice(&hash_bytes[..32]);
 
     Ok(master_key)
@@ -285,7 +265,7 @@ pub fn verify_master_password(
 
     // Constant-time comparison
     use subtle::ConstantTimeEq;
-    let derived_key_ref = &derived_key as &[u8];
+    let derived_key_ref = derived_key.as_slice();
     let expected_key_ref = expected_key as &[u8];
 
     let matched = bool::from(derived_key_ref.ct_eq(expected_key_ref));
@@ -307,6 +287,33 @@ pub fn verify_master_password(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn derivation_preserves_legacy_output_for_all_supported_lengths() {
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        for output_length in [32, 48, 64] {
+            let params = super::KdfParams {
+                salt: [7; 16],
+                mem_cost: super::MIN_MEM_COST_KIB,
+                time_cost: 1,
+                parallelism: 1,
+                output_length,
+            };
+            let password = uuid::Uuid::new_v4();
+            let algorithm = argon2::Argon2::new(
+                argon2::Algorithm::Argon2id,
+                argon2::Version::V0x13,
+                argon2::Params::new(params.mem_cost, 1, 1, Some(output_length as usize)).unwrap(),
+            );
+            let salt = SaltString::encode_b64(&params.salt).unwrap();
+            let legacy = algorithm.hash_password(password.as_bytes(), &salt).unwrap();
+            assert_eq!(
+                super::derive_master_key(password.as_bytes(), &params)
+                    .unwrap()
+                    .as_slice(),
+                &legacy.hash.unwrap().as_bytes()[..32]
+            );
+        }
+    }
     use super::*;
 
     #[test]

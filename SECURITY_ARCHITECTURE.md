@@ -1,5 +1,7 @@
 # PASSWORD MANAGER - SECURITY ARCHITECTURE SPECIFICATION
 
+> **2026-09-22 remediation:** See [at-rest remediation and remaining boundaries](docs/SECURITY_REMEDIATION_2026-09-22.md) for field-specific AAD, local entry receipts, fresh-DEK replacement, diagnostic redaction and memory hardening. Historical target-state claims below must be read with that implementation note and the status matrix.
+
 > **Status Note (2026-09-04, updated 2026-09-11):** This document contains a mixture of implemented
 > controls and target-state architecture. The 2026-09-04 review identified new
 > release-blocking work in recovery, authenticated ciphertext context, sync, IPC,

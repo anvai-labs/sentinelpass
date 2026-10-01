@@ -74,7 +74,7 @@ use super::VaultManager;
 
 /// Registry-state key recording that a full sweep pass found zero v1 rows.
 /// Presence (any value — a timestamp) gates the post-unlock hook.
-const SWEEP_COMPLETE_KEY: &str = "v2_blob_sweep_complete";
+const SWEEP_COMPLETE_KEY: &str = "v2_field_binding_sweep_complete";
 
 /// Outcome of one [`VaultManager::sweep_v1_blobs_to_v2`] pass
 /// (SweepReport-style counting, as the registry/domain sweeps).
@@ -121,13 +121,6 @@ fn set_sweep_complete_flag(conn: &Connection, completed_at: &str) -> Result<()> 
 
 /// A NULL optional blob column is format-NEUTRAL (absence is NULL — the
 /// same rule `update_entry`'s mixed-format gate applies).
-fn optional_blob_is_envelope(blob: &Option<Vec<u8>>) -> bool {
-    match blob {
-        Some(b) => envelope_ops::is_envelope_blob(b),
-        None => true,
-    }
-}
-
 /// Seal one field and VERIFY it before the caller may write: open the
 /// fresh envelope right back and constant-time-compare the plaintext.
 /// Any mismatch or failure is an error — the caller must not write the row.
@@ -213,19 +206,19 @@ fn decrypt_entry_fields(
     blobs: &EntryBlobs<'_>,
 ) -> Result<OpenedEntryFields> {
     let open = |purpose, blob: &[u8]| {
-        envelope_ops::open_entry_field_with_identity(dek, Some(identity), purpose, blob)
+        envelope_ops::open_entry_field_for_migration(dek, identity, purpose, blob)
     };
     Ok(OpenedEntryFields {
-        title: open(EnvelopePurpose::Summary, blobs.title)?,
-        username: open(EnvelopePurpose::Summary, blobs.username)?,
-        password: open(EnvelopePurpose::Secret, blobs.password)?,
+        title: open(EnvelopePurpose::EntryTitle, blobs.title)?,
+        username: open(EnvelopePurpose::EntryUsername, blobs.username)?,
+        password: open(EnvelopePurpose::EntryPassword, blobs.password)?,
         url: blobs
             .url
-            .map(|blob| open(EnvelopePurpose::Secret, blob))
+            .map(|blob| open(EnvelopePurpose::EntryUrl, blob))
             .transpose()?,
         notes: blobs
             .notes
-            .map(|blob| open(EnvelopePurpose::Secret, blob))
+            .map(|blob| open(EnvelopePurpose::EntryNotes, blob))
             .transpose()?,
     })
 }
@@ -248,7 +241,7 @@ fn seal_and_verify_entry_fields(
             vault_uuid,
             sync_id,
             object_type,
-            EnvelopePurpose::Summary,
+            EnvelopePurpose::EntryTitle,
             &opened.title,
             epoch,
         )?,
@@ -257,7 +250,7 @@ fn seal_and_verify_entry_fields(
             vault_uuid,
             sync_id,
             object_type,
-            EnvelopePurpose::Summary,
+            EnvelopePurpose::EntryUsername,
             &opened.username,
             epoch,
         )?,
@@ -266,7 +259,7 @@ fn seal_and_verify_entry_fields(
             vault_uuid,
             sync_id,
             object_type,
-            EnvelopePurpose::Secret,
+            EnvelopePurpose::EntryPassword,
             &opened.password,
             epoch,
         )?,
@@ -279,7 +272,7 @@ fn seal_and_verify_entry_fields(
                     vault_uuid,
                     sync_id,
                     object_type,
-                    EnvelopePurpose::Secret,
+                    EnvelopePurpose::EntryUrl,
                     value,
                     epoch,
                 )
@@ -294,7 +287,7 @@ fn seal_and_verify_entry_fields(
                     vault_uuid,
                     sync_id,
                     object_type,
-                    EnvelopePurpose::Secret,
+                    EnvelopePurpose::EntryNotes,
                     value,
                     epoch,
                 )
@@ -339,11 +332,15 @@ fn sweep_entry_rows(
 
     for (entry_id, sync_id, credential_type, title, username, password, url, notes) in rows {
         report.scanned += 1;
-        let already_v2 = envelope_ops::is_envelope_blob(&title)
-            && envelope_ops::is_envelope_blob(&username)
-            && envelope_ops::is_envelope_blob(&password)
-            && optional_blob_is_envelope(&url)
-            && optional_blob_is_envelope(&notes);
+        let already_v2 = envelope_ops::has_field_binding(&title, EnvelopePurpose::EntryTitle)
+            && envelope_ops::has_field_binding(&username, EnvelopePurpose::EntryUsername)
+            && envelope_ops::has_field_binding(&password, EnvelopePurpose::EntryPassword)
+            && url
+                .as_ref()
+                .is_none_or(|b| envelope_ops::has_field_binding(b, EnvelopePurpose::EntryUrl))
+            && notes
+                .as_ref()
+                .is_none_or(|b| envelope_ops::has_field_binding(b, EnvelopePurpose::EntryNotes));
         if already_v2 {
             continue;
         }
@@ -550,6 +547,114 @@ fn sweep_three_part_rows(
     Ok(())
 }
 
+/// Upgrade legacy identity metadata and distinguish the two TOTP columns.
+/// The trusted column chooses the expected context; failed rows stay untouched.
+fn sweep_identity_metadata(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    vault: &str,
+    epoch: i64,
+    report: &mut V2BlobSweepReport,
+) -> Result<()> {
+    use rusqlite::types::Value;
+    for (table, id, column, kind, purpose) in [
+        (
+            "totp_secrets",
+            "totp_id",
+            "issuer",
+            ObjectType::TotpSecret,
+            EnvelopePurpose::TotpIssuer,
+        ),
+        (
+            "totp_secrets",
+            "totp_id",
+            "account_name",
+            ObjectType::TotpSecret,
+            EnvelopePurpose::TotpAccount,
+        ),
+        (
+            "ssh_keys",
+            "key_id",
+            "comment",
+            ObjectType::SshKey,
+            EnvelopePurpose::Summary,
+        ),
+    ] {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {id},sync_id,{column} FROM {table} WHERE {column} IS NOT NULL"
+            ))
+            .map_err(DatabaseError::Sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Value>(2)?,
+                ))
+            })
+            .map_err(DatabaseError::Sqlite)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(DatabaseError::Sqlite)?;
+        for (row, sid, value) in rows {
+            let result = (|| -> Result<()> {
+                let sid = sid.as_deref().ok_or_else(|| {
+                    PasswordManagerError::InvalidInput("metadata has no stable identity".into())
+                })?;
+                let read_purpose = match &value {
+                    Value::Blob(blob) if blob.starts_with(crate::crypto::ENVELOPE_MAGIC) => {
+                        if blob.len() > crate::crypto::envelope::MAX_ENVELOPE_BYTES {
+                            return Err(PasswordManagerError::InvalidInput(
+                                "metadata envelope too large".into(),
+                            ));
+                        }
+                        let doc: crate::crypto::Envelope = serde_json::from_slice(blob)
+                            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+                        if doc.context.purpose == purpose
+                            && (!purpose.is_entry_field() || doc.context.schema_version == 2)
+                        {
+                            // Verify even an already converted envelope before marking completion.
+                            envelope_ops::open_object_field(
+                                dek,
+                                Some(vault),
+                                Some(sid),
+                                kind,
+                                purpose,
+                                blob,
+                            )?;
+                            return Ok(());
+                        }
+                        purpose.legacy()
+                    }
+                    _ => purpose.legacy(),
+                };
+                let plain = envelope_ops::open_metadata_text_field(
+                    dek,
+                    Some(vault),
+                    Some(sid),
+                    kind,
+                    read_purpose,
+                    Some(value),
+                )?
+                .ok_or_else(|| PasswordManagerError::InvalidInput("missing metadata".into()))?;
+                let plain = zeroize::Zeroizing::new(plain);
+                let sealed = seal_and_verify_field(dek, vault, sid, kind, purpose, &plain, epoch)?;
+                conn.execute(
+                    &format!("UPDATE {table} SET {column}=?1 WHERE {id}=?2"),
+                    rusqlite::params![sealed, row],
+                )
+                .map_err(DatabaseError::Sqlite)?;
+                Ok(())
+            })();
+            if result.is_err() {
+                report.failed += 1;
+                tracing::warn!(table, column, row, "identity metadata migration refused");
+            }
+        }
+    }
+    Ok(())
+}
+
 impl VaultManager {
     /// True when [`Self::sweep_v1_blobs_to_v2`] has (or may still have)
     /// work to do: no completed full pass is on record yet.
@@ -580,10 +685,7 @@ impl VaultManager {
         let dek = self.key_hierarchy.dek()?;
         let db = self.lock_db()?;
         let (vault_uuid, epoch) = envelope_ops::read_local_identity(db.conn())?;
-        let tx = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
+        let tx = super::content_guard::ContentTransaction::begin(db.conn(), dek)?;
 
         let mut report = V2BlobSweepReport::default();
         sweep_entry_rows(&tx, dek, &vault_uuid, epoch, &mut report)?;
@@ -614,6 +716,8 @@ impl VaultManager {
             &|dek, blob, nonce, tag| crate::totp::decrypt_totp_secret(dek, blob, nonce, tag),
         )?;
 
+        sweep_identity_metadata(&tx, dek, &vault_uuid, epoch, &mut report)?;
+
         // Terminal state for DETERMINISTIC failures (gate review,
         // finding 2): decrypt/seal failures are input-determined — the
         // same row fails identically on every pass — so a pass that
@@ -634,7 +738,7 @@ impl VaultManager {
         } else if report.converted == 0 && report.skipped_unreadable == 0 && report.failed == 0 {
             set_sweep_complete_flag(&tx, &Utc::now().to_rfc3339())?;
         }
-        tx.commit().map_err(DatabaseError::Sqlite)?;
+        tx.commit()?;
 
         tracing::info!(
             scanned = report.scanned,
@@ -1246,7 +1350,11 @@ mod tests {
         );
         let err = vault.get_entry(corrupt_id).unwrap_err();
         assert!(
-            err.to_string().contains("Serialization") || err.to_string().contains("deserialize"),
+            err.to_string().contains("Serialization")
+                || err.to_string().contains("deserialize")
+                || err
+                    .to_string()
+                    .contains("requires authenticated column binding"),
             "expected a clean typed refusal, got: {err}"
         );
         // The healthy row converted and reads fine.
@@ -1325,7 +1433,7 @@ mod tests {
             let marker: String = db
                 .conn()
                 .query_row(
-                    "SELECT value FROM registry_state WHERE key = 'v2_blob_sweep_complete'",
+                    "SELECT value FROM registry_state WHERE key = 'v2_field_binding_sweep_complete'",
                     [],
                     |r| r.get(0),
                 )

@@ -45,6 +45,10 @@ mod error;
 mod ffi;
 mod slot;
 
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
+
 #[cfg(feature = "jni")]
 mod jni;
 

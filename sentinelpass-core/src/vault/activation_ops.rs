@@ -196,7 +196,11 @@ fn open_entry_column(
     purpose: EnvelopePurpose,
     blob: &[u8],
 ) -> Result<zeroize::Zeroizing<String>> {
-    envelope_ops::open_entry_field_with_identity(dek, Some(*identity), purpose, blob)
+    if envelope_ops::is_envelope_blob(blob) {
+        envelope_ops::open_entry_field_with_identity(dek, Some(*identity), purpose, blob)
+    } else {
+        envelope_ops::open_entry_field_for_migration(dek, *identity, purpose, blob)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +278,11 @@ fn verify_entry_rows(
         // Present columns only (a NULL optional column is format-neutral:
         // absence is NULL, never a v1 blob).
         let present: Vec<(&'static str, EnvelopePurpose, &Vec<u8>)> = [
-            ("title", EnvelopePurpose::Summary, Some(&title)),
-            ("username", EnvelopePurpose::Summary, Some(&username)),
-            ("password", EnvelopePurpose::Secret, Some(&password)),
-            ("url", EnvelopePurpose::Secret, url.as_ref()),
-            ("notes", EnvelopePurpose::Secret, notes.as_ref()),
+            ("title", EnvelopePurpose::EntryTitle, Some(&title)),
+            ("username", EnvelopePurpose::EntryUsername, Some(&username)),
+            ("password", EnvelopePurpose::EntryPassword, Some(&password)),
+            ("url", EnvelopePurpose::EntryUrl, url.as_ref()),
+            ("notes", EnvelopePurpose::EntryNotes, notes.as_ref()),
         ]
         .into_iter()
         .filter_map(|(name, purpose, value)| value.map(|blob| (name, purpose, blob)))
@@ -586,6 +590,79 @@ fn set_registry_value(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn verify_identity_metadata(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    vault: &str,
+    report: &mut VaultVerificationReport,
+) -> Result<()> {
+    use rusqlite::types::Value;
+    for (table, id, column, kind, purpose) in [
+        (
+            "totp_secrets",
+            "totp_id",
+            "issuer",
+            ObjectType::TotpSecret,
+            EnvelopePurpose::TotpIssuer,
+        ),
+        (
+            "totp_secrets",
+            "totp_id",
+            "account_name",
+            ObjectType::TotpSecret,
+            EnvelopePurpose::TotpAccount,
+        ),
+        (
+            "ssh_keys",
+            "key_id",
+            "comment",
+            ObjectType::SshKey,
+            EnvelopePurpose::Summary,
+        ),
+    ] {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {id},sync_id,{column} FROM {table} WHERE {column} IS NOT NULL"
+            ))
+            .map_err(DatabaseError::Sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Value>(2)?,
+                ))
+            })
+            .map_err(DatabaseError::Sqlite)?;
+        for row in rows {
+            let (row, sid, value) = row.map_err(DatabaseError::Sqlite)?;
+            if !matches!(&value, Value::Blob(b) if b.starts_with(crate::crypto::ENVELOPE_MAGIC)) {
+                report.rows_still_v1 += 1;
+                continue;
+            }
+            if envelope_ops::open_metadata_text_field(
+                dek,
+                Some(vault),
+                sid.as_deref(),
+                kind,
+                purpose,
+                Some(value),
+            )
+            .is_err()
+            {
+                report.failures.push(VaultVerificationFailure {
+                    table,
+                    row_id: row,
+                    sync_id: sid,
+                    column,
+                    reason: "metadata envelope failed column authentication".into(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 impl VaultManager {
     /// True when the vault's envelope format is (or exceeds) this build's
     /// ACTIVATED format — the durable downgrade-block marker (WBS-406).
@@ -627,6 +704,10 @@ impl VaultManager {
         // reentrant — the sweep's discipline).
         let db = self.lock_db()?;
         let conn = db.conn();
+        let _read = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        super::content_guard::verify_snapshot(conn, dek)?;
         let mut report = VaultVerificationReport::default();
         verify_entry_rows(conn, dek, &vault_uuid, &mut report)?;
         let (ssh_scanned, ssh_verified) = verify_three_part_rows(
@@ -656,6 +737,7 @@ impl VaultManager {
         report.totp_secrets_scanned += totp_scanned;
         report.totp_secrets_verified += totp_verified;
         verify_domain_rows(conn, dek, &vault_uuid, &tag_key, &mut report)?;
+        verify_identity_metadata(conn, dek, &vault_uuid, &mut report)?;
         Ok(report)
     }
 }
@@ -702,6 +784,7 @@ pub(crate) fn verify_snapshot_envelopes(
     report.totp_secrets_scanned += totp_scanned;
     report.totp_secrets_verified += totp_verified;
     verify_domain_rows(conn, dek, vault_uuid, &tag_key, &mut report)?;
+    verify_identity_metadata(conn, dek, vault_uuid, &mut report)?;
     Ok(report)
 }
 

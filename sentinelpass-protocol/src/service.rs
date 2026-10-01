@@ -28,6 +28,7 @@ pub struct ServiceEntry {
     #[serde(default)]
     pub entry_id: Option<i64>,
     pub title: String,
+    #[serde(default)]
     pub username: String,
     #[serde(default)]
     pub password: Zeroizing<String>,
@@ -543,6 +544,14 @@ mod tests {
         assert_eq!(back.entry_id, Some(7));
         assert_eq!(back.password.as_str(), "secret");
         assert_eq!(back.credential_type, "api_key");
+    }
+
+    #[test]
+    fn api_key_service_entry_allows_omitted_username() {
+        let value = serde_json::json!({"title":"service", "password":hex::encode(rand::random::<[u8; 16]>()), "credential_type":"api_key"});
+        let entry: ServiceEntry = serde_json::from_value(value).unwrap();
+        assert!(entry.username.is_empty());
+        assert_eq!(entry.credential_type, "api_key");
     }
 
     /// An old client's entry frame (no credential_type / timestamps) must

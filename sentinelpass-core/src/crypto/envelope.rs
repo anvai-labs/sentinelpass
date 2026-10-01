@@ -132,17 +132,18 @@ pub fn seal_envelope(
     expected_max_plaintext: usize,
 ) -> Result<Vec<u8>> {
     let mut nonce_bytes = [0u8; 12];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes);
+    rand::RngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes)
+        .map_err(|_| CryptoError::EncryptionFailed("OS randomness unavailable".into()))?;
     seal_envelope_with_nonce(dek, context, plaintext, expected_max_plaintext, nonce_bytes)
 }
 
 /// [`seal_envelope`] with a CALLER-SUPPLIED nonce: exists solely so the
 /// durable format has a deterministic sealing path for golden vectors and
 /// cross-language conformance files (WBS-305). Production callers must
-/// use [`seal_envelope`] — a reused nonce under the same key with the
-/// same AAD is the one catastrophic AES-GCM misuse, and only the OS
-/// CSPRNG gives the no-reuse guarantee.
-pub fn seal_envelope_with_nonce(
+/// use [`seal_envelope`]. Nonce reuse under one key is unsafe even with
+/// different AAD. OS randomness makes collisions negligibly probable;
+/// it is not a mathematical uniqueness guarantee.
+fn seal_envelope_with_nonce(
     dek: &DataEncryptionKey,
     context: AadContext,
     plaintext: &[u8],
@@ -429,6 +430,22 @@ fn decode_exact_b64(s: &str, expected_len: usize, field: &str) -> Result<Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unknown_identity_fields_are_rejected() {
+        let dek = DataEncryptionKey::new().unwrap();
+        let context = ctx(EnvelopePurpose::Secret);
+        let blob = seal_envelope(&dek, context.clone(), b"synthetic", 64).unwrap();
+        let mut document: serde_json::Value = serde_json::from_slice(&blob).unwrap();
+        document["context"]["unrecognized_identity"] = "not authenticated".into();
+        let document = serde_json::to_vec(&document).unwrap();
+        // Preserve the required magic prefix instead of relying on map order.
+        let mut object: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&document).unwrap();
+        object.remove("magic");
+        let remainder = serde_json::to_string(&object).unwrap();
+        let document = format!("{{\"magic\":\"SPENV\",{}", &remainder[1..]);
+        assert!(open_envelope(&dek, context, document.as_bytes()).is_err());
+    }
     use super::*;
     use crate::crypto::aad::{AadContextBuilder, EnvelopePurpose, ObjectType};
     use uuid::Uuid;

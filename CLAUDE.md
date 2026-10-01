@@ -139,7 +139,7 @@ sentinelpass-daemon
 
 **sentinelpass-cli/** - Command-line interface (binary: `sentinelpass`):
 - Clap-based CLI with subcommands
-- Commands: init, add, list, search, edit, delete, generate, totp-add/code/remove, ssh-key-add/list/get/delete, export, import, check, biometric-enable/disable
+- Commands: init, add, list, search, edit, delete, generate, totp-add/code/remove, ssh-key-add/list/get/delete, export, import, check, biometric-enable/disable, service-credential install/verify/list/remove (restart-safe systemd encrypted credentials; see docs/SERVICE_CREDENTIALS.md)
 - Sync subcommands: sync init/now/status/device-list/device-revoke/pair-start/pair-join/disable
 
 **sentinelpass-ui/** - Tauri v2 desktop application (binary: `sentinelpass-ui`):
@@ -472,6 +472,26 @@ Other workflows:
 - `public-overflow-runner-smoke.yml` - self-path pushes + manual dispatch
 
 All checks must pass (via the Gate) before merging to main branch.
+
+## Release Channels and What They Include
+
+Three distribution channels ship from the same tag; they deliberately carry different component sets (verified against the release archives each release — update the table in README "Release Artifacts" if this changes):
+
+| Component | Homebrew formula (`anvai-labs/tap/sentinelpass`) | DMG (`.app` bundle) | Installer archive (`sentinelpass-installer-*`) |
+| --- | --- | --- | --- |
+| CLI (`sentinelpass`) | ✓ macOS + Linux | ✗ | ✓ |
+| Desktop UI (`sentinelpass-ui`) | ✓ | ✓ (the `.app`) | ✓ |
+| Native host (`sentinelpass-host`) | ✓ | ✓ (sidecar inside the `.app`) | ✓ |
+| Daemon (`sentinelpass-daemon`) | ✓ Linux only — omitted on macOS on purpose | ✓ (sidecar inside the `.app`) | ✓ |
+| Browser extensions | ✗ | ✗ | ✓ |
+| LaunchAgent / auto-start + native-host manifests | ✗ (binaries only) | manifests auto-register on UI launch | ✓ (full setup) |
+
+Gotchas:
+- The DMG bundle's sidecar resources (`Contents/Resources/src-tauri/resources/bin/`) contain only daemon + host — NEVER the CLI. For a full local upgrade of all binaries use the installer archive, not the DMG.
+- The daemon's exclusive maintenance lock (WBS-501/503) means one daemon per vault; the brew formula's macOS omission exists so it never competes with the app-managed LaunchAgent daemon.
+- Whichever UI launched last re-registers the native-host manifests — keep installed channels on the same version.
+- Browser extensions are a separate train (`chrome-v*` tags); app releases do not bump them.
+- The Homebrew tap's formula bumps are automated via `anvai-labs/homebrew-tap`'s dispatch (Actions → Update SentinelPass Formula); its CI runs a contract test against LIVE upstream registries (e.g. PyPI for the `victor` formula), so an upstream release can redden all tap PRs until that formula's bump PR merges.
 
 ## Git Workflow
 

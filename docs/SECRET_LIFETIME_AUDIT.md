@@ -1,5 +1,7 @@
 # Secret Lifetime Audit — WBS-308 (SR-CRYPTO-004 / TD-ROB-08 second half)
 
+**2026-09-22 update:** FU-01 and FU-02 are closed in the derivation path: `hash_password_into_with_memory` writes into explicitly zeroizing Argon2 workspace/output buffers, and `derive_master_key` returns `Zeroizing<[u8; 32]>`. Compatibility tests preserve historical output. See [at-rest remediation](SECURITY_REMEDIATION_2026-09-22.md) for export buffers, Unix dump suppression, and remaining page-locking/runtime limitations. The original inventory below records the earlier audit.
+
 **Status:** delivered in the WBS-308 pass (branch `feat/envelope-v2-adoption` line).
 **Acceptance (WBS):** P — this table, committed. N — no owned secret buffer in
 crypto/KDF intermediate paths or new paths left without a zeroizing type.

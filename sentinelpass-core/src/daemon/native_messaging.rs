@@ -122,10 +122,7 @@ impl NativeMessagingHost {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        info!(
-            "Received native message: type={}, domain={:?}",
-            message.msg_type, message.domain
-        );
+        info!("Received native message:");
 
         // Create IPC client to communicate with daemon
         let socket_path = default_ipc_socket_path();
@@ -366,7 +363,7 @@ impl NativeMessagingHost {
                 Self::send_error(request_id, "Unexpected response from daemon")?;
             }
             Err(e) => {
-                error!("IPC error: {}", e);
+                error!(error_kind = ?std::any::type_name_of_val(&e), "IPC error");
                 Self::send_error(
                     request_id,
                     &format!("Failed to communicate with daemon: {}", e),

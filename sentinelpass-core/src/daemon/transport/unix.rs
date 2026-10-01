@@ -46,27 +46,14 @@ impl UnixSocketTransport {
         // REFUSED (this is what retires the /tmp fallback in practice).
         sentinelpass_protocol::transport::unix::ensure_private_socket_dir(&self.socket_path, true)?;
 
-        // Set restrictive umask before bind to prevent brief window with default permissions
-        #[cfg(unix)]
-        let old_umask = unsafe { libc::umask(0o177) }; // Only owner r/w
-
-        let listener = tokio::net::UnixListener::bind(&self.socket_path).map_err(|e| {
-            #[cfg(unix)]
-            unsafe {
-                libc::umask(old_umask)
-            };
-            TransportError::ConnectionFailed(format!(
-                "Failed to bind to {}: {}",
-                self.socket_path.display(),
-                e
-            ))
-        })?;
-
-        // Restore original umask
-        #[cfg(unix)]
-        unsafe {
-            libc::umask(old_umask)
-        };
+        // The validated 0700 directory prevents access during bind. Never
+        // change the process-wide umask: concurrent vault/directory creation
+        // otherwise inherits a transient mask and can lose owner execute bits.
+        let listener =
+            tokio::net::UnixListener::bind(&self.socket_path).map_err(TransportError::Io)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(TransportError::Io)?;
 
         self.listener = Some(listener);
         Ok(())
@@ -178,6 +165,15 @@ mod tests {
 
         transport.bind().unwrap();
         assert!(transport.is_bound());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&socket_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
 
         // Cleanup
         let _ = std::fs::remove_file(&socket_path);

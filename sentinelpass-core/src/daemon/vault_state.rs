@@ -282,7 +282,7 @@ impl DaemonVault {
                         }
                         Err(PasswordManagerError::NotFound(_)) => continue,
                         Err(e) => {
-                            warn!("Failed to generate TOTP for domain '{}': {}", domain, e);
+                            warn!("Failed to generate TOTP");
                             return Err(e);
                         }
                     }
@@ -308,7 +308,7 @@ impl DaemonVault {
                             }
                             Err(PasswordManagerError::NotFound(_)) => continue,
                             Err(e) => {
-                                warn!("Failed to generate TOTP for domain '{}': {}", domain, e);
+                                warn!("Failed to generate TOTP");
                                 return Err(e);
                             }
                         }
@@ -443,10 +443,7 @@ impl DaemonVault {
             }
             existing_entry.modified_at = now;
             vault.update_entry(entry_id, &existing_entry)?;
-            info!(
-                "Credential updated for domain: {} (entry_id={})",
-                domain, entry_id
-            );
+            info!("Credential");
             return Ok(());
         }
 
@@ -464,7 +461,7 @@ impl DaemonVault {
         };
 
         vault.add_entry(&entry)?;
-        info!("Credential saved for domain: {}", domain);
+        info!("Credential");
         Ok(())
     }
 
@@ -510,10 +507,7 @@ impl DaemonVault {
             // stamp), and age-based rotation statuses are suppressed for
             // these entries.
             let _ = vault.set_lifecycle_source(entry_id, LifecycleSource::ToolManaged);
-            info!(
-                "External secret updated for domain: {} (entry_id={})",
-                domain, entry_id
-            );
+            info!("External secret");
             return Ok(());
         }
 
@@ -531,7 +525,7 @@ impl DaemonVault {
         };
         let new_entry_id = vault.add_entry(&entry)?;
         let _ = vault.set_lifecycle_source(new_entry_id, LifecycleSource::ToolManaged);
-        info!("External secret saved for domain: {}", domain);
+        info!("External secret");
         Ok(())
     }
 
