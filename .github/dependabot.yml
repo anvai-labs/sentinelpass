@@ -4,6 +4,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Ground rules (CLAUDE.md/AGENTS.md): integration happens on develop;
+    # promotion to main is the single-commit release train.
+    target-branch: develop
     groups:
       cargo-minor-patch:
         update-types:
@@ -48,6 +51,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       actions:
         patterns:
@@ -57,6 +61,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       npm-dev:
         dependency-type: development
@@ -65,6 +70,7 @@ updates:
     directory: /browser-extension/chrome
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       npm-dev:
         dependency-type: development
@@ -73,6 +79,7 @@ updates:
     directory: /browser-extension/e2e
     schedule:
       interval: weekly
+    target-branch: develop
     groups:
       npm-dev:
         dependency-type: development
