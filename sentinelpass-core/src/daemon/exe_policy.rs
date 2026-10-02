@@ -28,9 +28,10 @@ pub enum ExePolicyResult {
 /// EvidenceUnavailable).
 pub fn resolve_exe_digest(pid: u32) -> Result<String, String> {
     let path = format!("/proc/{pid}/exe");
-    // O_RDONLY | O_NOFOLLOW via OpenOptionsExt (no custom flags needed —
-    // /proc/<pid>/exe is a magic symlink the kernel resolves; opening it
-    // directly is the kernel-referenced view).
+    // Plain pathname open of the procfs magic symlink: security rests on
+    // the kernel-owned numeric pid + kernel-controlled procfs, not on
+    // open flags (O_NOFOLLOW would ELOOP on magic symlinks — see
+    // ADR-016 §2).
     let mut file = std::fs::File::open(&path).map_err(|e| format!("cannot open {path}: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];

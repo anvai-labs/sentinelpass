@@ -200,6 +200,20 @@ impl IpcServer {
                     Ok(crate::exe_policy::ExePolicyResult::Matched)
                     | Ok(crate::exe_policy::ExePolicyResult::NotRequired) => {}
                     Ok(crate::exe_policy::ExePolicyResult::Mismatch) => {
+                        // Verification N1: the handoff §6 "digest mismatch"
+                        // event — the core stolen-token detection — MUST
+                        // leave a forensic trace.
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_mismatch".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: executable policy mismatch",
+                        );
                         return self.service_secret_report(
                             "denied",
                             None,
@@ -416,6 +430,7 @@ impl IpcServer {
                     "grant_id": grant.grant_id.to_string(),
                     "client_token": *token,
                     "expires_at": grant.expires_at.map(|e| e.timestamp()),
+                    "required_exe_sha256": grant.required_exe_sha256,
                 })),
             },
         }
