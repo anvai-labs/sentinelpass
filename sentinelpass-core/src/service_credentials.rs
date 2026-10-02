@@ -923,7 +923,10 @@ mod tests {
 
         let (bad, _bad_dir) = fake_tool("fail-encrypt");
         let err = install(&bad, store.path(), true).unwrap_err();
-        assert!(err.to_string().contains("mock: unavailable key"));
+        assert!(
+            err.to_string().contains("mock: unavailable key"),
+            "unexpected error from the failing tool: {err}"
+        );
 
         let after = std::fs::read(store.path().join("sandhi.provider.apikey")).unwrap();
         assert_eq!(
