@@ -418,10 +418,30 @@ pub enum VaultOp {
         /// SHA-256 digests of approved binaries). None = no pin.
         #[serde(default)]
         required_exe_sha256: Option<Vec<String>>,
+        /// SP-4 / ADR-017: full 40-hex OpenPGP fingerprint.
+        #[serde(default)]
+        registration_key_fingerprint: Option<String>,
     },
     /// Administration (step-up class): revoke a grant by id.
     ServiceGrantRevoke {
         grant_id: String,
+    },
+    /// Administration (step-up class): begin enrollment — mint a
+    /// single-use canonical transcript challenge. SP-4 / ADR-017.
+    ServiceEnrollmentBegin {
+        client_id: String,
+    },
+    /// Enrollment completion: prove OpenPGP key possession by signing
+    /// the canonical transcript. On verification, the grant's token is
+    /// minted and shown once.
+    ServiceEnrollmentComplete {
+        client_id: String,
+        nonce: String,
+        signature_armored: String,
+        /// The client's OpenPGP public key (armored). Imported into an
+        /// ISOLATED keyring for verification; the fingerprint check
+        /// against the pre-approved grant is the binding control.
+        client_public_key: String,
     },
     SyncPairJoin {
         relay_url: String,
@@ -529,7 +549,8 @@ impl VaultOp {
             | SyncPairStart
             | SyncPairJoin { .. }
             | ServiceGrantCreate { .. }
-            | ServiceGrantRevoke { .. } => true,
+            | ServiceGrantRevoke { .. }
+            | ServiceEnrollmentBegin { .. } => true,
             VaultCreate { .. }
             | VaultStatus
             | EntryGet { .. }
@@ -547,7 +568,8 @@ impl VaultOp {
             | SyncStatus
             | SyncDeadLetterList
             | SyncConflictList
-            | ServiceGetSecret { .. } => false,
+            | ServiceGetSecret { .. }
+            | ServiceEnrollmentComplete { .. } => false,
         }
     }
 }

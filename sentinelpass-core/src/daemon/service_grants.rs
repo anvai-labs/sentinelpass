@@ -21,6 +21,11 @@ use zeroize::Zeroizing;
 
 use crate::{DatabaseError, PasswordManagerError, Result};
 
+/// Marker hash for fingerprinted grants awaiting enrollment (F1): the
+/// grant exists but has NO usable token until ServiceEnrollmentComplete
+/// verifies key possession. authorize() rejects this hash.
+pub const PENDING_TOKEN_HASH: &str = "pending-enrollment";
+
 /// Service principal tokens carry their own prefix so a service token can
 /// never be confused with a legacy broker token at either validation site.
 pub const SERVICE_TOKEN_PREFIX: &str = "sps_";
@@ -73,6 +78,12 @@ pub struct ServiceGrant {
     /// these; unavailable evidence DENIES (fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_exe_sha256: Option<Vec<String>>,
+    /// SP-4 / ADR-017: full 40-hex-char OpenPGP primary key fingerprint.
+    /// None = no enrollment factor (SP-1/SP-3 behavior). Some = the
+    /// enrollment flow (key-possession proof) is required to mint the
+    /// token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -228,6 +239,10 @@ impl ServiceGrantStore {
         field: ServiceField,
         now: DateTime<Utc>,
     ) -> Option<&ServiceGrant> {
+        // F1: pending grants (awaiting enrollment) never authorize.
+        if token == PENDING_TOKEN_HASH {
+            return None;
+        }
         let token_hash = Sha256::digest(token.as_bytes());
         self.grants
             .values()
@@ -237,6 +252,7 @@ impl ServiceGrantStore {
                     && g.revoked_at.is_none()
                     && g.expires_at.map(|e| now < e).unwrap_or(true)
                     && g.fields.contains(&field)
+                    && g.client_token_hash != PENDING_TOKEN_HASH
             })
             .find(|g| {
                 // Constant-time over the hex-encoded digest.
@@ -255,6 +271,7 @@ impl ServiceGrantStore {
         fields: Vec<ServiceField>,
         expires_at: Option<DateTime<Utc>>,
         required_exe_sha256: Option<Vec<String>>,
+        registration_key_fingerprint: Option<String>,
     ) -> std::result::Result<(ServiceGrant, Zeroizing<String>), &'static str> {
         if fields.is_empty() {
             return Err("a grant must name at least one field");
@@ -262,6 +279,15 @@ impl ServiceGrantStore {
         // Review F3: a malformed pin would mint successfully and then
         // silently never match at retrieval (a permanent lockout wearing
         // an attack-shaped denial message). Validate at the boundary.
+        if let Some(fingerprint) = registration_key_fingerprint.as_ref() {
+            if fingerprint.len() != 40
+                || !fingerprint
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            {
+                return Err("registration key fingerprint must be exactly 40 lowercase hex characters (OpenPGP v4)");
+            }
+        }
         if let Some(pins) = required_exe_sha256.as_ref() {
             for pin in pins {
                 if pin.len() != 64
@@ -281,7 +307,16 @@ impl ServiceGrantStore {
             "{SERVICE_TOKEN_PREFIX}{}",
             hex::encode(token_bytes)
         ));
-        let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        // F1: fingerprinted grants are created PENDING — no usable token
+        // until enrollment proves key possession. The token returned by
+        // this method is a placeholder that will be replaced at
+        // enrollment_complete (callers must check the fingerprint and NOT
+        // reveal the placeholder).
+        let token_hash = if registration_key_fingerprint.is_some() {
+            PENDING_TOKEN_HASH.to_string()
+        } else {
+            hex::encode(Sha256::digest(token.as_bytes()))
+        };
         let grant = ServiceGrant {
             policy_version: 1,
             grant_id: Uuid::new_v4(),
@@ -293,6 +328,7 @@ impl ServiceGrantStore {
             created_at: Utc::now(),
             client_token_hash: token_hash,
             required_exe_sha256,
+            registration_key_fingerprint,
         };
         self.grants.insert(grant.grant_id, grant.clone());
         Ok((grant, token))
@@ -301,6 +337,29 @@ impl ServiceGrantStore {
     /// SP-3 / ADR-016: the grant's mandatory executable policy, if any.
     pub fn required_exe_policy(grant: &ServiceGrant) -> &[String] {
         grant.required_exe_sha256.as_deref().unwrap_or(&[])
+    }
+
+    /// F3: rotate the token for an EXISTING grant (same grant_id) —
+    /// enrollment_complete must never mint a duplicate grant. Returns
+    /// the new plaintext token (shown once) or None if the grant is
+    /// absent/already revoked.
+    pub fn rotate_token(
+        &mut self,
+        grant_id: Uuid,
+    ) -> std::result::Result<Option<Zeroizing<String>>, &'static str> {
+        let grant = match self.grants.get_mut(&grant_id) {
+            Some(g) if g.revoked_at.is_none() => g,
+            Some(_) => return Ok(None), // revoked
+            None => return Ok(None),    // absent
+        };
+        let mut token_bytes = [0u8; SERVICE_TOKEN_BYTES];
+        OsRng.fill_bytes(&mut token_bytes);
+        let token = Zeroizing::new(format!(
+            "{SERVICE_TOKEN_PREFIX}{}",
+            hex::encode(token_bytes)
+        ));
+        grant.client_token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        Ok(Some(token))
     }
 
     pub fn revoke(&mut self, grant_id: Uuid) -> bool {
@@ -327,7 +386,7 @@ mod tests {
     fn mint_authorize_and_revoke_round_trip() {
         let mut s = store();
         let (grant, token) = s
-            .mint_grant("svc", 42, vec![ServiceField::Password], None, None)
+            .mint_grant("svc", 42, vec![ServiceField::Password], None, None, None)
             .unwrap();
         let now = Utc::now();
         // Correct token + exact entry + granted field -> authorized.
@@ -362,6 +421,7 @@ mod tests {
                 1,
                 vec![ServiceField::Password],
                 Some(Utc::now() - chrono::Duration::seconds(1)),
+                None,
                 None,
             )
             .unwrap();
@@ -400,7 +460,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join(STORE_FILE);
         let mut s = store();
-        s.mint_grant("svc", 9, vec![ServiceField::Title], None, None)
+        s.mint_grant("svc", 9, vec![ServiceField::Title], None, None, None)
             .unwrap();
         s.save_to_path(&path).unwrap();
         #[cfg(unix)]
@@ -428,7 +488,7 @@ mod tests {
     fn service_tokens_use_their_own_prefix() {
         let mut s = store();
         let (_, token) = s
-            .mint_grant("svc", 1, vec![ServiceField::Password], None, None)
+            .mint_grant("svc", 1, vec![ServiceField::Password], None, None, None)
             .unwrap();
         assert!(token.starts_with(SERVICE_TOKEN_PREFIX));
     }

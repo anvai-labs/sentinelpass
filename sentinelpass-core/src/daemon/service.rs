@@ -112,7 +112,9 @@ impl LiveVaultService<'_> {
             // future routing can execute them against the vault by mistake.
             VaultOp::ServiceGetSecret { .. }
             | VaultOp::ServiceGrantCreate { .. }
-            | VaultOp::ServiceGrantRevoke { .. } => Err(PasswordManagerError::InvalidInput(
+            | VaultOp::ServiceGrantRevoke { .. }
+            | VaultOp::ServiceEnrollmentBegin { .. }
+            | VaultOp::ServiceEnrollmentComplete { .. } => Err(PasswordManagerError::InvalidInput(
                 "service-grant operations are served by the IPC boundary, not the vault service"
                     .to_string(),
             )),

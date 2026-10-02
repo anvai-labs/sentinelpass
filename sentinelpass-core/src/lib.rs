@@ -11,6 +11,8 @@ pub mod crypto;
 pub mod daemon;
 pub mod database;
 pub mod domain;
+#[path = "daemon/enrollment.rs"]
+pub mod enrollment;
 #[path = "daemon/exe_policy.rs"]
 pub mod exe_policy;
 pub mod external_secret_access;
