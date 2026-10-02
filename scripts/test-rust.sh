@@ -8,7 +8,10 @@ export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/sentinelpass-target}"
 mkdir -p "$CARGO_TARGET_DIR"
 
-TMP_ROOT="$CARGO_TARGET_DIR/.tmp"
+# Per-invocation TMPDIR: a single persistent .tmp accumulated weeks of
+# fixtures from older branches and deterministically broke
+# fixture-lifetime tests (see #212); each run now gets a fresh root.
+TMP_ROOT="$CARGO_TARGET_DIR/.tmp/run-$$"
 mkdir -p "$TMP_ROOT"
 export TMPDIR="$TMP_ROOT"
 export TMP="$TMP_ROOT"
