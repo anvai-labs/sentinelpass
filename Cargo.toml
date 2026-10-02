@@ -28,7 +28,7 @@ categories = ["command-line-utilities", "authentication"]
 
 [workspace.dependencies]
 # Cryptography
-argon2 = { version = "0.5", features = ["zeroize"] }
+argon2 = { version = "0.6", features = ["zeroize"] }
 aes-gcm = "0.10"
 rand = "0.8"
 zeroize = { version = "1.7", features = ["zeroize_derive", "serde"] }
