@@ -73,6 +73,12 @@ pub struct ServiceGrant {
     /// these; unavailable evidence DENIES (fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_exe_sha256: Option<Vec<String>>,
+    /// SP-4 / ADR-017: full 40-hex-char OpenPGP primary key fingerprint.
+    /// None = no enrollment factor (SP-1/SP-3 behavior). Some = the
+    /// enrollment flow (key-possession proof) is required to mint the
+    /// token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -255,6 +261,7 @@ impl ServiceGrantStore {
         fields: Vec<ServiceField>,
         expires_at: Option<DateTime<Utc>>,
         required_exe_sha256: Option<Vec<String>>,
+        registration_key_fingerprint: Option<String>,
     ) -> std::result::Result<(ServiceGrant, Zeroizing<String>), &'static str> {
         if fields.is_empty() {
             return Err("a grant must name at least one field");
@@ -262,6 +269,15 @@ impl ServiceGrantStore {
         // Review F3: a malformed pin would mint successfully and then
         // silently never match at retrieval (a permanent lockout wearing
         // an attack-shaped denial message). Validate at the boundary.
+        if let Some(fingerprint) = registration_key_fingerprint.as_ref() {
+            if fingerprint.len() != 40
+                || !fingerprint
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            {
+                return Err("registration key fingerprint must be exactly 40 lowercase hex characters (OpenPGP v4)");
+            }
+        }
         if let Some(pins) = required_exe_sha256.as_ref() {
             for pin in pins {
                 if pin.len() != 64
@@ -293,6 +309,7 @@ impl ServiceGrantStore {
             created_at: Utc::now(),
             client_token_hash: token_hash,
             required_exe_sha256,
+            registration_key_fingerprint,
         };
         self.grants.insert(grant.grant_id, grant.clone());
         Ok((grant, token))
@@ -327,7 +344,7 @@ mod tests {
     fn mint_authorize_and_revoke_round_trip() {
         let mut s = store();
         let (grant, token) = s
-            .mint_grant("svc", 42, vec![ServiceField::Password], None, None)
+            .mint_grant("svc", 42, vec![ServiceField::Password], None, None, None)
             .unwrap();
         let now = Utc::now();
         // Correct token + exact entry + granted field -> authorized.
@@ -362,6 +379,7 @@ mod tests {
                 1,
                 vec![ServiceField::Password],
                 Some(Utc::now() - chrono::Duration::seconds(1)),
+                None,
                 None,
             )
             .unwrap();
@@ -400,7 +418,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join(STORE_FILE);
         let mut s = store();
-        s.mint_grant("svc", 9, vec![ServiceField::Title], None, None)
+        s.mint_grant("svc", 9, vec![ServiceField::Title], None, None, None)
             .unwrap();
         s.save_to_path(&path).unwrap();
         #[cfg(unix)]
@@ -428,7 +446,7 @@ mod tests {
     fn service_tokens_use_their_own_prefix() {
         let mut s = store();
         let (_, token) = s
-            .mint_grant("svc", 1, vec![ServiceField::Password], None, None)
+            .mint_grant("svc", 1, vec![ServiceField::Password], None, None, None)
             .unwrap();
         assert!(token.starts_with(SERVICE_TOKEN_PREFIX));
     }

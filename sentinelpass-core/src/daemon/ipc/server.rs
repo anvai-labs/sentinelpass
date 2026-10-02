@@ -62,6 +62,9 @@ pub struct IpcServer {
     service_grants_path: std::path::PathBuf,
     /// Serializes grant-store read-modify-write cycles.
     service_grants_lock: std::sync::Mutex<()>,
+    /// SP-4 / ADR-017: enrollment challenge state (single-use nonces,
+    /// server-held only — restart-safe by construction).
+    enrollment: crate::enrollment::EnrollmentState,
 
     /// Strict administrative-step-up profile (SP-0): when set, every
     /// `VaultOp::requires_admin_step_up()` op needs a fresh approval and
@@ -123,6 +126,7 @@ impl IpcServer {
             stepup: stepup::StepUpState::new(),
             service_grants_path: crate::service_grants::ServiceGrantStore::default_path(),
             service_grants_lock: std::sync::Mutex::new(()),
+            enrollment: crate::enrollment::EnrollmentState::new(),
             require_stepup: std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
                 .map(|v| v == "1")
                 .unwrap_or(false),
@@ -344,6 +348,7 @@ impl IpcServer {
     }
 
     /// SP-1 / ADR-014: mint a grant (admin; step-up gated upstream).
+    #[allow(clippy::too_many_arguments)]
     async fn service_grant_create(
         &self,
         peer: &crate::daemon::transport::PeerContext,
@@ -352,6 +357,7 @@ impl IpcServer {
         fields: Vec<String>,
         expires_at: Option<i64>,
         required_exe_sha256: Option<Vec<String>>,
+        registration_key_fingerprint: Option<String>,
     ) -> IpcMessage {
         let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
             .iter()
@@ -404,6 +410,7 @@ impl IpcServer {
             fields,
             expiry,
             required_exe_sha256.clone(),
+            registration_key_fingerprint.clone(),
         ) {
             Ok(minted) => minted,
             Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
@@ -437,6 +444,212 @@ impl IpcServer {
     }
 
     /// SP-1 / ADR-014: revoke a grant (admin; step-up gated upstream).
+    /// SP-4 / ADR-017: begin enrollment — mint a single-use challenge
+    /// for the named client's pre-approved grant. Owner step-up gated.
+    async fn service_enrollment_begin(
+        &self,
+        _peer: &crate::daemon::transport::PeerContext,
+        client_id: &str,
+    ) -> IpcMessage {
+        let store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable: {e}")),
+                )
+            }
+        };
+        // Find the pre-approved grant for this client (with a fingerprint).
+        let grant = store.grants.values().find(|g| {
+            g.client_id == client_id
+                && g.revoked_at.is_none()
+                && g.registration_key_fingerprint.is_some()
+        });
+        let Some(grant) = grant else {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some(format!(
+                    "no enrollment-pending grant for client '{client_id}'"
+                )),
+            );
+        };
+        let fingerprint = grant
+            .registration_key_fingerprint
+            .as_deref()
+            .unwrap_or_default();
+        let fields: Vec<&str> = grant.fields.iter().map(|f| f.as_str()).collect();
+        let exe_digest = grant
+            .required_exe_sha256
+            .as_ref()
+            .map(|pins| pins.join(","));
+        let (nonce, transcript) = self.enrollment.begin(
+            client_id,
+            grant.entry_id,
+            &fields,
+            exe_digest.as_deref(),
+            fingerprint,
+            grant.expires_at.map(|e| e.timestamp()),
+        );
+        IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": "challenge",
+                    "nonce": nonce,
+                    "transcript": String::from_utf8_lossy(&transcript),
+                })),
+            },
+        }
+    }
+
+    /// SP-4 / ADR-017: complete enrollment — verify the OpenPGP signature
+    /// and reveal the grant's service token (minted + shown once).
+    async fn service_enrollment_complete(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        client_id: &str,
+        nonce: String,
+        signature_armored: String,
+    ) -> IpcMessage {
+        // Consume the challenge FIRST (single-use regardless of outcome).
+        let Some(challenge) = self.enrollment.take(&nonce) else {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some("enrollment challenge unknown, expired, or already used".into()),
+            );
+        };
+        if challenge.client_id != client_id {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some("enrollment challenge does not belong to this client".into()),
+            );
+        }
+
+        // Load the store to verify against the grant.
+        let store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable: {e}")),
+                )
+            }
+        };
+        let grant = store.grants.values().find(|g| {
+            g.client_id == client_id
+                && g.revoked_at.is_none()
+                && g.registration_key_fingerprint.is_some()
+        });
+        let Some(grant) = grant else {
+            return self.service_secret_report("not_found", None, None);
+        };
+        let fingerprint = grant
+            .registration_key_fingerprint
+            .as_deref()
+            .unwrap_or_default();
+
+        // Verify via the pinned gpg (blocking: subprocess + I/O).
+        let gpg_path = std::env::var("SENTINELPASS_GPG_PATH")
+            .unwrap_or_else(|_| crate::enrollment::DEFAULT_GPG_PATH.to_string());
+        let sig = signature_armored.clone();
+        let transcript = challenge.transcript.clone();
+        let fp = fingerprint.to_string();
+        let verification = tokio::task::spawn_blocking(move || {
+            crate::enrollment::verify_signature(&gpg_path, &transcript, &sig, &fp)
+        })
+        .await;
+
+        match verification {
+            Ok(Ok(())) => {
+                // Verified: mint the grant's token (the client proved key
+                // possession; the token is the ongoing credential).
+                let _guard = self.service_grants_lock.lock().unwrap();
+                let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
+                    &self.service_grants_path,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!("grant store unavailable: {e}")),
+                        )
+                    }
+                };
+                // Mint a fresh token for the grant (replaces any prior).
+                let (grant, token) = match store.mint_grant(
+                    client_id,
+                    grant.entry_id,
+                    grant.fields.clone(),
+                    grant.expires_at,
+                    grant.required_exe_sha256.clone(),
+                    grant.registration_key_fingerprint.clone(),
+                ) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return self.service_secret_report("denied", None, Some(e.to_string()))
+                    }
+                };
+                if let Err(e) = store.save_to_path(&self.service_grants_path) {
+                    return self.service_secret_report("store_error", None, Some(e.to_string()));
+                }
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::CredentialModified {
+                        entry_id: grant.entry_id,
+                    },
+                    &format!(
+                        "SP-4 enrollment_completed {client_id} entry:{} {}",
+                        grant.entry_id,
+                        peer.provenance_token()
+                    ),
+                );
+                // Token shown ONCE (sealed session).
+                IpcMessage::ServiceResult {
+                    outcome: ServiceOutcome::Ok {
+                        result: VaultOpResult::Report(serde_json::json!({
+                            "status": "enrolled",
+                            "grant_id": grant.grant_id.to_string(),
+                            "client_token": *token,
+                        })),
+                    },
+                }
+            }
+            Ok(Err(reason)) => {
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::ExternalSecretAccess {
+                        client_id: Some(client_id.to_string()),
+                        domain: "enrollment".to_string(),
+                        field: None,
+                        purpose: Some("enrollment:verification_failed".to_string()),
+                        success: false,
+                    },
+                    "SP-4 enrollment denied: verification failed",
+                );
+                self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("OpenPGP verification failed: {reason}")),
+                )
+            }
+            Err(e) => self.service_secret_report(
+                "denied",
+                None,
+                Some(format!("verification task failed: {e}")),
+            ),
+        }
+    }
+
     async fn service_grant_revoke(
         &self,
         peer: &crate::daemon::transport::PeerContext,
@@ -2009,6 +2222,7 @@ impl IpcServer {
                 fields,
                 expires_at,
                 required_exe_sha256,
+                registration_key_fingerprint,
             } => {
                 // Review F2: the ServiceCall arm gates these two admin ops
                 // on a consumed op-bound step-up approval UNCONDITIONALLY
@@ -2021,11 +2235,29 @@ impl IpcServer {
                         fields.clone(),
                         *expires_at,
                         required_exe_sha256.clone(),
+                        registration_key_fingerprint.clone(),
                     )
                     .await;
             }
             VaultOp::ServiceGrantRevoke { grant_id } => {
                 return self.service_grant_revoke(peer, grant_id).await
+            }
+            VaultOp::ServiceEnrollmentBegin { client_id } => {
+                return self.service_enrollment_begin(peer, client_id).await
+            }
+            VaultOp::ServiceEnrollmentComplete {
+                client_id,
+                nonce,
+                signature_armored,
+            } => {
+                return self
+                    .service_enrollment_complete(
+                        peer,
+                        client_id,
+                        nonce.clone(),
+                        signature_armored.clone(),
+                    )
+                    .await
             }
             _ => {}
         }
@@ -3711,6 +3943,7 @@ mod autofill_origin_gate_tests {
             fields: vec!["password".into()],
             expires_at: None,
             required_exe_sha256: None,
+            registration_key_fingerprint: None,
         };
         let unapproved = handle(
             &rt,
@@ -3890,6 +4123,7 @@ mod autofill_origin_gate_tests {
             fields: vec!["password".into()],
             expires_at: None,
             required_exe_sha256: Some(vec![self_digest]),
+            registration_key_fingerprint: None,
         };
         let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
             &rt,
@@ -3967,6 +4201,7 @@ mod autofill_origin_gate_tests {
             fields: vec![],
             expires_at: None,
             required_exe_sha256: None,
+            registration_key_fingerprint: None,
         }
         .requires_admin_step_up());
         assert!(O::ServiceGrantRevoke {

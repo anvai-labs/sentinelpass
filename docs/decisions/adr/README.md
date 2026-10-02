@@ -37,3 +37,4 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-014](ADR-014-service-grants-v2.md) | Exact-entry service grants (SP-1) | Accepted |
 | [ADR-015](ADR-015-trusted-peer-context.md) | Trusted peer context (SP-2) | Accepted |
 | [ADR-016](ADR-016-executable-policy.md) | Linux executable policy (SP-3) | Accepted |
+| [ADR-017](ADR-017-openpgp-enrollment.md) | OpenPGP enrollment (SP-4) | Accepted |
