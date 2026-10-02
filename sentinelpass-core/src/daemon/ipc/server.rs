@@ -62,6 +62,9 @@ pub struct IpcServer {
     service_grants_path: std::path::PathBuf,
     /// Serializes grant-store read-modify-write cycles.
     service_grants_lock: std::sync::Mutex<()>,
+    /// SP-2 / ADR-015: server-owned trusted peer context per connection
+    /// (kernel-derived at accept; provenance only in this slice).
+    peer_context: std::sync::Mutex<Option<crate::daemon::transport::unix::KernelPeerCred>>,
     /// Strict administrative-step-up profile (SP-0): when set, every
     /// `VaultOp::requires_admin_step_up()` op needs a fresh approval and
     /// browser/external-tool write surfaces are denied outright.
@@ -122,6 +125,7 @@ impl IpcServer {
             stepup: stepup::StepUpState::new(),
             service_grants_path: crate::service_grants::ServiceGrantStore::default_path(),
             service_grants_lock: std::sync::Mutex::new(()),
+            peer_context: std::sync::Mutex::new(None),
             require_stepup: std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
                 .map(|v| v == "1")
                 .unwrap_or(false),
@@ -142,6 +146,21 @@ impl IpcServer {
     pub fn with_service_grants_path(mut self, path: std::path::PathBuf) -> Self {
         self.service_grants_path = path;
         self
+    }
+
+    /// SP-2 / ADR-015: this connection's kernel-derived provenance
+    /// (redacted token for audit context lines; provenance only).
+    fn peer_provenance(&self) -> String {
+        let guard = self.peer_context.lock().unwrap();
+        match guard.as_ref() {
+            Some(cred) => format!(
+                "peer=uid:{}{}{}",
+                cred.uid,
+                cred.gid.map(|g| format!(":gid:{g}")).unwrap_or_default(),
+                cred.pid.map(|p| format!(":pid:{p}")).unwrap_or_default(),
+            ),
+            None => "peer=unknown".to_string(),
+        }
     }
 
     /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
@@ -201,8 +220,9 @@ impl IpcServer {
                 }
             },
             &format!(
-                "SP-1 service_get {client_id} entry:{entry_id} field:{} authorized={authorized}",
-                field.as_str()
+                "SP-1 service_get {client_id} entry:{entry_id} field:{} authorized={authorized} {}",
+                field.as_str(),
+                self.peer_provenance(),
             ),
         );
         if !authorized {
@@ -329,7 +349,10 @@ impl IpcServer {
         log_daemon_audit(
             self.audit_logger.as_deref(),
             crate::AuditEventType::CredentialModified { entry_id },
-            &format!("SP-1 service_grant_created {client_id} entry:{entry_id}"),
+            &format!(
+                "SP-1 service_grant_created {client_id} entry:{entry_id} {}",
+                self.peer_provenance()
+            ),
         );
         // Token shown once, inside the sealed session (legacy-broker
         // discipline). The report is the ONLY place it appears.
@@ -371,7 +394,10 @@ impl IpcServer {
                 log_daemon_audit(
                     self.audit_logger.as_deref(),
                     crate::AuditEventType::CredentialModified { entry_id: 0 },
-                    &format!("SP-1 service_grant_revoked {grant_id}"),
+                    &format!(
+                        "SP-1 service_grant_revoked {grant_id} {}",
+                        self.peer_provenance()
+                    ),
                 );
                 self.service_secret_report("revoked", None, None)
             }
@@ -453,8 +479,8 @@ impl IpcServer {
 
             loop {
                 match transport.accept().await {
-                    Ok(conn) => {
-                        debug!("IPC client connected");
+                    Ok((conn, cred)) => {
+                        debug!(uid = cred.uid, "IPC client connected");
                         // WBS-512: each connection runs on its own task,
                         // bounded by the client semaphore — a stalled or
                         // slow client can no longer wedge the daemon.
@@ -463,8 +489,16 @@ impl IpcServer {
                                 let server = Arc::clone(&self);
                                 tokio::spawn(async move {
                                     let _permit = permit;
+                                    // SP-2: install this connection's
+                                    // trusted provenance for its lifetime.
+                                    if let Ok(mut guard) = server.peer_context.lock() {
+                                        *guard = Some(cred);
+                                    }
                                     if let Err(e) = server.run_connection(conn.into()).await {
                                         debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
+                                    }
+                                    if let Ok(mut guard) = server.peer_context.lock() {
+                                        *guard = None;
                                     }
                                 });
                             }
@@ -2470,6 +2504,36 @@ mod autofill_origin_gate_tests {
     }
 
     const TEST_CONNECTION: u128 = 0x5FE0_0000_0000_0000;
+
+    #[test]
+    fn peer_provenance_token_is_redacted_and_stable() {
+        // SP-2: the provenance token carries only the kernel triple —
+        // no paths, no argv, nothing client-supplied.
+        let h = harness_with_vault();
+        {
+            let mut guard = h.server.peer_context.lock().unwrap();
+            *guard = Some(crate::daemon::transport::unix::KernelPeerCred {
+                uid: 501,
+                gid: Some(20),
+                pid: Some(999),
+            });
+        }
+        let token = h.server.peer_provenance();
+        assert!(token.starts_with("peer=uid:501"), "token: {token}");
+        // Only digits/colons after the label fields — nothing else rides.
+        let body = token.trim_start_matches("peer=");
+        assert!(
+            body.chars()
+                .all(|c| c.is_ascii_digit() || c == ':' || c.is_ascii_alphabetic()),
+            "unexpected characters in provenance token: {token}"
+        );
+        // Unset context degrades to the explicit unknown marker.
+        {
+            let mut guard = h.server.peer_context.lock().unwrap();
+            *guard = None;
+        }
+        assert_eq!(h.server.peer_provenance(), "peer=unknown");
+    }
 
     /// Test-only: a Debug-safe label (IpcMessage Debug can contain secret
     /// payloads; panic messages must not embed them).
