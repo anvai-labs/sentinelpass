@@ -39,8 +39,17 @@ unattended."
 2. **Step-up protocol** (sealed-session IPC, like `UnlockVault`):
    `StepUpAuthorize { master_password, op }` → the daemon verifies the
    password by running the full reviewed open path (`VaultManager::open`)
-   and discarding the result — no cheaper verifier, no unlock side effect,
-   KDF gated + blocking-pool + lockout-rate-limited exactly like unlock.
+   and discarding the manager — no cheaper verifier, and the DaemonVault
+   itself is never unlocked. Honest side effects (adversarial review F2):
+   the success path re-runs the vault's idempotent maintenance sweeps and
+   appends a `VaultUnlocked` audit record (forensic noise, not an
+   unlock); a wrong password shares the vault-wide persistent lockout
+   counter with unlock (a deliberate shared brake). To avoid running
+   those effects against a vault at rest, `StepUpAuthorize` is refused
+   while the daemon vault is locked (mutations cannot dispatch while
+   locked anyway). KDF gated + blocking-pool exactly like unlock, plus a
+   bounded in-memory daemon-level throttle (5 failures → escalating
+   backoff).
    On success it returns `StepUpReceipt { approval_id, expires_at }` where
    the approval binds: the minting **connection**, an HMAC-SHA256
    **commitment over the serialized op** (keyed by a per-daemon-start
@@ -52,9 +61,12 @@ unattended."
    denied with the typed `step_up_required` error. Approvals are consumed
    on the attempt (a failed mutation burns it — no replay). Server-held
    only: a daemon restart invalidates every pending approval. Browser
-   (`SaveCredential`) and external-tool (`SaveSecret`) writes and
-   browser-surface site-permission grants are denied outright under the
-   strict profile until their clients implement the flow (fail-closed).
+   (`SaveCredential`) and external-tool (`SaveSecret`) writes,
+   browser-surface site-permission grants AND revocations, and the bare
+   `SyncNow` IPC message (a sync cycle applies remote mutations —
+   adversarial review F1 caught the ungated alias) are denied outright
+   under the strict profile until their clients implement the flow
+   (fail-closed).
 4. **Strict profile** — opt-in today via `SENTINELPASS_REQUIRE_STEPUP=1`
    at daemon start (the server-vault posture the Sandesha deployment
    uses). The desktop default stays permissive until the Tauri UI and
@@ -98,6 +110,19 @@ exists precisely so the VPS never needs it after provisioning).
 - **A separate lightweight password verifier** — rejected: duplicates
   crypto; the reviewed path is reuse-as-is.
 - **Persisted approvals** — rejected: restart must invalidate (replay).
+
+## Known residuals (review-verified)
+
+- SP-0 is a MUTATION gate, not read containment: any daemon-token holder
+  retains full read access (`EntryGet`, `SshKeyGet { include_private }`,
+  broker lookups). Read scoping is SP-1's exact-entry grants.
+- The operator-flagged `SENTINELPASS_ALLOW_DIRECT_VAULT=1` CLI compat
+  path bypasses step-up (no daemon involved) but cannot run against a
+  live strict daemon — it takes the exclusive maintenance lock and
+  refuses while the daemon owns the vault; it remains an ADR-007
+  migration-window path, removed in 1.0.
+- The receipt's `expires_at_unix` hint is wall-clock while enforcement is
+  monotonic; only the hint can diverge on a clock jump.
 
 ## MVP vs. Later
 

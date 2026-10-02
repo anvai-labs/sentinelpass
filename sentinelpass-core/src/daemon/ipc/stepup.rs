@@ -345,6 +345,50 @@ mod tests {
 
 #[cfg(test)]
 mod ser_probe {
+    /// Review F9: the approval commitment is computed over the
+    /// SERIALIZED op — pin that a serialize → deserialize → serialize
+    /// round trip (the actual client wire path) is byte-stable for
+    /// secret-bearing ops. If any op type ever gains a nondeterministic
+    /// collection, this fails before approvals start misbinding.
+    #[test]
+    fn op_serialization_survives_wire_round_trip_identically() {
+        use sentinelpass_protocol::VaultOp;
+        let entry = sentinelpass_protocol::service::ServiceEntry {
+            entry_id: None,
+            title: "wire".to_string(),
+            username: "u".to_string(),
+            password: zeroize::Zeroizing::new("p".to_string()),
+            url: Some("https://x".to_string()),
+            notes: None,
+            credential_type: "password".to_string(),
+            created_at: 1,
+            modified_at: 2,
+            favorite: true,
+        };
+        for op in [
+            VaultOp::EntryAdd {
+                entry: entry.clone(),
+            },
+            VaultOp::TotpAdd {
+                entry_id: 7,
+                secret: zeroize::Zeroizing::new("BASE32".to_string()),
+                algorithm: Some("SHA1".into()),
+                digits: Some(6),
+                period: Some(30),
+                issuer: Some("i".into()),
+                account_name: Some("a".into()),
+            },
+        ] {
+            let first = serde_json::to_vec(&op).unwrap();
+            let back: VaultOp = serde_json::from_slice(&first).unwrap();
+            let second = serde_json::to_vec(&back).unwrap();
+            assert_eq!(
+                first, second,
+                "wire round trip must be byte-stable for the commitment"
+            );
+        }
+    }
+
     #[test]
     fn op_serialization_is_deterministic_across_clones() {
         let e = sentinelpass_protocol::service::ServiceEntry {

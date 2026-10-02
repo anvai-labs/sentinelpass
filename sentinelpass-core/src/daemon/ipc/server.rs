@@ -1198,6 +1198,20 @@ impl IpcServer {
                 }
             }
             IpcMessage::RevokeSitePermission { host } => {
+                // SP-0 / ADR-013 (review F3): revocation is a policy
+                // mutation too — handoff §3A: "Even restrictive
+                // administrative revocation uses step-up under the owner's
+                // current rule." The browser surface cannot step up.
+                if self.require_stepup {
+                    return IpcMessage::RevokeSitePermissionResponse {
+                        success: false,
+                        removed: false,
+                        error: Some(
+                            "step_up_required: site permission changes are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::RevokeSitePermissionResponse {
                         success: false,
@@ -1342,6 +1356,22 @@ impl IpcServer {
                 }
             }
             IpcMessage::SyncNow => {
+                // SP-0 / ADR-013 (review F1): the bare SyncNow message must
+                // honor the strict profile exactly like
+                // ServiceCall(VaultOp::SyncNow) — a sync cycle APPLIES remote
+                // mutations, so gating only the classified op left a crafted
+                // bare-frame bypass.
+                if self.require_stepup {
+                    return IpcMessage::SyncNowResponse {
+                        success: false,
+                        pushed: 0,
+                        pulled: 0,
+                        error: Some(
+                            "step_up_required: unattended sync is disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 debug!("IPC: SyncNow");
                 #[cfg(feature = "sync")]
                 {
@@ -1483,6 +1513,20 @@ impl IpcServer {
                         retry_after_secs: None,
                     };
                 }
+                // Review F2: mutations can only dispatch against an
+                // UNLOCKED manager, and running the full open() while the
+                // daemon vault is locked installs the process-global
+                // audit-key lease (breaking the cleared-on-lock invariant)
+                // and re-runs vault maintenance sweeps against a vault the
+                // operator believes is at rest. Refuse: unlock first.
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::StepUpDenied {
+                        error: "vault is locked: unlock it before requesting step-up \
+                             (administrative mutations require the unlocked vault)"
+                            .to_string(),
+                        retry_after_secs: None,
+                    };
+                }
                 let op_bytes = match serde_json::to_vec(&op) {
                     Ok(bytes) => bytes,
                     Err(e) => {
@@ -1493,8 +1537,13 @@ impl IpcServer {
                     }
                 };
                 // KDF discipline identical to unlock: blocking pool + the
-                // per-vault Argon2id gate; the resulting manager is dropped
-                // (verification only — no unlock side effect).
+                // per-vault Argon2id gate. NOTE (review F2, documented in
+                // ADR-013): this runs the FULL reviewed open(), whose
+                // success path re-runs (idempotent, already-completed)
+                // maintenance sweeps and appends a VaultUnlocked audit
+                // record; a wrong password shares the vault-wide persistent
+                // lockout counter with unlock. The DaemonVault itself is
+                // never unlocked by this.
                 let permit = self.vault.kdf_permit().await;
                 let vault_path = self.vault.vault_path().to_path_buf();
                 // Zeroizing custody inside the blocking task; nothing
@@ -2977,5 +3026,90 @@ mod autofill_origin_gate_tests {
             matches!(service_outcome(msg), ServiceOutcome::Ok { .. }),
             "strict-off must keep pre-SP-0 behavior"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // SP-0 adversarial review remediation tests (F1/F2a/F3/F9)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn strict_profile_denies_bare_sync_now_message() {
+        // Review F1: the bare IpcMessage::SyncNow (not the VaultOp) was an
+        // ungated alias that applied remote mutations unattended.
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(&rt, &h.server, envelope(IpcMessage::SyncNow, None)) {
+            IpcMessage::SyncNowResponse {
+                success: false,
+                error: Some(error),
+                ..
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_site_permission_revocation() {
+        // Review F3: revocation is a policy mutation on a surface that
+        // cannot step up.
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::RevokeSitePermission {
+                    host: "example.com".into(),
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::RevokeSitePermissionResponse {
+                success: false,
+                error: Some(error),
+                ..
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn step_up_is_refused_while_vault_locked() {
+        // Review F2: the full open() against a locked daemon vault would
+        // install the process-global audit-key lease (breaking
+        // cleared-on-lock) and run maintenance sweeps on a vault at rest.
+        // Refused: unlock first.
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        VaultManager::create(&vault_path, b"test_password").unwrap();
+        // DaemonVault stays LOCKED (no unlock call).
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("locked.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_require_stepup(true);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: VaultOp::EntryList,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::StepUpDenied { error, .. } => {
+                assert!(error.contains("locked"), "unexpected denial: {error}")
+            }
+            IpcMessage::StepUpReceipt { .. } => {
+                panic!("step-up must be refused while the vault is locked")
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
     }
 }
