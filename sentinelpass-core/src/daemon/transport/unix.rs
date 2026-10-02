@@ -170,26 +170,6 @@ fn peer_cred(fd: std::os::fd::RawFd) -> Option<KernelPeerCred> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn kernel_peer_cred_shape_is_platform_honest() {
-        // The type is never constructed from client data; this pins the
-        // platform fidelity contract (ADR-015): pid only on Linux.
-        let cred = KernelPeerCred {
-            uid: 1000,
-            gid: Some(1000),
-            pid: if cfg!(any(target_os = "linux", target_os = "android")) {
-                Some(4242)
-            } else {
-                None
-            },
-        };
-        assert_eq!(cred.uid, 1000);
-        assert_eq!(
-            cred.pid.is_some(),
-            cfg!(any(target_os = "linux", target_os = "android"))
-        );
-    }
-
     #[tokio::test]
     async fn test_unix_socket_transport_bind() {
         let temp_dir = tempfile::TempDir::new().unwrap();

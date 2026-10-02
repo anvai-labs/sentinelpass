@@ -559,6 +559,9 @@ impl IpcServer {
                     // connection's server-side constructor.
                     Ok(()) => {
                         debug!("IPC client connected (named pipe)");
+                        // SP-0 connection identity (minted per accept,
+                        // both platforms).
+                        let connection_id: u128 = rand::random();
                         let pipe_conn =
                             sentinelpass_protocol::WindowsNamedPipeConnection::from_server(
                                 pipe_server,
@@ -568,7 +571,19 @@ impl IpcServer {
                                 let server = Arc::clone(&self);
                                 tokio::spawn(async move {
                                     let _permit = permit;
-                                    if let Err(e) = server.run_connection(pipe_conn.into()).await {
+                                    // SP-2 / ADR-015: named pipes have no
+                                    // portable peer-credential query —
+                                    // uid:0 with no gid/pid IS the unknown
+                                    // marker (PeerContext::unknown()), so
+                                    // provenance renders the explicit
+                                    // "peer=unknown" token, never a
+                                    // root-lookalike uid:0.
+                                    let peer = crate::daemon::transport::PeerContext::unknown(
+                                        connection_id,
+                                    );
+                                    if let Err(e) =
+                                        server.run_connection(pipe_conn.into(), peer).await
+                                    {
                                         debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
                                     }
                                 });
@@ -2587,14 +2602,10 @@ mod autofill_origin_gate_tests {
         assert_ne!(a.provenance_token(), b.provenance_token());
         assert!(a.provenance_token().contains("pid:100"));
         assert!(b.provenance_token().contains("pid:200"));
-        // A minimal context (Windows-shaped) carries no gid/pid fields.
-        let minimal = crate::daemon::transport::PeerContext {
-            connection_id: 3,
-            uid: 0,
-            gid: None,
-            pid: None,
-        };
-        assert_eq!(minimal.provenance_token(), "peer=uid:0");
+        // The Windows-shaped unknown marker renders explicitly — never
+        // a root-lookalike "peer=uid:0" (review N1 design note).
+        let minimal = crate::daemon::transport::PeerContext::unknown(3);
+        assert_eq!(minimal.provenance_token(), "peer=unknown");
     }
 
     #[test]

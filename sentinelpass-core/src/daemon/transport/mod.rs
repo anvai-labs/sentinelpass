@@ -41,7 +41,12 @@ pub struct PeerContext {
 impl PeerContext {
     /// Redacted provenance token for audit context lines — digits, colons
     /// and fixed labels only; nothing client-supplied rides in it.
+    /// The `unknown()` marker renders the explicit `peer=unknown` token
+    /// (never a root-lookalike `peer=uid:0`).
     pub fn provenance_token(&self) -> String {
+        if self.is_unknown() {
+            return Self::UNKNOWN_TOKEN.to_string();
+        }
         format!(
             "peer=uid:{}{}{}",
             self.uid,
@@ -50,8 +55,23 @@ impl PeerContext {
         )
     }
 
-    /// The "no peer context" degradation marker (Windows pipes before
-    /// their marker lands, or any platform without credentials).
+    /// The "no peer context available" shape: uid 0 with no gid/pid.
+    /// Windows named pipes use this (no portable credential query);
+    /// it renders as the explicit unknown marker, not as root.
+    pub fn unknown(connection_id: u128) -> Self {
+        Self {
+            connection_id,
+            uid: 0,
+            gid: None,
+            pid: None,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.uid == 0 && self.gid.is_none() && self.pid.is_none()
+    }
+
+    /// The "no peer context" degradation marker.
     pub const UNKNOWN_TOKEN: &'static str = "peer=unknown";
 }
 
