@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(digest.len(), 64, "sha256 hex");
         // The policy check with our own digest pinned must match.
         assert_eq!(
-            check_policy(&[digest.clone()], Some(pid)),
+            check_policy(std::slice::from_ref(&digest), Some(pid)),
             ExePolicyResult::Matched
         );
         // A wrong pin mismatches.
