@@ -3074,6 +3074,32 @@ mod autofill_origin_gate_tests {
     }
 
     #[test]
+    fn strict_profile_denies_site_permission_grant() {
+        // Reviewer-requested coverage: the GRANT direction's strict denial
+        // (revocation already had one; the code existed since the base
+        // commit — this pins it).
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GrantSitePermission {
+                    host: "example.com".into(),
+                    allow_insecure: true,
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::GrantSitePermissionResponse {
+                success: false,
+                error: Some(error),
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
     fn step_up_is_refused_while_vault_locked() {
         // Review F2: the full open() against a locked daemon vault would
         // install the process-global audit-key lease (breaking
