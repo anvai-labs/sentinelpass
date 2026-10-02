@@ -67,6 +67,12 @@ pub struct ServiceGrant {
     pub created_at: DateTime<Utc>,
     /// SHA-256 of the service token (the plaintext is shown once at mint).
     pub client_token_hash: String,
+    /// SP-3 / ADR-016: optional MANDATORY executable policy. `None` or
+    /// empty = no requirement (SP-1 behavior). Non-empty = the peer's
+    /// kernel-referenced executable must hash (SHA-256, hex) to one of
+    /// these; unavailable evidence DENIES (fail-closed).
+    #[serde(default)]
+    pub required_exe_sha256: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -248,6 +254,7 @@ impl ServiceGrantStore {
         entry_id: i64,
         fields: Vec<ServiceField>,
         expires_at: Option<DateTime<Utc>>,
+        required_exe_sha256: Option<Vec<String>>,
     ) -> std::result::Result<(ServiceGrant, Zeroizing<String>), &'static str> {
         if fields.is_empty() {
             return Err("a grant must name at least one field");
@@ -269,9 +276,15 @@ impl ServiceGrantStore {
             revoked_at: None,
             created_at: Utc::now(),
             client_token_hash: token_hash,
+            required_exe_sha256,
         };
         self.grants.insert(grant.grant_id, grant.clone());
         Ok((grant, token))
+    }
+
+    /// SP-3 / ADR-016: the grant's mandatory executable policy, if any.
+    pub fn required_exe_policy(grant: &ServiceGrant) -> &[String] {
+        grant.required_exe_sha256.as_deref().unwrap_or(&[])
     }
 
     pub fn revoke(&mut self, grant_id: Uuid) -> bool {
@@ -298,7 +311,7 @@ mod tests {
     fn mint_authorize_and_revoke_round_trip() {
         let mut s = store();
         let (grant, token) = s
-            .mint_grant("svc", 42, vec![ServiceField::Password], None)
+            .mint_grant("svc", 42, vec![ServiceField::Password], None, None)
             .unwrap();
         let now = Utc::now();
         // Correct token + exact entry + granted field -> authorized.
@@ -333,6 +346,7 @@ mod tests {
                 1,
                 vec![ServiceField::Password],
                 Some(Utc::now() - chrono::Duration::seconds(1)),
+                None,
             )
             .unwrap();
         assert!(s
@@ -370,7 +384,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join(STORE_FILE);
         let mut s = store();
-        s.mint_grant("svc", 9, vec![ServiceField::Title], None)
+        s.mint_grant("svc", 9, vec![ServiceField::Title], None, None)
             .unwrap();
         s.save_to_path(&path).unwrap();
         #[cfg(unix)]
@@ -398,7 +412,7 @@ mod tests {
     fn service_tokens_use_their_own_prefix() {
         let mut s = store();
         let (_, token) = s
-            .mint_grant("svc", 1, vec![ServiceField::Password], None)
+            .mint_grant("svc", 1, vec![ServiceField::Password], None, None)
             .unwrap();
         assert!(token.starts_with(SERVICE_TOKEN_PREFIX));
     }

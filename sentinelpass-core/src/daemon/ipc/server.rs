@@ -182,9 +182,49 @@ impl IpcServer {
                 )
             }
         };
-        let authorized = store
-            .authorize(client_id, token, entry_id, field, chrono::Utc::now())
-            .is_some();
+        let grant = store.authorize(client_id, token, entry_id, field, chrono::Utc::now());
+        let authorized = grant.is_some();
+        // SP-3 / ADR-016: executable policy (see exe_policy.rs) —
+        // enforced when the grant pins digests; unavailable evidence
+        // denies (fail-closed). Blocking pool: hashing is I/O + CPU.
+        if let Some(grant) = grant {
+            let pins =
+                crate::service_grants::ServiceGrantStore::required_exe_policy(grant).to_vec();
+            if !pins.is_empty() {
+                let pid = peer.pid;
+                let verdict = tokio::task::spawn_blocking(move || {
+                    crate::exe_policy::check_policy(&pins, pid)
+                })
+                .await;
+                match verdict {
+                    Ok(crate::exe_policy::ExePolicyResult::Matched)
+                    | Ok(crate::exe_policy::ExePolicyResult::NotRequired) => {}
+                    Ok(crate::exe_policy::ExePolicyResult::Mismatch) => {
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some("executable policy mismatch (this process is not an approved binary)".into()),
+                        );
+                    }
+                    Ok(crate::exe_policy::ExePolicyResult::EvidenceUnavailable(reason)) => {
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!(
+                                "executable evidence unavailable (fail closed): {reason}"
+                            )),
+                        );
+                    }
+                    Err(e) => {
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!("policy check task failed: {e}")),
+                        )
+                    }
+                }
+            }
+        }
         // Review F3: service deliveries get the same audit discipline as
         // the legacy broker (client/entry/field only — never the value).
         log_daemon_audit(
@@ -275,6 +315,7 @@ impl IpcServer {
         entry_id: i64,
         fields: Vec<String>,
         expires_at: Option<i64>,
+        required_exe_sha256: Option<Vec<String>>,
     ) -> IpcMessage {
         let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
             .iter()
@@ -321,7 +362,13 @@ impl IpcServer {
                 )
             }
         };
-        let (grant, token) = match store.mint_grant(client_id, entry_id, fields, expiry) {
+        let (grant, token) = match store.mint_grant(
+            client_id,
+            entry_id,
+            fields,
+            expiry,
+            required_exe_sha256.clone(),
+        ) {
             Ok(minted) => minted,
             Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
         };
@@ -1924,12 +1971,20 @@ impl IpcServer {
                 entry_id,
                 fields,
                 expires_at,
+                required_exe_sha256,
             } => {
                 // Review F2: the ServiceCall arm gates these two admin ops
                 // on a consumed op-bound step-up approval UNCONDITIONALLY
                 // (every profile) before dispatch reaches here.
                 return self
-                    .service_grant_create(peer, client_id, *entry_id, fields.clone(), *expires_at)
+                    .service_grant_create(
+                        peer,
+                        client_id,
+                        *entry_id,
+                        fields.clone(),
+                        *expires_at,
+                        required_exe_sha256.clone(),
+                    )
                     .await;
             }
             VaultOp::ServiceGrantRevoke { grant_id } => {
@@ -3618,6 +3673,7 @@ mod autofill_origin_gate_tests {
             entry_id: 1,
             fields: vec!["password".into()],
             expires_at: None,
+            required_exe_sha256: None,
         };
         let unapproved = handle(
             &rt,
@@ -3773,6 +3829,7 @@ mod autofill_origin_gate_tests {
             entry_id: 1,
             fields: vec![],
             expires_at: None,
+            required_exe_sha256: None,
         }
         .requires_admin_step_up());
         assert!(O::ServiceGrantRevoke {
