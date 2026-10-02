@@ -3868,6 +3868,7 @@ mod autofill_origin_gate_tests {
 
         // Self digest.
         let self_digest = {
+            use sha2::Digest;
             use std::io::Read;
             let mut f = std::fs::File::open("/proc/self/exe").unwrap();
             let mut hasher = sha2::Sha256::new();
