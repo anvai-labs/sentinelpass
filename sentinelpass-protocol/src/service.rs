@@ -397,6 +397,28 @@ pub enum VaultOp {
     /// local vault when none exists). Not served over IPC in this release —
     /// the CLI runs pairing as exclusive offline maintenance under the
     /// vault lock.
+    // --- SP-1 / ADR-014: exact-entry service grants ----------------------
+    /// Retrieval-only: serve one field of one EXACT entry under a service
+    /// grant (client token + exact entry_id + field). Never step-up.
+    ServiceGetSecret {
+        client_id: String,
+        entry_id: i64,
+        field: String,
+        token: String,
+    },
+    /// Administration (step-up class): mint a service grant. The returned
+    /// report carries the grant id and the one-time-shown service token.
+    ServiceGrantCreate {
+        client_id: String,
+        entry_id: i64,
+        fields: Vec<String>,
+        /// Unix seconds; None = no expiry.
+        expires_at: Option<i64>,
+    },
+    /// Administration (step-up class): revoke a grant by id.
+    ServiceGrantRevoke {
+        grant_id: String,
+    },
     SyncPairJoin {
         relay_url: String,
         code: String,
@@ -501,7 +523,9 @@ impl VaultOp {
             | SyncConflictResolve { .. }
             | SyncDeadLetterPurge { .. }
             | SyncPairStart
-            | SyncPairJoin { .. } => true,
+            | SyncPairJoin { .. }
+            | ServiceGrantCreate { .. }
+            | ServiceGrantRevoke { .. } => true,
             VaultCreate { .. }
             | VaultStatus
             | EntryGet { .. }
@@ -518,7 +542,8 @@ impl VaultOp {
             | SyncDeviceList
             | SyncStatus
             | SyncDeadLetterList
-            | SyncConflictList => false,
+            | SyncConflictList
+            | ServiceGetSecret { .. } => false,
         }
     }
 }
