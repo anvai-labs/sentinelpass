@@ -98,3 +98,8 @@ target-wt/
 
 # Local drill evidence transcripts (CI uploads its own via workflow artifacts)
 drill-report-*.txt
+
+# WBS-905 local sidecar staging: local `cargo tauri build` copies daemon/host
+# here (release CI stages its own); never commit local binaries.
+sentinelpass-ui/src-tauri/resources/bin/sentinelpass-daemon*
+sentinelpass-ui/src-tauri/resources/bin/sentinelpass-host*

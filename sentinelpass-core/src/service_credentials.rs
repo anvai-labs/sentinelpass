@@ -827,7 +827,16 @@ mod tests {
             }
             _ => "#!/bin/sh\ncase \"$1\" in\n  encrypt) base64 ;;\n  decrypt) base64 -d < \"$3\" ;;\nesac\n",
         };
-        std::fs::write(&script, body).unwrap();
+        // Write + sync_all before chmod/exec: freshly written scripts can hit
+        // ETXTBSY ("Text file busy") on exec under CI load (overlayfs
+        // writeback) — sync_all closes the write-busy window and with it the
+        // whole flake class seen on the ubuntu legs (#212).
+        use std::io::Write as _;
+        {
+            let mut file = std::fs::File::create(&script).unwrap();
+            file.write_all(body.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -923,7 +932,10 @@ mod tests {
 
         let (bad, _bad_dir) = fake_tool("fail-encrypt");
         let err = install(&bad, store.path(), true).unwrap_err();
-        assert!(err.to_string().contains("mock: unavailable key"));
+        assert!(
+            err.to_string().contains("mock: unavailable key"),
+            "unexpected error from the failing tool: {err}"
+        );
 
         let after = std::fs::read(store.path().join("sandhi.provider.apikey")).unwrap();
         assert_eq!(
