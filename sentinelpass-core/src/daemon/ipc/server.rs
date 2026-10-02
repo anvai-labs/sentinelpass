@@ -57,6 +57,11 @@ pub struct IpcServer {
     client_limiter: Arc<tokio::sync::Semaphore>,
     /// SP-0 / ADR-013: master-password step-up state (server-held only).
     stepup: stepup::StepUpState,
+    /// SP-1 / ADR-014: exact-entry service grant store path (injectable
+    /// for tests; default beside the config).
+    service_grants_path: std::path::PathBuf,
+    /// Serializes grant-store read-modify-write cycles.
+    service_grants_lock: std::sync::Mutex<()>,
     /// Strict administrative-step-up profile (SP-0): when set, every
     /// `VaultOp::requires_admin_step_up()` op needs a fresh approval and
     /// browser/external-tool write surfaces are denied outright.
@@ -115,6 +120,8 @@ impl IpcServer {
             mode: Arc::new(AtomicU8::new(MODE_LIVE)),
             client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
             stepup: stepup::StepUpState::new(),
+            service_grants_path: crate::service_grants::ServiceGrantStore::default_path(),
+            service_grants_lock: std::sync::Mutex::new(()),
             require_stepup: std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
                 .map(|v| v == "1")
                 .unwrap_or(false),
@@ -131,7 +138,201 @@ impl IpcServer {
         self
     }
 
+    /// SP-1 / ADR-014: inject the service grant store path (tests).
+    pub fn with_service_grants_path(mut self, path: std::path::PathBuf) -> Self {
+        self.service_grants_path = path;
+        self
+    }
+
     /// Override the capability store path (tests / embedders).
+    /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
+    /// Typed outcomes; `not_found` is only reachable AFTER grant
+    /// validation (un-granted probing gets `denied`).
+    async fn service_get_secret(
+        &self,
+        client_id: &str,
+        entry_id: i64,
+        field: &str,
+        token: &str,
+    ) -> IpcMessage {
+        let field = match field {
+            "username" => crate::service_grants::ServiceField::Username,
+            "password" => crate::service_grants::ServiceField::Password,
+            "title" => crate::service_grants::ServiceField::Title,
+            other => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!(
+                        "unknown field {other:?} (username, password, title)"
+                    )),
+                )
+            }
+        };
+        let store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable (fail closed): {e}")),
+                )
+            }
+        };
+        if store
+            .authorize(client_id, token, entry_id, field, chrono::Utc::now())
+            .is_none()
+        {
+            return self.service_secret_report("denied", None, None);
+        }
+        let Some(manager) = self.vault.manager().await else {
+            return self.service_secret_report("locked", None, None);
+        };
+        // get_entry returns Err(NotFound) for absent ids — normalize to
+        // the typed not_found status.
+        let fetch = tokio::task::spawn_blocking(move || manager.get_entry(entry_id)).await;
+        let fetch = fetch.map(|r| {
+            r.map(Some).or_else(|e| {
+                if matches!(e, crate::PasswordManagerError::NotFound(_)) {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            })
+        });
+        match fetch {
+            Ok(Ok(Some(entry))) => {
+                let value = match field {
+                    crate::service_grants::ServiceField::Username => entry.username,
+                    // The Entry password is Zeroizing<String>; the report
+                    // rides the sealed session (same as every credential
+                    // response on this socket).
+                    crate::service_grants::ServiceField::Password => entry.password.to_string(),
+                    crate::service_grants::ServiceField::Title => entry.title,
+                };
+                self.service_secret_report("authorized", Some(value), None)
+            }
+            Ok(Ok(None)) => self.service_secret_report("not_found", None, None),
+            Ok(Err(e)) => self.service_secret_report(
+                "denied",
+                None,
+                Some(format!("entry lookup failed: {e}")),
+            ),
+            Err(e) => {
+                self.service_secret_report("denied", None, Some(format!("lookup task failed: {e}")))
+            }
+        }
+    }
+
+    fn service_secret_report(
+        &self,
+        status: &str,
+        value: Option<String>,
+        error: Option<String>,
+    ) -> IpcMessage {
+        IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": status,
+                    "value": value,
+                    "error": error,
+                })),
+            },
+        }
+    }
+
+    /// SP-1 / ADR-014: mint a grant (admin; step-up gated upstream).
+    async fn service_grant_create(
+        &self,
+        client_id: &str,
+        entry_id: i64,
+        fields: Vec<String>,
+        expires_at: Option<i64>,
+    ) -> IpcMessage {
+        let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
+            .iter()
+            .map(|f| match f.as_str() {
+                "username" => Ok(crate::service_grants::ServiceField::Username),
+                "password" => Ok(crate::service_grants::ServiceField::Password),
+                "title" => Ok(crate::service_grants::ServiceField::Title),
+                other => Err(PasswordManagerError::InvalidInput(format!(
+                    "unknown field {other:?}"
+                ))),
+            })
+            .collect();
+        let fields = match parsed {
+            Ok(fields) if !fields.is_empty() => fields,
+            Ok(_) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some("a grant must name at least one field".into()),
+                )
+            }
+            Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
+        };
+        let expiry = expires_at
+            .map(|secs| chrono::DateTime::from_timestamp(secs, 0).unwrap_or_else(chrono::Utc::now));
+        let _guard = self.service_grants_lock.lock().unwrap();
+        let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable (fail closed): {e}")),
+                )
+            }
+        };
+        let (grant, token) = store.mint_grant(client_id, entry_id, fields, expiry);
+        if let Err(e) = store.save_to_path(&self.service_grants_path) {
+            return self.service_secret_report("denied", None, Some(e.to_string()));
+        }
+        // Token shown once, inside the sealed session (legacy-broker
+        // discipline). The report is the ONLY place it appears.
+        IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": "created",
+                    "grant_id": grant.grant_id.to_string(),
+                    "client_token": *token,
+                    "expires_at": grant.expires_at.map(|e| e.timestamp()),
+                })),
+            },
+        }
+    }
+
+    /// SP-1 / ADR-014: revoke a grant (admin; step-up gated upstream).
+    async fn service_grant_revoke(&self, grant_id: &str) -> IpcMessage {
+        let Ok(grant_id) = uuid::Uuid::parse_str(grant_id) else {
+            return self.service_secret_report("denied", None, Some("malformed grant id".into()));
+        };
+        let _guard = self.service_grants_lock.lock().unwrap();
+        let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable (fail closed): {e}")),
+                )
+            }
+        };
+        if !store.revoke(grant_id) {
+            return self.service_secret_report("not_found", None, None);
+        }
+        match store.save_to_path(&self.service_grants_path) {
+            Ok(()) => self.service_secret_report("revoked", None, None),
+            Err(e) => self.service_secret_report("denied", None, Some(e.to_string())),
+        }
+    }
+
     pub fn with_capability_store_path(mut self, path: PathBuf) -> Self {
         self.capability_store_path = path;
         self
@@ -1596,6 +1797,38 @@ impl IpcServer {
         // Metadata ops that are valid while LOCKED — served without a
         // manager (review finding: the UI asks biometric status before
         // unlock to decide whether to offer the button).
+        // SP-1 / ADR-014: service-grant ops are served HERE (grant store
+        // + step-up context live at the IPC boundary), not in the vault
+        // application service. Step-up enforcement for the admin pair is
+        // inherited: the ServiceCall arm already gated them via the
+        // exhaustive classification (both are step-up class).
+        match &op {
+            VaultOp::ServiceGetSecret {
+                client_id,
+                entry_id,
+                field,
+                token,
+            } => {
+                return self
+                    .service_get_secret(client_id, *entry_id, field, token)
+                    .await
+            }
+            VaultOp::ServiceGrantCreate {
+                client_id,
+                entry_id,
+                fields,
+                expires_at,
+            } => {
+                return self
+                    .service_grant_create(client_id, *entry_id, fields.clone(), *expires_at)
+                    .await
+            }
+            VaultOp::ServiceGrantRevoke { grant_id } => {
+                return self.service_grant_revoke(grant_id).await
+            }
+            _ => {}
+        }
+
         if let VaultOp::BiometricStatusGet = op {
             let configured =
                 VaultManager::is_biometric_unlock_enabled(self.vault.vault_path()).unwrap_or(false);
@@ -3137,5 +3370,225 @@ mod autofill_origin_gate_tests {
             }
             other => panic!("unexpected: {}", variant_name(&other)),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // SP-1 / ADR-014: exact-entry service grants
+    // ------------------------------------------------------------------
+
+    fn sp1_harness() -> (GateHarness, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+        let vm = VaultManager::create(&vault_path, password).unwrap();
+        let _entry_id = vm
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "Svc".to_string(),
+                username: "svc-user".to_string(),
+                password: "svc-secret".to_string().into(),
+                url: Some("https://svc.example".to_string()),
+                notes: None,
+                credential_type: crate::CredentialType::Password,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        drop(vm);
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { daemon_vault.unlock(password).await })
+            .unwrap();
+        let grants = tmp.path().join("service-grants.json");
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("sp1.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_service_grants_path(grants.clone());
+        (
+            GateHarness {
+                _tmp: tmp,
+                server,
+                capability: String::new(),
+                permissions_path: std::path::PathBuf::new(),
+            },
+            grants,
+        )
+    }
+
+    fn report_value(msg: IpcMessage) -> serde_json::Value {
+        match msg {
+            IpcMessage::ServiceResult {
+                outcome:
+                    ServiceOutcome::Ok {
+                        result: VaultOpResult::Report(value),
+                    },
+            } => value,
+            IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Err { error },
+            } => panic!("service error: {error}"),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn service_grant_lifecycle_end_to_end() {
+        let (h, _grants) = sp1_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // 1. Mint (admin op — non-strict harness for the lifecycle test;
+        //    step-up gating is covered by the classification test).
+        let created = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGrantCreate {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 1,
+                        fields: vec!["password".into()],
+                        expires_at: None,
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let create_report = report_value(created);
+        assert_eq!(create_report["status"], "created");
+        let token = create_report["client_token"].as_str().unwrap().to_string();
+        let grant_id = create_report["grant_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!grant_id.is_empty(), "mint report must carry grant_id");
+
+        // 2. Retrieve: exact entry + field + token -> the value.
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token: token.clone(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        assert_eq!(report["status"], "authorized");
+        assert_eq!(report["value"].as_str(), Some("svc-secret"));
+
+        // 3. Un-granted probing: wrong entry id -> denied (never
+        //    not_found before grant validation).
+        let probe = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 99,
+                        field: "password".into(),
+                        token: token.clone(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        assert_eq!(report_value(probe)["status"], "denied");
+
+        // 4. Revoke (admin op), then retrieval is denied.
+        let revoked = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGrantRevoke { grant_id },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        assert_eq!(report_value(revoked)["status"], "revoked");
+        let after = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token,
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        assert_eq!(report_value(after)["status"], "denied");
+    }
+
+    #[test]
+    fn grant_admin_ops_are_step_up_class() {
+        // SP-1 admin ops join the SP-0 classification (exhaustive match
+        // forces this; pinned here for the spec).
+        use sentinelpass_protocol::VaultOp as O;
+        assert!(O::ServiceGrantCreate {
+            client_id: "x".into(),
+            entry_id: 1,
+            fields: vec![],
+            expires_at: None,
+        }
+        .requires_admin_step_up());
+        assert!(O::ServiceGrantRevoke {
+            grant_id: "g".into()
+        }
+        .requires_admin_step_up());
+        assert!(!O::ServiceGetSecret {
+            client_id: "x".into(),
+            entry_id: 1,
+            field: "password".into(),
+            token: "t".into(),
+        }
+        .requires_admin_step_up());
+    }
+
+    #[test]
+    fn tampered_grant_store_fails_closed() {
+        let (h, grants) = sp1_harness();
+        std::fs::write(&grants, b"{\"grants\": {}, \"evil\": 1}").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "x".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token: "sps_anything".into(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        assert_eq!(
+            report["status"], "denied",
+            "tampered store must fail closed, got: {report}"
+        );
     }
 }

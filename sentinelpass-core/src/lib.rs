@@ -18,6 +18,8 @@ pub mod lockout;
 pub mod platform;
 pub mod registry;
 pub mod service_credentials;
+#[path = "daemon/service_grants.rs"]
+pub mod service_grants;
 pub mod ssh;
 pub mod sync;
 pub mod totp;
