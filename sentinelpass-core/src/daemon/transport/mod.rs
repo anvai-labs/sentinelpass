@@ -20,6 +20,41 @@ pub use sentinelpass_protocol::{
 
 use crate::DatabaseError;
 
+/// SP-2 / ADR-015: server-owned trusted peer context — one per accepted
+/// connection, constructed ONLY by the platform accept path from
+/// kernel-derived values, threaded through dispatch as a parameter
+/// (never deserialized from any wire, never shared across connections).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerContext {
+    /// SP-0 step-up connection identity (approvals bind to it).
+    pub connection_id: u128,
+    /// Peer effective UID (kernel-verified; equals daemon euid on the
+    /// Unix accept path by the WBS-507 refusal).
+    pub uid: u32,
+    pub gid: Option<u32>,
+    /// Linux only (`SO_PEERCRED` carries the connecting pid); `None`
+    /// elsewhere or when the kernel could not attribute it. SP-3's
+    /// executable policy will resolve `/proc/<pid>/exe` from it.
+    pub pid: Option<u32>,
+}
+
+impl PeerContext {
+    /// Redacted provenance token for audit context lines — digits, colons
+    /// and fixed labels only; nothing client-supplied rides in it.
+    pub fn provenance_token(&self) -> String {
+        format!(
+            "peer=uid:{}{}{}",
+            self.uid,
+            self.gid.map(|g| format!(":gid:{g}")).unwrap_or_default(),
+            self.pid.map(|p| format!(":pid:{p}")).unwrap_or_default(),
+        )
+    }
+
+    /// The "no peer context" degradation marker (Windows pipes before
+    /// their marker lands, or any platform without credentials).
+    pub const UNKNOWN_TOKEN: &'static str = "peer=unknown";
+}
+
 impl From<TransportError> for DatabaseError {
     fn from(err: TransportError) -> Self {
         DatabaseError::Ipc(err.to_string())

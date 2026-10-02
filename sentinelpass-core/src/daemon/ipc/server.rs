@@ -62,9 +62,7 @@ pub struct IpcServer {
     service_grants_path: std::path::PathBuf,
     /// Serializes grant-store read-modify-write cycles.
     service_grants_lock: std::sync::Mutex<()>,
-    /// SP-2 / ADR-015: server-owned trusted peer context per connection
-    /// (kernel-derived at accept; provenance only in this slice).
-    peer_context: std::sync::Mutex<Option<crate::daemon::transport::unix::KernelPeerCred>>,
+
     /// Strict administrative-step-up profile (SP-0): when set, every
     /// `VaultOp::requires_admin_step_up()` op needs a fresh approval and
     /// browser/external-tool write surfaces are denied outright.
@@ -125,7 +123,6 @@ impl IpcServer {
             stepup: stepup::StepUpState::new(),
             service_grants_path: crate::service_grants::ServiceGrantStore::default_path(),
             service_grants_lock: std::sync::Mutex::new(()),
-            peer_context: std::sync::Mutex::new(None),
             require_stepup: std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
                 .map(|v| v == "1")
                 .unwrap_or(false),
@@ -148,26 +145,12 @@ impl IpcServer {
         self
     }
 
-    /// SP-2 / ADR-015: this connection's kernel-derived provenance
-    /// (redacted token for audit context lines; provenance only).
-    fn peer_provenance(&self) -> String {
-        let guard = self.peer_context.lock().unwrap();
-        match guard.as_ref() {
-            Some(cred) => format!(
-                "peer=uid:{}{}{}",
-                cred.uid,
-                cred.gid.map(|g| format!(":gid:{g}")).unwrap_or_default(),
-                cred.pid.map(|p| format!(":pid:{p}")).unwrap_or_default(),
-            ),
-            None => "peer=unknown".to_string(),
-        }
-    }
-
     /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
     /// Typed outcomes; `not_found` is only reachable AFTER grant
     /// validation (un-granted probing gets `denied`).
     async fn service_get_secret(
         &self,
+        peer: &crate::daemon::transport::PeerContext,
         client_id: &str,
         entry_id: i64,
         field: &str,
@@ -222,7 +205,7 @@ impl IpcServer {
             &format!(
                 "SP-1 service_get {client_id} entry:{entry_id} field:{} authorized={authorized} {}",
                 field.as_str(),
-                self.peer_provenance(),
+                peer.provenance_token(),
             ),
         );
         if !authorized {
@@ -287,6 +270,7 @@ impl IpcServer {
     /// SP-1 / ADR-014: mint a grant (admin; step-up gated upstream).
     async fn service_grant_create(
         &self,
+        peer: &crate::daemon::transport::PeerContext,
         client_id: &str,
         entry_id: i64,
         fields: Vec<String>,
@@ -351,7 +335,7 @@ impl IpcServer {
             crate::AuditEventType::CredentialModified { entry_id },
             &format!(
                 "SP-1 service_grant_created {client_id} entry:{entry_id} {}",
-                self.peer_provenance()
+                peer.provenance_token()
             ),
         );
         // Token shown once, inside the sealed session (legacy-broker
@@ -369,7 +353,11 @@ impl IpcServer {
     }
 
     /// SP-1 / ADR-014: revoke a grant (admin; step-up gated upstream).
-    async fn service_grant_revoke(&self, grant_id_str: &str) -> IpcMessage {
+    async fn service_grant_revoke(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        grant_id_str: &str,
+    ) -> IpcMessage {
         let Ok(grant_id) = uuid::Uuid::parse_str(grant_id_str) else {
             return self.service_secret_report("denied", None, Some("malformed grant id".into()));
         };
@@ -396,7 +384,7 @@ impl IpcServer {
                     crate::AuditEventType::CredentialModified { entry_id: 0 },
                     &format!(
                         "SP-1 service_grant_revoked {grant_id} {}",
-                        self.peer_provenance()
+                        peer.provenance_token()
                     ),
                 );
                 self.service_secret_report("revoked", None, None)
@@ -481,6 +469,9 @@ impl IpcServer {
                 match transport.accept().await {
                     Ok((conn, cred)) => {
                         debug!(uid = cred.uid, "IPC client connected");
+                        // SP-0: random per-connection identity for step-up
+                        // binding (minted at the single accept site pair).
+                        let connection_id: u128 = rand::random();
                         // WBS-512: each connection runs on its own task,
                         // bounded by the client semaphore — a stalled or
                         // slow client can no longer wedge the daemon.
@@ -489,16 +480,17 @@ impl IpcServer {
                                 let server = Arc::clone(&self);
                                 tokio::spawn(async move {
                                     let _permit = permit;
-                                    // SP-2: install this connection's
-                                    // trusted provenance for its lifetime.
-                                    if let Ok(mut guard) = server.peer_context.lock() {
-                                        *guard = Some(cred);
-                                    }
-                                    if let Err(e) = server.run_connection(conn.into()).await {
+                                    // SP-2: kernel-derived provenance for
+                                    // THIS connection, threaded (not a
+                                    // shared slot — review F2).
+                                    let peer = crate::daemon::transport::PeerContext {
+                                        connection_id,
+                                        uid: cred.uid,
+                                        gid: cred.gid,
+                                        pid: cred.pid,
+                                    };
+                                    if let Err(e) = server.run_connection(conn.into(), peer).await {
                                         debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
-                                    }
-                                    if let Ok(mut guard) = server.peer_context.lock() {
-                                        *guard = None;
                                     }
                                 });
                             }
@@ -605,9 +597,8 @@ impl IpcServer {
     async fn run_connection(
         &self,
         conn: sentinelpass_protocol::connection::TransportConnection,
+        peer: crate::daemon::transport::PeerContext,
     ) -> Result<()> {
-        // SP-0: random per-connection identity for step-up binding.
-        let connection_id: u128 = rand::random();
         let (mut ipc, first_frame) =
             sentinelpass_protocol::connection::IpcConnection::accept_server(conn, &self.auth_token)
                 .await
@@ -620,7 +611,7 @@ impl IpcServer {
 
         // A legacy PLAIN client's first frame is already delivered.
         if let Some(first) = first_frame {
-            if let Some(response_bytes) = self.process_frame(&first, connection_id).await {
+            if let Some(response_bytes) = self.process_frame(&first, peer).await {
                 ipc.send_frame(&response_bytes).await.map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
                         "Failed to send response: {}",
@@ -645,7 +636,7 @@ impl IpcServer {
                     break;
                 }
             };
-            if let Some(response_bytes) = self.process_frame(&frame, connection_id).await {
+            if let Some(response_bytes) = self.process_frame(&frame, peer).await {
                 ipc.send_frame(&response_bytes).await.map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
                         "Failed to send response: {}",
@@ -659,14 +650,18 @@ impl IpcServer {
 
     /// Token check + dispatch for one plaintext envelope frame. Returns the
     /// serialized response, or None when no response should be sent.
-    async fn process_frame(&self, frame: &[u8], connection_id: u128) -> Option<Vec<u8>> {
+    async fn process_frame(
+        &self,
+        frame: &[u8],
+        peer: crate::daemon::transport::PeerContext,
+    ) -> Option<Vec<u8>> {
         match serde_json::from_slice::<IpcEnvelope>(frame) {
             Ok(envelope) => {
                 if !bool::from(envelope.token.as_bytes().ct_eq(self.auth_token.as_bytes())) {
                     warn!("Rejected IPC request with invalid token");
                     return None;
                 }
-                let response = self.handle_message(envelope, connection_id).await;
+                let response = self.handle_message(envelope, peer).await;
                 match serde_json::to_vec(&response) {
                     Ok(response_bytes) => Some(response_bytes),
                     Err(e) => {
@@ -816,13 +811,15 @@ impl IpcServer {
     #[allow(dead_code)]
     /// `connection_id` (SP-0): random per-connection identity minted in
     /// `run_connection`; step-up approvals are bound to it.
-    async fn handle_message(&self, envelope: IpcEnvelope, connection_id: u128) -> IpcMessage {
+    async fn handle_message(
+        &self,
+        envelope: IpcEnvelope,
+        peer: crate::daemon::transport::PeerContext,
+    ) -> IpcMessage {
         // Maintenance/bootstrap gate (WBS-501/503): a daemon started with no
         // vault serves only status, bootstrap creation, and shutdown.
         if self.is_maintenance_mode() {
-            return self
-                .handle_maintenance_message(envelope, connection_id)
-                .await;
+            return self.handle_maintenance_message(envelope, peer).await;
         }
 
         let client_token = envelope.client_token.clone();
@@ -1766,7 +1763,7 @@ impl IpcServer {
                     };
                     if let Err(denial) =
                         self.stepup
-                            .take_if_valid(&approval, connection_id, &op_bytes)
+                            .take_if_valid(&approval, peer.connection_id, &op_bytes)
                     {
                         return IpcMessage::ServiceResult {
                             outcome: ServiceOutcome::Err {
@@ -1780,7 +1777,7 @@ impl IpcServer {
                     // Approval consumed (single use, burned even if the
                     // mutation below fails — ADR-013).
                 }
-                self.dispatch_service_call(op).await
+                self.dispatch_service_call(&peer, op).await
             }
             // SP-0 / ADR-013: mint a single-use administrative approval
             // after verifying the master password through the full
@@ -1851,7 +1848,7 @@ impl IpcServer {
                         // dropped here on purpose.
                         self.stepup.record_success();
                         let (approval_id, expires_at_unix) =
-                            self.stepup.mint(connection_id, &op_bytes);
+                            self.stepup.mint(peer.connection_id, &op_bytes);
                         IpcMessage::StepUpReceipt {
                             approval_id,
                             expires_at_unix,
@@ -1883,7 +1880,11 @@ impl IpcServer {
     /// The blocking work (SQLite + crypto) runs on the blocking pool, never
     /// on the async executor; the relay-network ops (`SyncNow`) are awaited
     /// here instead because the sync engine needs an async context.
-    async fn dispatch_service_call(&self, op: VaultOp) -> IpcMessage {
+    async fn dispatch_service_call(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        op: VaultOp,
+    ) -> IpcMessage {
         // Metadata ops that are valid while LOCKED — served without a
         // manager (review finding: the UI asks biometric status before
         // unlock to decide whether to offer the button).
@@ -1900,7 +1901,7 @@ impl IpcServer {
                 token,
             } => {
                 return self
-                    .service_get_secret(client_id, *entry_id, field, token)
+                    .service_get_secret(peer, client_id, *entry_id, field, token)
                     .await
             }
             VaultOp::ServiceGrantCreate {
@@ -1913,11 +1914,11 @@ impl IpcServer {
                 // on a consumed op-bound step-up approval UNCONDITIONALLY
                 // (every profile) before dispatch reaches here.
                 return self
-                    .service_grant_create(client_id, *entry_id, fields.clone(), *expires_at)
+                    .service_grant_create(peer, client_id, *entry_id, fields.clone(), *expires_at)
                     .await;
             }
             VaultOp::ServiceGrantRevoke { grant_id } => {
-                return self.service_grant_revoke(grant_id).await
+                return self.service_grant_revoke(peer, grant_id).await
             }
             _ => {}
         }
@@ -2016,7 +2017,7 @@ impl IpcServer {
     async fn handle_maintenance_message(
         &self,
         envelope: IpcEnvelope,
-        _connection_id: u128,
+        _peer: crate::daemon::transport::PeerContext,
     ) -> IpcMessage {
         match envelope.message {
             IpcMessage::CheckVault => IpcMessage::VaultStatusResponse {
@@ -2505,34 +2506,13 @@ mod autofill_origin_gate_tests {
 
     const TEST_CONNECTION: u128 = 0x5FE0_0000_0000_0000;
 
-    #[test]
-    fn peer_provenance_token_is_redacted_and_stable() {
-        // SP-2: the provenance token carries only the kernel triple —
-        // no paths, no argv, nothing client-supplied.
-        let h = harness_with_vault();
-        {
-            let mut guard = h.server.peer_context.lock().unwrap();
-            *guard = Some(crate::daemon::transport::unix::KernelPeerCred {
-                uid: 501,
-                gid: Some(20),
-                pid: Some(999),
-            });
+    fn test_peer() -> crate::daemon::transport::PeerContext {
+        crate::daemon::transport::PeerContext {
+            connection_id: TEST_CONNECTION,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(4242),
         }
-        let token = h.server.peer_provenance();
-        assert!(token.starts_with("peer=uid:501"), "token: {token}");
-        // Only digits/colons after the label fields — nothing else rides.
-        let body = token.trim_start_matches("peer=");
-        assert!(
-            body.chars()
-                .all(|c| c.is_ascii_digit() || c == ':' || c.is_ascii_alphabetic()),
-            "unexpected characters in provenance token: {token}"
-        );
-        // Unset context degrades to the explicit unknown marker.
-        {
-            let mut guard = h.server.peer_context.lock().unwrap();
-            *guard = None;
-        }
-        assert_eq!(h.server.peer_provenance(), "peer=unknown");
     }
 
     /// Test-only: a Debug-safe label (IpcMessage Debug can contain secret
@@ -2546,7 +2526,7 @@ mod autofill_origin_gate_tests {
         server: &IpcServer,
         envelope: IpcEnvelope,
     ) -> IpcMessage {
-        rt.block_on(server.handle_message(envelope, TEST_CONNECTION))
+        rt.block_on(server.handle_message(envelope, test_peer()))
     }
 
     /// SP-0: same, on an explicit connection identity (cross-connection
@@ -2557,7 +2537,64 @@ mod autofill_origin_gate_tests {
         envelope: IpcEnvelope,
         connection_id: u128,
     ) -> IpcMessage {
-        rt.block_on(server.handle_message(envelope, connection_id))
+        rt.block_on(server.handle_message(
+            envelope,
+            crate::daemon::transport::PeerContext {
+                connection_id,
+                ..test_peer()
+            },
+        ))
+    }
+
+    #[test]
+    fn peer_provenance_token_is_redacted_and_stable() {
+        // SP-2: the token carries only the kernel triple — no paths, no
+        // argv, nothing client-supplied.
+        let peer = crate::daemon::transport::PeerContext {
+            connection_id: 7,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(999),
+        };
+        let token = peer.provenance_token();
+        assert!(token.starts_with("peer=uid:501"), "token: {token}");
+        let body = token.trim_start_matches("peer=");
+        // Fixed labels + digits + colons only (uid/gid/pid labels).
+        assert!(
+            body.chars()
+                .all(|c| c.is_ascii_digit() || c == ':' || c.is_ascii_lowercase()),
+            "unexpected characters in provenance token: {token}"
+        );
+    }
+
+    #[test]
+    fn peer_provenance_is_per_connection_isolated() {
+        // Review F2: provenance is a THREADED per-connection value, not a
+        // shared slot — two contexts cannot misattribute each other by
+        // construction (the test the shared-slot design could not express).
+        let a = crate::daemon::transport::PeerContext {
+            connection_id: 1,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(100),
+        };
+        let b = crate::daemon::transport::PeerContext {
+            connection_id: 2,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(200),
+        };
+        assert_ne!(a.provenance_token(), b.provenance_token());
+        assert!(a.provenance_token().contains("pid:100"));
+        assert!(b.provenance_token().contains("pid:200"));
+        // A minimal context (Windows-shaped) carries no gid/pid fields.
+        let minimal = crate::daemon::transport::PeerContext {
+            connection_id: 3,
+            uid: 0,
+            gid: None,
+            pid: None,
+        };
+        assert_eq!(minimal.provenance_token(), "peer=uid:0");
     }
 
     #[test]

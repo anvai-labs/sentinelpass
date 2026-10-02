@@ -27,25 +27,36 @@ audit, while browser/mobile protocol behavior stays unchanged.
 
 ## Decision
 
-1. **Capture** — at accept, `UnixSocketTransport` returns the kernel's
-   credential triple alongside the stream: `(euid, egid, pid)` on Linux
-   (`SO_PEERCRED` `ucred`), `(euid, egid)` on macOS/BSD (`getpeereid`);
-   Windows named pipes record the authenticated-user marker only
-   (no PID without extra plumbing — documented gap). The existing
-   "peer UID must equal daemon UID" refusal is unchanged and remains the
+1. **Capture** — at accept, each platform's transport builds a
+   `PeerContext`: Unix returns the kernel's credential view alongside the
+   stream (`euid + egid + pid` on Linux via `SO_PEERCRED` `ucred`,
+   `euid + egid` on macOS/BSD via `getpeereid`); Windows named pipes have
+   no portable peer-credential query, so their context degrades to the
+   explicit unknown marker (documented fidelity gap; the uid-equality
+   boundary rides the pipe ACL instead). The existing "peer UID must
+   equal daemon UID" refusal on Unix is unchanged and remains the
    authorization boundary.
 2. **Shape** — `PeerContext { connection_id: u128, uid: u32, gid:
-   Option<u32>, pid: Option<u32> }`, constructed ONLY by the accept path
-   (server-owned; no serde derives on the wire type — it is never
-   deserialized). It joins the SP-0 `connection_id` that step-up
-   approvals already bind to.
+   Option<u32>, pid: Option<u32> }` (platform-neutral, in
+   `daemon/transport/mod.rs`), constructed ONLY by the accept paths
+   (server-owned; no serde derives — it is never deserialized from any
+   wire). It carries the SP-0 `connection_id` that step-up approvals
+   bind to, so provenance and step-up authorization share one
+   per-connection identity.
 3. **Thread** — `run_connection` → `process_frame` → `handle_message`
-   carry `&PeerContext` (replacing the bare `connection_id` parameter).
-4. **Provenance** — the SP-1 service-grant audit events and the external
-   secret broker events append a redacted provenance token
-   (`peer=uid:gid:pid`) to their context lines. Static reason codes only;
-   no argv, no paths beyond the already-audited ones, nothing
-   client-supplied.
+   → `dispatch_service_call` → the SP-1 handlers carry `&PeerContext`
+   as a parameter. There is NO shared state: with up to 16 concurrent
+   connections, a server-wide slot would misattribute provenance
+   (adversarial review F2); per-connection threading makes correct
+   attribution structural (pinned by the isolation test).
+4. **Provenance** — the SP-1 service-grant audit events append a
+   redacted provenance token (`peer=uid:gid:pid`) to their context lines
+   (the request context is threaded end-to-end on that path). The legacy
+   external-secret broker events adopt the token with SP-3, when their
+   handlers gain the threaded request context; until then their context
+   lines are unchanged (they never carried peer data). Static reason
+   codes only; no argv, no paths beyond the already-audited ones,
+   nothing client-supplied.
 5. **Explicit non-goals (this slice)** — no per-message re-verification
    (`SO_PEERCRED` is connection-time truth; SP-3 handles the
    exec-after-connect problem at policy-enforcement time); no

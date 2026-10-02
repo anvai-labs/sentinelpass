@@ -135,8 +135,10 @@ fn peer_cred(fd: std::os::fd::RawFd) -> Option<KernelPeerCred> {
         };
         if ok == 0 {
             // A zero pid means the kernel could not attribute the
-            // connection (or the peer already exited); record uid+gid
-            // and leave pid absent rather than trusting 0.
+            // connection (e.g. a cross-PID-namespace peer); record
+            // uid+gid and leave pid absent rather than trusting 0.
+            // SO_PEERCRED is a connect-time snapshot — a later peer exit
+            // does NOT zero it (stale/recycled pids are SP-3's concern).
             let pid = (ucred.pid > 0).then_some(ucred.pid as u32);
             Some(KernelPeerCred {
                 uid: ucred.uid,
@@ -294,10 +296,16 @@ mod tests {
             .await
             .unwrap();
         let (mut conn, cred) = transport.accept().await.expect("same-euid peer accepted");
-        // SP-2: the kernel credential view rides along. The uid-equality
-        // refusal above already proved cred.uid == our euid (a foreign uid
-        // would have been refused), so pin the shape only.
-        assert!(cred.gid.is_some());
+        // SP-2: the kernel credential view rides along with REAL kernel
+        // data — pin the platform fidelity contract on the live path
+        // (review F5): uid equals ours (the refusal would have fired
+        // otherwise), pid present exactly on Linux/Android.
+        assert_eq!(cred.uid, unsafe { libc::geteuid() });
+        assert_eq!(
+            cred.pid.is_some(),
+            cfg!(any(target_os = "linux", target_os = "android")),
+            "pid fidelity: present on Linux, absent elsewhere"
+        );
         // Exchange a frame to prove the connection is live.
         client.write_message(b"ping").await.unwrap();
         let msg = conn.read_message().await.unwrap();
