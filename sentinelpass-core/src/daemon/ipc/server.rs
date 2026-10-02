@@ -430,6 +430,25 @@ impl IpcServer {
         );
         // Token shown once, inside the sealed session (legacy-broker
         // discipline). The report is the ONLY place it appears.
+        // F1 (review): fingerprinted grants are PENDING — the token is
+        // NOT revealed here. The client must complete enrollment
+        // (ServiceEnrollmentComplete) to prove key possession and mint
+        // the real token. The placeholder token from mint is discarded.
+        if grant.registration_key_fingerprint.is_some() {
+            drop(token); // zeroize the placeholder
+            return IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Ok {
+                    result: VaultOpResult::Report(serde_json::json!({
+                        "status": "pending_enrollment",
+                        "grant_id": grant.grant_id.to_string(),
+                        "expires_at": grant.expires_at.map(|e| e.timestamp()),
+                        "required_exe_sha256": grant.required_exe_sha256,
+                        "registration_key_fingerprint": grant.registration_key_fingerprint,
+                        "next_step": "ServiceEnrollmentBegin { client_id } to start the enrollment ceremony",
+                    })),
+                },
+            };
+        }
         IpcMessage::ServiceResult {
             outcome: ServiceOutcome::Ok {
                 result: VaultOpResult::Report(serde_json::json!({
@@ -489,6 +508,7 @@ impl IpcServer {
             .map(|pins| pins.join(","));
         let (nonce, transcript) = self.enrollment.begin(
             client_id,
+            grant.grant_id,
             grant.entry_id,
             &fields,
             exe_digest.as_deref(),
@@ -514,6 +534,7 @@ impl IpcServer {
         client_id: &str,
         nonce: String,
         signature_armored: String,
+        client_public_key: String,
     ) -> IpcMessage {
         // Consume the challenge FIRST (single-use regardless of outcome).
         let Some(challenge) = self.enrollment.take(&nonce) else {
@@ -531,7 +552,7 @@ impl IpcServer {
             );
         }
 
-        // Load the store to verify against the grant.
+        // Load the store to get the expected fingerprint.
         let store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
         ) {
@@ -544,11 +565,9 @@ impl IpcServer {
                 )
             }
         };
-        let grant = store.grants.values().find(|g| {
-            g.client_id == client_id
-                && g.revoked_at.is_none()
-                && g.registration_key_fingerprint.is_some()
-        });
+        // F5: find by the grant_id bound into the challenge, not by
+        // an arbitrary client-id scan.
+        let grant = store.grants.get(&challenge.grant_id);
         let Some(grant) = grant else {
             return self.service_secret_report("not_found", None, None);
         };
@@ -557,21 +576,25 @@ impl IpcServer {
             .as_deref()
             .unwrap_or_default();
 
-        // Verify via the pinned gpg (blocking: subprocess + I/O).
+        // Verify via the pinned gpg with the CLIENT's public key imported
+        // into an isolated keyring (review F2). The fingerprint check is
+        // the binding control — a different key won't match.
         let gpg_path = std::env::var("SENTINELPASS_GPG_PATH")
             .unwrap_or_else(|_| crate::enrollment::DEFAULT_GPG_PATH.to_string());
         let sig = signature_armored.clone();
+        let key = client_public_key.clone();
         let transcript = challenge.transcript.clone();
         let fp = fingerprint.to_string();
         let verification = tokio::task::spawn_blocking(move || {
-            crate::enrollment::verify_signature(&gpg_path, &transcript, &sig, &fp)
+            crate::enrollment::verify_signature(&gpg_path, &key, &transcript, &sig, &fp)
         })
         .await;
 
         match verification {
             Ok(Ok(())) => {
-                // Verified: mint the grant's token (the client proved key
-                // possession; the token is the ongoing credential).
+                // F4: re-validate INSIDE the lock — a concurrent revoke
+                // during the multi-second verification window must be
+                // honored, not silently overridden.
                 let _guard = self.service_grants_lock.lock().unwrap();
                 let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
                     &self.service_grants_path,
@@ -585,16 +608,37 @@ impl IpcServer {
                         )
                     }
                 };
-                // Mint a fresh token for the grant (replaces any prior).
-                let (grant, token) = match store.mint_grant(
-                    client_id,
-                    grant.entry_id,
-                    grant.fields.clone(),
-                    grant.expires_at,
-                    grant.required_exe_sha256.clone(),
-                    grant.registration_key_fingerprint.clone(),
-                ) {
-                    Ok(m) => m,
+                // Re-find by grant_id (F5) and check still-unrevoked (F4).
+                match store.grants.get(&challenge.grant_id) {
+                    None => return self.service_secret_report("not_found", None, None),
+                    Some(grant) if grant.revoked_at.is_some() => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: "enrollment".to_string(),
+                                field: None,
+                                purpose: Some("enrollment:revoked_during_verify".to_string()),
+                                success: false,
+                            },
+                            "SP-4 enrollment denied: grant revoked during verification",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some("grant was revoked during enrollment verification".into()),
+                        );
+                    }
+                    Some(_) => {} // active: proceed
+                }
+
+                // F3: ROTATE the existing grant's token in place — never
+                // mint a duplicate grant (same grant_id, new token hash).
+                let token = match store.rotate_token(challenge.grant_id) {
+                    Ok(Some(token)) => token,
+                    Ok(None) => {
+                        return self.service_secret_report("not_found", None, None);
+                    }
                     Err(e) => {
                         return self.service_secret_report("denied", None, Some(e.to_string()))
                     }
@@ -602,14 +646,17 @@ impl IpcServer {
                 if let Err(e) = store.save_to_path(&self.service_grants_path) {
                     return self.service_secret_report("store_error", None, Some(e.to_string()));
                 }
+                let entry_id = store
+                    .grants
+                    .get(&challenge.grant_id)
+                    .map(|g| g.entry_id)
+                    .unwrap_or(0);
                 log_daemon_audit(
                     self.audit_logger.as_deref(),
-                    crate::AuditEventType::CredentialModified {
-                        entry_id: grant.entry_id,
-                    },
+                    crate::AuditEventType::CredentialModified { entry_id },
                     &format!(
-                        "SP-4 enrollment_completed {client_id} entry:{} {}",
-                        grant.entry_id,
+                        "SP-4 enrollment_completed {client_id} grant:{} {}",
+                        challenge.grant_id,
                         peer.provenance_token()
                     ),
                 );
@@ -618,7 +665,7 @@ impl IpcServer {
                     outcome: ServiceOutcome::Ok {
                         result: VaultOpResult::Report(serde_json::json!({
                             "status": "enrolled",
-                            "grant_id": grant.grant_id.to_string(),
+                            "grant_id": challenge.grant_id.to_string(),
                             "client_token": *token,
                         })),
                     },
@@ -2249,6 +2296,7 @@ impl IpcServer {
                 client_id,
                 nonce,
                 signature_armored,
+                client_public_key,
             } => {
                 return self
                     .service_enrollment_complete(
@@ -2256,6 +2304,7 @@ impl IpcServer {
                         client_id,
                         nonce.clone(),
                         signature_armored.clone(),
+                        client_public_key.clone(),
                     )
                     .await
             }

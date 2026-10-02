@@ -438,6 +438,10 @@ pub enum VaultOp {
         client_id: String,
         nonce: String,
         signature_armored: String,
+        /// The client's OpenPGP public key (armored). Imported into an
+        /// ISOLATED keyring for verification; the fingerprint check
+        /// against the pre-approved grant is the binding control.
+        client_public_key: String,
     },
     SyncPairJoin {
         relay_url: String,

@@ -54,7 +54,10 @@ mandatory — unavailable evidence must deny.
    - **Client** signs the transcript bytes with its OpenPGP key
      (detached cleartext signature).
    - **Verification + activation**: `ServiceEnrollmentComplete { client_id,
-     nonce, signature_armored }` — the daemon verifies via the pinned gpg:
+     nonce, signature_armored, client_public_key }` — the daemon imports
+     the client's public key into an ISOLATED per-verification keyring
+     (temp `--homedir`, `--auto-key-locate clear` — no network), then
+     verifies the detached signature against the canonical transcript:
      (a) the signing key's full primary fingerprint matches the
      pre-approved grant's `registration_key_fingerprint`; (b) the
      signature covers exactly the canonical transcript bytes for this
@@ -65,11 +68,21 @@ mandatory — unavailable evidence must deny.
 3. **Grant schema extension (v1 additive)**: `ServiceGrant` gains
    `registration_key_fingerprint: Option<String>` (serde default) —
    grants WITHOUT it work exactly as SP-1/SP-3 (no enrollment factor);
-   grants WITH it require the enrollment flow to mint the token.
+   grants WITH it are created PENDING (no usable token — the hash is
+   the `pending-enrollment` marker) and ONLY
+   `ServiceEnrollmentComplete` can mint the real token (by rotating
+   the grant's token hash in place — same grant_id, never a
+   duplicate grant).
 4. **Canonical transcript**: deterministic `serde_json` with sorted keys,
-   no whitespace — byte-identical on any platform. Domain separator
-   prevents cross-protocol replay. The nonce is 256-bit random,
-   single-use, with a bounded TTL (5 minutes, matching the handoff).
+   no whitespace — byte-identical on any platform. Includes the
+   `grant_id` (binding the challenge to one exact grant, preventing
+   cross-grant scope substitution). Domain separator prevents
+   cross-protocol replay. The nonce is 256-bit random, single-use,
+   with a bounded TTL (5 minutes, matching the handoff). At completion,
+   the grant is re-found BY grant_id inside the store lock and
+   re-checked for revocation AFTER the multi-second gpg verification
+   window — a concurrent revocation is honored, never silently
+   overridden.
 5. **Fail-closed**: if the exe policy is configured on the grant, the
    enrollment transcript includes its digest (so the client knows what
    it's agreeing to) and the grant's exe enforcement applies from the

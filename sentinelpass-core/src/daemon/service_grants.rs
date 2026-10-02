@@ -21,6 +21,11 @@ use zeroize::Zeroizing;
 
 use crate::{DatabaseError, PasswordManagerError, Result};
 
+/// Marker hash for fingerprinted grants awaiting enrollment (F1): the
+/// grant exists but has NO usable token until ServiceEnrollmentComplete
+/// verifies key possession. authorize() rejects this hash.
+pub const PENDING_TOKEN_HASH: &str = "pending-enrollment";
+
 /// Service principal tokens carry their own prefix so a service token can
 /// never be confused with a legacy broker token at either validation site.
 pub const SERVICE_TOKEN_PREFIX: &str = "sps_";
@@ -234,6 +239,10 @@ impl ServiceGrantStore {
         field: ServiceField,
         now: DateTime<Utc>,
     ) -> Option<&ServiceGrant> {
+        // F1: pending grants (awaiting enrollment) never authorize.
+        if token == PENDING_TOKEN_HASH {
+            return None;
+        }
         let token_hash = Sha256::digest(token.as_bytes());
         self.grants
             .values()
@@ -243,6 +252,7 @@ impl ServiceGrantStore {
                     && g.revoked_at.is_none()
                     && g.expires_at.map(|e| now < e).unwrap_or(true)
                     && g.fields.contains(&field)
+                    && g.client_token_hash != PENDING_TOKEN_HASH
             })
             .find(|g| {
                 // Constant-time over the hex-encoded digest.
@@ -297,7 +307,16 @@ impl ServiceGrantStore {
             "{SERVICE_TOKEN_PREFIX}{}",
             hex::encode(token_bytes)
         ));
-        let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        // F1: fingerprinted grants are created PENDING — no usable token
+        // until enrollment proves key possession. The token returned by
+        // this method is a placeholder that will be replaced at
+        // enrollment_complete (callers must check the fingerprint and NOT
+        // reveal the placeholder).
+        let token_hash = if registration_key_fingerprint.is_some() {
+            PENDING_TOKEN_HASH.to_string()
+        } else {
+            hex::encode(Sha256::digest(token.as_bytes()))
+        };
         let grant = ServiceGrant {
             policy_version: 1,
             grant_id: Uuid::new_v4(),
@@ -318,6 +337,29 @@ impl ServiceGrantStore {
     /// SP-3 / ADR-016: the grant's mandatory executable policy, if any.
     pub fn required_exe_policy(grant: &ServiceGrant) -> &[String] {
         grant.required_exe_sha256.as_deref().unwrap_or(&[])
+    }
+
+    /// F3: rotate the token for an EXISTING grant (same grant_id) —
+    /// enrollment_complete must never mint a duplicate grant. Returns
+    /// the new plaintext token (shown once) or None if the grant is
+    /// absent/already revoked.
+    pub fn rotate_token(
+        &mut self,
+        grant_id: Uuid,
+    ) -> std::result::Result<Option<Zeroizing<String>>, &'static str> {
+        let grant = match self.grants.get_mut(&grant_id) {
+            Some(g) if g.revoked_at.is_none() => g,
+            Some(_) => return Ok(None), // revoked
+            None => return Ok(None),    // absent
+        };
+        let mut token_bytes = [0u8; SERVICE_TOKEN_BYTES];
+        OsRng.fill_bytes(&mut token_bytes);
+        let token = Zeroizing::new(format!(
+            "{SERVICE_TOKEN_PREFIX}{}",
+            hex::encode(token_bytes)
+        ));
+        grant.client_token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+        Ok(Some(token))
     }
 
     pub fn revoke(&mut self, grant_id: Uuid) -> bool {

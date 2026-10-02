@@ -30,6 +30,7 @@ pub const DEFAULT_GPG_PATH: &str = "/usr/bin/gpg";
 pub struct EnrollmentChallenge {
     pub nonce: String,
     pub client_id: String,
+    pub grant_id: uuid::Uuid,
     pub transcript: Vec<u8>,
     pub expires: Instant,
 }
@@ -47,9 +48,11 @@ impl EnrollmentState {
 
     /// Mint a challenge for a pre-approved grant. Returns (nonce_hex,
     /// transcript_bytes).
+    #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &self,
         client_id: &str,
+        grant_id: uuid::Uuid,
         entry_id: i64,
         fields: &[&str],
         exe_policy_digest: Option<&str>,
@@ -65,6 +68,7 @@ impl EnrollmentState {
         let transcript = json!({
             "client_id": client_id,
             "entry_id": entry_id,
+            "grant_id": grant_id.to_string(),
             "exe_policy_sha256": exe_policy_digest,
             "expires_at": expires_at_unix,
             "fields": fields,
@@ -90,6 +94,7 @@ impl EnrollmentState {
             EnrollmentChallenge {
                 nonce: nonce.clone(),
                 client_id: client_id.to_string(),
+                grant_id,
                 transcript: transcript_bytes.clone(),
                 expires: Instant::now() + ENROLLMENT_TTL,
             },
@@ -135,60 +140,79 @@ impl Drop for TempDirGuard<'_> {
 }
 
 /// Verify an OpenPGP detached signature against the expected transcript
-/// using the pinned gpg binary. Returns Ok(fingerprint) on success.
+/// using the pinned gpg binary, with the client's public key imported
+/// into an ISOLATED per-verification keyring (review F2: detached
+/// signatures do NOT embed key material — the key must be supplied).
 ///
+/// Returns Ok(()) on verified signature with matching fingerprint.
 /// Fail-closed: any gpg failure, wrong key, or mismatch denies.
 pub fn verify_signature(
     gpg_path: &str,
+    client_public_key: &str,
     transcript_bytes: &[u8],
     signature_armored: &str,
     expected_fingerprint: &str,
 ) -> Result<(), String> {
     use std::process::{Command, Stdio};
 
-    // Isolated keyring: no default, no network.
-    let mut child = Command::new(gpg_path)
-        .arg("--verify") // verify a detached signature
-        .arg("--") // end of options
-        .arg("-") // signature on stdin (we'll write transcript to a temp)
-        .stdin(Stdio::piped())
+    // Isolated per-verification environment (review F2/F7).
+    let temp_base = std::env::temp_dir();
+    let work_dir = temp_dir_unique(&temp_base)?;
+    let _guard = TempDirGuard(&work_dir);
+
+    let gnupg_home = work_dir.join("gnupg");
+    let keyring_dir = gnupg_home.join("keyring");
+    std::fs::create_dir_all(&keyring_dir)
+        .map_err(|e| format!("cannot create isolated keyring: {e}"))?;
+
+    // Import the client's public key into the isolated keyring.
+    let key_path = work_dir.join("client pubkey.asc");
+    std::fs::write(&key_path, client_public_key)
+        .map_err(|e| format!("cannot write client key: {e}"))?;
+    let import = Command::new(gpg_path)
+        .arg("--homedir")
+        .arg(&keyring_dir)
+        .arg("--no-default-keyring")
+        .arg("--auto-key-locate")
+        .arg("clear") // no network keyserver fetch (ADR-017)
+        .arg("--import")
+        .arg(&key_path)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_remove("GNUPGHOME")
-        .spawn()
-        .map_err(|e| format!("cannot launch gpg at {gpg_path}: {e}"))?;
+        .output()
+        .map_err(|e| format!("gpg import failed to launch: {e}"))?;
+    if !import.status.success() {
+        let stderr = String::from_utf8_lossy(&import.stderr);
+        return Err(format!(
+            "cannot import client public key: {}",
+            stderr.chars().take(200).collect::<String>()
+        ));
+    }
 
-    // For a proper detached verify, gpg needs the signature file and the
-    // data file. The simplest approach: write the signature to a temp
-    // file, then pass both to gpg --verify.
-    // This initial implementation uses a simplified flow — full
-    // file-based verify below.
-    drop(child.stdin.take());
-    let _ = child.wait();
-
-    // Full implementation: write signature to temp, run gpg --verify
-    // <sigfile> <datafile>
-    let temp_base = std::env::temp_dir();
-    let temp_dir = temp_dir_unique(&temp_base)?;
-    let _guard = TempDirGuard(&temp_dir); // cleanup on drop
-    let sig_path = temp_dir.join("signature.asc");
-    let data_path = temp_dir.join("transcript.bin");
+    // Write the signature and transcript data for detached verification.
+    let sig_path = work_dir.join("signature.asc");
+    let data_path = work_dir.join("transcript.bin");
     std::fs::write(&sig_path, signature_armored)
         .map_err(|e| format!("cannot write signature temp: {e}"))?;
     std::fs::write(&data_path, transcript_bytes)
         .map_err(|e| format!("cannot write transcript temp: {e}"))?;
 
+    // Detached verify against the isolated keyring.
     let output = Command::new(gpg_path)
-        .arg("--verify")
-        .arg("--status-fd")
-        .arg("1") // status to stdout for parsing
-        .arg("--with-colons")
+        .arg("--homedir")
+        .arg(&keyring_dir)
         .arg("--no-default-keyring")
-        .arg("--keyring")
-        .arg("/dev/null") // empty keyring: the pubkey must be in the sig
-        .arg("--")
+        .arg("--auto-key-locate")
+        .arg("clear")
+        .arg("--status-fd")
+        .arg("1")
+        .arg("--verify")
         .arg(&sig_path)
         .arg(&data_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .output()
         .map_err(|e| format!("gpg verify failed to launch: {e}"))?;
 
@@ -203,14 +227,12 @@ pub fn verify_signature(
     // Parse the status output for the signing key fingerprint.
     let status = String::from_utf8_lossy(&output.stdout);
     for line in status.lines() {
-        // [GNUPG:] GOODSIG <keyid> <userid>
-        // [GNUPG:] VALIDSIG <fingerprint> <date> <ts> <expire_ts> <version> <reserved> <keygrip>
         if line.starts_with("[GNUPG:] VALIDSIG ") {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 let fingerprint = parts[1];
-                // Full 40-char v4 fingerprint comparison (constant-time
-                // via subtle not needed — the fingerprint is not secret).
+                // Full 40-char v4 fingerprint match (public identifier —
+                // constant-time not required, ADR-017).
                 if fingerprint.eq_ignore_ascii_case(expected_fingerprint) {
                     return Ok(());
                 }
@@ -223,16 +245,13 @@ pub fn verify_signature(
             return Err("signature does not match the transcript".to_string());
         }
         if line.starts_with("[GNUPG:] ERRSIG") {
-            return Err("signature verification error (unknown key or algorithm)".to_string());
+            return Err("signature verification error".to_string());
         }
-        if line.starts_with("[GNUPG:] EXPKEYSIG") {
-            return Err("signing key is expired".to_string());
-        }
-        if line.starts_with("[GNUPG:] REVKEYSIG") {
-            return Err("signing key is revoked".to_string());
+        if line.starts_with("[GNUPG:] NO_PUBKEY") {
+            return Err("client public key not available in isolated keyring".to_string());
         }
     }
-    Err("gpg did not report a signature status".to_string())
+    Err("gpg did not report a valid signature status".to_string())
 }
 
 #[cfg(test)]
@@ -242,8 +261,24 @@ mod tests {
     #[test]
     fn transcript_is_deterministic_for_same_inputs() {
         let state = EnrollmentState::new();
-        let (n1, t1) = state.begin("svc", 1, &["password"], None, &"a".repeat(40), None);
-        let (n2, t2) = state.begin("svc", 1, &["password"], None, &"a".repeat(40), None);
+        let (n1, t1) = state.begin(
+            "svc",
+            uuid::Uuid::new_v4(),
+            1,
+            &["password"],
+            None,
+            &"a".repeat(40),
+            None,
+        );
+        let (n2, t2) = state.begin(
+            "svc",
+            uuid::Uuid::new_v4(),
+            1,
+            &["password"],
+            None,
+            &"a".repeat(40),
+            None,
+        );
         // Nonces are random (different) — but the transcript structure
         // contains the nonce so they differ. The DETERMINISM is: same
         // nonce → same transcript, verified by the take/consume cycle.
@@ -257,7 +292,15 @@ mod tests {
     #[test]
     fn transcript_keys_are_sorted() {
         let state = EnrollmentState::new();
-        let (_, t) = state.begin("svc", 1, &["password"], None, &"a".repeat(40), None);
+        let (_, t) = state.begin(
+            "svc",
+            uuid::Uuid::new_v4(),
+            1,
+            &["password"],
+            None,
+            &"a".repeat(40),
+            None,
+        );
         let text = String::from_utf8_lossy(&t);
         // client_id must appear before entry_id in the byte stream
         // (BTreeMap ordering — 'c' < 'e').
@@ -272,7 +315,15 @@ mod tests {
     #[test]
     fn nonce_is_single_use() {
         let state = EnrollmentState::new();
-        let (nonce, _) = state.begin("svc", 1, &["password"], None, &"a".repeat(40), None);
+        let (nonce, _) = state.begin(
+            "svc",
+            uuid::Uuid::new_v4(),
+            1,
+            &["password"],
+            None,
+            &"a".repeat(40),
+            None,
+        );
         assert!(state.take(&nonce).is_some());
         assert!(state.take(&nonce).is_none(), "second use denied");
         assert_eq!(state.outstanding(), 0);
@@ -287,7 +338,15 @@ mod tests {
     #[test]
     fn expired_nonce_denied() {
         let state = EnrollmentState::new();
-        let (nonce, _) = state.begin("svc", 1, &["password"], None, &"a".repeat(40), None);
+        let (nonce, _) = state.begin(
+            "svc",
+            uuid::Uuid::new_v4(),
+            1,
+            &["password"],
+            None,
+            &"a".repeat(40),
+            None,
+        );
         // Manually expire
         {
             let mut challenges = state.challenges.lock().unwrap();
@@ -300,7 +359,7 @@ mod tests {
 
     #[test]
     fn gpg_verify_rejects_missing_binary() {
-        let err = verify_signature("/nonexistent/gpg", b"data", "sig", "fp").unwrap_err();
+        let err = verify_signature("/nonexistent/gpg", "key", b"data", "sig", "fp").unwrap_err();
         assert!(err.contains("cannot launch") || err.contains("failed"));
     }
 
@@ -313,6 +372,7 @@ mod tests {
         }
         let err = verify_signature(
             DEFAULT_GPG_PATH,
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\ngarbage\n-----END PGP PUBLIC KEY BLOCK-----",
             b"canonical transcript bytes",
             "-----BEGIN PGP SIGNATURE-----\ngarbage\n-----END PGP SIGNATURE-----",
             &"a".repeat(40),
