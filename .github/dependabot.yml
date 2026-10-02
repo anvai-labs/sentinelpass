@@ -46,6 +46,11 @@ updates:
     # dual sha2/hmac (same class as the hmac 0.13 rule above).
       - dependency-name: sha1
         versions: [">=0.11"]
+    # aes-gcm 0.11 sits on the reshuffled aead/trait stack
+    # (aes_gcm::aead::OsRng no longer resolves — CI-verified on #207);
+    # migrate with the coordinated crypto-stack slice (#213).
+      - dependency-name: aes-gcm
+        versions: [">=0.11"]
 
   - package-ecosystem: github-actions
     directory: /
