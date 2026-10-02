@@ -144,7 +144,6 @@ impl IpcServer {
         self
     }
 
-    /// Override the capability store path (tests / embedders).
     /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
     /// Typed outcomes; `not_found` is only reachable AFTER grant
     /// validation (un-granted probing gets `denied`).

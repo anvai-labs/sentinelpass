@@ -347,13 +347,21 @@ mod tests {
         // Unknown field name.
         std::fs::write(&path, br#"{"grants": {}, "future_field": 1}"#).unwrap();
         assert!(ServiceGrantStore::load_from_path(&path).is_err());
-        // Unknown policy_version inside a grant.
-        let bad = r#"{"grants": {"00000000-0000-0000-0000-000000000001": {"policy_version": 2, "grant_id": "00000000-0000-0000-0000-000000000001", "client_id": "x", "entry_id": 1, "fields": ["password"], "created_at": "2026-10-02T00:00:00Z", "client_token_hash": "ab"} } }"#;
+        // Unknown policy_version inside a grant (Vec shape — the only
+        // accepted document form).
+        let bad = r#"{"grants": [{"policy_version": 2, "grant_id": "00000000-0000-0000-0000-000000000001", "client_id": "x", "entry_id": 1, "fields": ["password"], "created_at": "2026-10-02T00:00:00Z", "client_token_hash": "ab"} ]}"#;
         std::fs::write(&path, bad).unwrap();
         assert!(ServiceGrantStore::load_from_path(&path).is_err());
         // Missing mandatory field.
-        let missing = r#"{"grants": {"00000000-0000-0000-0000-000000000002": {"policy_version": 1, "client_id": "x", "entry_id": 1, "fields": [], "created_at": "2026-10-02T00:00:00Z", "client_token_hash": "ab"} } }"#;
+        let missing = r#"{"grants": [{"policy_version": 1, "client_id": "x", "entry_id": 1, "fields": [], "created_at": "2026-10-02T00:00:00Z", "client_token_hash": "ab"} ]}"#;
         std::fs::write(&path, missing).unwrap();
+        assert!(ServiceGrantStore::load_from_path(&path).is_err());
+        // Duplicate grant ids in one document (review F4).
+        let dup = r#"{"grants": [
+            {"policy_version": 1, "grant_id": "00000000-0000-0000-0000-000000000003", "client_id": "x", "entry_id": 1, "fields": ["password"], "created_at": "2026-10-02T00:00:00Z", "client_token_hash": "ab"},
+            {"policy_version": 1, "grant_id": "00000000-0000-0000-0000-000000000003", "client_id": "y", "entry_id": 2, "fields": ["title"], "created_at": "2026-10-02T00:00:00Z", "client_token_hash": "cd"}
+        ]}"#;
+        std::fs::write(&path, dup).unwrap();
         assert!(ServiceGrantStore::load_from_path(&path).is_err());
     }
 
