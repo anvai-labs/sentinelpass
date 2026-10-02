@@ -229,8 +229,9 @@ pub fn verify_signature(
     for line in status.lines() {
         if line.starts_with("[GNUPG:] VALIDSIG ") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let fingerprint = parts[1];
+            // parts: ["[GNUPG:]", "VALIDSIG", "<fingerprint>", ...] - fp is THIRD (review V1).
+            if parts.len() >= 3 {
+                let fingerprint = parts[2];
                 // Full 40-char v4 fingerprint match (public identifier —
                 // constant-time not required, ADR-017).
                 if fingerprint.eq_ignore_ascii_case(expected_fingerprint) {
@@ -361,6 +362,109 @@ mod tests {
     fn gpg_verify_rejects_missing_binary() {
         let err = verify_signature("/nonexistent/gpg", "key", b"data", "sig", "fp").unwrap_err();
         assert!(err.contains("cannot launch") || err.contains("failed"));
+    }
+
+    /// Positive-path (review V1/F9): real key, real signature, matching
+    /// fingerprint -> Ok. Would have caught the round-2 off-by-one.
+    #[test]
+    fn gpg_verify_happy_path_with_real_key() {
+        use std::process::Command;
+        if !std::path::Path::new(DEFAULT_GPG_PATH).exists() {
+            eprintln!("skipping: no gpg at {DEFAULT_GPG_PATH}");
+            return;
+        }
+        let work = std::env::temp_dir().join(format!("sp-gpg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        let home = work.join("gnupg");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let gen = Command::new(DEFAULT_GPG_PATH)
+            .arg("--homedir")
+            .arg(&home)
+            .arg("--batch")
+            .arg("--passphrase")
+            .arg("")
+            .arg("--quick-generate-key")
+            .arg("test@example.com")
+            .arg("ed25519")
+            .arg("sign")
+            .arg("0")
+            .output()
+            .expect("gpg keygen");
+        assert!(
+            gen.status.success(),
+            "keygen: {}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
+
+        let fp_out = Command::new(DEFAULT_GPG_PATH)
+            .arg("--homedir")
+            .arg(&home)
+            .arg("--with-colons")
+            .arg("--list-keys")
+            .output()
+            .expect("gpg list");
+        let fp_text = String::from_utf8_lossy(&fp_out.stdout).to_lowercase();
+        let fingerprint = fp_text
+            .lines()
+            .find(|l| l.starts_with("fpr:"))
+            .and_then(|l| l.split(':').nth(1))
+            .expect("fingerprint")
+            .to_string();
+        assert_eq!(fingerprint.len(), 40, "v4 fp: {fingerprint}");
+
+        let key_out = Command::new(DEFAULT_GPG_PATH)
+            .arg("--homedir")
+            .arg(&home)
+            .arg("--armor")
+            .arg("--export")
+            .arg(&fingerprint)
+            .output()
+            .expect("gpg export");
+        let pubkey = String::from_utf8_lossy(&key_out.stdout).to_string();
+
+        let data_file = work.join("data.bin");
+        std::fs::write(&data_file, b"canonical transcript bytes").unwrap();
+        let sig_out = Command::new(DEFAULT_GPG_PATH)
+            .arg("--homedir")
+            .arg(&home)
+            .arg("--batch")
+            .arg("--passphrase")
+            .arg("")
+            .arg("--detach-sign")
+            .arg("--armor")
+            .arg("--output")
+            .arg(work.join("sig.asc"))
+            .arg(&data_file)
+            .output()
+            .expect("gpg sign");
+        assert!(sig_out.status.success());
+        let sig = std::fs::read_to_string(work.join("sig.asc")).unwrap();
+
+        let result = verify_signature(
+            DEFAULT_GPG_PATH,
+            &pubkey,
+            b"canonical transcript bytes",
+            &sig,
+            &fingerprint,
+        );
+        assert!(result.is_ok(), "happy path: {result:?}");
+
+        let wrong = "f".repeat(40);
+        assert!(verify_signature(
+            DEFAULT_GPG_PATH,
+            &pubkey,
+            b"canonical transcript bytes",
+            &sig,
+            &wrong
+        )
+        .is_err());
+        assert!(
+            verify_signature(DEFAULT_GPG_PATH, &pubkey, b"TAMPERED", &sig, &fingerprint).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     #[test]

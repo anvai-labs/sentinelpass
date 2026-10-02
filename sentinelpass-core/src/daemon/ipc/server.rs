@@ -2089,7 +2089,9 @@ impl IpcServer {
                 // profile-conditional for the transitional surface.
                 let grant_admin = matches!(
                     &op,
-                    VaultOp::ServiceGrantCreate { .. } | VaultOp::ServiceGrantRevoke { .. }
+                    VaultOp::ServiceGrantCreate { .. }
+                        | VaultOp::ServiceGrantRevoke { .. }
+                        | VaultOp::ServiceEnrollmentBegin { .. }
                 );
                 if grant_admin || (self.require_stepup && op.requires_admin_step_up()) {
                     let op_bytes = match serde_json::to_vec(&op) {
