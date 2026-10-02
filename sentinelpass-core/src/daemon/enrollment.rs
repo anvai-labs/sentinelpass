@@ -409,7 +409,11 @@ mod tests {
         let fingerprint = fp_text
             .lines()
             .find(|l| l.starts_with("fpr:"))
-            .and_then(|l| l.split(':').nth(1))
+            .and_then(|l| {
+                l.split(':')
+                    .skip(1)
+                    .find(|f| !f.is_empty() && f.len() == 40)
+            })
             .expect("fingerprint")
             .to_string();
         assert_eq!(fingerprint.len(), 40, "v4 fp: {fingerprint}");
