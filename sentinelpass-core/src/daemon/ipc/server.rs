@@ -1,5 +1,6 @@
 //! IPC server — handles daemon-side message dispatch.
 
+use super::stepup;
 #[cfg(windows)]
 use super::windows_named_pipe_path;
 use super::{
@@ -54,6 +55,13 @@ pub struct IpcServer {
     /// WBS-512: bounds concurrent client connections (stalled/slow clients
     /// cannot exhaust daemon tasks).
     client_limiter: Arc<tokio::sync::Semaphore>,
+    /// SP-0 / ADR-013: master-password step-up state (server-held only).
+    stepup: stepup::StepUpState,
+    /// Strict administrative-step-up profile (SP-0): when set, every
+    /// `VaultOp::requires_admin_step_up()` op needs a fresh approval and
+    /// browser/external-tool write surfaces are denied outright.
+    /// Enabled by `SENTINELPASS_REQUIRE_STEPUP=1` at daemon start.
+    require_stepup: bool,
     /// WBS-504/505: capability store (default location; injectable for
     /// tests).
     capability_store_path: PathBuf,
@@ -106,10 +114,21 @@ impl IpcServer {
             shutdown: Arc::new(AtomicBool::new(false)),
             mode: Arc::new(AtomicU8::new(MODE_LIVE)),
             client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
+            stepup: stepup::StepUpState::new(),
+            require_stepup: std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             capability_store_path: crate::daemon::capabilities::default_store_path(),
             site_permissions_path: crate::daemon::site_permissions::default_store_path(),
             site_permissions_lock: std::sync::Mutex::new(()),
         }
+    }
+
+    /// SP-0 / ADR-013: enable the strict administrative step-up profile
+    /// (tests / the SENTINELPASS_REQUIRE_STEPUP deployment posture).
+    pub fn with_require_stepup(mut self, require: bool) -> Self {
+        self.require_stepup = require;
+        self
     }
 
     /// Override the capability store path (tests / embedders).
@@ -304,6 +323,8 @@ impl IpcServer {
         &self,
         conn: sentinelpass_protocol::connection::TransportConnection,
     ) -> Result<()> {
+        // SP-0: random per-connection identity for step-up binding.
+        let connection_id: u128 = rand::random();
         let (mut ipc, first_frame) =
             sentinelpass_protocol::connection::IpcConnection::accept_server(conn, &self.auth_token)
                 .await
@@ -316,7 +337,7 @@ impl IpcServer {
 
         // A legacy PLAIN client's first frame is already delivered.
         if let Some(first) = first_frame {
-            if let Some(response_bytes) = self.process_frame(&first).await {
+            if let Some(response_bytes) = self.process_frame(&first, connection_id).await {
                 ipc.send_frame(&response_bytes).await.map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
                         "Failed to send response: {}",
@@ -341,7 +362,7 @@ impl IpcServer {
                     break;
                 }
             };
-            if let Some(response_bytes) = self.process_frame(&frame).await {
+            if let Some(response_bytes) = self.process_frame(&frame, connection_id).await {
                 ipc.send_frame(&response_bytes).await.map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
                         "Failed to send response: {}",
@@ -355,14 +376,14 @@ impl IpcServer {
 
     /// Token check + dispatch for one plaintext envelope frame. Returns the
     /// serialized response, or None when no response should be sent.
-    async fn process_frame(&self, frame: &[u8]) -> Option<Vec<u8>> {
+    async fn process_frame(&self, frame: &[u8], connection_id: u128) -> Option<Vec<u8>> {
         match serde_json::from_slice::<IpcEnvelope>(frame) {
             Ok(envelope) => {
                 if !bool::from(envelope.token.as_bytes().ct_eq(self.auth_token.as_bytes())) {
                     warn!("Rejected IPC request with invalid token");
                     return None;
                 }
-                let response = self.handle_message(envelope).await;
+                let response = self.handle_message(envelope, connection_id).await;
                 match serde_json::to_vec(&response) {
                     Ok(response_bytes) => Some(response_bytes),
                     Err(e) => {
@@ -510,11 +531,15 @@ impl IpcServer {
 
     /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
-    async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+    /// `connection_id` (SP-0): random per-connection identity minted in
+    /// `run_connection`; step-up approvals are bound to it.
+    async fn handle_message(&self, envelope: IpcEnvelope, connection_id: u128) -> IpcMessage {
         // Maintenance/bootstrap gate (WBS-501/503): a daemon started with no
         // vault serves only status, bootstrap creation, and shutdown.
         if self.is_maintenance_mode() {
-            return self.handle_maintenance_message(envelope).await;
+            return self
+                .handle_maintenance_message(envelope, connection_id)
+                .await;
         }
 
         let client_token = envelope.client_token.clone();
@@ -635,7 +660,7 @@ impl IpcServer {
                             authorized: false,
                             error: Some(format!(
                                 "Client '{}' is not authorized for {} {}: run \
-                                 'sentinelpass secret allow --client-id {} --domain {} --field {}' \
+                                 'sentinelpass secret allow {} --domain {} --field {}' \
                                  and set SENTINELPASS_CLIENT_TOKEN",
                                 client_id,
                                 domain,
@@ -664,6 +689,20 @@ impl IpcServer {
                 value,
                 purpose,
             } => {
+                // SP-0 / ADR-013: under the strict administrative profile,
+                // unattended external-tool writes are disabled — entry
+                // mutation needs an owner step-up, which this surface
+                // cannot present. Fail closed with the typed code.
+                if self.require_stepup {
+                    return IpcMessage::SaveSecretResponse {
+                        success: false,
+                        locked: None,
+                        error: Some(
+                            "step_up_required: external-tool writes are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 let purpose_label = purpose.unwrap_or_else(|| "external-secret-write".to_string());
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::SaveSecretResponse {
@@ -707,7 +746,7 @@ impl IpcServer {
                         locked: None,
                         error: Some(format!(
                             "Client '{}' has no write grant for '{}': run \
-                             'sentinelpass secret allow --client-id {} --domain {} --field password --write' \
+                             'sentinelpass secret allow {} --domain {} --field password --write' \
                              and set SENTINELPASS_CLIENT_TOKEN",
                             client_id, domain, client_id, domain
                         )),
@@ -1034,6 +1073,20 @@ impl IpcServer {
                 url,
                 save_trigger: _,
             } => {
+                // SP-0 / ADR-013: browser capture is entry creation; under
+                // the strict profile the extension cannot present a
+                // master-password step-up, so capture is disabled (the
+                // owner adds entries through the step-up-capable CLI/UI).
+                if self.require_stepup {
+                    return IpcMessage::SaveCredentialResponse {
+                        success: false,
+                        locked: None,
+                        error: Some(
+                            "step_up_required: browser capture is disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 info!("IPC: SaveCredential");
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -1081,6 +1134,18 @@ impl IpcServer {
                 host,
                 allow_insecure,
             } => {
+                // SP-0 / ADR-013: autofill permission grants are policy
+                // mutations; the strict profile denies them on the browser
+                // surface (which cannot step up).
+                if self.require_stepup {
+                    return IpcMessage::GrantSitePermissionResponse {
+                        success: false,
+                        error: Some(
+                            "step_up_required: site permission grants are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 // WBS-712: permission management is a browser-surface op —
                 // the same capability gate as the ops it authorizes. The
                 // grant only ever loosens the gate for ONE exact host and
@@ -1133,6 +1198,20 @@ impl IpcServer {
                 }
             }
             IpcMessage::RevokeSitePermission { host } => {
+                // SP-0 / ADR-013 (review F3): revocation is a policy
+                // mutation too — handoff §3A: "Even restrictive
+                // administrative revocation uses step-up under the owner's
+                // current rule." The browser surface cannot step up.
+                if self.require_stepup {
+                    return IpcMessage::RevokeSitePermissionResponse {
+                        success: false,
+                        removed: false,
+                        error: Some(
+                            "step_up_required: site permission changes are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::RevokeSitePermissionResponse {
                         success: false,
@@ -1277,6 +1356,22 @@ impl IpcServer {
                 }
             }
             IpcMessage::SyncNow => {
+                // SP-0 / ADR-013 (review F1): the bare SyncNow message must
+                // honor the strict profile exactly like
+                // ServiceCall(VaultOp::SyncNow) — a sync cycle APPLIES remote
+                // mutations, so gating only the classified op left a crafted
+                // bare-frame bypass.
+                if self.require_stepup {
+                    return IpcMessage::SyncNowResponse {
+                        success: false,
+                        pushed: 0,
+                        pulled: 0,
+                        error: Some(
+                            "step_up_required: unattended sync is disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 debug!("IPC: SyncNow");
                 #[cfg(feature = "sync")]
                 {
@@ -1341,7 +1436,150 @@ impl IpcServer {
                     }
                 }
             }
-            IpcMessage::ServiceCall { op } => self.dispatch_service_call(op).await,
+            IpcMessage::ServiceCall {
+                op,
+                stepup_approval,
+            } => {
+                // SP-0 / ADR-013: strict profile — administrative mutations
+                // require a fresh, unused, connection- and operation-bound
+                // master-password approval. Fail-closed with a typed error
+                // the CLI maps to an interactive password prompt.
+                if self.require_stepup && op.requires_admin_step_up() {
+                    let op_bytes = match serde_json::to_vec(&op) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return IpcMessage::ServiceResult {
+                                outcome: ServiceOutcome::Err {
+                                    error: ServiceError::new(
+                                        "step_up_required",
+                                        format!(
+                                            "cannot serialize operation for approval binding: {e}"
+                                        ),
+                                    ),
+                                },
+                            };
+                        }
+                    };
+                    let approval = match stepup_approval {
+                        Some(approval) => approval,
+                        None => {
+                            return IpcMessage::ServiceResult {
+                                outcome: ServiceOutcome::Err {
+                                    error: ServiceError::new(
+                                        "step_up_required",
+                                        "this operation requires a fresh master-password approval",
+                                    ),
+                                },
+                            };
+                        }
+                    };
+                    if let Err(denial) =
+                        self.stepup
+                            .take_if_valid(&approval, connection_id, &op_bytes)
+                    {
+                        return IpcMessage::ServiceResult {
+                            outcome: ServiceOutcome::Err {
+                                error: ServiceError::new(
+                                    "step_up_required",
+                                    format!("step-up approval denied: {denial}"),
+                                ),
+                            },
+                        };
+                    }
+                    // Approval consumed (single use, burned even if the
+                    // mutation below fails — ADR-013).
+                }
+                self.dispatch_service_call(op).await
+            }
+            // SP-0 / ADR-013: mint a single-use administrative approval
+            // after verifying the master password through the full
+            // reviewed open path. The password never unlocks anything,
+            // never persists, and is dropped (zeroizing) immediately.
+            IpcMessage::StepUpAuthorize {
+                master_password,
+                op,
+            } => {
+                if let Some(retry_after) = self.stepup.throttled() {
+                    return IpcMessage::StepUpDenied {
+                        error: "too many failed verifications".to_string(),
+                        retry_after_secs: Some(retry_after),
+                    };
+                }
+                // The vault must exist (nothing to verify against in
+                // maintenance mode; VaultCreate needs no step-up).
+                if self.is_maintenance_mode() {
+                    return IpcMessage::StepUpDenied {
+                        error: "no vault: nothing to verify against".to_string(),
+                        retry_after_secs: None,
+                    };
+                }
+                // Review F2: mutations can only dispatch against an
+                // UNLOCKED manager, and running the full open() while the
+                // daemon vault is locked installs the process-global
+                // audit-key lease (breaking the cleared-on-lock invariant)
+                // and re-runs vault maintenance sweeps against a vault the
+                // operator believes is at rest. Refuse: unlock first.
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::StepUpDenied {
+                        error: "vault is locked: unlock it before requesting step-up \
+                             (administrative mutations require the unlocked vault)"
+                            .to_string(),
+                        retry_after_secs: None,
+                    };
+                }
+                let op_bytes = match serde_json::to_vec(&op) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return IpcMessage::StepUpDenied {
+                            error: format!("cannot serialize operation: {e}"),
+                            retry_after_secs: None,
+                        };
+                    }
+                };
+                // KDF discipline identical to unlock: blocking pool + the
+                // per-vault Argon2id gate. NOTE (review F2, documented in
+                // ADR-013): this runs the FULL reviewed open(), whose
+                // success path re-runs (idempotent, already-completed)
+                // maintenance sweeps and appends a VaultUnlocked audit
+                // record; a wrong password shares the vault-wide persistent
+                // lockout counter with unlock. The DaemonVault itself is
+                // never unlocked by this.
+                let permit = self.vault.kdf_permit().await;
+                let vault_path = self.vault.vault_path().to_path_buf();
+                // Zeroizing custody inside the blocking task; nothing
+                // retains the password after verification.
+                let password = zeroize::Zeroizing::new(master_password.into_bytes());
+                let verification = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    VaultManager::open(&vault_path, &password)
+                })
+                .await;
+                match verification {
+                    Ok(Ok(_manager)) => {
+                        // Verified. The manager (and its derived keys) is
+                        // dropped here on purpose.
+                        self.stepup.record_success();
+                        let (approval_id, expires_at_unix) =
+                            self.stepup.mint(connection_id, &op_bytes);
+                        IpcMessage::StepUpReceipt {
+                            approval_id,
+                            expires_at_unix,
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        self.stepup.record_failure();
+                        let retry_after = self.stepup.throttled();
+                        IpcMessage::StepUpDenied {
+                            error: "master password verification failed".to_string(),
+                            retry_after_secs: retry_after,
+                        }
+                    }
+                    Err(e) => IpcMessage::StepUpDenied {
+                        error: format!("verification task failed: {e}"),
+                        retry_after_secs: None,
+                    },
+                }
+            }
             _ => IpcMessage::VaultStatusResponse {
                 unlocked: false,
                 key_epoch: 0,
@@ -1449,7 +1687,11 @@ impl IpcServer {
     }
 
     /// Maintenance/bootstrap surface (WBS-501/503): no vault exists yet.
-    async fn handle_maintenance_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+    async fn handle_maintenance_message(
+        &self,
+        envelope: IpcEnvelope,
+        _connection_id: u128,
+    ) -> IpcMessage {
         match envelope.message {
             IpcMessage::CheckVault => IpcMessage::VaultStatusResponse {
                 unlocked: false,
@@ -1463,7 +1705,12 @@ impl IpcServer {
                     key_epoch: 0,
                 }
             }
-            IpcMessage::ServiceCall { op } => self.dispatch_maintenance_op(op).await,
+            IpcMessage::ServiceCall { op, .. } => {
+                // Maintenance mode serves only VaultStatus/VaultCreate —
+                // VaultCreate is bootstrap password-setting, exempt from
+                // step-up by design (ADR-013).
+                self.dispatch_maintenance_op(op).await
+            }
             IpcMessage::UnlockVault {
                 mut master_password,
             } => {
@@ -1930,12 +2177,31 @@ mod autofill_origin_gate_tests {
         }
     }
 
+    const TEST_CONNECTION: u128 = 0x5FE0_0000_0000_0000;
+
+    /// Test-only: a Debug-safe label (IpcMessage Debug can contain secret
+    /// payloads; panic messages must not embed them).
+    fn variant_name(_: &IpcMessage) -> &'static str {
+        "IpcMessage"
+    }
+
     fn handle(
         rt: &tokio::runtime::Runtime,
         server: &IpcServer,
         envelope: IpcEnvelope,
     ) -> IpcMessage {
-        rt.block_on(server.handle_message(envelope))
+        rt.block_on(server.handle_message(envelope, TEST_CONNECTION))
+    }
+
+    /// SP-0: same, on an explicit connection identity (cross-connection
+    /// denial tests).
+    fn handle_on(
+        rt: &tokio::runtime::Runtime,
+        server: &IpcServer,
+        envelope: IpcEnvelope,
+        connection_id: u128,
+    ) -> IpcMessage {
+        rt.block_on(server.handle_message(envelope, connection_id))
     }
 
     #[test]
@@ -2392,5 +2658,484 @@ mod autofill_origin_gate_tests {
         )
         .unwrap();
         assert!(!store.allows_insecure("example.com"));
+    }
+
+    // ------------------------------------------------------------------
+    // SP-0 / ADR-013: master-password administrative step-up
+    // ------------------------------------------------------------------
+
+    fn strict_harness() -> GateHarness {
+        // One owned tempdir: the vault file must stay alive for the
+        // step-up verifier's full open.
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        VaultManager::create(&vault_path, b"test_password").unwrap();
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { daemon_vault.unlock(b"test_password").await })
+            .unwrap();
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("strict.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_require_stepup(true);
+        GateHarness {
+            _tmp: tmp,
+            server,
+            capability: String::new(),
+            permissions_path: std::path::PathBuf::new(),
+        }
+    }
+
+    fn make_add_op(title: &str) -> VaultOp {
+        VaultOp::EntryAdd {
+            entry: sentinelpass_protocol::service::ServiceEntry {
+                entry_id: None,
+                title: title.to_string(),
+                username: "u".to_string(),
+                password: zeroize::Zeroizing::new("p".to_string()),
+                url: None,
+                notes: None,
+                credential_type: "password".to_string(),
+                created_at: 0,
+                modified_at: 0,
+                favorite: false,
+            },
+        }
+    }
+
+    fn service_outcome(msg: IpcMessage) -> ServiceOutcome {
+        match msg {
+            IpcMessage::ServiceResult { outcome } => outcome,
+            other => panic!("unexpected response: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_mutation_without_approval() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: make_add_op("x"),
+                    stepup_approval: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Err { error } => assert_eq!(error.code, "step_up_required"),
+            ServiceOutcome::Ok { .. } => panic!("unapproved mutation must be denied"),
+        }
+    }
+
+    #[test]
+    fn strict_profile_allows_reads_without_step_up() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for op in [VaultOp::VaultStatus, VaultOp::EntryList] {
+            let msg = handle(
+                &rt,
+                &h.server,
+                envelope(
+                    IpcMessage::ServiceCall {
+                        op,
+                        stepup_approval: None,
+                    },
+                    Some(h.capability.clone()),
+                ),
+            );
+            assert!(
+                matches!(service_outcome(msg), ServiceOutcome::Ok { .. }),
+                "reads must remain unattended under the strict profile"
+            );
+        }
+    }
+
+    #[test]
+    fn step_up_allows_exactly_one_mutation() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let op = make_add_op("stepped");
+        // Authorize with the correct master password for THIS op.
+        let receipt = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: op.clone(),
+                },
+                None,
+            ),
+        );
+        let IpcMessage::StepUpReceipt { approval_id, .. } = receipt else {
+            panic!("expected receipt")
+        };
+        // The approved mutation succeeds...
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: op.clone(),
+                    stepup_approval: Some(approval_id.clone()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Ok { .. } => {}
+            ServiceOutcome::Err { error } => panic!("approved mutation failed: {error}"),
+        }
+        // ...exactly once. Replay is denied.
+        let replay = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op,
+                    stepup_approval: Some(approval_id),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(replay) {
+            ServiceOutcome::Err { error } => {
+                assert_eq!(error.code, "step_up_required");
+                assert!(error.message.contains("unknown, already used"));
+            }
+            ServiceOutcome::Ok { .. } => panic!("approval replay must be denied"),
+        }
+    }
+
+    #[test]
+    fn step_up_wrong_password_denied_then_throttled() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let op = VaultOp::EntryList;
+        let deny = |msg: IpcMessage| match msg {
+            IpcMessage::StepUpDenied { error, .. } => error,
+            other => panic!("expected denial, got {}", variant_name(&other)),
+        };
+        for _ in 0..5 {
+            let err = deny(handle(
+                &rt,
+                &h.server,
+                envelope(
+                    IpcMessage::StepUpAuthorize {
+                        master_password: "wrong-password".to_string(),
+                        op: op.clone(),
+                    },
+                    None,
+                ),
+            ));
+            assert!(err.contains("verification failed"));
+        }
+        // The 6th attempt is throttled before touching the KDF.
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::StepUpDenied {
+                error,
+                retry_after_secs: Some(wait),
+            } => {
+                assert!(error.contains("too many failed"));
+                assert!(wait >= 1);
+            }
+            IpcMessage::StepUpReceipt { .. } => panic!("must be throttled after 5 failures"),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn step_up_approval_binds_to_the_exact_operation() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let authorized = make_add_op("a");
+        let substituted = make_add_op("SWAPPED");
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: authorized,
+                },
+                None,
+            ),
+        ) else {
+            panic!("expected receipt")
+        };
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: substituted,
+                    stepup_approval: Some(approval_id),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Err { error } => {
+                assert_eq!(error.code, "step_up_required");
+                assert!(error
+                    .message
+                    .contains("does not match this exact operation"));
+            }
+            ServiceOutcome::Ok { .. } => panic!("swapped target must be denied"),
+        }
+    }
+
+    #[test]
+    fn step_up_approval_is_connection_bound() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let op = make_add_op("c");
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("expected receipt")
+        };
+        // A different connection cannot use it...
+        let msg = handle_on(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: op.clone(),
+                    stepup_approval: Some(approval_id.clone()),
+                },
+                Some(h.capability.clone()),
+            ),
+            TEST_CONNECTION + 1,
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Err { error } => {
+                assert!(error.message.contains("different connection"))
+            }
+            ServiceOutcome::Ok { .. } => panic!("cross-connection approval must be denied"),
+        }
+        // ...but the minting connection still can.
+        let ok = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op,
+                    stepup_approval: Some(approval_id),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        assert!(matches!(service_outcome(ok), ServiceOutcome::Ok { .. }));
+    }
+
+    #[test]
+    fn strict_profile_denies_browser_and_tool_write_surfaces() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::SaveCredential {
+                    domain: "example.com".into(),
+                    username: "u".into(),
+                    password: "p".into(),
+                    url: Some("https://example.com".into()),
+                    save_trigger: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::SaveCredentialResponse {
+                success: false,
+                error,
+                ..
+            } => {
+                assert!(error.unwrap().contains("step_up_required"))
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::SaveSecret {
+                    client_id: "tool".into(),
+                    domain: "example.com".into(),
+                    value: "v".into(),
+                    purpose: None,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::SaveSecretResponse {
+                success: false,
+                error,
+                ..
+            } => {
+                assert!(error.unwrap().contains("step_up_required"))
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn legacy_profile_keeps_unattended_mutations() {
+        // Strict OFF (the desktop default until UI support): behavior is
+        // unchanged — the regression guard for the rollout gate.
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: make_add_op("legacy"),
+                    stepup_approval: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        assert!(
+            matches!(service_outcome(msg), ServiceOutcome::Ok { .. }),
+            "strict-off must keep pre-SP-0 behavior"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // SP-0 adversarial review remediation tests (F1/F2a/F3/F9)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn strict_profile_denies_bare_sync_now_message() {
+        // Review F1: the bare IpcMessage::SyncNow (not the VaultOp) was an
+        // ungated alias that applied remote mutations unattended.
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(&rt, &h.server, envelope(IpcMessage::SyncNow, None)) {
+            IpcMessage::SyncNowResponse {
+                success: false,
+                error: Some(error),
+                ..
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_site_permission_revocation() {
+        // Review F3: revocation is a policy mutation on a surface that
+        // cannot step up.
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::RevokeSitePermission {
+                    host: "example.com".into(),
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::RevokeSitePermissionResponse {
+                success: false,
+                error: Some(error),
+                ..
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_site_permission_grant() {
+        // Reviewer-requested coverage: the GRANT direction's strict denial
+        // (revocation already had one; the code existed since the base
+        // commit — this pins it).
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GrantSitePermission {
+                    host: "example.com".into(),
+                    allow_insecure: true,
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::GrantSitePermissionResponse {
+                success: false,
+                error: Some(error),
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn step_up_is_refused_while_vault_locked() {
+        // Review F2: the full open() against a locked daemon vault would
+        // install the process-global audit-key lease (breaking
+        // cleared-on-lock) and run maintenance sweeps on a vault at rest.
+        // Refused: unlock first.
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        VaultManager::create(&vault_path, b"test_password").unwrap();
+        // DaemonVault stays LOCKED (no unlock call).
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("locked.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_require_stepup(true);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: VaultOp::EntryList,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::StepUpDenied { error, .. } => {
+                assert!(error.contains("locked"), "unexpected denial: {error}")
+            }
+            IpcMessage::StepUpReceipt { .. } => {
+                panic!("step-up must be refused while the vault is locked")
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
     }
 }

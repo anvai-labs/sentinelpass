@@ -27,7 +27,7 @@ vault (locked outside provisioning) → daemon broker → GetExternalSecret
   (its own server-side vault; stays locked outside provisioning), plus a
   scoped grant and client token:
   ```bash
-  sentinelpass secret allow --client-id <client> --domain <domain> --field password
+  sentinelpass secret allow <client> --domain <domain> --field password
   ```
 
 ## Install (and rotate)
