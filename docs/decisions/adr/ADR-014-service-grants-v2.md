@@ -50,11 +50,14 @@ serialized crash-safe updates.
    a valid grant first), and `locked` — without leaking entry existence to
    un-granted callers. Ambiguity is structurally impossible: the grant
    names one `entry_id`; there is no domain lookup on this path.
-3. **Administration is step-up-gated** — `ServiceGrantCreate`/`Revoke`
-   are `VaultOp`s classified `requires_admin_step_up()` (exhaustive match
-   forces the classification), executed against the grant store under the
-   SP-0 approval machinery: an unlocked vault plus a stolen IPC token can
-   no longer mint service grants.
+3. **Administration is step-up-gated UNCONDITIONALLY** —
+   `ServiceGrantCreate`/`Revoke` are `VaultOp`s classified
+   `requires_admin_step_up()` (exhaustive match forces the classification),
+   and unlike the transitional SP-0 surface their gate ignores the profile
+   flag: a consumed, op-bound approval is required on EVERY daemon (new
+   surface, zero legacy clients — nothing to preserve). An unlocked vault
+   plus a stolen IPC token can never mint or revoke service grants on any
+   profile.
 4. **Serialized updates** — the store uses the same
    write-temp/fsync/atomic-rename discipline as the SP-0 manifest, with a
    store-level mutex serializing read-modify-write cycles (the

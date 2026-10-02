@@ -181,10 +181,32 @@ impl IpcServer {
                 )
             }
         };
-        if store
+        let authorized = store
             .authorize(client_id, token, entry_id, field, chrono::Utc::now())
-            .is_none()
-        {
+            .is_some();
+        // Review F3: service deliveries get the same audit discipline as
+        // the legacy broker (client/entry/field only — never the value).
+        log_daemon_audit(
+            self.audit_logger.as_deref(),
+            if authorized {
+                crate::AuditEventType::CredentialViewed { entry_id }
+            } else {
+                // Denials ride the same event with the outcome in the
+                // context line (no value material, ever).
+                crate::AuditEventType::ExternalSecretAccess {
+                    client_id: Some(client_id.to_string()),
+                    domain: format!("entry:{entry_id}"),
+                    field: Some(field.as_str().to_string()),
+                    purpose: Some("service_get:denied".to_string()),
+                    success: false,
+                }
+            },
+            &format!(
+                "SP-1 service_get {client_id} entry:{entry_id} field:{} authorized={authorized}",
+                field.as_str()
+            ),
+        );
+        if !authorized {
             return self.service_secret_report("denied", None, None);
         }
         let Some(manager) = self.vault.manager().await else {
@@ -273,8 +295,16 @@ impl IpcServer {
             }
             Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
         };
-        let expiry = expires_at
-            .map(|secs| chrono::DateTime::from_timestamp(secs, 0).unwrap_or_else(chrono::Utc::now));
+        // Review F5: a garbage expires_at is an input error, never a
+        // silently clamped expiry.
+        let expiry = expires_at.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+        if expires_at.is_some() && expiry.is_none() {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some("expires_at out of range".into()),
+            );
+        }
         let _guard = self.service_grants_lock.lock().unwrap();
         let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
@@ -288,10 +318,20 @@ impl IpcServer {
                 )
             }
         };
-        let (grant, token) = store.mint_grant(client_id, entry_id, fields, expiry);
+        let (grant, token) = match store.mint_grant(client_id, entry_id, fields, expiry) {
+            Ok(minted) => minted,
+            Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
+        };
         if let Err(e) = store.save_to_path(&self.service_grants_path) {
-            return self.service_secret_report("denied", None, Some(e.to_string()));
+            // Review F6: NOT published — distinct from an authz denial.
+            return self.service_secret_report("store_error", None, Some(e.to_string()));
         }
+        // Review F3: audit the policy mutation (no secret material).
+        log_daemon_audit(
+            self.audit_logger.as_deref(),
+            crate::AuditEventType::CredentialModified { entry_id },
+            &format!("SP-1 service_grant_created {client_id} entry:{entry_id}"),
+        );
         // Token shown once, inside the sealed session (legacy-broker
         // discipline). The report is the ONLY place it appears.
         IpcMessage::ServiceResult {
@@ -307,8 +347,8 @@ impl IpcServer {
     }
 
     /// SP-1 / ADR-014: revoke a grant (admin; step-up gated upstream).
-    async fn service_grant_revoke(&self, grant_id: &str) -> IpcMessage {
-        let Ok(grant_id) = uuid::Uuid::parse_str(grant_id) else {
+    async fn service_grant_revoke(&self, grant_id_str: &str) -> IpcMessage {
+        let Ok(grant_id) = uuid::Uuid::parse_str(grant_id_str) else {
             return self.service_secret_report("denied", None, Some("malformed grant id".into()));
         };
         let _guard = self.service_grants_lock.lock().unwrap();
@@ -328,8 +368,17 @@ impl IpcServer {
             return self.service_secret_report("not_found", None, None);
         }
         match store.save_to_path(&self.service_grants_path) {
-            Ok(()) => self.service_secret_report("revoked", None, None),
-            Err(e) => self.service_secret_report("denied", None, Some(e.to_string())),
+            Ok(()) => {
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::CredentialModified { entry_id: 0 },
+                    &format!("SP-1 service_grant_revoked {grant_id}"),
+                );
+                self.service_secret_report("revoked", None, None)
+            }
+            // Review F6: revocation NOT published — the grant is still
+            // live on disk; say so distinctly.
+            Err(e) => self.service_secret_report("store_error", None, Some(e.to_string())),
         }
     }
 
@@ -1645,7 +1694,15 @@ impl IpcServer {
                 // require a fresh, unused, connection- and operation-bound
                 // master-password approval. Fail-closed with a typed error
                 // the CLI maps to an interactive password prompt.
-                if self.require_stepup && op.requires_admin_step_up() {
+                // Review F2 (SP-1): service-grant administration gates on a
+                // step-up approval on EVERY profile — new surface, no
+                // legacy clients. The general SP-0 gate below remains
+                // profile-conditional for the transitional surface.
+                let grant_admin = matches!(
+                    &op,
+                    VaultOp::ServiceGrantCreate { .. } | VaultOp::ServiceGrantRevoke { .. }
+                );
+                if grant_admin || (self.require_stepup && op.requires_admin_step_up()) {
                     let op_bytes = match serde_json::to_vec(&op) {
                         Ok(bytes) => bytes,
                         Err(e) => {
@@ -1819,9 +1876,12 @@ impl IpcServer {
                 fields,
                 expires_at,
             } => {
+                // Review F2: the ServiceCall arm gates these two admin ops
+                // on a consumed op-bound step-up approval UNCONDITIONALLY
+                // (every profile) before dispatch reaches here.
                 return self
                     .service_grant_create(client_id, *entry_id, fields.clone(), *expires_at)
-                    .await
+                    .await;
             }
             VaultOp::ServiceGrantRevoke { grant_id } => {
                 return self.service_grant_revoke(grant_id).await
@@ -3439,20 +3499,55 @@ mod autofill_origin_gate_tests {
         let (h, _grants) = sp1_harness();
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // 1. Mint (admin op — non-strict harness for the lifecycle test;
-        //    step-up gating is covered by the classification test).
+        // 1. Mint — grant administration needs a step-up on EVERY profile
+        //    (review F2). First prove the unapproved call is denied, then
+        //    approve and retry.
+        let create_op = VaultOp::ServiceGrantCreate {
+            client_id: "sandesha-svc".into(),
+            entry_id: 1,
+            fields: vec!["password".into()],
+            expires_at: None,
+        };
+        let unapproved = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: create_op.clone(),
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        match unapproved {
+            IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Err { error },
+            } => assert_eq!(error.code, "step_up_required"),
+            other => panic!(
+                "unapproved grant create must be step-up denied: {}",
+                variant_name(&other)
+            ),
+        }
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: create_op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("expected step-up receipt")
+        };
         let created = handle(
             &rt,
             &h.server,
             envelope(
                 IpcMessage::ServiceCall {
-                    op: VaultOp::ServiceGrantCreate {
-                        client_id: "sandesha-svc".into(),
-                        entry_id: 1,
-                        fields: vec!["password".into()],
-                        expires_at: None,
-                    },
-                    stepup_approval: None,
+                    op: create_op,
+                    stepup_approval: Some(approval_id),
                 },
                 None,
             ),
@@ -3507,14 +3602,32 @@ mod autofill_origin_gate_tests {
         );
         assert_eq!(report_value(probe)["status"], "denied");
 
-        // 4. Revoke (admin op), then retrieval is denied.
+        // 4. Revoke (admin op — step-up), then retrieval is denied.
+        let revoke_op = VaultOp::ServiceGrantRevoke { grant_id };
+        let IpcMessage::StepUpReceipt {
+            approval_id: revoke_approval,
+            ..
+        } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: revoke_op.clone(),
+                },
+                None,
+            ),
+        )
+        else {
+            panic!("expected step-up receipt for revoke")
+        };
         let revoked = handle(
             &rt,
             &h.server,
             envelope(
                 IpcMessage::ServiceCall {
-                    op: VaultOp::ServiceGrantRevoke { grant_id },
-                    stepup_approval: None,
+                    op: revoke_op,
+                    stepup_approval: Some(revoke_approval),
                 },
                 None,
             ),

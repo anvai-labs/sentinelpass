@@ -72,7 +72,8 @@ pub struct ServiceGrant {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceGrantStore {
-    /// Keyed by grant_id for stable serialization.
+    /// Serialized as a sequence (order is insert-order); the LOADER
+    /// rejects duplicate grant ids before building the map (review F4).
     #[serde(default)]
     pub grants: HashMap<Uuid, ServiceGrant>,
     /// In-process serialization of read-modify-write cycles (the daemon is
@@ -89,9 +90,10 @@ impl ServiceGrantStore {
     }
 
     /// Fail-closed load: any schema violation (unknown version, unknown
-    /// field name, missing mandatory field) refuses the WHOLE document —
-    /// a partial load would silently drop grants (availability) or worse,
-    /// drop revocations (security).
+    /// field name, missing mandatory field, or DUPLICATE grant id in the
+    /// raw document — serde maps are silently last-wins, review F4)
+    /// refuses the WHOLE document — a partial load would silently drop
+    /// grants (availability) or worse, drop revocations (security).
     pub fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -102,11 +104,32 @@ impl ServiceGrantStore {
         )
         .map_err(PasswordManagerError::from)?;
         let bytes = std::fs::read(path)?;
-        let store: Self = serde_json::from_slice(&bytes).map_err(|e| {
+        // Reject duplicate grant ids BEFORE map conversion (last-wins
+        // would let a crafted file present a revoked grant while
+        // enforcing its unrevoked duplicate, or vice versa).
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawStore {
+            #[serde(default)]
+            grants: Vec<ServiceGrant>,
+        }
+        let raw: RawStore = serde_json::from_slice(&bytes).map_err(|e| {
             PasswordManagerError::InvalidInput(format!(
                 "service grant store failed closed (schema violation): {e}"
             ))
         })?;
+        let mut grants = HashMap::with_capacity(raw.grants.len());
+        for grant in raw.grants {
+            if grants.insert(grant.grant_id, grant).is_some() {
+                return Err(PasswordManagerError::InvalidInput(
+                    "service grant store failed closed: duplicate grant id".to_string(),
+                ));
+            }
+        }
+        let store = Self {
+            grants,
+            _serialization: None,
+        };
         for grant in store.grants.values() {
             if grant.policy_version != 1 {
                 return Err(PasswordManagerError::InvalidInput(format!(
@@ -118,7 +141,10 @@ impl ServiceGrantStore {
         Ok(store)
     }
 
-    /// Atomic publication: born-0600 temp, fsync, rename, dir fsync.
+    /// Atomic publication: born-0600 temp, fsync, rename, then PARENT
+    /// DIRECTORY fsync (review F1: without the dir fsync a acknowledged
+    /// revocation can be lost to a power cut — the rename metadata was
+    /// never made durable and the pre-revoke file reappears).
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
         if let Ok(meta) = std::fs::symlink_metadata(path) {
             if meta.file_type().is_symlink() {
@@ -134,7 +160,17 @@ impl ServiceGrantStore {
                     .map_err(|e| PasswordManagerError::InvalidInput(e.to_string()))?;
             }
         }
-        let body = serde_json::to_vec_pretty(self).map_err(|e| {
+        // Serialize the grant LIST (not the map) so load's duplicate
+        // check sees the same shape it will parse (review F4 symmetry).
+        #[derive(serde::Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct StoreFile<'a> {
+            grants: Vec<&'a ServiceGrant>,
+        }
+        let file = StoreFile {
+            grants: self.grants.values().collect(),
+        };
+        let body = serde_json::to_vec_pretty(&file).map_err(|e| {
             PasswordManagerError::from(DatabaseError::Serialization(format!(
                 "Failed to serialize service grant store: {e}"
             )))
@@ -164,6 +200,10 @@ impl ServiceGrantStore {
                     "Failed to publish service grant store: {e}"
                 ))
             })?;
+            // Durably record the rename itself (crash-safe publication).
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -208,7 +248,10 @@ impl ServiceGrantStore {
         entry_id: i64,
         fields: Vec<ServiceField>,
         expires_at: Option<DateTime<Utc>>,
-    ) -> (ServiceGrant, Zeroizing<String>) {
+    ) -> std::result::Result<(ServiceGrant, Zeroizing<String>), &'static str> {
+        if fields.is_empty() {
+            return Err("a grant must name at least one field");
+        }
         let mut token_bytes = [0u8; SERVICE_TOKEN_BYTES];
         OsRng.fill_bytes(&mut token_bytes);
         let token = Zeroizing::new(format!(
@@ -228,7 +271,7 @@ impl ServiceGrantStore {
             client_token_hash: token_hash,
         };
         self.grants.insert(grant.grant_id, grant.clone());
-        (grant, token)
+        Ok((grant, token))
     }
 
     pub fn revoke(&mut self, grant_id: Uuid) -> bool {
@@ -254,7 +297,9 @@ mod tests {
     #[test]
     fn mint_authorize_and_revoke_round_trip() {
         let mut s = store();
-        let (grant, token) = s.mint_grant("svc", 42, vec![ServiceField::Password], None);
+        let (grant, token) = s
+            .mint_grant("svc", 42, vec![ServiceField::Password], None)
+            .unwrap();
         let now = Utc::now();
         // Correct token + exact entry + granted field -> authorized.
         assert!(s
@@ -282,12 +327,14 @@ mod tests {
     #[test]
     fn expired_grant_is_denied() {
         let mut s = store();
-        let (_, token) = s.mint_grant(
-            "svc",
-            1,
-            vec![ServiceField::Password],
-            Some(Utc::now() - chrono::Duration::seconds(1)),
-        );
+        let (_, token) = s
+            .mint_grant(
+                "svc",
+                1,
+                vec![ServiceField::Password],
+                Some(Utc::now() - chrono::Duration::seconds(1)),
+            )
+            .unwrap();
         assert!(s
             .authorize("svc", &token, 1, ServiceField::Password, Utc::now())
             .is_none());
@@ -315,7 +362,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join(STORE_FILE);
         let mut s = store();
-        s.mint_grant("svc", 9, vec![ServiceField::Title], None);
+        s.mint_grant("svc", 9, vec![ServiceField::Title], None)
+            .unwrap();
         s.save_to_path(&path).unwrap();
         #[cfg(unix)]
         {
@@ -341,7 +389,9 @@ mod tests {
     #[test]
     fn service_tokens_use_their_own_prefix() {
         let mut s = store();
-        let (_, token) = s.mint_grant("svc", 1, vec![ServiceField::Password], None);
+        let (_, token) = s
+            .mint_grant("svc", 1, vec![ServiceField::Password], None)
+            .unwrap();
         assert!(token.starts_with(SERVICE_TOKEN_PREFIX));
     }
 }
