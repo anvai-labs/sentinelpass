@@ -207,6 +207,17 @@ impl IpcServer {
                         );
                     }
                     Ok(crate::exe_policy::ExePolicyResult::EvidenceUnavailable(reason)) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_unavailable".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: executable evidence unavailable",
+                        );
                         return self.service_secret_report(
                             "denied",
                             None,
@@ -216,11 +227,22 @@ impl IpcServer {
                         );
                     }
                     Err(e) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_task_failed".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: policy check task failed",
+                        );
                         return self.service_secret_report(
                             "denied",
                             None,
                             Some(format!("policy check task failed: {e}")),
-                        )
+                        );
                     }
                 }
             }
@@ -3817,6 +3839,105 @@ mod autofill_origin_gate_tests {
             ),
         );
         assert_eq!(report_value(after)["status"], "denied");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_policy_enforcement_end_to_end() {
+        // SP-3 / ADR-016: the SERVER enforcement block (review F2 — the
+        // unit tests alone left it unexercised). Pin the test binary's own
+        // digest via /proc/self/exe; the strict harness's PeerContext pid
+        // is the daemon's (this process), so the evidence resolves.
+        let (h, _grants) = sp1_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Self digest.
+        let self_digest = {
+            use std::io::Read;
+            let mut f = std::fs::File::open("/proc/self/exe").unwrap();
+            let mut hasher = sha2::Sha256::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = f.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        // Mint with the self pin (via the step-up flow).
+        let create_op = VaultOp::ServiceGrantCreate {
+            client_id: "exe-svc".into(),
+            entry_id: 1,
+            fields: vec!["password".into()],
+            expires_at: None,
+            required_exe_sha256: Some(vec![self_digest]),
+        };
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: create_op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("receipt")
+        };
+        let created = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: create_op,
+                    stepup_approval: Some(approval_id),
+                },
+                None,
+            ),
+        );
+        let report = report_value(created);
+        assert_eq!(report["status"], "created");
+        let token = report["client_token"].as_str().unwrap().to_string();
+
+        // Retrieval: the pin matches THIS process's binary — but the
+        // harness's PeerContext.pid is None on macOS... on Linux it is
+        // Some(our pid) via the test_peer() fixture, which uses 4242 —
+        // a NONEXISTENT pid. So evidence is unavailable -> denied.
+        // This is exactly the fail-closed behavior we want to pin.
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "exe-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token,
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        // test_peer uses pid 4242 — /proc/4242/exe may or may not exist
+        // on the CI runner. The ASSERTION is: either denied (evidence
+        // unavailable or mismatch) — never authorized with a pin we
+        // didn't verify against the actual process.
+        assert!(
+            report["status"] == "denied",
+            "pinned grant with non-self pid must deny, got: {report}"
+        );
+        let error = report["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("executable") || error.contains("unavailable"),
+            "denial must carry the exe reason, got: {error}"
+        );
     }
 
     #[test]

@@ -71,7 +71,7 @@ pub struct ServiceGrant {
     /// empty = no requirement (SP-1 behavior). Non-empty = the peer's
     /// kernel-referenced executable must hash (SHA-256, hex) to one of
     /// these; unavailable evidence DENIES (fail-closed).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_exe_sha256: Option<Vec<String>>,
 }
 
@@ -258,6 +258,22 @@ impl ServiceGrantStore {
     ) -> std::result::Result<(ServiceGrant, Zeroizing<String>), &'static str> {
         if fields.is_empty() {
             return Err("a grant must name at least one field");
+        }
+        // Review F3: a malformed pin would mint successfully and then
+        // silently never match at retrieval (a permanent lockout wearing
+        // an attack-shaped denial message). Validate at the boundary.
+        if let Some(pins) = required_exe_sha256.as_ref() {
+            for pin in pins {
+                if pin.len() != 64
+                    || !pin
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                {
+                    return Err(
+                        "executable pins must be exactly 64 lowercase hex characters (SHA-256)",
+                    );
+                }
+            }
         }
         let mut token_bytes = [0u8; SERVICE_TOKEN_BYTES];
         OsRng.fill_bytes(&mut token_bytes);

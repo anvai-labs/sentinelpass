@@ -39,13 +39,16 @@ libraries/plugins/injected code remain relevant even for a pinned ELF.
    never wrote it and the loader's whole-document rejection still fires
    on truly unknown names.
 2. **Resolution (Linux only)** — at enforcement time, open
-   `/proc/<pid>/exe` with `O_RDONLY|O_NOFOLLOW` via the numeric pid from
-   the SP-2 `PeerContext` (connection-time kernel snapshot; the stale-pid
-   race is bounded by hashing the open file, whatever it currently is —
-   a recycled pid's binary simply won't match the pin unless it IS the
-   approved binary). Stream-hash the open file (SHA-256, bounded size,
-   blocking pool). `/proc` unavailable or the open fails → DENY
-   (fail-closed, reason `exe_evidence_unavailable`).
+   `/proc/<pid>/exe` by pathname (the kernel-owned numeric pid from
+   SP-2's `PeerContext` + kernel-controlled procfs; no O_NOFOLLOW — it
+   would ELOOP on procfs magic symlinks, and security rests on the pid
+   and procfs both being kernel-owned, not on open flags). The
+   connection-time pid is a snapshot: a recycled pid's binary matching
+   the pin is precisely the conceded "attacker runs the approved binary"
+   case, as is fd-passing/fork-inheritance of the connection — both
+   subsumed by the same-UID limitation. Stream-hash the open file
+   (SHA-256, bounded, blocking pool). `/proc` unavailable or the open
+   fails → DENY (fail-closed, reason `exe_evidence_unavailable`).
 3. **Enforcement point** — `service_get_secret`, AFTER token+grant
    validation, BEFORE vault lookup: if the grant's
    `required_exe_sha256` is `Some(list)` and non-empty, resolve the
@@ -71,23 +74,34 @@ libraries/plugins/injected code remain relevant even for a pinned ELF.
 Adds: a stolen service token used by an UNAPPROVED executable is denied
 (the handoff's "stolen client token used by an unapproved executable"
 row) — damage limitation against token exfiltration to a different
-tool/binary on the host.
+tool/binary on the host. Every denial is AUDITED (mismatch and
+evidence-unavailable both leave a forensic trace — handoff §6).
 
-Does NOT add (unchanged from ADR-014/015): same-UID compromise (attacker
-runs the approved binary or reads the token + approved binary
-placement), root, interpreter-script confusion (pinning `/bin/bash`
-pins bash), library/plugin injection into the approved binary,
-exec-after-connect within the approved process, or container namespace
-spoofing (an unqualified container uid vs host uid is documented — the
-uid-equality boundary is the daemon's own euid; container deployments
-must run the daemon in the same namespace view).
+Does NOT add (unchanged from ADR-014/015, stated per handoff §4's
+residual-limits discipline): same-UID compromise (the attacker can run
+the approved binary, or read the token and the approved binary's
+placement — this INCLUDES fd-passing/SCM_RIGHTS and fork-fd-inheritance
+of the connection to a different process, and pid recycling onto the
+approved binary), root, interpreter-script confusion (pinning
+`/bin/bash` pins bash), library/plugin injection into the approved
+binary, exec-after-connect within the approved process (the open-pins-
+the-inode race: the hash sees the old image while the response rides to
+the new one — requires already running the approved binary at open
+time, subsumed), and container namespace spoofing. pidfd pinning is a
+hard prerequisite for the future cross-UID service socket (handoff §3),
+where these races carry real weight; on the same-UID owner socket they
+add nothing beyond the same-UID concession.
 
 ## MVP vs. Later
 
 - MVP: grant pin field, Linux `/proc/<pid>/exe` resolution, enforcement
-  with typed denials, step-up-gated grant updates carrying pins, tests
-  (fake /proc fixture for the resolver unit; live self-exe pin for the
-  enforcement path).
+  with typed AUDITED denials, step-up-gated grant creation carrying
+  pins (with 64-hex validation at mint), pin-listing on the create
+  report, unit tests (self-exe resolution + match/mismatch on Linux,
+  non-Linux evidence-unavailable, empty-pins no-op, absent pid
+  unavailable) and a Linux server-level integration test proving the
+  enforcement block denies a pinned grant when the peer pid does not
+  resolve to the pinned binary.
 - Later: pidfd pinning (`pidfd_open`/`SO_PEERPIDFD`) to tighten the
   connection-lifetime identity; digest caching with full invalidation;
   trusted-custody checks on the exe path; container support matrix.
