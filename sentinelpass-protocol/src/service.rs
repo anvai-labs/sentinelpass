@@ -414,6 +414,10 @@ pub enum VaultOp {
         fields: Vec<String>,
         /// Unix seconds; None = no expiry.
         expires_at: Option<i64>,
+        /// SP-3 / ADR-016: optional mandatory executable policy (hex
+        /// SHA-256 digests of approved binaries). None = no pin.
+        #[serde(default)]
+        required_exe_sha256: Option<Vec<String>>,
     },
     /// Administration (step-up class): revoke a grant by id.
     ServiceGrantRevoke {

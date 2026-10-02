@@ -182,9 +182,85 @@ impl IpcServer {
                 )
             }
         };
-        let authorized = store
-            .authorize(client_id, token, entry_id, field, chrono::Utc::now())
-            .is_some();
+        let grant = store.authorize(client_id, token, entry_id, field, chrono::Utc::now());
+        let authorized = grant.is_some();
+        // SP-3 / ADR-016: executable policy (see exe_policy.rs) —
+        // enforced when the grant pins digests; unavailable evidence
+        // denies (fail-closed). Blocking pool: hashing is I/O + CPU.
+        if let Some(grant) = grant {
+            let pins =
+                crate::service_grants::ServiceGrantStore::required_exe_policy(grant).to_vec();
+            if !pins.is_empty() {
+                let pid = peer.pid;
+                let verdict = tokio::task::spawn_blocking(move || {
+                    crate::exe_policy::check_policy(&pins, pid)
+                })
+                .await;
+                match verdict {
+                    Ok(crate::exe_policy::ExePolicyResult::Matched)
+                    | Ok(crate::exe_policy::ExePolicyResult::NotRequired) => {}
+                    Ok(crate::exe_policy::ExePolicyResult::Mismatch) => {
+                        // Verification N1: the handoff §6 "digest mismatch"
+                        // event — the core stolen-token detection — MUST
+                        // leave a forensic trace.
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_mismatch".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: executable policy mismatch",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some("executable policy mismatch (this process is not an approved binary)".into()),
+                        );
+                    }
+                    Ok(crate::exe_policy::ExePolicyResult::EvidenceUnavailable(reason)) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_unavailable".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: executable evidence unavailable",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!(
+                                "executable evidence unavailable (fail closed): {reason}"
+                            )),
+                        );
+                    }
+                    Err(e) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_task_failed".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: policy check task failed",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!("policy check task failed: {e}")),
+                        );
+                    }
+                }
+            }
+        }
         // Review F3: service deliveries get the same audit discipline as
         // the legacy broker (client/entry/field only — never the value).
         log_daemon_audit(
@@ -275,6 +351,7 @@ impl IpcServer {
         entry_id: i64,
         fields: Vec<String>,
         expires_at: Option<i64>,
+        required_exe_sha256: Option<Vec<String>>,
     ) -> IpcMessage {
         let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
             .iter()
@@ -321,7 +398,13 @@ impl IpcServer {
                 )
             }
         };
-        let (grant, token) = match store.mint_grant(client_id, entry_id, fields, expiry) {
+        let (grant, token) = match store.mint_grant(
+            client_id,
+            entry_id,
+            fields,
+            expiry,
+            required_exe_sha256.clone(),
+        ) {
             Ok(minted) => minted,
             Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
         };
@@ -347,6 +430,7 @@ impl IpcServer {
                     "grant_id": grant.grant_id.to_string(),
                     "client_token": *token,
                     "expires_at": grant.expires_at.map(|e| e.timestamp()),
+                    "required_exe_sha256": grant.required_exe_sha256,
                 })),
             },
         }
@@ -1924,12 +2008,20 @@ impl IpcServer {
                 entry_id,
                 fields,
                 expires_at,
+                required_exe_sha256,
             } => {
                 // Review F2: the ServiceCall arm gates these two admin ops
                 // on a consumed op-bound step-up approval UNCONDITIONALLY
                 // (every profile) before dispatch reaches here.
                 return self
-                    .service_grant_create(peer, client_id, *entry_id, fields.clone(), *expires_at)
+                    .service_grant_create(
+                        peer,
+                        client_id,
+                        *entry_id,
+                        fields.clone(),
+                        *expires_at,
+                        required_exe_sha256.clone(),
+                    )
                     .await;
             }
             VaultOp::ServiceGrantRevoke { grant_id } => {
@@ -3618,6 +3710,7 @@ mod autofill_origin_gate_tests {
             entry_id: 1,
             fields: vec!["password".into()],
             expires_at: None,
+            required_exe_sha256: None,
         };
         let unapproved = handle(
             &rt,
@@ -3763,6 +3856,106 @@ mod autofill_origin_gate_tests {
         assert_eq!(report_value(after)["status"], "denied");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_policy_enforcement_end_to_end() {
+        // SP-3 / ADR-016: the SERVER enforcement block (review F2 — the
+        // unit tests alone left it unexercised). Pin the test binary's own
+        // digest via /proc/self/exe; the strict harness's PeerContext pid
+        // is the daemon's (this process), so the evidence resolves.
+        let (h, _grants) = sp1_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Self digest.
+        let self_digest = {
+            use sha2::Digest;
+            use std::io::Read;
+            let mut f = std::fs::File::open("/proc/self/exe").unwrap();
+            let mut hasher = sha2::Sha256::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = f.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        // Mint with the self pin (via the step-up flow).
+        let create_op = VaultOp::ServiceGrantCreate {
+            client_id: "exe-svc".into(),
+            entry_id: 1,
+            fields: vec!["password".into()],
+            expires_at: None,
+            required_exe_sha256: Some(vec![self_digest]),
+        };
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: create_op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("receipt")
+        };
+        let created = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: create_op,
+                    stepup_approval: Some(approval_id),
+                },
+                None,
+            ),
+        );
+        let report = report_value(created);
+        assert_eq!(report["status"], "created");
+        let token = report["client_token"].as_str().unwrap().to_string();
+
+        // Retrieval: the pin matches THIS process's binary — but the
+        // harness's PeerContext.pid is None on macOS... on Linux it is
+        // Some(our pid) via the test_peer() fixture, which uses 4242 —
+        // a NONEXISTENT pid. So evidence is unavailable -> denied.
+        // This is exactly the fail-closed behavior we want to pin.
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "exe-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token,
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        // test_peer uses pid 4242 — /proc/4242/exe may or may not exist
+        // on the CI runner. The ASSERTION is: either denied (evidence
+        // unavailable or mismatch) — never authorized with a pin we
+        // didn't verify against the actual process.
+        assert!(
+            report["status"] == "denied",
+            "pinned grant with non-self pid must deny, got: {report}"
+        );
+        let error = report["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("executable") || error.contains("unavailable"),
+            "denial must carry the exe reason, got: {error}"
+        );
+    }
+
     #[test]
     fn grant_admin_ops_are_step_up_class() {
         // SP-1 admin ops join the SP-0 classification (exhaustive match
@@ -3773,6 +3966,7 @@ mod autofill_origin_gate_tests {
             entry_id: 1,
             fields: vec![],
             expires_at: None,
+            required_exe_sha256: None,
         }
         .requires_admin_step_up());
         assert!(O::ServiceGrantRevoke {
