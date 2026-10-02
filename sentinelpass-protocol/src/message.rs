@@ -218,12 +218,43 @@ pub enum IpcMessage {
     // --- application-service surface (WBS-408, ADR-007) ----------------------
     /// One vault application-service call — the single shape UI, CLI, and
     /// the native host use for vault operations (see `crate::service`).
+    ///
+    /// `stepup_approval` (SP-0 / ADR-013): under the strict profile every
+    /// [`VaultOp::requires_admin_step_up`] op must carry a fresh, unused
+    /// approval id minted by [`IpcMessage::StepUpAuthorize`] on the SAME
+    /// connection. Absent/invalid approvals are denied with the typed
+    /// `step_up_required` service error (fail-closed). Defaulted so
+    /// pre-SP-0 clients keep compiling and merely read as "no approval".
     ServiceCall {
         op: VaultOp,
+        #[serde(default)]
+        stepup_approval: Option<String>,
     },
     /// Outcome of a [`IpcMessage::ServiceCall`].
     ServiceResult {
         outcome: ServiceOutcome,
+    },
+    /// SP-0 / ADR-013: request a single-use administrative step-up approval
+    /// for exactly `op`. The master password rides the sealed session (the
+    /// same transport discipline as [`IpcMessage::UnlockVault`]); the daemon
+    /// verifies it through the full reviewed open path and NEVER unlocks or
+    /// persists anything with it. The password is zeroized after use.
+    StepUpAuthorize {
+        master_password: String,
+        op: VaultOp,
+    },
+    /// A minted approval: `approval_id` is an opaque 256-bit capability,
+    /// valid for 60 seconds, single use, bound to the minting connection
+    /// and to the exact serialized `op` (keyed commitment).
+    StepUpReceipt {
+        approval_id: String,
+        expires_at_unix: i64,
+    },
+    /// Step-up denial (wrong password, lockout, vault state). `message` is
+    /// safe for display; `retry_after_secs` is set while rate-limited.
+    StepUpDenied {
+        error: String,
+        retry_after_secs: Option<u64>,
     },
 }
 

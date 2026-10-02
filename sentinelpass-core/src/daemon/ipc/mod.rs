@@ -56,6 +56,7 @@ pub(super) fn log_external_secret_audit(
 }
 
 pub mod server;
+pub mod stepup;
 pub use server::IpcServer;
 
 #[cfg(test)]
@@ -631,7 +632,14 @@ mod tests {
             op: VaultOp,
         ) -> std::result::Result<VaultOpResult, sentinelpass_protocol::service::ServiceError>
         {
-            match client.send(IpcMessage::ServiceCall { op }).await.unwrap() {
+            match client
+                .send(IpcMessage::ServiceCall {
+                    op,
+                    stepup_approval: None,
+                })
+                .await
+                .unwrap()
+            {
                 IpcMessage::ServiceResult { outcome } => match outcome {
                     ServiceOutcome::Ok { result } => Ok(result),
                     ServiceOutcome::Err { error } => Err(error),
@@ -961,6 +969,7 @@ mod tests {
         let outcome = match client
             .send(IpcMessage::ServiceCall {
                 op: VaultOp::EntryList,
+                stepup_approval: None,
             })
             .await
             .unwrap()
@@ -977,6 +986,7 @@ mod tests {
                 op: VaultOp::VaultCreate {
                     master_password: zeroize::Zeroizing::new("another-password-123!".to_string()),
                 },
+                stepup_approval: None,
             })
             .await
             .unwrap()
@@ -997,6 +1007,7 @@ mod tests {
                 op: VaultOp::VaultCreate {
                     master_password: zeroize::Zeroizing::new("another-password-123!".to_string()),
                 },
+                stepup_approval: None,
             })
             .await
             .unwrap()

@@ -76,13 +76,28 @@ impl Backend {
     }
 
     /// Execute one application-service op against this backend.
+    ///
+    /// SP-0 / ADR-013: under the daemon's strict administrative profile,
+    /// mutation ops are denied with the typed `step_up_required` error.
+    /// The daemon backend then interactively performs the master-password
+    /// step-up (hidden prompt -> `StepUpAuthorize` for THIS exact op ->
+    /// replay with the single-use receipt) and retries once. The password
+    /// is never in argv/env/logs and never persists.
     pub fn call(&self, op: VaultOp) -> Result<VaultOpResult> {
         match self {
             Backend::Daemon(client) => {
                 // block_on accepts borrowed futures: the client is
                 // runtime-agnostic (no stored runtime handles).
-                let result = crate::run_async(client.call_service(op))??;
-                Ok(result)
+                let first = crate::run_async(client.call_service(op.clone()))?;
+                match first {
+                    Ok(result) => Ok(result),
+                    Err(err) if is_step_up_required(&err) => {
+                        let approval = step_up_interactive(client, &op)?;
+                        crate::run_async(client.call_service_with_approval(op, approval))?
+                            .map_err(|e| anyhow!(format!("{e}")))
+                    }
+                    Err(err) => Err(anyhow!(err.to_string())),
+                }
             }
             Backend::Direct { vault, .. } => {
                 let service = LiveVaultService::new(vault);
@@ -213,5 +228,48 @@ pub fn expect_report(result: VaultOpResult) -> Result<serde_json::Value> {
     match result {
         VaultOpResult::Report(value) => Ok(value),
         other => Err(anyhow!("expected a report result, got {other:?}")),
+    }
+}
+
+/// SP-0: does this daemon error demand a master-password step-up?
+fn is_step_up_required(err: &sentinelpass_protocol::ProtocolError) -> bool {
+    matches!(
+        err,
+        sentinelpass_protocol::ProtocolError::Service(code, _)
+            if code == "step_up_required" || code.starts_with("step_up_required")
+    ) || {
+        let text = err.to_string();
+        text.contains("step_up_required")
+    }
+}
+
+/// Interactive SP-0 flow: prompt for the master password and mint a
+/// single-use approval for exactly `op`. Returns the approval id.
+fn step_up_interactive(client: &sentinelpass_protocol::IpcClient, op: &VaultOp) -> Result<String> {
+    use rpassword::prompt_password;
+    let password = prompt_password(
+        "SentinelPass: this change needs the master password (fresh authorization): ",
+    )?;
+    let response = crate::run_async(client.send(
+        sentinelpass_protocol::IpcMessage::StepUpAuthorize {
+            master_password: password,
+            op: op.clone(),
+        },
+    ))??;
+    match response {
+        sentinelpass_protocol::IpcMessage::StepUpReceipt { approval_id, .. } => Ok(approval_id),
+        sentinelpass_protocol::IpcMessage::StepUpDenied {
+            error,
+            retry_after_secs,
+        } => {
+            let wait = retry_after_secs
+                .map(|s| format!(" (retry in {s}s)"))
+                .unwrap_or_default();
+            anyhow::bail!("master-password verification failed: {error}{wait}")
+        }
+        other => anyhow::bail!(
+            "unexpected daemon response during step-up: {}",
+            sentinelpass_protocol::client::message_kind(&other)
+        ),
     }
 }
