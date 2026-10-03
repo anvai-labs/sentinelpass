@@ -65,16 +65,15 @@ exist in the protocol and daemon but are **not yet exposed through CLI
 commands**. The step-up transport fix (P0) is a prerequisite — now landed.
 The service-grant CLI commands are the next feature release (0.16.0).
 
-Until then, provisioning uses the existing legacy grant surface (which works
-under strict mode with the P0 fix):
-```bash
-# On the owner machine (strict daemon), legacy grant creation is gated.
-# For the initial provisioning profile, use a non-strict daemon for grant
-# setup, then switch to strict for steady-state:
-SENTINELPASS_DAEMON_ARGS="" sentinelpass-daemon &  # non-strict
-sentinelpass secret allow sandesha-svc --domain sandhi:provider:key --field password
-# ... then restart the daemon with SENTINELPASS_REQUIRE_STEPUP=1
-```
+Until then, provisioning uses the existing legacy grant surface. Under the
+strict profile (`SENTINELPASS_REQUIRE_STEPUP=1`) the CLI's legacy
+`secret allow/revoke/token` commands refuse (P1b), so grant setup happens
+on a daemon running WITHOUT the strict profile. **This gate is a CLI-side
+courtesy check, not daemon enforcement** (verification follow-up F2): a
+caller that unsets the variable or edits `external-secret-access.json`
+directly is bounded only by same-UID file ownership. Authoritative
+daemon-side disablement of legacy mutations ships with the service-grant
+release.
 
 ## Supported custody topology
 
@@ -91,19 +90,27 @@ OVH VPS:
   - One dedicated UNIX user per service (recommended)
 ```
 
-## Integration commands (existing, verified with P0 fix)
+## Integration commands (existing surface; constraints per F3/F4)
+
+The `service-credential install` path still retrieves via the legacy
+token-enforced `GetExternalSecret` — it does **not** use master-password
+step-up (F3). Host-key encryption must run **on the target VPS with that
+host's own host key** (F4): a credential encrypted on the owner machine
+with the owner's host key is NOT decryptable on the VPS. Do not copy
+owner-encrypted blobs or export host keys; deliver approved plaintext to
+the target over authenticated SSH stdin and encrypt in place:
 
 ```bash
-# On the owner machine:
+# Owner machine: create the token-enforced grant (non-strict daemon; see F2 above)
 sentinelpass secret allow sandesha-svc --domain sandhi:provider:key --field password
 # Note the minted client token (shown once)
 
-# Provision into systemd credential (owner machine, sudo/root):
-sudo sentinelpass service-credential install \
-  --client-id sandesha-svc --domain sandhi:provider:key \
-  --cred-name sandesha.provider.key \
-  --protection host-key
-# Prompts for master password (P0 fix: single connection)
+# Owner machine → target: deliver plaintext over SSH stdin (not argv/env/files)
+sentinelpass secret get --client-id sandesha-svc --domain sandhi:provider:key \
+  --field password --token "$SENTINELPASS_CLIENT_TOKEN" |
+  ssh vsingh@dataserver3 'sudo systemd-creds encrypt --with-key=host \
+    --name=sandesha.provider.key /dev/stdin \
+    /etc/credstore.encrypted/sandesha.provider.key'
 
 # On the VPS, the service unit:
 # [Service]
@@ -114,14 +121,22 @@ sudo sentinelpass service-credential install \
 ## Remaining explicit limits
 
 1. **Service-grant CLI** not yet exposed (P1a — next release)
-2. **Cross-UID service socket** deferred (SP-1 Later; same-UID owner IPC only)
-3. **Remote mTLS** deferred (SP-5; no public SentinelPass listener)
-4. **Performance benchmarks** with real primitives remain follow-up work
-5. **Production-path gpg enrollment** qualification (custody, network denial,
+2. **P1b strict gate is CLI-side only** (F2): daemon-side enforcement of
+   legacy grant mutations, plus fail-closed when the daemon is stopped, is
+   follow-up; same-UID file ownership is the current boundary
+3. **Install path is not step-up'd** (F3): `service-credential install` uses
+   legacy `GetExternalSecret`; typed exact-entry retrieval and owner-authorized
+   provisioning/removal come with the service-grant release
+4. **Host-key credentials are host-bound** (F4): encrypt on the target with
+   the target's host key; owner-encrypted blobs are not portable
+5. **Cross-UID service socket** deferred (SP-1 Later; same-UID owner IPC only)
+6. **Remote mTLS** deferred (SP-5; no public SentinelPass listener)
+7. **Performance benchmarks** with real primitives remain follow-up work
+8. **Production-path gpg enrollment** qualification (custody, network denial,
    timeout/output bounds, revoked keys, nonce replay) remains follow-up work
-6. **Host-key mode** defeated by full disk snapshot (no TPM on target)
-7. **Android emulator matrix** optional (continue-on-error; results visible
-   but non-blocking)
+9. **Host-key mode** defeated by full disk snapshot (no TPM on target)
+10. **Android emulator matrix** optional (continue-on-error; results visible
+    but non-blocking)
 
 ## Evidence
 

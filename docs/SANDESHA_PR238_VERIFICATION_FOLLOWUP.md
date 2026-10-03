@@ -111,3 +111,15 @@ actual security changes first. No production update, tag move, or master-passwor
 ceremony was performed by the consumer session.
 
 Latest GitHub check: PR #239 is OPEN at 843a21d (no merge commit); the source regression above applies to that PR. Sandesha consumer source check is checkpointed as AnvaiOps 5b19b62; no production adoption authorized.
+
+## Addendum — SentinelPass side, October 3 (later the same day)
+
+The `release/0.15.1-fix` branch flagged above was recut from the merged
+develop content (`7ba930c`) and force-pushed; PR #239's head is now the
+promotion of those fixes (plus this document, the corrected hand-back, and
+the 0.15.1 version files). The four security files now match the reviewed
+PR #238 content, satisfying the source guard's intent — rerun
+`check_source.py` against the new head to confirm rather than refreshing
+baseline hashes. F2/F3/F4 are carried as explicit limits in
+`docs/SANDESHA_V015_1_HANDOFF.md`; the non-strict bootstrap recipe and the
+step-up install claim were removed there.
