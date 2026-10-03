@@ -421,6 +421,26 @@ pub fn handle_secret_get(
 }
 
 pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
+    // P1b (Sandesha adoption handoff): legacy policy administration
+    // (allow/revoke/token) writes external-secret-access.json directly,
+    // outside the daemon's step-up boundary. In the strict provisioning
+    // profile, refuse with a pointer to the step-up-gated surface.
+    // Read/list/audit remain available (they don't mutate policy).
+    let is_admin = matches!(
+        command,
+        crate::SecretCommands::Allow { .. }
+            | crate::SecretCommands::Revoke { .. }
+            | crate::SecretCommands::Token { .. }
+    );
+    if is_admin && strict_stepup_profile_enabled() {
+        anyhow::bail!(
+            "strict provisioning profile is active: legacy 'secret allow/revoke/token' \
+             write the grants file directly, outside the master-password step-up \
+             boundary. Use the step-up-gated 'service-grant' commands (ADR-014), \
+             or unset SENTINELPASS_REQUIRE_STEPUP on the daemon and restart."
+        );
+    }
+
     match command {
         crate::SecretCommands::Allow {
             client_id,
@@ -606,4 +626,13 @@ pub fn handle_secret_token_command(command: &crate::SecretTokenCommands) -> Resu
     }
 
     Ok(())
+}
+
+/// Whether the daemon (if reachable) runs with the strict step-up profile.
+/// The env var is the daemon-side opt-in; the CLI mirrors it as a local
+/// hint so the operator gets a clear error BEFORE the daemon refuses.
+fn strict_stepup_profile_enabled() -> bool {
+    std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }

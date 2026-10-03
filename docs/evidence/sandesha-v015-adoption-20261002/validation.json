@@ -1,0 +1,25 @@
+{
+  "releasedVersion": "0.15.0",
+  "baseCommit": "5125a3da68a4bcfe9316023f60c4a8c2aff6a205",
+  "patchSha256": "fc7bde30db6936088421e3475d7582ddd50cf8b084d83f47ac5005b9b9bc3d7a",
+  "patchStatus": "proposed, uncommitted, not released",
+  "reproduction": "real client/server Unix socket: correct password receipt rejected on a different connection",
+  "validation": {
+    "focusedCoreStepUpTests": {
+      "passed": 7,
+      "failed": 0
+    },
+    "cargoFmt": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "notRun": [
+    "full workspace tests",
+    "CLI PTY integration",
+    "Windows named pipes",
+    "Linux executable policy qualification",
+    "release packaging"
+  ],
+  "productionSecretsTouched": false,
+  "productionDeployment": false,
+  "workingClone": "/private/tmp/sentinelpass-stepup-transport-20261002"
+}
