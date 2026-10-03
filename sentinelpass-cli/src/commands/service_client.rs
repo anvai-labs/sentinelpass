@@ -91,11 +91,7 @@ impl Backend {
                 let first = crate::run_async(client.call_service(op.clone()))?;
                 match first {
                     Ok(result) => Ok(result),
-                    Err(err) if is_step_up_required(&err) => {
-                        let approval = step_up_interactive(client, &op)?;
-                        crate::run_async(client.call_service_with_approval(op, approval))?
-                            .map_err(|e| anyhow!(format!("{e}")))
-                    }
+                    Err(err) if is_step_up_required(&err) => step_up_interactive(client, op),
                     Err(err) => Err(anyhow!(err.to_string())),
                 }
             }
@@ -243,33 +239,14 @@ fn is_step_up_required(err: &sentinelpass_protocol::ProtocolError) -> bool {
     }
 }
 
-/// Interactive SP-0 flow: prompt for the master password and mint a
-/// single-use approval for exactly `op`. Returns the approval id.
-fn step_up_interactive(client: &sentinelpass_protocol::IpcClient, op: &VaultOp) -> Result<String> {
-    use rpassword::prompt_password;
-    let password = prompt_password(
+/// Prompt before connecting, then authorize and mutate on one secured connection.
+fn step_up_interactive(
+    client: &sentinelpass_protocol::IpcClient,
+    op: VaultOp,
+) -> Result<VaultOpResult> {
+    let password = rpassword::prompt_password(
         "SentinelPass: this change needs the master password (fresh authorization): ",
     )?;
-    let response = crate::run_async(client.send(
-        sentinelpass_protocol::IpcMessage::StepUpAuthorize {
-            master_password: password,
-            op: op.clone(),
-        },
-    ))??;
-    match response {
-        sentinelpass_protocol::IpcMessage::StepUpReceipt { approval_id, .. } => Ok(approval_id),
-        sentinelpass_protocol::IpcMessage::StepUpDenied {
-            error,
-            retry_after_secs,
-        } => {
-            let wait = retry_after_secs
-                .map(|s| format!(" (retry in {s}s)"))
-                .unwrap_or_default();
-            anyhow::bail!("master-password verification failed: {error}{wait}")
-        }
-        other => anyhow::bail!(
-            "unexpected daemon response during step-up: {}",
-            sentinelpass_protocol::client::message_kind(&other)
-        ),
-    }
+    crate::run_async(client.call_service_with_step_up(op, password))?
+        .map_err(|e| anyhow!(e.to_string()))
 }

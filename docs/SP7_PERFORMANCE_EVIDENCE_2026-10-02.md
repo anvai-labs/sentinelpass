@@ -15,25 +15,33 @@ warm-up discarded). SP-3 (executable hashing) runs on CI's Linux legs where
 | SP-1 | Token hash + constant-time compare | 0.00 µs | 0.04 µs | 0.04 µs |
 | SP-3 | `/proc/<pid>/exe` SHA-256 (full binary) | I/O-bound by binary size — not per-request logic | | |
 
-## Handoff §7 target compliance
+## Handoff §7 target assessment (corrected per the adoption handoff P2)
 
-| Target | Result | Evidence |
+> **Correction (Sandesha adoption handoff):** the original version of this
+> document labeled both targets as PASS based on benchmarks that
+> substituted FNV-1a for SHA-256/HMAC. Those samples do NOT establish
+> production cryptographic-primitive, real executable-hashing, daemon-IPC,
+> or gpg-enrollment latency. The corrected assessment is:
+
+| Target | Assessment | Basis |
 | --- | --- | --- |
-| Warm added p95 < 10 ms (small native client) | **PASS** | All per-request layers measure in sub-microseconds; SP-3 is I/O-bound by binary size (not logic overhead) and runs on the blocking pool off the async executor |
-| Enrollment p95 < 1 s (excluding human/hardware) | **PASS** | Daemon-side cost is sub-ms (transcript + HMAC); the gpg subprocess dominates at ~100–500 ms; enrollment is a one-time ceremony, NOT on any retrieval critical path |
+| Warm added p95 < 10 ms (small native client) | **PROVISIONAL** | Sub-µs measurements used simplified hash primitives, not production SHA-256/HMAC/ct_eq. Real primitives on ~200-byte inputs are well-documented as sub-µs on modern hardware, and the Argon2id KDF (~1 s at 256 MB) applies only at unlock/step-up password verification, not on the retrieval path. A production-path benchmark with real primitives remains follow-up work. |
+| Enrollment p95 < 1 s (excluding human/hardware) | **PROVISIONAL** | Daemon-side transcript+HMAC is sub-µs; the gpg subprocess (~100–500 ms) dominates. No production-path timing has been recorded; the gpg happy-path test in `enrollment.rs` exercises the full lifecycle but does not measure latency. A timed benchmark remains follow-up work. |
 
 ## Notes
 
 - Enrollment signatures are **not** on every retrieval's critical path —
   the per-request cost after enrollment is: token verify (SHA-256 + ct_eq)
   + optional exe-policy check (one file hash). Both are sub-ms.
-- The benchmark uses simplified hash primitives for timing (FNV-1a in
-  place of full SHA-256 for the HMAC/comparison benchmarks). The
-  production implementations use the `sha2` and `subtle` crates; their
-  real-world overhead for these small payloads is well-documented as
-  sub-microsecond on modern hardware. The full Argon2id KDF cost
-  (~1 s at 256 MB) applies only at unlock/step-up password
-  verification, not on the retrieval path.
+- **Methodology limitation (P2 correction):** the benchmark used FNV-1a
+  as a timing proxy for SHA-256/HMAC. Production implementations use
+  the `sha2` and `subtle` crates; for these small payloads the
+  production cost is expected to remain sub-millisecond on modern
+  hardware, but this has NOT been measured on the production code path.
+  A follow-up benchmark using the real primitives and real IPC is
+  required before claiming target compliance.
+- The full Argon2id KDF cost (~1 s at 256 MB) applies only at
+  unlock/step-up password verification, not on the retrieval path.
 - Security failures never fall back for speed: every denial path
   (step-up, exe-policy mismatch, token invalid) completes the full
   check before denying.

@@ -3536,6 +3536,52 @@ mod autofill_origin_gate_tests {
         }
     }
 
+    /// Sandesha integration: exercise the public client over a REAL socket,
+    /// rather than injecting an identical PeerContext into both handler calls.
+    #[cfg(unix)]
+    #[test]
+    fn step_up_real_client_keeps_approval_connection() {
+        let h = strict_harness();
+        let socket = h.server.socket_path.clone();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            socket.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let server = Arc::new(h.server);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let running = tokio::spawn(server.run());
+            for _ in 0..100 {
+                if socket.exists() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if !socket.exists() && running.is_finished() {
+                panic!("test listener failed: {:?}", running.await);
+            }
+            assert!(socket.exists(), "test listener did not start");
+            let client = sentinelpass_protocol::IpcClient::new_with_token(socket, "test-token".into());
+            let op = make_add_op("real-socket-step-up");
+            let receipt = client.send(IpcMessage::StepUpAuthorize {
+                master_password: "test_password".into(), op: op.clone(),
+            }).await.unwrap();
+            let IpcMessage::StepUpReceipt { approval_id, .. } = receipt else {
+                panic!("expected synthetic approval");
+            };
+            let denied = client.call_service_with_approval(op.clone(), approval_id).await;
+            assert!(matches!(denied, Err(sentinelpass_protocol::ProtocolError::Service(ref code, _)) if code == "step_up_required"));
+            let wrong = client.call_service_with_step_up(op.clone(), "wrong-synthetic-password".into()).await;
+            assert!(matches!(wrong, Err(sentinelpass_protocol::ProtocolError::Service(ref code, _)) if code == "step_up_denied"));
+            let result = client.call_service_with_step_up(op, "test_password".into()).await;
+            assert!(result.is_ok(), "same-connection step-up must succeed");
+            let entries = client.call_service(VaultOp::EntryList).await.unwrap();
+            let VaultOpResult::EntryList(entries) = entries else { panic!("expected entry list"); };
+            assert_eq!(entries.len(), 1, "exactly one mutation, no replay or wrong-password write");
+            running.abort();
+        });
+    }
+
     #[test]
     fn step_up_allows_exactly_one_mutation() {
         let h = strict_harness();
