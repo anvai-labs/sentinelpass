@@ -150,7 +150,40 @@ impl IpcClient {
     /// unwrap the `ServiceResult` outcome. Typed service errors surface as
     /// [`ProtocolError::Service`].
     pub async fn call_service(&self, op: VaultOp) -> Result<VaultOpResult> {
-        let response = self.send(IpcMessage::ServiceCall { op }).await?;
+        let response = self
+            .send(IpcMessage::ServiceCall {
+                op,
+                stepup_approval: None,
+            })
+            .await?;
+        match response {
+            IpcMessage::ServiceResult { outcome } => match outcome {
+                ServiceOutcome::Ok { result } => Ok(result),
+                ServiceOutcome::Err { error } => {
+                    Err(ProtocolError::Service(error.code, error.message))
+                }
+            },
+            other => Err(ProtocolError::Ipc(format!(
+                "unexpected daemon response to service call: {}",
+                message_kind(&other)
+            ))),
+        }
+    }
+
+    /// SP-0 / ADR-013: `call_service` carrying a fresh step-up approval id
+    /// (minted via `StepUpAuthorize` on this same connection). The daemon
+    /// validates and consumes it atomically with dispatch.
+    pub async fn call_service_with_approval(
+        &self,
+        op: VaultOp,
+        stepup_approval: String,
+    ) -> Result<VaultOpResult> {
+        let response = self
+            .send(IpcMessage::ServiceCall {
+                op,
+                stepup_approval: Some(stepup_approval),
+            })
+            .await?;
         match response {
             IpcMessage::ServiceResult { outcome } => match outcome {
                 ServiceOutcome::Ok { result } => Ok(result),
@@ -168,7 +201,7 @@ impl IpcClient {
 
 /// Best-effort variant label for an unexpected response (diagnostics only;
 /// never message payloads).
-fn message_kind(msg: &IpcMessage) -> &'static str {
+pub fn message_kind(msg: &IpcMessage) -> &'static str {
     match msg {
         IpcMessage::GetCredentialResponse { .. }
         | IpcMessage::GetExternalSecretResponse { .. }

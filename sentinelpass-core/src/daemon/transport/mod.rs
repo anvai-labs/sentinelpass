@@ -20,6 +20,61 @@ pub use sentinelpass_protocol::{
 
 use crate::DatabaseError;
 
+/// SP-2 / ADR-015: server-owned trusted peer context — one per accepted
+/// connection, constructed ONLY by the platform accept path from
+/// kernel-derived values, threaded through dispatch as a parameter
+/// (never deserialized from any wire, never shared across connections).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerContext {
+    /// SP-0 step-up connection identity (approvals bind to it).
+    pub connection_id: u128,
+    /// Peer effective UID (kernel-verified; equals daemon euid on the
+    /// Unix accept path by the WBS-507 refusal).
+    pub uid: u32,
+    pub gid: Option<u32>,
+    /// Linux only (`SO_PEERCRED` carries the connecting pid); `None`
+    /// elsewhere or when the kernel could not attribute it. SP-3's
+    /// executable policy will resolve `/proc/<pid>/exe` from it.
+    pub pid: Option<u32>,
+}
+
+impl PeerContext {
+    /// Redacted provenance token for audit context lines — digits, colons
+    /// and fixed labels only; nothing client-supplied rides in it.
+    /// The `unknown()` marker renders the explicit `peer=unknown` token
+    /// (never a root-lookalike `peer=uid:0`).
+    pub fn provenance_token(&self) -> String {
+        if self.is_unknown() {
+            return Self::UNKNOWN_TOKEN.to_string();
+        }
+        format!(
+            "peer=uid:{}{}{}",
+            self.uid,
+            self.gid.map(|g| format!(":gid:{g}")).unwrap_or_default(),
+            self.pid.map(|p| format!(":pid:{p}")).unwrap_or_default(),
+        )
+    }
+
+    /// The "no peer context available" shape: uid 0 with no gid/pid.
+    /// Windows named pipes use this (no portable credential query);
+    /// it renders as the explicit unknown marker, not as root.
+    pub fn unknown(connection_id: u128) -> Self {
+        Self {
+            connection_id,
+            uid: 0,
+            gid: None,
+            pid: None,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.uid == 0 && self.gid.is_none() && self.pid.is_none()
+    }
+
+    /// The "no peer context" degradation marker.
+    pub const UNKNOWN_TOKEN: &'static str = "peer=unknown";
+}
+
 impl From<TransportError> for DatabaseError {
     fn from(err: TransportError) -> Self {
         DatabaseError::Ipc(err.to_string())

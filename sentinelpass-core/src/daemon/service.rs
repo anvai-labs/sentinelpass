@@ -106,6 +106,18 @@ impl LiveVaultService<'_> {
     fn execute_op(&self, op: &VaultOp) -> Result<VaultOpResult> {
         let vault = self.vault;
         match op {
+            // SP-1 / ADR-014: service-grant operations live at the IPC
+            // server boundary (grant store + step-up context), not in the
+            // vault application service. Refuse here fail-closed so no
+            // future routing can execute them against the vault by mistake.
+            VaultOp::ServiceGetSecret { .. }
+            | VaultOp::ServiceGrantCreate { .. }
+            | VaultOp::ServiceGrantRevoke { .. }
+            | VaultOp::ServiceEnrollmentBegin { .. }
+            | VaultOp::ServiceEnrollmentComplete { .. } => Err(PasswordManagerError::InvalidInput(
+                "service-grant operations are served by the IPC boundary, not the vault service"
+                    .to_string(),
+            )),
             VaultOp::VaultCreate { .. } => Err(PasswordManagerError::InvalidInput(
                 "vault creation is a maintenance/bootstrap operation; it is not valid against \
                  a live unlocked vault"

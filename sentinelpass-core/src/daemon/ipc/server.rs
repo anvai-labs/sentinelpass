@@ -1,5 +1,6 @@
 //! IPC server — handles daemon-side message dispatch.
 
+use super::stepup;
 #[cfg(windows)]
 use super::windows_named_pipe_path;
 use super::{
@@ -54,6 +55,22 @@ pub struct IpcServer {
     /// WBS-512: bounds concurrent client connections (stalled/slow clients
     /// cannot exhaust daemon tasks).
     client_limiter: Arc<tokio::sync::Semaphore>,
+    /// SP-0 / ADR-013: master-password step-up state (server-held only).
+    stepup: stepup::StepUpState,
+    /// SP-1 / ADR-014: exact-entry service grant store path (injectable
+    /// for tests; default beside the config).
+    service_grants_path: std::path::PathBuf,
+    /// Serializes grant-store read-modify-write cycles.
+    service_grants_lock: std::sync::Mutex<()>,
+    /// SP-4 / ADR-017: enrollment challenge state (single-use nonces,
+    /// server-held only — restart-safe by construction).
+    enrollment: crate::enrollment::EnrollmentState,
+
+    /// Strict administrative-step-up profile (SP-0): when set, every
+    /// `VaultOp::requires_admin_step_up()` op needs a fresh approval and
+    /// browser/external-tool write surfaces are denied outright.
+    /// Enabled by `SENTINELPASS_REQUIRE_STEPUP=1` at daemon start.
+    require_stepup: bool,
     /// WBS-504/505: capability store (default location; injectable for
     /// tests).
     capability_store_path: PathBuf,
@@ -106,13 +123,622 @@ impl IpcServer {
             shutdown: Arc::new(AtomicBool::new(false)),
             mode: Arc::new(AtomicU8::new(MODE_LIVE)),
             client_limiter: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CLIENTS)),
+            stepup: stepup::StepUpState::new(),
+            service_grants_path: crate::service_grants::ServiceGrantStore::default_path(),
+            service_grants_lock: std::sync::Mutex::new(()),
+            enrollment: crate::enrollment::EnrollmentState::new(),
+            require_stepup: std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
+                .map(|v| v == "1")
+                .unwrap_or(false),
             capability_store_path: crate::daemon::capabilities::default_store_path(),
             site_permissions_path: crate::daemon::site_permissions::default_store_path(),
             site_permissions_lock: std::sync::Mutex::new(()),
         }
     }
 
-    /// Override the capability store path (tests / embedders).
+    /// SP-0 / ADR-013: enable the strict administrative step-up profile
+    /// (tests / the SENTINELPASS_REQUIRE_STEPUP deployment posture).
+    pub fn with_require_stepup(mut self, require: bool) -> Self {
+        self.require_stepup = require;
+        self
+    }
+
+    /// SP-1 / ADR-014: inject the service grant store path (tests).
+    pub fn with_service_grants_path(mut self, path: std::path::PathBuf) -> Self {
+        self.service_grants_path = path;
+        self
+    }
+
+    /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
+    /// Typed outcomes; `not_found` is only reachable AFTER grant
+    /// validation (un-granted probing gets `denied`).
+    async fn service_get_secret(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        client_id: &str,
+        entry_id: i64,
+        field: &str,
+        token: &str,
+    ) -> IpcMessage {
+        let field = match field {
+            "username" => crate::service_grants::ServiceField::Username,
+            "password" => crate::service_grants::ServiceField::Password,
+            "title" => crate::service_grants::ServiceField::Title,
+            other => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!(
+                        "unknown field {other:?} (username, password, title)"
+                    )),
+                )
+            }
+        };
+        let store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable (fail closed): {e}")),
+                )
+            }
+        };
+        let grant = store.authorize(client_id, token, entry_id, field, chrono::Utc::now());
+        let authorized = grant.is_some();
+        // SP-3 / ADR-016: executable policy (see exe_policy.rs) —
+        // enforced when the grant pins digests; unavailable evidence
+        // denies (fail-closed). Blocking pool: hashing is I/O + CPU.
+        if let Some(grant) = grant {
+            let pins =
+                crate::service_grants::ServiceGrantStore::required_exe_policy(grant).to_vec();
+            if !pins.is_empty() {
+                let pid = peer.pid;
+                let verdict = tokio::task::spawn_blocking(move || {
+                    crate::exe_policy::check_policy(&pins, pid)
+                })
+                .await;
+                match verdict {
+                    Ok(crate::exe_policy::ExePolicyResult::Matched)
+                    | Ok(crate::exe_policy::ExePolicyResult::NotRequired) => {}
+                    Ok(crate::exe_policy::ExePolicyResult::Mismatch) => {
+                        // Verification N1: the handoff §6 "digest mismatch"
+                        // event — the core stolen-token detection — MUST
+                        // leave a forensic trace.
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_mismatch".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: executable policy mismatch",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some("executable policy mismatch (this process is not an approved binary)".into()),
+                        );
+                    }
+                    Ok(crate::exe_policy::ExePolicyResult::EvidenceUnavailable(reason)) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_unavailable".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: executable evidence unavailable",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!(
+                                "executable evidence unavailable (fail closed): {reason}"
+                            )),
+                        );
+                    }
+                    Err(e) => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: format!("entry:{entry_id}"),
+                                field: Some(field.as_str().to_string()),
+                                purpose: Some("service_get:exe_task_failed".to_string()),
+                                success: false,
+                            },
+                            "SP-3 service_get denied: policy check task failed",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!("policy check task failed: {e}")),
+                        );
+                    }
+                }
+            }
+        }
+        // Review F3: service deliveries get the same audit discipline as
+        // the legacy broker (client/entry/field only — never the value).
+        log_daemon_audit(
+            self.audit_logger.as_deref(),
+            if authorized {
+                crate::AuditEventType::CredentialViewed { entry_id }
+            } else {
+                // Denials ride the same event with the outcome in the
+                // context line (no value material, ever).
+                crate::AuditEventType::ExternalSecretAccess {
+                    client_id: Some(client_id.to_string()),
+                    domain: format!("entry:{entry_id}"),
+                    field: Some(field.as_str().to_string()),
+                    purpose: Some("service_get:denied".to_string()),
+                    success: false,
+                }
+            },
+            &format!(
+                "SP-1 service_get {client_id} entry:{entry_id} field:{} authorized={authorized} {}",
+                field.as_str(),
+                peer.provenance_token(),
+            ),
+        );
+        if !authorized {
+            return self.service_secret_report("denied", None, None);
+        }
+        let Some(manager) = self.vault.manager().await else {
+            return self.service_secret_report("locked", None, None);
+        };
+        // get_entry returns Err(NotFound) for absent ids — normalize to
+        // the typed not_found status.
+        let fetch = tokio::task::spawn_blocking(move || manager.get_entry(entry_id)).await;
+        let fetch = fetch.map(|r| {
+            r.map(Some).or_else(|e| {
+                if matches!(e, crate::PasswordManagerError::NotFound(_)) {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            })
+        });
+        match fetch {
+            Ok(Ok(Some(entry))) => {
+                let value = match field {
+                    crate::service_grants::ServiceField::Username => entry.username,
+                    // The Entry password is Zeroizing<String>; the report
+                    // rides the sealed session (same as every credential
+                    // response on this socket).
+                    crate::service_grants::ServiceField::Password => entry.password.to_string(),
+                    crate::service_grants::ServiceField::Title => entry.title,
+                };
+                self.service_secret_report("authorized", Some(value), None)
+            }
+            Ok(Ok(None)) => self.service_secret_report("not_found", None, None),
+            Ok(Err(e)) => self.service_secret_report(
+                "denied",
+                None,
+                Some(format!("entry lookup failed: {e}")),
+            ),
+            Err(e) => {
+                self.service_secret_report("denied", None, Some(format!("lookup task failed: {e}")))
+            }
+        }
+    }
+
+    fn service_secret_report(
+        &self,
+        status: &str,
+        value: Option<String>,
+        error: Option<String>,
+    ) -> IpcMessage {
+        IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": status,
+                    "value": value,
+                    "error": error,
+                })),
+            },
+        }
+    }
+
+    /// SP-1 / ADR-014: mint a grant (admin; step-up gated upstream).
+    #[allow(clippy::too_many_arguments)]
+    async fn service_grant_create(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        client_id: &str,
+        entry_id: i64,
+        fields: Vec<String>,
+        expires_at: Option<i64>,
+        required_exe_sha256: Option<Vec<String>>,
+        registration_key_fingerprint: Option<String>,
+    ) -> IpcMessage {
+        let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
+            .iter()
+            .map(|f| match f.as_str() {
+                "username" => Ok(crate::service_grants::ServiceField::Username),
+                "password" => Ok(crate::service_grants::ServiceField::Password),
+                "title" => Ok(crate::service_grants::ServiceField::Title),
+                other => Err(PasswordManagerError::InvalidInput(format!(
+                    "unknown field {other:?}"
+                ))),
+            })
+            .collect();
+        let fields = match parsed {
+            Ok(fields) if !fields.is_empty() => fields,
+            Ok(_) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some("a grant must name at least one field".into()),
+                )
+            }
+            Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
+        };
+        // Review F5: a garbage expires_at is an input error, never a
+        // silently clamped expiry.
+        let expiry = expires_at.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+        if expires_at.is_some() && expiry.is_none() {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some("expires_at out of range".into()),
+            );
+        }
+        let _guard = self.service_grants_lock.lock().unwrap();
+        let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable (fail closed): {e}")),
+                )
+            }
+        };
+        let (grant, token) = match store.mint_grant(
+            client_id,
+            entry_id,
+            fields,
+            expiry,
+            required_exe_sha256.clone(),
+            registration_key_fingerprint.clone(),
+        ) {
+            Ok(minted) => minted,
+            Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
+        };
+        if let Err(e) = store.save_to_path(&self.service_grants_path) {
+            // Review F6: NOT published — distinct from an authz denial.
+            return self.service_secret_report("store_error", None, Some(e.to_string()));
+        }
+        // Review F3: audit the policy mutation (no secret material).
+        log_daemon_audit(
+            self.audit_logger.as_deref(),
+            crate::AuditEventType::CredentialModified { entry_id },
+            &format!(
+                "SP-1 service_grant_created {client_id} entry:{entry_id} {}",
+                peer.provenance_token()
+            ),
+        );
+        // Token shown once, inside the sealed session (legacy-broker
+        // discipline). The report is the ONLY place it appears.
+        // F1 (review): fingerprinted grants are PENDING — the token is
+        // NOT revealed here. The client must complete enrollment
+        // (ServiceEnrollmentComplete) to prove key possession and mint
+        // the real token. The placeholder token from mint is discarded.
+        if grant.registration_key_fingerprint.is_some() {
+            drop(token); // zeroize the placeholder
+            return IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Ok {
+                    result: VaultOpResult::Report(serde_json::json!({
+                        "status": "pending_enrollment",
+                        "grant_id": grant.grant_id.to_string(),
+                        "expires_at": grant.expires_at.map(|e| e.timestamp()),
+                        "required_exe_sha256": grant.required_exe_sha256,
+                        "registration_key_fingerprint": grant.registration_key_fingerprint,
+                        "next_step": "ServiceEnrollmentBegin { client_id } to start the enrollment ceremony",
+                    })),
+                },
+            };
+        }
+        IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": "created",
+                    "grant_id": grant.grant_id.to_string(),
+                    "client_token": *token,
+                    "expires_at": grant.expires_at.map(|e| e.timestamp()),
+                    "required_exe_sha256": grant.required_exe_sha256,
+                })),
+            },
+        }
+    }
+
+    /// SP-1 / ADR-014: revoke a grant (admin; step-up gated upstream).
+    /// SP-4 / ADR-017: begin enrollment — mint a single-use challenge
+    /// for the named client's pre-approved grant. Owner step-up gated.
+    async fn service_enrollment_begin(
+        &self,
+        _peer: &crate::daemon::transport::PeerContext,
+        client_id: &str,
+    ) -> IpcMessage {
+        let store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable: {e}")),
+                )
+            }
+        };
+        // Find the pre-approved grant for this client (with a fingerprint).
+        let grant = store.grants.values().find(|g| {
+            g.client_id == client_id
+                && g.revoked_at.is_none()
+                && g.registration_key_fingerprint.is_some()
+        });
+        let Some(grant) = grant else {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some(format!(
+                    "no enrollment-pending grant for client '{client_id}'"
+                )),
+            );
+        };
+        let fingerprint = grant
+            .registration_key_fingerprint
+            .as_deref()
+            .unwrap_or_default();
+        let fields: Vec<&str> = grant.fields.iter().map(|f| f.as_str()).collect();
+        let exe_digest = grant
+            .required_exe_sha256
+            .as_ref()
+            .map(|pins| pins.join(","));
+        let (nonce, transcript) = self.enrollment.begin(
+            client_id,
+            grant.grant_id,
+            grant.entry_id,
+            &fields,
+            exe_digest.as_deref(),
+            fingerprint,
+            grant.expires_at.map(|e| e.timestamp()),
+        );
+        IpcMessage::ServiceResult {
+            outcome: ServiceOutcome::Ok {
+                result: VaultOpResult::Report(serde_json::json!({
+                    "status": "challenge",
+                    "nonce": nonce,
+                    "transcript": String::from_utf8_lossy(&transcript),
+                })),
+            },
+        }
+    }
+
+    /// SP-4 / ADR-017: complete enrollment — verify the OpenPGP signature
+    /// and reveal the grant's service token (minted + shown once).
+    async fn service_enrollment_complete(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        client_id: &str,
+        nonce: String,
+        signature_armored: String,
+        client_public_key: String,
+    ) -> IpcMessage {
+        // Consume the challenge FIRST (single-use regardless of outcome).
+        let Some(challenge) = self.enrollment.take(&nonce) else {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some("enrollment challenge unknown, expired, or already used".into()),
+            );
+        };
+        if challenge.client_id != client_id {
+            return self.service_secret_report(
+                "denied",
+                None,
+                Some("enrollment challenge does not belong to this client".into()),
+            );
+        }
+
+        // Load the store to get the expected fingerprint.
+        let store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable: {e}")),
+                )
+            }
+        };
+        // F5: find by the grant_id bound into the challenge, not by
+        // an arbitrary client-id scan.
+        let grant = store.grants.get(&challenge.grant_id);
+        let Some(grant) = grant else {
+            return self.service_secret_report("not_found", None, None);
+        };
+        let fingerprint = grant
+            .registration_key_fingerprint
+            .as_deref()
+            .unwrap_or_default();
+
+        // Verify via the pinned gpg with the CLIENT's public key imported
+        // into an isolated keyring (review F2). The fingerprint check is
+        // the binding control — a different key won't match.
+        let gpg_path = std::env::var("SENTINELPASS_GPG_PATH")
+            .unwrap_or_else(|_| crate::enrollment::DEFAULT_GPG_PATH.to_string());
+        let sig = signature_armored.clone();
+        let key = client_public_key.clone();
+        let transcript = challenge.transcript.clone();
+        let fp = fingerprint.to_string();
+        let verification = tokio::task::spawn_blocking(move || {
+            crate::enrollment::verify_signature(&gpg_path, &key, &transcript, &sig, &fp)
+        })
+        .await;
+
+        match verification {
+            Ok(Ok(())) => {
+                // F4: re-validate INSIDE the lock — a concurrent revoke
+                // during the multi-second verification window must be
+                // honored, not silently overridden.
+                let _guard = self.service_grants_lock.lock().unwrap();
+                let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
+                    &self.service_grants_path,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some(format!("grant store unavailable: {e}")),
+                        )
+                    }
+                };
+                // Re-find by grant_id (F5) and check still-unrevoked (F4).
+                match store.grants.get(&challenge.grant_id) {
+                    None => return self.service_secret_report("not_found", None, None),
+                    Some(grant) if grant.revoked_at.is_some() => {
+                        log_daemon_audit(
+                            self.audit_logger.as_deref(),
+                            crate::AuditEventType::ExternalSecretAccess {
+                                client_id: Some(client_id.to_string()),
+                                domain: "enrollment".to_string(),
+                                field: None,
+                                purpose: Some("enrollment:revoked_during_verify".to_string()),
+                                success: false,
+                            },
+                            "SP-4 enrollment denied: grant revoked during verification",
+                        );
+                        return self.service_secret_report(
+                            "denied",
+                            None,
+                            Some("grant was revoked during enrollment verification".into()),
+                        );
+                    }
+                    Some(_) => {} // active: proceed
+                }
+
+                // F3: ROTATE the existing grant's token in place — never
+                // mint a duplicate grant (same grant_id, new token hash).
+                let token = match store.rotate_token(challenge.grant_id) {
+                    Ok(Some(token)) => token,
+                    Ok(None) => {
+                        return self.service_secret_report("not_found", None, None);
+                    }
+                    Err(e) => {
+                        return self.service_secret_report("denied", None, Some(e.to_string()))
+                    }
+                };
+                if let Err(e) = store.save_to_path(&self.service_grants_path) {
+                    return self.service_secret_report("store_error", None, Some(e.to_string()));
+                }
+                let entry_id = store
+                    .grants
+                    .get(&challenge.grant_id)
+                    .map(|g| g.entry_id)
+                    .unwrap_or(0);
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::CredentialModified { entry_id },
+                    &format!(
+                        "SP-4 enrollment_completed {client_id} grant:{} {}",
+                        challenge.grant_id,
+                        peer.provenance_token()
+                    ),
+                );
+                // Token shown ONCE (sealed session).
+                IpcMessage::ServiceResult {
+                    outcome: ServiceOutcome::Ok {
+                        result: VaultOpResult::Report(serde_json::json!({
+                            "status": "enrolled",
+                            "grant_id": challenge.grant_id.to_string(),
+                            "client_token": *token,
+                        })),
+                    },
+                }
+            }
+            Ok(Err(reason)) => {
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::ExternalSecretAccess {
+                        client_id: Some(client_id.to_string()),
+                        domain: "enrollment".to_string(),
+                        field: None,
+                        purpose: Some("enrollment:verification_failed".to_string()),
+                        success: false,
+                    },
+                    "SP-4 enrollment denied: verification failed",
+                );
+                self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("OpenPGP verification failed: {reason}")),
+                )
+            }
+            Err(e) => self.service_secret_report(
+                "denied",
+                None,
+                Some(format!("verification task failed: {e}")),
+            ),
+        }
+    }
+
+    async fn service_grant_revoke(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        grant_id_str: &str,
+    ) -> IpcMessage {
+        let Ok(grant_id) = uuid::Uuid::parse_str(grant_id_str) else {
+            return self.service_secret_report("denied", None, Some("malformed grant id".into()));
+        };
+        let _guard = self.service_grants_lock.lock().unwrap();
+        let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
+            &self.service_grants_path,
+        ) {
+            Ok(store) => store,
+            Err(e) => {
+                return self.service_secret_report(
+                    "denied",
+                    None,
+                    Some(format!("grant store unavailable (fail closed): {e}")),
+                )
+            }
+        };
+        if !store.revoke(grant_id) {
+            return self.service_secret_report("not_found", None, None);
+        }
+        match store.save_to_path(&self.service_grants_path) {
+            Ok(()) => {
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::CredentialModified { entry_id: 0 },
+                    &format!(
+                        "SP-1 service_grant_revoked {grant_id} {}",
+                        peer.provenance_token()
+                    ),
+                );
+                self.service_secret_report("revoked", None, None)
+            }
+            // Review F6: revocation NOT published — the grant is still
+            // live on disk; say so distinctly.
+            Err(e) => self.service_secret_report("store_error", None, Some(e.to_string())),
+        }
+    }
+
     pub fn with_capability_store_path(mut self, path: PathBuf) -> Self {
         self.capability_store_path = path;
         self
@@ -185,8 +811,11 @@ impl IpcServer {
 
             loop {
                 match transport.accept().await {
-                    Ok(conn) => {
-                        debug!("IPC client connected");
+                    Ok((conn, cred)) => {
+                        debug!(uid = cred.uid, "IPC client connected");
+                        // SP-0: random per-connection identity for step-up
+                        // binding (minted at the single accept site pair).
+                        let connection_id: u128 = rand::random();
                         // WBS-512: each connection runs on its own task,
                         // bounded by the client semaphore — a stalled or
                         // slow client can no longer wedge the daemon.
@@ -195,7 +824,16 @@ impl IpcServer {
                                 let server = Arc::clone(&self);
                                 tokio::spawn(async move {
                                     let _permit = permit;
-                                    if let Err(e) = server.run_connection(conn.into()).await {
+                                    // SP-2: kernel-derived provenance for
+                                    // THIS connection, threaded (not a
+                                    // shared slot — review F2).
+                                    let peer = crate::daemon::transport::PeerContext {
+                                        connection_id,
+                                        uid: cred.uid,
+                                        gid: cred.gid,
+                                        pid: cred.pid,
+                                    };
+                                    if let Err(e) = server.run_connection(conn.into(), peer).await {
                                         debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
                                     }
                                 });
@@ -265,6 +903,9 @@ impl IpcServer {
                     // connection's server-side constructor.
                     Ok(()) => {
                         debug!("IPC client connected (named pipe)");
+                        // SP-0 connection identity (minted per accept,
+                        // both platforms).
+                        let connection_id: u128 = rand::random();
                         let pipe_conn =
                             sentinelpass_protocol::WindowsNamedPipeConnection::from_server(
                                 pipe_server,
@@ -274,7 +915,19 @@ impl IpcServer {
                                 let server = Arc::clone(&self);
                                 tokio::spawn(async move {
                                     let _permit = permit;
-                                    if let Err(e) = server.run_connection(pipe_conn.into()).await {
+                                    // SP-2 / ADR-015: named pipes have no
+                                    // portable peer-credential query —
+                                    // uid:0 with no gid/pid IS the unknown
+                                    // marker (PeerContext::unknown()), so
+                                    // provenance renders the explicit
+                                    // "peer=unknown" token, never a
+                                    // root-lookalike uid:0.
+                                    let peer = crate::daemon::transport::PeerContext::unknown(
+                                        connection_id,
+                                    );
+                                    if let Err(e) =
+                                        server.run_connection(pipe_conn.into(), peer).await
+                                    {
                                         debug!(error_kind = ?std::any::type_name_of_val(&e), "IPC connection ended");
                                     }
                                 });
@@ -303,6 +956,7 @@ impl IpcServer {
     async fn run_connection(
         &self,
         conn: sentinelpass_protocol::connection::TransportConnection,
+        peer: crate::daemon::transport::PeerContext,
     ) -> Result<()> {
         let (mut ipc, first_frame) =
             sentinelpass_protocol::connection::IpcConnection::accept_server(conn, &self.auth_token)
@@ -316,7 +970,7 @@ impl IpcServer {
 
         // A legacy PLAIN client's first frame is already delivered.
         if let Some(first) = first_frame {
-            if let Some(response_bytes) = self.process_frame(&first).await {
+            if let Some(response_bytes) = self.process_frame(&first, peer).await {
                 ipc.send_frame(&response_bytes).await.map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
                         "Failed to send response: {}",
@@ -341,7 +995,7 @@ impl IpcServer {
                     break;
                 }
             };
-            if let Some(response_bytes) = self.process_frame(&frame).await {
+            if let Some(response_bytes) = self.process_frame(&frame, peer).await {
                 ipc.send_frame(&response_bytes).await.map_err(|e| {
                     PasswordManagerError::from(DatabaseError::Ipc(format!(
                         "Failed to send response: {}",
@@ -355,14 +1009,18 @@ impl IpcServer {
 
     /// Token check + dispatch for one plaintext envelope frame. Returns the
     /// serialized response, or None when no response should be sent.
-    async fn process_frame(&self, frame: &[u8]) -> Option<Vec<u8>> {
+    async fn process_frame(
+        &self,
+        frame: &[u8],
+        peer: crate::daemon::transport::PeerContext,
+    ) -> Option<Vec<u8>> {
         match serde_json::from_slice::<IpcEnvelope>(frame) {
             Ok(envelope) => {
                 if !bool::from(envelope.token.as_bytes().ct_eq(self.auth_token.as_bytes())) {
                     warn!("Rejected IPC request with invalid token");
                     return None;
                 }
-                let response = self.handle_message(envelope).await;
+                let response = self.handle_message(envelope, peer).await;
                 match serde_json::to_vec(&response) {
                     Ok(response_bytes) => Some(response_bytes),
                     Err(e) => {
@@ -510,11 +1168,17 @@ impl IpcServer {
 
     /// Handle an IPC envelope (auth token was already verified by the caller).
     #[allow(dead_code)]
-    async fn handle_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+    /// `connection_id` (SP-0): random per-connection identity minted in
+    /// `run_connection`; step-up approvals are bound to it.
+    async fn handle_message(
+        &self,
+        envelope: IpcEnvelope,
+        peer: crate::daemon::transport::PeerContext,
+    ) -> IpcMessage {
         // Maintenance/bootstrap gate (WBS-501/503): a daemon started with no
         // vault serves only status, bootstrap creation, and shutdown.
         if self.is_maintenance_mode() {
-            return self.handle_maintenance_message(envelope).await;
+            return self.handle_maintenance_message(envelope, peer).await;
         }
 
         let client_token = envelope.client_token.clone();
@@ -635,7 +1299,7 @@ impl IpcServer {
                             authorized: false,
                             error: Some(format!(
                                 "Client '{}' is not authorized for {} {}: run \
-                                 'sentinelpass secret allow --client-id {} --domain {} --field {}' \
+                                 'sentinelpass secret allow {} --domain {} --field {}' \
                                  and set SENTINELPASS_CLIENT_TOKEN",
                                 client_id,
                                 domain,
@@ -664,6 +1328,20 @@ impl IpcServer {
                 value,
                 purpose,
             } => {
+                // SP-0 / ADR-013: under the strict administrative profile,
+                // unattended external-tool writes are disabled — entry
+                // mutation needs an owner step-up, which this surface
+                // cannot present. Fail closed with the typed code.
+                if self.require_stepup {
+                    return IpcMessage::SaveSecretResponse {
+                        success: false,
+                        locked: None,
+                        error: Some(
+                            "step_up_required: external-tool writes are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 let purpose_label = purpose.unwrap_or_else(|| "external-secret-write".to_string());
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::SaveSecretResponse {
@@ -707,7 +1385,7 @@ impl IpcServer {
                         locked: None,
                         error: Some(format!(
                             "Client '{}' has no write grant for '{}': run \
-                             'sentinelpass secret allow --client-id {} --domain {} --field password --write' \
+                             'sentinelpass secret allow {} --domain {} --field password --write' \
                              and set SENTINELPASS_CLIENT_TOKEN",
                             client_id, domain, client_id, domain
                         )),
@@ -1034,6 +1712,20 @@ impl IpcServer {
                 url,
                 save_trigger: _,
             } => {
+                // SP-0 / ADR-013: browser capture is entry creation; under
+                // the strict profile the extension cannot present a
+                // master-password step-up, so capture is disabled (the
+                // owner adds entries through the step-up-capable CLI/UI).
+                if self.require_stepup {
+                    return IpcMessage::SaveCredentialResponse {
+                        success: false,
+                        locked: None,
+                        error: Some(
+                            "step_up_required: browser capture is disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 info!("IPC: SaveCredential");
 
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
@@ -1081,6 +1773,18 @@ impl IpcServer {
                 host,
                 allow_insecure,
             } => {
+                // SP-0 / ADR-013: autofill permission grants are policy
+                // mutations; the strict profile denies them on the browser
+                // surface (which cannot step up).
+                if self.require_stepup {
+                    return IpcMessage::GrantSitePermissionResponse {
+                        success: false,
+                        error: Some(
+                            "step_up_required: site permission grants are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 // WBS-712: permission management is a browser-surface op —
                 // the same capability gate as the ops it authorizes. The
                 // grant only ever loosens the gate for ONE exact host and
@@ -1133,6 +1837,20 @@ impl IpcServer {
                 }
             }
             IpcMessage::RevokeSitePermission { host } => {
+                // SP-0 / ADR-013 (review F3): revocation is a policy
+                // mutation too — handoff §3A: "Even restrictive
+                // administrative revocation uses step-up under the owner's
+                // current rule." The browser surface cannot step up.
+                if self.require_stepup {
+                    return IpcMessage::RevokeSitePermissionResponse {
+                        success: false,
+                        removed: false,
+                        error: Some(
+                            "step_up_required: site permission changes are disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 if !self.browser_surface_allowed(origin, envelope.capability.as_deref()) {
                     return IpcMessage::RevokeSitePermissionResponse {
                         success: false,
@@ -1277,6 +1995,22 @@ impl IpcServer {
                 }
             }
             IpcMessage::SyncNow => {
+                // SP-0 / ADR-013 (review F1): the bare SyncNow message must
+                // honor the strict profile exactly like
+                // ServiceCall(VaultOp::SyncNow) — a sync cycle APPLIES remote
+                // mutations, so gating only the classified op left a crafted
+                // bare-frame bypass.
+                if self.require_stepup {
+                    return IpcMessage::SyncNowResponse {
+                        success: false,
+                        pushed: 0,
+                        pulled: 0,
+                        error: Some(
+                            "step_up_required: unattended sync is disabled under the strict profile"
+                                .to_string(),
+                        ),
+                    };
+                }
                 debug!("IPC: SyncNow");
                 #[cfg(feature = "sync")]
                 {
@@ -1341,7 +2075,160 @@ impl IpcServer {
                     }
                 }
             }
-            IpcMessage::ServiceCall { op } => self.dispatch_service_call(op).await,
+            IpcMessage::ServiceCall {
+                op,
+                stepup_approval,
+            } => {
+                // SP-0 / ADR-013: strict profile — administrative mutations
+                // require a fresh, unused, connection- and operation-bound
+                // master-password approval. Fail-closed with a typed error
+                // the CLI maps to an interactive password prompt.
+                // Review F2 (SP-1): service-grant administration gates on a
+                // step-up approval on EVERY profile — new surface, no
+                // legacy clients. The general SP-0 gate below remains
+                // profile-conditional for the transitional surface.
+                let grant_admin = matches!(
+                    &op,
+                    VaultOp::ServiceGrantCreate { .. }
+                        | VaultOp::ServiceGrantRevoke { .. }
+                        | VaultOp::ServiceEnrollmentBegin { .. }
+                );
+                if grant_admin || (self.require_stepup && op.requires_admin_step_up()) {
+                    let op_bytes = match serde_json::to_vec(&op) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            return IpcMessage::ServiceResult {
+                                outcome: ServiceOutcome::Err {
+                                    error: ServiceError::new(
+                                        "step_up_required",
+                                        format!(
+                                            "cannot serialize operation for approval binding: {e}"
+                                        ),
+                                    ),
+                                },
+                            };
+                        }
+                    };
+                    let approval = match stepup_approval {
+                        Some(approval) => approval,
+                        None => {
+                            return IpcMessage::ServiceResult {
+                                outcome: ServiceOutcome::Err {
+                                    error: ServiceError::new(
+                                        "step_up_required",
+                                        "this operation requires a fresh master-password approval",
+                                    ),
+                                },
+                            };
+                        }
+                    };
+                    if let Err(denial) =
+                        self.stepup
+                            .take_if_valid(&approval, peer.connection_id, &op_bytes)
+                    {
+                        return IpcMessage::ServiceResult {
+                            outcome: ServiceOutcome::Err {
+                                error: ServiceError::new(
+                                    "step_up_required",
+                                    format!("step-up approval denied: {denial}"),
+                                ),
+                            },
+                        };
+                    }
+                    // Approval consumed (single use, burned even if the
+                    // mutation below fails — ADR-013).
+                }
+                self.dispatch_service_call(&peer, op).await
+            }
+            // SP-0 / ADR-013: mint a single-use administrative approval
+            // after verifying the master password through the full
+            // reviewed open path. The password never unlocks anything,
+            // never persists, and is dropped (zeroizing) immediately.
+            IpcMessage::StepUpAuthorize {
+                master_password,
+                op,
+            } => {
+                if let Some(retry_after) = self.stepup.throttled() {
+                    return IpcMessage::StepUpDenied {
+                        error: "too many failed verifications".to_string(),
+                        retry_after_secs: Some(retry_after),
+                    };
+                }
+                // The vault must exist (nothing to verify against in
+                // maintenance mode; VaultCreate needs no step-up).
+                if self.is_maintenance_mode() {
+                    return IpcMessage::StepUpDenied {
+                        error: "no vault: nothing to verify against".to_string(),
+                        retry_after_secs: None,
+                    };
+                }
+                // Review F2: mutations can only dispatch against an
+                // UNLOCKED manager, and running the full open() while the
+                // daemon vault is locked installs the process-global
+                // audit-key lease (breaking the cleared-on-lock invariant)
+                // and re-runs vault maintenance sweeps against a vault the
+                // operator believes is at rest. Refuse: unlock first.
+                if !self.vault.is_unlocked().await {
+                    return IpcMessage::StepUpDenied {
+                        error: "vault is locked: unlock it before requesting step-up \
+                             (administrative mutations require the unlocked vault)"
+                            .to_string(),
+                        retry_after_secs: None,
+                    };
+                }
+                let op_bytes = match serde_json::to_vec(&op) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return IpcMessage::StepUpDenied {
+                            error: format!("cannot serialize operation: {e}"),
+                            retry_after_secs: None,
+                        };
+                    }
+                };
+                // KDF discipline identical to unlock: blocking pool + the
+                // per-vault Argon2id gate. NOTE (review F2, documented in
+                // ADR-013): this runs the FULL reviewed open(), whose
+                // success path re-runs (idempotent, already-completed)
+                // maintenance sweeps and appends a VaultUnlocked audit
+                // record; a wrong password shares the vault-wide persistent
+                // lockout counter with unlock. The DaemonVault itself is
+                // never unlocked by this.
+                let permit = self.vault.kdf_permit().await;
+                let vault_path = self.vault.vault_path().to_path_buf();
+                // Zeroizing custody inside the blocking task; nothing
+                // retains the password after verification.
+                let password = zeroize::Zeroizing::new(master_password.into_bytes());
+                let verification = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    VaultManager::open(&vault_path, &password)
+                })
+                .await;
+                match verification {
+                    Ok(Ok(_manager)) => {
+                        // Verified. The manager (and its derived keys) is
+                        // dropped here on purpose.
+                        self.stepup.record_success();
+                        let (approval_id, expires_at_unix) =
+                            self.stepup.mint(peer.connection_id, &op_bytes);
+                        IpcMessage::StepUpReceipt {
+                            approval_id,
+                            expires_at_unix,
+                        }
+                    }
+                    Ok(Err(_)) => {
+                        self.stepup.record_failure();
+                        let retry_after = self.stepup.throttled();
+                        IpcMessage::StepUpDenied {
+                            error: "master password verification failed".to_string(),
+                            retry_after_secs: retry_after,
+                        }
+                    }
+                    Err(e) => IpcMessage::StepUpDenied {
+                        error: format!("verification task failed: {e}"),
+                        retry_after_secs: None,
+                    },
+                }
+            }
             _ => IpcMessage::VaultStatusResponse {
                 unlocked: false,
                 key_epoch: 0,
@@ -1354,10 +2241,78 @@ impl IpcServer {
     /// The blocking work (SQLite + crypto) runs on the blocking pool, never
     /// on the async executor; the relay-network ops (`SyncNow`) are awaited
     /// here instead because the sync engine needs an async context.
-    async fn dispatch_service_call(&self, op: VaultOp) -> IpcMessage {
+    async fn dispatch_service_call(
+        &self,
+        peer: &crate::daemon::transport::PeerContext,
+        op: VaultOp,
+    ) -> IpcMessage {
         // Metadata ops that are valid while LOCKED — served without a
         // manager (review finding: the UI asks biometric status before
         // unlock to decide whether to offer the button).
+        // SP-1 / ADR-014: service-grant ops are served HERE (grant store
+        // + step-up context live at the IPC boundary), not in the vault
+        // application service. Step-up enforcement for the admin pair is
+        // inherited: the ServiceCall arm already gated them via the
+        // exhaustive classification (both are step-up class).
+        match &op {
+            VaultOp::ServiceGetSecret {
+                client_id,
+                entry_id,
+                field,
+                token,
+            } => {
+                return self
+                    .service_get_secret(peer, client_id, *entry_id, field, token)
+                    .await
+            }
+            VaultOp::ServiceGrantCreate {
+                client_id,
+                entry_id,
+                fields,
+                expires_at,
+                required_exe_sha256,
+                registration_key_fingerprint,
+            } => {
+                // Review F2: the ServiceCall arm gates these two admin ops
+                // on a consumed op-bound step-up approval UNCONDITIONALLY
+                // (every profile) before dispatch reaches here.
+                return self
+                    .service_grant_create(
+                        peer,
+                        client_id,
+                        *entry_id,
+                        fields.clone(),
+                        *expires_at,
+                        required_exe_sha256.clone(),
+                        registration_key_fingerprint.clone(),
+                    )
+                    .await;
+            }
+            VaultOp::ServiceGrantRevoke { grant_id } => {
+                return self.service_grant_revoke(peer, grant_id).await
+            }
+            VaultOp::ServiceEnrollmentBegin { client_id } => {
+                return self.service_enrollment_begin(peer, client_id).await
+            }
+            VaultOp::ServiceEnrollmentComplete {
+                client_id,
+                nonce,
+                signature_armored,
+                client_public_key,
+            } => {
+                return self
+                    .service_enrollment_complete(
+                        peer,
+                        client_id,
+                        nonce.clone(),
+                        signature_armored.clone(),
+                        client_public_key.clone(),
+                    )
+                    .await
+            }
+            _ => {}
+        }
+
         if let VaultOp::BiometricStatusGet = op {
             let configured =
                 VaultManager::is_biometric_unlock_enabled(self.vault.vault_path()).unwrap_or(false);
@@ -1449,7 +2404,11 @@ impl IpcServer {
     }
 
     /// Maintenance/bootstrap surface (WBS-501/503): no vault exists yet.
-    async fn handle_maintenance_message(&self, envelope: IpcEnvelope) -> IpcMessage {
+    async fn handle_maintenance_message(
+        &self,
+        envelope: IpcEnvelope,
+        _peer: crate::daemon::transport::PeerContext,
+    ) -> IpcMessage {
         match envelope.message {
             IpcMessage::CheckVault => IpcMessage::VaultStatusResponse {
                 unlocked: false,
@@ -1463,7 +2422,12 @@ impl IpcServer {
                     key_epoch: 0,
                 }
             }
-            IpcMessage::ServiceCall { op } => self.dispatch_maintenance_op(op).await,
+            IpcMessage::ServiceCall { op, .. } => {
+                // Maintenance mode serves only VaultStatus/VaultCreate —
+                // VaultCreate is bootstrap password-setting, exempt from
+                // step-up by design (ADR-013).
+                self.dispatch_maintenance_op(op).await
+            }
             IpcMessage::UnlockVault {
                 mut master_password,
             } => {
@@ -1930,12 +2894,93 @@ mod autofill_origin_gate_tests {
         }
     }
 
+    const TEST_CONNECTION: u128 = 0x5FE0_0000_0000_0000;
+
+    fn test_peer() -> crate::daemon::transport::PeerContext {
+        crate::daemon::transport::PeerContext {
+            connection_id: TEST_CONNECTION,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(4242),
+        }
+    }
+
+    /// Test-only: a Debug-safe label (IpcMessage Debug can contain secret
+    /// payloads; panic messages must not embed them).
+    fn variant_name(_: &IpcMessage) -> &'static str {
+        "IpcMessage"
+    }
+
     fn handle(
         rt: &tokio::runtime::Runtime,
         server: &IpcServer,
         envelope: IpcEnvelope,
     ) -> IpcMessage {
-        rt.block_on(server.handle_message(envelope))
+        rt.block_on(server.handle_message(envelope, test_peer()))
+    }
+
+    /// SP-0: same, on an explicit connection identity (cross-connection
+    /// denial tests).
+    fn handle_on(
+        rt: &tokio::runtime::Runtime,
+        server: &IpcServer,
+        envelope: IpcEnvelope,
+        connection_id: u128,
+    ) -> IpcMessage {
+        rt.block_on(server.handle_message(
+            envelope,
+            crate::daemon::transport::PeerContext {
+                connection_id,
+                ..test_peer()
+            },
+        ))
+    }
+
+    #[test]
+    fn peer_provenance_token_is_redacted_and_stable() {
+        // SP-2: the token carries only the kernel triple — no paths, no
+        // argv, nothing client-supplied.
+        let peer = crate::daemon::transport::PeerContext {
+            connection_id: 7,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(999),
+        };
+        let token = peer.provenance_token();
+        assert!(token.starts_with("peer=uid:501"), "token: {token}");
+        let body = token.trim_start_matches("peer=");
+        // Fixed labels + digits + colons only (uid/gid/pid labels).
+        assert!(
+            body.chars()
+                .all(|c| c.is_ascii_digit() || c == ':' || c.is_ascii_lowercase()),
+            "unexpected characters in provenance token: {token}"
+        );
+    }
+
+    #[test]
+    fn peer_provenance_is_per_connection_isolated() {
+        // Review F2: provenance is a THREADED per-connection value, not a
+        // shared slot — two contexts cannot misattribute each other by
+        // construction (the test the shared-slot design could not express).
+        let a = crate::daemon::transport::PeerContext {
+            connection_id: 1,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(100),
+        };
+        let b = crate::daemon::transport::PeerContext {
+            connection_id: 2,
+            uid: 501,
+            gid: Some(20),
+            pid: Some(200),
+        };
+        assert_ne!(a.provenance_token(), b.provenance_token());
+        assert!(a.provenance_token().contains("pid:100"));
+        assert!(b.provenance_token().contains("pid:200"));
+        // The Windows-shaped unknown marker renders explicitly — never
+        // a root-lookalike "peer=uid:0" (review N1 design note).
+        let minimal = crate::daemon::transport::PeerContext::unknown(3);
+        assert_eq!(minimal.provenance_token(), "peer=unknown");
     }
 
     #[test]
@@ -2392,5 +3437,862 @@ mod autofill_origin_gate_tests {
         )
         .unwrap();
         assert!(!store.allows_insecure("example.com"));
+    }
+
+    // ------------------------------------------------------------------
+    // SP-0 / ADR-013: master-password administrative step-up
+    // ------------------------------------------------------------------
+
+    fn strict_harness() -> GateHarness {
+        // One owned tempdir: the vault file must stay alive for the
+        // step-up verifier's full open.
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        VaultManager::create(&vault_path, b"test_password").unwrap();
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { daemon_vault.unlock(b"test_password").await })
+            .unwrap();
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("strict.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_require_stepup(true);
+        GateHarness {
+            _tmp: tmp,
+            server,
+            capability: String::new(),
+            permissions_path: std::path::PathBuf::new(),
+        }
+    }
+
+    fn make_add_op(title: &str) -> VaultOp {
+        VaultOp::EntryAdd {
+            entry: sentinelpass_protocol::service::ServiceEntry {
+                entry_id: None,
+                title: title.to_string(),
+                username: "u".to_string(),
+                password: zeroize::Zeroizing::new("p".to_string()),
+                url: None,
+                notes: None,
+                credential_type: "password".to_string(),
+                created_at: 0,
+                modified_at: 0,
+                favorite: false,
+            },
+        }
+    }
+
+    fn service_outcome(msg: IpcMessage) -> ServiceOutcome {
+        match msg {
+            IpcMessage::ServiceResult { outcome } => outcome,
+            other => panic!("unexpected response: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_mutation_without_approval() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: make_add_op("x"),
+                    stepup_approval: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Err { error } => assert_eq!(error.code, "step_up_required"),
+            ServiceOutcome::Ok { .. } => panic!("unapproved mutation must be denied"),
+        }
+    }
+
+    #[test]
+    fn strict_profile_allows_reads_without_step_up() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for op in [VaultOp::VaultStatus, VaultOp::EntryList] {
+            let msg = handle(
+                &rt,
+                &h.server,
+                envelope(
+                    IpcMessage::ServiceCall {
+                        op,
+                        stepup_approval: None,
+                    },
+                    Some(h.capability.clone()),
+                ),
+            );
+            assert!(
+                matches!(service_outcome(msg), ServiceOutcome::Ok { .. }),
+                "reads must remain unattended under the strict profile"
+            );
+        }
+    }
+
+    #[test]
+    fn step_up_allows_exactly_one_mutation() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let op = make_add_op("stepped");
+        // Authorize with the correct master password for THIS op.
+        let receipt = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: op.clone(),
+                },
+                None,
+            ),
+        );
+        let IpcMessage::StepUpReceipt { approval_id, .. } = receipt else {
+            panic!("expected receipt")
+        };
+        // The approved mutation succeeds...
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: op.clone(),
+                    stepup_approval: Some(approval_id.clone()),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Ok { .. } => {}
+            ServiceOutcome::Err { error } => panic!("approved mutation failed: {error}"),
+        }
+        // ...exactly once. Replay is denied.
+        let replay = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op,
+                    stepup_approval: Some(approval_id),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(replay) {
+            ServiceOutcome::Err { error } => {
+                assert_eq!(error.code, "step_up_required");
+                assert!(error.message.contains("unknown, already used"));
+            }
+            ServiceOutcome::Ok { .. } => panic!("approval replay must be denied"),
+        }
+    }
+
+    #[test]
+    fn step_up_wrong_password_denied_then_throttled() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let op = VaultOp::EntryList;
+        let deny = |msg: IpcMessage| match msg {
+            IpcMessage::StepUpDenied { error, .. } => error,
+            other => panic!("expected denial, got {}", variant_name(&other)),
+        };
+        for _ in 0..5 {
+            let err = deny(handle(
+                &rt,
+                &h.server,
+                envelope(
+                    IpcMessage::StepUpAuthorize {
+                        master_password: "wrong-password".to_string(),
+                        op: op.clone(),
+                    },
+                    None,
+                ),
+            ));
+            assert!(err.contains("verification failed"));
+        }
+        // The 6th attempt is throttled before touching the KDF.
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::StepUpDenied {
+                error,
+                retry_after_secs: Some(wait),
+            } => {
+                assert!(error.contains("too many failed"));
+                assert!(wait >= 1);
+            }
+            IpcMessage::StepUpReceipt { .. } => panic!("must be throttled after 5 failures"),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn step_up_approval_binds_to_the_exact_operation() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let authorized = make_add_op("a");
+        let substituted = make_add_op("SWAPPED");
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: authorized,
+                },
+                None,
+            ),
+        ) else {
+            panic!("expected receipt")
+        };
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: substituted,
+                    stepup_approval: Some(approval_id),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Err { error } => {
+                assert_eq!(error.code, "step_up_required");
+                assert!(error
+                    .message
+                    .contains("does not match this exact operation"));
+            }
+            ServiceOutcome::Ok { .. } => panic!("swapped target must be denied"),
+        }
+    }
+
+    #[test]
+    fn step_up_approval_is_connection_bound() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let op = make_add_op("c");
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("expected receipt")
+        };
+        // A different connection cannot use it...
+        let msg = handle_on(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: op.clone(),
+                    stepup_approval: Some(approval_id.clone()),
+                },
+                Some(h.capability.clone()),
+            ),
+            TEST_CONNECTION + 1,
+        );
+        match service_outcome(msg) {
+            ServiceOutcome::Err { error } => {
+                assert!(error.message.contains("different connection"))
+            }
+            ServiceOutcome::Ok { .. } => panic!("cross-connection approval must be denied"),
+        }
+        // ...but the minting connection still can.
+        let ok = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op,
+                    stepup_approval: Some(approval_id),
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        assert!(matches!(service_outcome(ok), ServiceOutcome::Ok { .. }));
+    }
+
+    #[test]
+    fn strict_profile_denies_browser_and_tool_write_surfaces() {
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::SaveCredential {
+                    domain: "example.com".into(),
+                    username: "u".into(),
+                    password: "p".into(),
+                    url: Some("https://example.com".into()),
+                    save_trigger: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::SaveCredentialResponse {
+                success: false,
+                error,
+                ..
+            } => {
+                assert!(error.unwrap().contains("step_up_required"))
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::SaveSecret {
+                    client_id: "tool".into(),
+                    domain: "example.com".into(),
+                    value: "v".into(),
+                    purpose: None,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::SaveSecretResponse {
+                success: false,
+                error,
+                ..
+            } => {
+                assert!(error.unwrap().contains("step_up_required"))
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn legacy_profile_keeps_unattended_mutations() {
+        // Strict OFF (the desktop default until UI support): behavior is
+        // unchanged — the regression guard for the rollout gate.
+        let h = harness_with_vault();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: make_add_op("legacy"),
+                    stepup_approval: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        assert!(
+            matches!(service_outcome(msg), ServiceOutcome::Ok { .. }),
+            "strict-off must keep pre-SP-0 behavior"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // SP-0 adversarial review remediation tests (F1/F2a/F3/F9)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn strict_profile_denies_bare_sync_now_message() {
+        // Review F1: the bare IpcMessage::SyncNow (not the VaultOp) was an
+        // ungated alias that applied remote mutations unattended.
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(&rt, &h.server, envelope(IpcMessage::SyncNow, None)) {
+            IpcMessage::SyncNowResponse {
+                success: false,
+                error: Some(error),
+                ..
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_site_permission_revocation() {
+        // Review F3: revocation is a policy mutation on a surface that
+        // cannot step up.
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::RevokeSitePermission {
+                    host: "example.com".into(),
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::RevokeSitePermissionResponse {
+                success: false,
+                error: Some(error),
+                ..
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_site_permission_grant() {
+        // Reviewer-requested coverage: the GRANT direction's strict denial
+        // (revocation already had one; the code existed since the base
+        // commit — this pins it).
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::GrantSitePermission {
+                    host: "example.com".into(),
+                    allow_insecure: true,
+                },
+                Some(h.capability.clone()),
+            ),
+        ) {
+            IpcMessage::GrantSitePermissionResponse {
+                success: false,
+                error: Some(error),
+            } => assert!(error.contains("step_up_required")),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn step_up_is_refused_while_vault_locked() {
+        // Review F2: the full open() against a locked daemon vault would
+        // install the process-global audit-key lease (breaking
+        // cleared-on-lock) and run maintenance sweeps on a vault at rest.
+        // Refused: unlock first.
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        VaultManager::create(&vault_path, b"test_password").unwrap();
+        // DaemonVault stays LOCKED (no unlock call).
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("locked.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_require_stepup(true);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        match handle(
+            &rt,
+            &server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: VaultOp::EntryList,
+                },
+                None,
+            ),
+        ) {
+            IpcMessage::StepUpDenied { error, .. } => {
+                assert!(error.contains("locked"), "unexpected denial: {error}")
+            }
+            IpcMessage::StepUpReceipt { .. } => {
+                panic!("step-up must be refused while the vault is locked")
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SP-1 / ADR-014: exact-entry service grants
+    // ------------------------------------------------------------------
+
+    fn sp1_harness() -> (GateHarness, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+        let vm = VaultManager::create(&vault_path, password).unwrap();
+        let _entry_id = vm
+            .add_entry(&Entry {
+                entry_id: None,
+                title: "Svc".to_string(),
+                username: "svc-user".to_string(),
+                password: "svc-secret".to_string().into(),
+                url: Some("https://svc.example".to_string()),
+                notes: None,
+                credential_type: crate::CredentialType::Password,
+                created_at: Utc::now(),
+                modified_at: Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        drop(vm);
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { daemon_vault.unlock(password).await })
+            .unwrap();
+        let grants = tmp.path().join("service-grants.json");
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("sp1.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        )
+        .with_service_grants_path(grants.clone());
+        (
+            GateHarness {
+                _tmp: tmp,
+                server,
+                capability: String::new(),
+                permissions_path: std::path::PathBuf::new(),
+            },
+            grants,
+        )
+    }
+
+    fn report_value(msg: IpcMessage) -> serde_json::Value {
+        match msg {
+            IpcMessage::ServiceResult {
+                outcome:
+                    ServiceOutcome::Ok {
+                        result: VaultOpResult::Report(value),
+                    },
+            } => value,
+            IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Err { error },
+            } => panic!("service error: {error}"),
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn service_grant_lifecycle_end_to_end() {
+        let (h, _grants) = sp1_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // 1. Mint — grant administration needs a step-up on EVERY profile
+        //    (review F2). First prove the unapproved call is denied, then
+        //    approve and retry.
+        let create_op = VaultOp::ServiceGrantCreate {
+            client_id: "sandesha-svc".into(),
+            entry_id: 1,
+            fields: vec!["password".into()],
+            expires_at: None,
+            required_exe_sha256: None,
+            registration_key_fingerprint: None,
+        };
+        let unapproved = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: create_op.clone(),
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        match unapproved {
+            IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Err { error },
+            } => assert_eq!(error.code, "step_up_required"),
+            other => panic!(
+                "unapproved grant create must be step-up denied: {}",
+                variant_name(&other)
+            ),
+        }
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: create_op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("expected step-up receipt")
+        };
+        let created = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: create_op,
+                    stepup_approval: Some(approval_id),
+                },
+                None,
+            ),
+        );
+        let create_report = report_value(created);
+        assert_eq!(create_report["status"], "created");
+        let token = create_report["client_token"].as_str().unwrap().to_string();
+        let grant_id = create_report["grant_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!grant_id.is_empty(), "mint report must carry grant_id");
+
+        // 2. Retrieve: exact entry + field + token -> the value.
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token: token.clone(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        assert_eq!(report["status"], "authorized");
+        assert_eq!(report["value"].as_str(), Some("svc-secret"));
+
+        // 3. Un-granted probing: wrong entry id -> denied (never
+        //    not_found before grant validation).
+        let probe = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 99,
+                        field: "password".into(),
+                        token: token.clone(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        assert_eq!(report_value(probe)["status"], "denied");
+
+        // 4. Revoke (admin op — step-up), then retrieval is denied.
+        let revoke_op = VaultOp::ServiceGrantRevoke { grant_id };
+        let IpcMessage::StepUpReceipt {
+            approval_id: revoke_approval,
+            ..
+        } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: revoke_op.clone(),
+                },
+                None,
+            ),
+        )
+        else {
+            panic!("expected step-up receipt for revoke")
+        };
+        let revoked = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: revoke_op,
+                    stepup_approval: Some(revoke_approval),
+                },
+                None,
+            ),
+        );
+        assert_eq!(report_value(revoked)["status"], "revoked");
+        let after = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "sandesha-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token,
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        assert_eq!(report_value(after)["status"], "denied");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_policy_enforcement_end_to_end() {
+        // SP-3 / ADR-016: the SERVER enforcement block (review F2 — the
+        // unit tests alone left it unexercised). Pin the test binary's own
+        // digest via /proc/self/exe; the strict harness's PeerContext pid
+        // is the daemon's (this process), so the evidence resolves.
+        let (h, _grants) = sp1_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Self digest.
+        let self_digest = {
+            use sha2::Digest;
+            use std::io::Read;
+            let mut f = std::fs::File::open("/proc/self/exe").unwrap();
+            let mut hasher = sha2::Sha256::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = f.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            hex::encode(hasher.finalize())
+        };
+
+        // Mint with the self pin (via the step-up flow).
+        let create_op = VaultOp::ServiceGrantCreate {
+            client_id: "exe-svc".into(),
+            entry_id: 1,
+            fields: vec!["password".into()],
+            expires_at: None,
+            required_exe_sha256: Some(vec![self_digest]),
+            registration_key_fingerprint: None,
+        };
+        let IpcMessage::StepUpReceipt { approval_id, .. } = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::StepUpAuthorize {
+                    master_password: "test_password".to_string(),
+                    op: create_op.clone(),
+                },
+                None,
+            ),
+        ) else {
+            panic!("receipt")
+        };
+        let created = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: create_op,
+                    stepup_approval: Some(approval_id),
+                },
+                None,
+            ),
+        );
+        let report = report_value(created);
+        assert_eq!(report["status"], "created");
+        let token = report["client_token"].as_str().unwrap().to_string();
+
+        // Retrieval: the pin matches THIS process's binary — but the
+        // harness's PeerContext.pid is None on macOS... on Linux it is
+        // Some(our pid) via the test_peer() fixture, which uses 4242 —
+        // a NONEXISTENT pid. So evidence is unavailable -> denied.
+        // This is exactly the fail-closed behavior we want to pin.
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "exe-svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token,
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        // test_peer uses pid 4242 — /proc/4242/exe may or may not exist
+        // on the CI runner. The ASSERTION is: either denied (evidence
+        // unavailable or mismatch) — never authorized with a pin we
+        // didn't verify against the actual process.
+        assert!(
+            report["status"] == "denied",
+            "pinned grant with non-self pid must deny, got: {report}"
+        );
+        let error = report["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("executable") || error.contains("unavailable"),
+            "denial must carry the exe reason, got: {error}"
+        );
+    }
+
+    #[test]
+    fn grant_admin_ops_are_step_up_class() {
+        // SP-1 admin ops join the SP-0 classification (exhaustive match
+        // forces this; pinned here for the spec).
+        use sentinelpass_protocol::VaultOp as O;
+        assert!(O::ServiceGrantCreate {
+            client_id: "x".into(),
+            entry_id: 1,
+            fields: vec![],
+            expires_at: None,
+            required_exe_sha256: None,
+            registration_key_fingerprint: None,
+        }
+        .requires_admin_step_up());
+        assert!(O::ServiceGrantRevoke {
+            grant_id: "g".into()
+        }
+        .requires_admin_step_up());
+        assert!(!O::ServiceGetSecret {
+            client_id: "x".into(),
+            entry_id: 1,
+            field: "password".into(),
+            token: "t".into(),
+        }
+        .requires_admin_step_up());
+    }
+
+    #[test]
+    fn tampered_grant_store_fails_closed() {
+        let (h, grants) = sp1_harness();
+        std::fs::write(&grants, b"{\"grants\": {}, \"evil\": 1}").unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let got = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "x".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token: "sps_anything".into(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            ),
+        );
+        let report = report_value(got);
+        assert_eq!(
+            report["status"], "denied",
+            "tampered store must fail closed, got: {report}"
+        );
     }
 }

@@ -397,6 +397,52 @@ pub enum VaultOp {
     /// local vault when none exists). Not served over IPC in this release —
     /// the CLI runs pairing as exclusive offline maintenance under the
     /// vault lock.
+    // --- SP-1 / ADR-014: exact-entry service grants ----------------------
+    /// Retrieval-only: serve one field of one EXACT entry under a service
+    /// grant (client token + exact entry_id + field). Never step-up.
+    ServiceGetSecret {
+        client_id: String,
+        entry_id: i64,
+        field: String,
+        token: String,
+    },
+    /// Administration (step-up class): mint a service grant. The returned
+    /// report carries the grant id and the one-time-shown service token.
+    ServiceGrantCreate {
+        client_id: String,
+        entry_id: i64,
+        fields: Vec<String>,
+        /// Unix seconds; None = no expiry.
+        expires_at: Option<i64>,
+        /// SP-3 / ADR-016: optional mandatory executable policy (hex
+        /// SHA-256 digests of approved binaries). None = no pin.
+        #[serde(default)]
+        required_exe_sha256: Option<Vec<String>>,
+        /// SP-4 / ADR-017: full 40-hex OpenPGP fingerprint.
+        #[serde(default)]
+        registration_key_fingerprint: Option<String>,
+    },
+    /// Administration (step-up class): revoke a grant by id.
+    ServiceGrantRevoke {
+        grant_id: String,
+    },
+    /// Administration (step-up class): begin enrollment — mint a
+    /// single-use canonical transcript challenge. SP-4 / ADR-017.
+    ServiceEnrollmentBegin {
+        client_id: String,
+    },
+    /// Enrollment completion: prove OpenPGP key possession by signing
+    /// the canonical transcript. On verification, the grant's token is
+    /// minted and shown once.
+    ServiceEnrollmentComplete {
+        client_id: String,
+        nonce: String,
+        signature_armored: String,
+        /// The client's OpenPGP public key (armored). Imported into an
+        /// ISOLATED keyring for verification; the fingerprint check
+        /// against the pre-approved grant is the binding control.
+        client_public_key: String,
+    },
     SyncPairJoin {
         relay_url: String,
         code: String,
@@ -449,6 +495,82 @@ pub enum VaultOpResult {
 impl std::fmt::Debug for VaultOpResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.kind())
+    }
+}
+
+/// SP-0 / ADR-013: does this operation require a fresh master-password
+/// step-up approval before the daemon will execute it?
+///
+/// The match is EXHAUSTIVE BY CONSTRUCTION (no wildcard arm): adding a
+/// `VaultOp` variant fails compilation here until it is classified.
+/// Classification rationale lives in ADR-013; the classes are:
+/// - reads and status/diagnostic queries: no step-up (unattended-safe);
+/// - `VaultCreate`: bootstrap password-setting in maintenance mode — the
+///   master password is the operation itself;
+/// - everything that creates, mutates, deletes, imports, exports (a
+///   sensitive read), or reconfigures trust/policy (biometrics, sync
+///   administration, conflict/dead-letter resolution, pairing): step-up.
+///   `SyncNow` is classified as a mutation because a sync cycle APPLIES
+///   remote mutations; the strict profile must not let unattended sync
+///   overwrite service credentials.
+impl VaultOp {
+    pub fn requires_admin_step_up(&self) -> bool {
+        use VaultOp::*;
+        // Exhaustive match: EVERY variant has an explicit arm and there is
+        // no wildcard — a newly added variant fails compilation here until
+        // it is classified (fail-closed by construction).
+        match self {
+            EntryAdd { .. }
+            | EntryUpdate { .. }
+            | EntryDelete { .. }
+            | TotpAdd { .. }
+            | TotpRemove { .. }
+            | SshKeyAdd { .. }
+            | SshKeyDelete { .. }
+            | RegistrySweep
+            | EntityAdd { .. }
+            | EntityDelete { .. }
+            | EntryAssign { .. }
+            | EntryUnassign { .. }
+            | EntryMarkRotated { .. }
+            | EntrySetExpiresAt { .. }
+            | BiometricEnable { .. }
+            | BiometricDisable
+            | ExportAll
+            | ImportEntries { .. }
+            | SyncInit { .. }
+            | SyncDisable
+            | SyncDeviceRevoke { .. }
+            | SyncNow
+            | SyncMigrateClaim
+            | SyncMigrateAuthoritative { .. }
+            | SyncConflictResolve { .. }
+            | SyncDeadLetterPurge { .. }
+            | SyncPairStart
+            | SyncPairJoin { .. }
+            | ServiceGrantCreate { .. }
+            | ServiceGrantRevoke { .. }
+            | ServiceEnrollmentBegin { .. } => true,
+            VaultCreate { .. }
+            | VaultStatus
+            | EntryGet { .. }
+            | EntryList
+            | TotpCode { .. }
+            | TotpMetadata { .. }
+            | SshKeyList
+            | SshKeyGet { .. }
+            | RegistryOverview { .. }
+            | EntityList
+            | HealthReport
+            | AuditVerify
+            | BiometricStatusGet
+            | SyncDeviceList
+            | SyncStatus
+            | SyncDeadLetterList
+            | SyncConflictList
+            | ServiceGetSecret { .. }
+            | ServiceEnrollmentComplete { .. } => false,
+        }
     }
 }
 
@@ -518,6 +640,104 @@ impl From<VaultOpResult> for ServiceOutcome {
 impl From<ServiceError> for ServiceOutcome {
     fn from(error: ServiceError) -> Self {
         Self::Err { error }
+    }
+}
+
+#[cfg(test)]
+mod step_up_classification_tests {
+    use super::{ServiceEntry, VaultOp};
+
+    fn entry() -> ServiceEntry {
+        ServiceEntry {
+            entry_id: None,
+            title: "t".to_string(),
+            username: String::new(),
+            password: zeroize::Zeroizing::new(String::new()),
+            url: None,
+            notes: None,
+            credential_type: "password".to_string(),
+            created_at: 0,
+            modified_at: 0,
+            favorite: false,
+        }
+    }
+
+    /// SP-0 / ADR-013: the exhaustive match forces classification at
+    /// compile time; this test pins the intent so a future edit cannot
+    /// silently flip a class. Reads stay unattended; mutations, policy,
+    /// export (sensitive read) and sync administration require the
+    /// master-password step-up; VaultCreate is bootstrap-exempt.
+    #[test]
+    fn step_up_classification_matches_spec() {
+        let reads = vec![
+            VaultOp::VaultStatus,
+            VaultOp::EntryList,
+            VaultOp::EntryGet { entry_id: 1 },
+            VaultOp::TotpCode { entry_id: 1 },
+            VaultOp::TotpMetadata { entry_id: 1 },
+            VaultOp::SshKeyList,
+            VaultOp::SshKeyGet {
+                key_id: 1,
+                include_private: false,
+            },
+            VaultOp::RegistryOverview {
+                include_strength: false,
+            },
+            VaultOp::EntityList,
+            VaultOp::HealthReport,
+            VaultOp::AuditVerify,
+            VaultOp::BiometricStatusGet,
+            VaultOp::SyncDeviceList,
+            VaultOp::SyncStatus,
+            VaultOp::SyncDeadLetterList,
+            VaultOp::SyncConflictList,
+            VaultOp::VaultCreate {
+                master_password: zeroize::Zeroizing::new(String::new()),
+            },
+        ];
+        for op in &reads {
+            assert!(
+                !op.requires_admin_step_up(),
+                "{op:?} must remain unattended/bootstrap"
+            );
+        }
+
+        let mutations = vec![
+            VaultOp::EntryAdd { entry: entry() },
+            VaultOp::EntryUpdate {
+                entry_id: 1,
+                entry: entry(),
+            },
+            VaultOp::EntryDelete { entry_id: 1 },
+            VaultOp::ImportEntries {
+                entries: vec![entry()],
+            },
+            VaultOp::ExportAll,
+            VaultOp::TotpAdd {
+                entry_id: 1,
+                secret: zeroize::Zeroizing::new(String::new()),
+                algorithm: None,
+                digits: None,
+                period: None,
+                issuer: None,
+                account_name: None,
+            },
+            VaultOp::TotpRemove { entry_id: 1 },
+            VaultOp::RegistrySweep,
+            VaultOp::BiometricEnable {
+                master_password: zeroize::Zeroizing::new(String::new()),
+            },
+            VaultOp::BiometricDisable,
+            VaultOp::SyncNow,
+            VaultOp::SyncDeviceRevoke {
+                device_id: "d".into(),
+            },
+            VaultOp::SyncPairStart,
+            VaultOp::SyncMigrateClaim,
+        ];
+        for op in &mutations {
+            assert!(op.requires_admin_step_up(), "{op:?} must require step-up");
+        }
     }
 }
 

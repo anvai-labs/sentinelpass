@@ -340,12 +340,39 @@ impl SystemdCredsTool {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|e| {
-            PasswordManagerError::InvalidInput(format!(
-                "Failed to launch {}: {e} (set --systemd-creds or check PATH)",
-                command.get_program().to_string_lossy()
-            ))
-        })?;
+        // ETXTBSY (26): exec'ing a file whose inode is still write-busy.
+        // A no-op for the real root-owned /usr/bin/systemd-creds; decisive
+        // on filesystems (overlayfs) where a freshly written+fsynced script
+        // can still be transiently busy at exec under load — seen twice on
+        // CI ubuntu legs even with sync_all before exec (#212).
+        let mut child = None;
+        let mut last_err = None;
+        for attempt in 0..5 {
+            match command.spawn() {
+                Ok(spawned) => {
+                    child = Some(spawned);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(26) && attempt < 4 => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+        let mut child = match child {
+            Some(child) => child,
+            None => {
+                let e = last_err.expect("spawn retry loop always sets an error");
+                return Err(PasswordManagerError::InvalidInput(format!(
+                    "Failed to launch {}: {e} (set --systemd-creds or check PATH)",
+                    command.get_program().to_string_lossy()
+                )));
+            }
+        };
 
         // Owned copy of the plaintext for the writer thread; zeroized on drop.
         let payload = Zeroizing::new(plaintext.to_vec());

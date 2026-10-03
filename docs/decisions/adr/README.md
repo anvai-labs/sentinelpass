@@ -33,3 +33,8 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-010](ADR-010-release-assurance-and-provenance.md) | Release assurance and provenance | Accepted (rev 2) |
 | [ADR-011](ADR-011-service-credentials-systemd.md) | Restart-safe service credentials via systemd | Accepted |
 | [ADR-012](ADR-012-shared-private-file-custody.md) | Shared private-file custody | Accepted |
+| [ADR-013](ADR-013-admin-step-up.md) | Master-password administrative step-up (SP-0) | Accepted |
+| [ADR-014](ADR-014-service-grants-v2.md) | Exact-entry service grants (SP-1) | Accepted |
+| [ADR-015](ADR-015-trusted-peer-context.md) | Trusted peer context (SP-2) | Accepted |
+| [ADR-016](ADR-016-executable-policy.md) | Linux executable policy (SP-3) | Accepted |
+| [ADR-017](ADR-017-openpgp-enrollment.md) | OpenPGP enrollment (SP-4) | Accepted |

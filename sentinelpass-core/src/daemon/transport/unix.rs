@@ -62,12 +62,12 @@ impl UnixSocketTransport {
     /// Accept a new connection (blocking, use in async context).
     ///
     /// WBS-507: platform peer-credential check — the connecting process's
-    /// effective UID must equal ours. The owner-only directory is the first
-    /// gate; this is the second, kernel-verified one (a process that cannot
-    /// create files in the directory cannot connect either way, but the
-    /// peer check also covers directories whose permissions were loosened
-    /// after bind).
-    pub async fn accept(&self) -> TransportResult<UnixSocketConnection> {
+    /// effective UID must equal ours (unchanged authorization boundary).
+    /// SP-2 / ADR-015: the kernel's full credential view is ALSO captured
+    /// (euid + egid + pid on Linux via `SO_PEERCRED`; euid + egid on
+    /// macOS/BSD) and returned alongside as trusted, server-owned
+    /// provenance for the connection's lifetime.
+    pub async fn accept(&self) -> TransportResult<(UnixSocketConnection, KernelPeerCred)> {
         let listener = self
             .listener
             .as_ref()
@@ -76,22 +76,22 @@ impl UnixSocketTransport {
         let (stream, _addr) = listener.accept().await.map_err(TransportError::Io)?;
 
         use std::os::fd::AsRawFd;
-        match peer_uid(stream.as_raw_fd()) {
-            Some(uid) if uid == unsafe { libc::geteuid() } => {}
-            Some(uid) => {
-                return Err(TransportError::ConnectionFailed(format!(
-                    "refused IPC connection from foreign peer UID {}",
-                    uid
-                )));
-            }
+        let cred = match peer_cred(stream.as_raw_fd()) {
+            Some(cred) => cred,
             None => {
                 return Err(TransportError::ConnectionFailed(
                     "refused IPC connection: peer credentials unavailable".to_string(),
                 ));
             }
+        };
+        if cred.uid != unsafe { libc::geteuid() } {
+            return Err(TransportError::ConnectionFailed(format!(
+                "refused IPC connection from foreign peer UID {}",
+                cred.uid
+            )));
         }
 
-        Ok(UnixSocketConnection::from_stream(stream))
+        Ok((UnixSocketConnection::from_stream(stream), cred))
     }
 
     /// Check if the transport is bound
@@ -100,10 +100,22 @@ impl UnixSocketTransport {
     }
 }
 
-/// Peer effective UID via the platform socket credential API:
-/// `SO_PEERCRED` on Linux, `getpeereid()` on macOS/*BSD.
+/// Kernel-derived peer credentials at accept time (SP-2 / ADR-015):
+/// server-owned provenance, never deserialized from any wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KernelPeerCred {
+    pub uid: u32,
+    pub gid: Option<u32>,
+    /// Linux only (`SO_PEERCRED` carries the pid); `None` elsewhere.
+    /// SP-3's executable policy will resolve `/proc/<pid>/exe` from it.
+    pub pid: Option<u32>,
+}
+
+/// Peer credentials via the platform socket credential API:
+/// `SO_PEERCRED` on Linux (uid+gid+pid), `getpeereid()` on macOS/*BSD
+/// (uid+gid; no pid without extra plumbing — documented fidelity gap).
 #[cfg(unix)]
-fn peer_uid(fd: std::os::fd::RawFd) -> Option<u32> {
+fn peer_cred(fd: std::os::fd::RawFd) -> Option<KernelPeerCred> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let mut ucred = libc::ucred {
@@ -122,7 +134,17 @@ fn peer_uid(fd: std::os::fd::RawFd) -> Option<u32> {
             )
         };
         if ok == 0 {
-            Some(ucred.uid)
+            // A zero pid means the kernel could not attribute the
+            // connection (e.g. a cross-PID-namespace peer); record
+            // uid+gid and leave pid absent rather than trusting 0.
+            // SO_PEERCRED is a connect-time snapshot — a later peer exit
+            // does NOT zero it (stale/recycled pids are SP-3's concern).
+            let pid = (ucred.pid > 0).then_some(ucred.pid as u32);
+            Some(KernelPeerCred {
+                uid: ucred.uid,
+                gid: Some(ucred.gid),
+                pid,
+            })
         } else {
             None
         }
@@ -133,7 +155,11 @@ fn peer_uid(fd: std::os::fd::RawFd) -> Option<u32> {
         let mut gid: libc::gid_t = 0;
         let ok = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
         if ok == 0 {
-            Some(uid)
+            Some(KernelPeerCred {
+                uid,
+                gid: Some(gid),
+                pid: None,
+            })
         } else {
             None
         }
@@ -249,10 +275,19 @@ mod tests {
         let mut client = sentinelpass_protocol::UnixSocketConnection::connect(socket_path.clone())
             .await
             .unwrap();
-        let conn = transport.accept().await.expect("same-euid peer accepted");
+        let (mut conn, cred) = transport.accept().await.expect("same-euid peer accepted");
+        // SP-2: the kernel credential view rides along with REAL kernel
+        // data — pin the platform fidelity contract on the live path
+        // (review F5): uid equals ours (the refusal would have fired
+        // otherwise), pid present exactly on Linux/Android.
+        assert_eq!(cred.uid, unsafe { libc::geteuid() });
+        assert_eq!(
+            cred.pid.is_some(),
+            cfg!(any(target_os = "linux", target_os = "android")),
+            "pid fidelity: present on Linux, absent elsewhere"
+        );
         // Exchange a frame to prove the connection is live.
         client.write_message(b"ping").await.unwrap();
-        let mut conn = conn;
         let msg = conn.read_message().await.unwrap();
         assert_eq!(msg, b"ping");
         let _ = std::fs::remove_file(&socket_path);

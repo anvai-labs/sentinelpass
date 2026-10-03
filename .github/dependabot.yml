@@ -51,6 +51,23 @@ updates:
     # migrate with the coordinated crypto-stack slice (#213).
       - dependency-name: aes-gcm
         versions: [">=0.11"]
+    # The five below are majors failing CI for structural reasons; each is a
+    # dedicated reviewed slice on the #213 migration ladder.
+      - dependency-name: sha2
+        versions: [">=0.11"]
+    # cocoa 0.27 deprecates its whole API ("use objc2") and breaks the macOS
+    # clippy gate, which no CI leg compiles today (#211). objc2 migration.
+      - dependency-name: cocoa
+        versions: [">=0.26"]
+    # argon2 0.6: KDF-stack major — golden vectors + derivation compat.
+      - dependency-name: argon2
+        versions: [">=0.6"]
+    # ed25519-dalek 3.0: signing-API reshape across sync auth.
+      - dependency-name: ed25519-dalek
+        versions: [">=3"]
+    # keyring 4.x: platform-keystore major (Keychain/Hello) — hardware review.
+      - dependency-name: keyring
+        versions: [">=4"]
 
   - package-ecosystem: github-actions
     directory: /

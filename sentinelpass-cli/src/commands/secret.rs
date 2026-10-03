@@ -115,10 +115,29 @@ pub async fn get_secret_from_daemon(
             let detail = error.unwrap_or_else(|| "external secret access denied".to_string());
             anyhow::bail!("{}", detail)
         }
+        // Authorized but the vault holds no matching entry/field — a
+        // distinct, actionable message instead of a generic protocol
+        // error (handoff §8 diagnostics fix; mirrors the exec wording).
+        IpcMessage::GetExternalSecretResponse {
+            value: None,
+            authorized: true,
+            error: None,
+            ..
+        } => anyhow::bail!(
+            "no entry for '{}' (grant may exist but the vault has no matching entry)",
+            domain
+        ),
         IpcMessage::GetExternalSecretResponse {
             error: Some(error), ..
         } => anyhow::bail!("{}", error),
-        _ => anyhow::bail!("Unexpected daemon response during external secret lookup"),
+        // The authorized-but-no-value case (grant exists, vault has no
+        // matching entry/field) already returned above with value: None;
+        // reaching here means a genuinely unexpected response shape.
+        _ => anyhow::bail!(
+            "Unexpected daemon response during external secret lookup \
+             (report this: the daemon replied with a response type the CLI \
+             does not recognize)"
+        ),
     }
 }
 

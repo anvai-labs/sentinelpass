@@ -200,6 +200,12 @@ jobs:
   # Android Emulator Tests
   emulator-tests:
     name: Android Emulator Tests
+    # OPTIONAL (#212): the emulator matrix has a chronic infra-flake rate
+    # (Maven/CDN/boot — 5 failures in one day across 3 PRs, 0 code failures).
+    # The JNI bridge build is verified by the mobile-bridge job (required);
+    # emulator runtime verification remains VISIBLE in PR checks but does
+    # NOT block the Gate or merges.
+    continue-on-error: true
     # ubuntu-24.04 is x86_64 and supports KVM hardware acceleration for Android
     # emulators. macos-latest is now arm64 and cannot run x86_64 AVD images.
     runs-on: ubuntu-24.04
