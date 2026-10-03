@@ -14,7 +14,7 @@ exclude = ["vendor/wayland-scanner"]
 resolver = "2"
 
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 edition = "2021"
 # File::try_lock (WBS-501/503 maintenance lock) stabilized in 1.89 (review F6).
 rust-version = "1.89"
@@ -99,7 +99,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 url = "2.5"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 toml_dep = { package = "toml", version = "0.8" }
 
 # System

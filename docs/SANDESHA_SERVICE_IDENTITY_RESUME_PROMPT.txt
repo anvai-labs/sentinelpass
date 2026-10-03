@@ -1,0 +1,23 @@
+Resume SentinelPass service-identity work requested by the owner. Read
+docs/SANDESHA_SERVICE_IDENTITY_HANDOFF_2026-10-02.md, AGENTS.md and the security
+status/architecture documents first. The handoff reviews v0.14.2 at 636b56f and
+issue #194; recheck current state and work on a feature branch targeting develop.
+
+Implement the SP-0 through SP-7 plan. SP-0 is mandatory: every administrative
+mutation needs fresh master-password verification bound to the precise operation;
+an unlocked vault, biometric, PGP key or automation token is insufficient. Only
+approved retrieval/restart and internal audit/replay bookkeeping run unattended.
+Cover all mutation entry points and separate app/sysadmin/keyadmin duties, keeping
+master-password approval off the VPS. Then implement exact-entry grants, isolated
+service authority, trusted Linux peer/executable context, OpenPGP enrollment with
+single-use signed challenges, and restart-safe systemd delivery. Preserve the
+owner IPC boundary. OpenPGP proves key possession; argv/process names are not
+identity; executable hashes do not defeat same-UID/root compromise. Keep remote
+mTLS a separately qualified adapter and do not enable public listeners by default.
+
+Run the adversarial, restart, interoperability and performance gates; fix the CLI
+diagnostics noted in the handoff. Use synthetic credentials and existing local/OVH
+capacity only. Follow repository CI/review/release rules, then return a released
+artifact/capability matrix and qualification recipe to Sandesha. Do not migrate
+production credentials or claim the owner's pending password import is complete.
+The Sandesha session continues mail deployment and UI verification independently.

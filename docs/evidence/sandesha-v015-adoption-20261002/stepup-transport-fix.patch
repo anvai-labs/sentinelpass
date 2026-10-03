@@ -1,0 +1,243 @@
+diff --git a/sentinelpass-cli/src/commands/service_client.rs b/sentinelpass-cli/src/commands/service_client.rs
+index 857b0ea..f45d992 100644
+--- a/sentinelpass-cli/src/commands/service_client.rs
++++ b/sentinelpass-cli/src/commands/service_client.rs
+@@ -91,11 +91,7 @@ impl Backend {
+                 let first = crate::run_async(client.call_service(op.clone()))?;
+                 match first {
+                     Ok(result) => Ok(result),
+-                    Err(err) if is_step_up_required(&err) => {
+-                        let approval = step_up_interactive(client, &op)?;
+-                        crate::run_async(client.call_service_with_approval(op, approval))?
+-                            .map_err(|e| anyhow!(format!("{e}")))
+-                    }
++                    Err(err) if is_step_up_required(&err) => step_up_interactive(client, op),
+                     Err(err) => Err(anyhow!(err.to_string())),
+                 }
+             }
+@@ -243,33 +239,14 @@ fn is_step_up_required(err: &sentinelpass_protocol::ProtocolError) -> bool {
+     }
+ }
+ 
+-/// Interactive SP-0 flow: prompt for the master password and mint a
+-/// single-use approval for exactly `op`. Returns the approval id.
+-fn step_up_interactive(client: &sentinelpass_protocol::IpcClient, op: &VaultOp) -> Result<String> {
+-    use rpassword::prompt_password;
+-    let password = prompt_password(
++/// Prompt before connecting, then authorize and mutate on one secured connection.
++fn step_up_interactive(
++    client: &sentinelpass_protocol::IpcClient,
++    op: VaultOp,
++) -> Result<VaultOpResult> {
++    let password = rpassword::prompt_password(
+         "SentinelPass: this change needs the master password (fresh authorization): ",
+     )?;
+-    let response = crate::run_async(client.send(
+-        sentinelpass_protocol::IpcMessage::StepUpAuthorize {
+-            master_password: password,
+-            op: op.clone(),
+-        },
+-    ))??;
+-    match response {
+-        sentinelpass_protocol::IpcMessage::StepUpReceipt { approval_id, .. } => Ok(approval_id),
+-        sentinelpass_protocol::IpcMessage::StepUpDenied {
+-            error,
+-            retry_after_secs,
+-        } => {
+-            let wait = retry_after_secs
+-                .map(|s| format!(" (retry in {s}s)"))
+-                .unwrap_or_default();
+-            anyhow::bail!("master-password verification failed: {error}{wait}")
+-        }
+-        other => anyhow::bail!(
+-            "unexpected daemon response during step-up: {}",
+-            sentinelpass_protocol::client::message_kind(&other)
+-        ),
+-    }
++    crate::run_async(client.call_service_with_step_up(op, password))?
++        .map_err(|e| anyhow!(e.to_string()))
+ }
+diff --git a/sentinelpass-core/src/daemon/ipc/server.rs b/sentinelpass-core/src/daemon/ipc/server.rs
+index 05d9d09..154d13f 100644
+--- a/sentinelpass-core/src/daemon/ipc/server.rs
++++ b/sentinelpass-core/src/daemon/ipc/server.rs
+@@ -3536,6 +3536,52 @@ mod autofill_origin_gate_tests {
+         }
+     }
+ 
++    /// Sandesha integration: exercise the public client over a REAL socket,
++    /// rather than injecting an identical PeerContext into both handler calls.
++    #[cfg(unix)]
++    #[test]
++    fn step_up_real_client_keeps_approval_connection() {
++        let h = strict_harness();
++        let socket = h.server.socket_path.clone();
++        use std::os::unix::fs::PermissionsExt;
++        std::fs::set_permissions(
++            socket.parent().unwrap(),
++            std::fs::Permissions::from_mode(0o700),
++        )
++        .unwrap();
++        let server = Arc::new(h.server);
++        let rt = tokio::runtime::Runtime::new().unwrap();
++        rt.block_on(async {
++            let running = tokio::spawn(server.run());
++            for _ in 0..100 {
++                if socket.exists() { break; }
++                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++            }
++            if !socket.exists() && running.is_finished() {
++                panic!("test listener failed: {:?}", running.await);
++            }
++            assert!(socket.exists(), "test listener did not start");
++            let client = sentinelpass_protocol::IpcClient::new_with_token(socket, "test-token".into());
++            let op = make_add_op("real-socket-step-up");
++            let receipt = client.send(IpcMessage::StepUpAuthorize {
++                master_password: "test_password".into(), op: op.clone(),
++            }).await.unwrap();
++            let IpcMessage::StepUpReceipt { approval_id, .. } = receipt else {
++                panic!("expected synthetic approval");
++            };
++            let denied = client.call_service_with_approval(op.clone(), approval_id).await;
++            assert!(matches!(denied, Err(sentinelpass_protocol::ProtocolError::Service(ref code, _)) if code == "step_up_required"));
++            let wrong = client.call_service_with_step_up(op.clone(), "wrong-synthetic-password".into()).await;
++            assert!(matches!(wrong, Err(sentinelpass_protocol::ProtocolError::Service(ref code, _)) if code == "step_up_denied"));
++            let result = client.call_service_with_step_up(op, "test_password".into()).await;
++            assert!(result.is_ok(), "same-connection step-up must succeed");
++            let entries = client.call_service(VaultOp::EntryList).await.unwrap();
++            let VaultOpResult::EntryList(entries) = entries else { panic!("expected entry list"); };
++            assert_eq!(entries.len(), 1, "exactly one mutation, no replay or wrong-password write");
++            running.abort();
++        });
++    }
++
+     #[test]
+     fn step_up_allows_exactly_one_mutation() {
+         let h = strict_harness();
+diff --git a/sentinelpass-protocol/src/client.rs b/sentinelpass-protocol/src/client.rs
+index bff4db2..d084f5f 100644
+--- a/sentinelpass-protocol/src/client.rs
++++ b/sentinelpass-protocol/src/client.rs
+@@ -89,16 +89,11 @@ impl IpcClient {
+     /// HKDF directional keys over the auth token + session randoms, AAD-
+     /// bound frames, strictly-increasing counters, and bounded reads.
+     pub async fn send(&self, msg: IpcMessage) -> Result<IpcMessage> {
+-        let envelope = IpcEnvelope {
+-            token: self.auth_token.clone(),
+-            client_token: self.client_token.clone(),
+-            origin: self.origin,
+-            capability: self.capability.clone(),
+-            message: msg,
+-        };
+-        let msg_bytes = serde_json::to_vec(&envelope)
+-            .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
++        let mut ipc = self.connect().await?;
++        self.send_on(&mut ipc, msg).await
++    }
+ 
++    async fn connect(&self) -> Result<crate::connection::IpcConnection> {
+         // --- platform connect ---------------------------------------------
+         #[cfg(unix)]
+         let transport_conn = {
+@@ -129,9 +124,25 @@ impl IpcClient {
+ 
+         // --- session negotiation + exchange ---------------------------------
+         let conn = crate::connection::TransportConnection::from(transport_conn);
+-        let mut ipc = crate::connection::IpcConnection::connect_client(conn, &self.auth_token)
++        crate::connection::IpcConnection::connect_client(conn, &self.auth_token)
+             .await
+-            .map_err(|e| ProtocolError::Ipc(format!("Session negotiation failed: {}", e)))?;
++            .map_err(|e| ProtocolError::Ipc(format!("Session negotiation failed: {}", e)))
++    }
++
++    async fn send_on(
++        &self,
++        ipc: &mut crate::connection::IpcConnection,
++        msg: IpcMessage,
++    ) -> Result<IpcMessage> {
++        let envelope = IpcEnvelope {
++            token: self.auth_token.clone(),
++            client_token: self.client_token.clone(),
++            origin: self.origin,
++            capability: self.capability.clone(),
++            message: msg,
++        };
++        let msg_bytes = serde_json::to_vec(&envelope)
++            .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
+ 
+         ipc.send_frame(&msg_bytes)
+             .await
+@@ -170,9 +181,71 @@ impl IpcClient {
+         }
+     }
+ 
++    /// Authorize and execute one exact operation on ONE secured connection.
++    /// No transparent retry: losing the response may leave the mutation outcome unknown.
++    /// Obtain the password before calling; do not hold a socket open during human input.
++    pub async fn call_service_with_step_up(
++        &self,
++        op: VaultOp,
++        master_password: String,
++    ) -> Result<VaultOpResult> {
++        let mut ipc = self.connect().await?;
++        let receipt = self
++            .send_on(
++                &mut ipc,
++                IpcMessage::StepUpAuthorize {
++                    master_password,
++                    op: op.clone(),
++                },
++            )
++            .await?;
++        let approval_id = match receipt {
++            IpcMessage::StepUpReceipt { approval_id, .. } => approval_id,
++            IpcMessage::StepUpDenied {
++                error,
++                retry_after_secs,
++            } => {
++                let wait = retry_after_secs
++                    .map(|s| format!(" (retry in {s}s)"))
++                    .unwrap_or_default();
++                return Err(ProtocolError::Service(
++                    "step_up_denied".into(),
++                    format!("{error}{wait}"),
++                ));
++            }
++            other => {
++                return Err(ProtocolError::Ipc(format!(
++                    "unexpected step-up response: {}",
++                    message_kind(&other)
++                )))
++            }
++        };
++        match self
++            .send_on(
++                &mut ipc,
++                IpcMessage::ServiceCall {
++                    op,
++                    stepup_approval: Some(approval_id),
++                },
++            )
++            .await?
++        {
++            IpcMessage::ServiceResult {
++                outcome: ServiceOutcome::Ok { result },
++            } => Ok(result),
++            IpcMessage::ServiceResult {
++                outcome: ServiceOutcome::Err { error },
++            } => Err(ProtocolError::Service(error.code, error.message)),
++            other => Err(ProtocolError::Ipc(format!(
++                "unexpected approved service response: {}",
++                message_kind(&other)
++            ))),
++        }
++    }
++
+     /// SP-0 / ADR-013: `call_service` carrying a fresh step-up approval id
+-    /// (minted via `StepUpAuthorize` on this same connection). The daemon
+-    /// validates and consumes it atomically with dispatch.
++    /// This one-shot method opens a NEW connection, so a connection-bound receipt
++    /// minted by `send` cannot succeed here. Use `call_service_with_step_up` instead.
+     pub async fn call_service_with_approval(
+         &self,
+         op: VaultOp,

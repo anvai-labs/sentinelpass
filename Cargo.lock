@@ -4197,7 +4197,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower",
- "tower-http 0.6.8",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -4231,7 +4231,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
- "tower-http 0.6.8",
+ "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -4611,7 +4611,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-cli"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4636,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-core"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "aes-gcm",
  "anvai-secure-io",
@@ -4684,7 +4684,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-daemon"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-host"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "sentinelpass-core",
@@ -4711,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-mobile-bridge"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "cbindgen",
  "chrono",
@@ -4729,7 +4729,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-protocol"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -4749,7 +4749,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-relay"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4770,7 +4770,7 @@ dependencies = [
  "tokio",
  "toml 0.8.2",
  "tower",
- "tower-http 0.5.2",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-ui"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5989,23 +5989,6 @@ dependencies = [
 
 [[package]]
 name = "tower-http"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
-dependencies = [
- "bitflags 2.11.0",
- "bytes",
- "http",
- "http-body",
- "http-body-util",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "tower-http"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
@@ -6015,11 +5998,13 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

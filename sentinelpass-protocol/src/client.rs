@@ -89,16 +89,11 @@ impl IpcClient {
     /// HKDF directional keys over the auth token + session randoms, AAD-
     /// bound frames, strictly-increasing counters, and bounded reads.
     pub async fn send(&self, msg: IpcMessage) -> Result<IpcMessage> {
-        let envelope = IpcEnvelope {
-            token: self.auth_token.clone(),
-            client_token: self.client_token.clone(),
-            origin: self.origin,
-            capability: self.capability.clone(),
-            message: msg,
-        };
-        let msg_bytes = serde_json::to_vec(&envelope)
-            .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
+        let mut ipc = self.connect().await?;
+        self.send_on(&mut ipc, msg).await
+    }
 
+    async fn connect(&self) -> Result<crate::connection::IpcConnection> {
         // --- platform connect ---------------------------------------------
         #[cfg(unix)]
         let transport_conn = {
@@ -129,9 +124,25 @@ impl IpcClient {
 
         // --- session negotiation + exchange ---------------------------------
         let conn = crate::connection::TransportConnection::from(transport_conn);
-        let mut ipc = crate::connection::IpcConnection::connect_client(conn, &self.auth_token)
+        crate::connection::IpcConnection::connect_client(conn, &self.auth_token)
             .await
-            .map_err(|e| ProtocolError::Ipc(format!("Session negotiation failed: {}", e)))?;
+            .map_err(|e| ProtocolError::Ipc(format!("Session negotiation failed: {}", e)))
+    }
+
+    async fn send_on(
+        &self,
+        ipc: &mut crate::connection::IpcConnection,
+        msg: IpcMessage,
+    ) -> Result<IpcMessage> {
+        let envelope = IpcEnvelope {
+            token: self.auth_token.clone(),
+            client_token: self.client_token.clone(),
+            origin: self.origin,
+            capability: self.capability.clone(),
+            message: msg,
+        };
+        let msg_bytes = serde_json::to_vec(&envelope)
+            .map_err(|e| ProtocolError::Ipc(format!("Failed to serialize message: {}", e)))?;
 
         ipc.send_frame(&msg_bytes)
             .await
@@ -170,9 +181,71 @@ impl IpcClient {
         }
     }
 
+    /// Authorize and execute one exact operation on ONE secured connection.
+    /// No transparent retry: losing the response may leave the mutation outcome unknown.
+    /// Obtain the password before calling; do not hold a socket open during human input.
+    pub async fn call_service_with_step_up(
+        &self,
+        op: VaultOp,
+        master_password: String,
+    ) -> Result<VaultOpResult> {
+        let mut ipc = self.connect().await?;
+        let receipt = self
+            .send_on(
+                &mut ipc,
+                IpcMessage::StepUpAuthorize {
+                    master_password,
+                    op: op.clone(),
+                },
+            )
+            .await?;
+        let approval_id = match receipt {
+            IpcMessage::StepUpReceipt { approval_id, .. } => approval_id,
+            IpcMessage::StepUpDenied {
+                error,
+                retry_after_secs,
+            } => {
+                let wait = retry_after_secs
+                    .map(|s| format!(" (retry in {s}s)"))
+                    .unwrap_or_default();
+                return Err(ProtocolError::Service(
+                    "step_up_denied".into(),
+                    format!("{error}{wait}"),
+                ));
+            }
+            other => {
+                return Err(ProtocolError::Ipc(format!(
+                    "unexpected step-up response: {}",
+                    message_kind(&other)
+                )))
+            }
+        };
+        match self
+            .send_on(
+                &mut ipc,
+                IpcMessage::ServiceCall {
+                    op,
+                    stepup_approval: Some(approval_id),
+                },
+            )
+            .await?
+        {
+            IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Ok { result },
+            } => Ok(result),
+            IpcMessage::ServiceResult {
+                outcome: ServiceOutcome::Err { error },
+            } => Err(ProtocolError::Service(error.code, error.message)),
+            other => Err(ProtocolError::Ipc(format!(
+                "unexpected approved service response: {}",
+                message_kind(&other)
+            ))),
+        }
+    }
+
     /// SP-0 / ADR-013: `call_service` carrying a fresh step-up approval id
-    /// (minted via `StepUpAuthorize` on this same connection). The daemon
-    /// validates and consumes it atomically with dispatch.
+    /// This one-shot method opens a NEW connection, so a connection-bound receipt
+    /// minted by `send` cannot succeed here. Use `call_service_with_step_up` instead.
     pub async fn call_service_with_approval(
         &self,
         op: VaultOp,
