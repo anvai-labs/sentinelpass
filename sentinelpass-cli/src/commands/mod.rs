@@ -10,6 +10,7 @@ pub mod registry;
 pub mod secret;
 pub mod service_client;
 pub mod service_credential;
+pub mod service_grant;
 pub mod ssh;
 pub mod sync;
 pub mod totp;

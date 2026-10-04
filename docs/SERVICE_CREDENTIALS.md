@@ -203,3 +203,63 @@ provisioning) until the repair — fail-closed by design.
 Unit and integration tests use a fake `systemd-creds` tool (synthetic
 credentials only). Production secrets must not be touched until the flow is
 qualified on the target host with synthetic values.
+
+## Exact-entry service grants (SP-1 / ADR-014, v0.16.0)
+
+The `service-grant` command tree is the strict-profile retrieval surface —
+and the recommended one everywhere. A grant names ONE exact entry id plus
+the fields it may serve; retrieval presents the per-grant service token
+(`SENTINELPASS_SERVICE_TOKEN`); administration (create, revoke, enrollment
+begin) requires a fresh master-password step-up on the SAME connection that
+executes the op.
+
+```bash
+# Mint a grant (prompts for the master password under any profile):
+sentinelpass service-grant create --client-id sandesha-svc \
+  --entry-id 42 --fields password \
+  [--expires-in 30d] [--exe-sha256 <64hex,...>] [--key-fingerprint <40hex>]
+# → prints grant_id + the service token ONCE
+
+# Retrieve (unattended, token-enforced; prints the raw value):
+SENTINELPASS_SERVICE_TOKEN=... sentinelpass service-grant get \
+  --client-id sandesha-svc --entry-id 42 --field password
+
+# Revoke (step-up):
+sentinelpass service-grant revoke --grant-id <uuid>
+
+# OpenPGP enrollment (SP-4/ADR-017) for fingerprinted grants:
+sentinelpass service-grant enrollment begin --client-id sandesha-svc
+# client signs the transcript with their key, then:
+sentinelpass service-grant enrollment complete --client-id sandesha-svc \
+  --nonce <n> --signature sig.asc --public-key pub.asc
+```
+
+Optional factors: `--exe-sha256` pins approved client binaries (Linux
+`/proc/<pid>/exe` evidence, fail-closed); `--key-fingerprint` leaves the
+grant PENDING until OpenPGP enrollment proves key possession (the token is
+only minted at enrollment completion).
+
+### Strict-profile containment (verification follow-up F2)
+
+Under `SENTINELPASS_REQUIRE_STEPUP=1` the daemon AUTHORITATIVELY disables
+the legacy external-secret surface: `GetExternalSecret` is refused even
+for a fully valid legacy grant + client token (the CLI-side env gate is UX
+only). Unsetting the variable in a shell, or editing
+`external-secret-access.json` directly, gains nothing — the daemon will
+not serve legacy grants. Migration path: re-issue grants as service
+grants (`create`), then retrieve with `service-grant get`. The legacy
+surface remains available on non-strict daemons (desktop default).
+
+### Provisioning to a remote host (F4 procedure)
+
+Credentials are host-bound: encrypt ON the target with the target's own
+host key. Do not copy owner-encrypted blobs or export host keys.
+
+```bash
+# owner machine → deliver approved plaintext over authenticated SSH stdin:
+sentinelpass service-grant get --client-id sandesha-svc \
+  --entry-id 42 --field password |
+  ssh user@target 'sudo systemd-creds encrypt --with-key=host \
+    --name=sandesha.provider.key /dev/stdin \
+    /etc/credstore.encrypted/sandesha.provider.key'
+```
