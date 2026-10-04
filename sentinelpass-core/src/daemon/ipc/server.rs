@@ -3615,28 +3615,43 @@ mod autofill_origin_gate_tests {
 
     /// SP-7 production-path performance evidence (P2 follow-up): REAL
     /// primitives on the REAL code paths — HMAC-SHA256 step-up mint+
-    /// validate, SHA-256+ct_eq grant authorize, canonical enrollment
-    /// transcript, /proc exe-policy check. `#[ignore]`: timing evidence run
-    /// in RELEASE mode via scripts/drills/drill-perf-production-path.sh,
-    /// not a per-PR gate (dev-build debug assertions and CI load skew
-    /// timings).
+    /// SP-7 production-path performance evidence (P2 follow-up): REAL
+    /// primitives on the REAL code paths. `#[ignore]`: timing evidence run
+    /// via scripts/drills/drill-perf-production-path.sh (release mode,
+    /// --test-threads=1), not a per-PR gate.
+    ///
+    /// Review B1/S4 hardening: this test calls platform::set_base_dir to
+    /// pin ALL config/audit/data resolution into its own temp dir — a perf
+    /// drill must never touch the operator's real grant store or audit
+    /// chain. Requires serial execution (global override); the drill
+    /// script enforces --test-threads=1.
     #[test]
     #[ignore]
     fn perf_evidence_in_process_layers() {
         const N: usize = 1_000;
-        let mut stepup_samples = Vec::with_capacity(N);
-        let mut authorize_samples = Vec::with_capacity(N);
-        let mut transcript_samples = Vec::with_capacity(N);
-
         let tmp = TempDir::new().unwrap();
+        crate::platform::set_base_dir(tmp.path().to_path_buf());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         }
+        let mut stepup_samples = Vec::with_capacity(N);
+        let mut authorize_samples = Vec::with_capacity(N);
+        let mut transcript_samples = Vec::with_capacity(N);
+        let mut deny_samples = Vec::with_capacity(N);
+        let build = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
 
         // Layer 1: step-up mint + single-use validation (real HMAC-SHA256
         // commitment over a representative VaultOp serialization).
+        // NOTE (review N1): mint/take_if_valid retain-scan a map that
+        // accumulates consumed-but-unexpired entries within the TTL, so
+        // per-sample cost drifts upward with iteration index — samples are
+        // conservative, not steady-state i.i.d.
         let state = crate::daemon::ipc::stepup::StepUpState::new();
         let op = make_add_op("perf-step-up");
         let op_bytes = serde_json::to_vec(&op).unwrap();
@@ -3650,6 +3665,7 @@ mod autofill_origin_gate_tests {
 
         // Layer 2: grant authorize (real SHA-256 token hash + constant-time
         // compare) — mint one grant, then repeatedly authorize against it.
+        // The timestamp is taken OUTSIDE the timed region (review N3).
         let store_path = tmp.path().join("service-grants.json");
         let mut store = crate::service_grants::ServiceGrantStore::default();
         let (_grant, token) = store
@@ -3663,6 +3679,7 @@ mod autofill_origin_gate_tests {
             )
             .unwrap();
         store.save_to_path(&store_path).unwrap();
+        let now = chrono::Utc::now();
         for _ in 0..N {
             let t0 = std::time::Instant::now();
             let hit = store.authorize(
@@ -3670,23 +3687,27 @@ mod autofill_origin_gate_tests {
                 &token,
                 7,
                 crate::service_grants::ServiceField::Password,
-                chrono::Utc::now(),
+                now,
             );
             authorize_samples.push(t0.elapsed());
             assert!(hit.is_some(), "valid token must authorize");
         }
-        // One cold denial path for contrast (wrong token, full work).
-        let t0 = std::time::Instant::now();
-        assert!(store
-            .authorize(
-                "perf-client",
-                "wrong-token",
-                7,
-                crate::service_grants::ServiceField::Password,
-                chrono::Utc::now()
-            )
-            .is_none());
-        let denial = t0.elapsed();
+        // Denial path, same shape and same N (review S2: the wrong-token
+        // denial does full work — hash + ct_eq — before refusing; a
+        // distribution, not a single sample).
+        for _ in 0..N {
+            let t0 = std::time::Instant::now();
+            assert!(store
+                .authorize(
+                    "perf-client",
+                    "wrong-token",
+                    7,
+                    crate::service_grants::ServiceField::Password,
+                    now
+                )
+                .is_none());
+            deny_samples.push(t0.elapsed());
+        }
 
         // Layer 3: canonical enrollment transcript construction.
         let enrollment = crate::enrollment::EnrollmentState::new();
@@ -3705,25 +3726,35 @@ mod autofill_origin_gate_tests {
         }
 
         // Layer 4 (Linux only): executable policy over the REAL
-        // /proc/self/exe. Non-Linux: evidence is unavailable by design and
-        // the check denies fail-closed — recorded, not timed.
+        // /proc/self/exe, sampled (review N2). Non-Linux: evidence is
+        // unavailable by design and the check denies fail-closed —
+        // verified, not timed.
         #[cfg(target_os = "linux")]
         let exe_note = {
+            const M: usize = 50;
             let digest = crate::exe_policy::resolve_exe_digest(std::process::id()).unwrap();
             let pins = vec![digest];
-            let t0 = std::time::Instant::now();
-            let verdict = crate::exe_policy::check_policy(&pins, Some(std::process::id()));
-            let exe_elapsed = t0.elapsed();
-            assert!(matches!(
-                verdict,
-                crate::exe_policy::ExePolicyResult::Matched
-            ));
-            format!("exe_policy(/proc/self/exe) p50/p95 over 1 hash: {exe_elapsed:?}")
+            let mut exe_samples = Vec::with_capacity(M);
+            for _ in 0..M {
+                let t0 = std::time::Instant::now();
+                let verdict = crate::exe_policy::check_policy(&pins, Some(std::process::id()));
+                exe_samples.push(t0.elapsed());
+                assert!(matches!(
+                    verdict,
+                    crate::exe_policy::ExePolicyResult::Matched
+                ));
+            }
+            exe_samples.sort();
+            format!(
+                "exe_policy(/proc/self/exe) over {M} hashes: p50 {:?} p95 {:?}",
+                exe_samples[M / 2],
+                exe_samples[(M as f64 * 0.95) as usize]
+            )
         };
         #[cfg(not(target_os = "linux"))]
         let exe_note = {
             let verdict =
-                crate::exe_policy::check_policy(&["aa".repeat(32)], Some(std::process::id()));
+                crate::exe_policy::check_policy(&["a".repeat(64)], Some(std::process::id()));
             assert!(
                 matches!(
                     verdict,
@@ -3738,8 +3769,13 @@ mod autofill_origin_gate_tests {
             samples.sort();
             samples[((samples.len() as f64 - 1.0) * p) as usize]
         }
-        let (mut s1, mut s2, mut s3) = (stepup_samples, authorize_samples, transcript_samples);
-        println!("SP-7 production-path evidence (release mode, N={N}):");
+        let (mut s1, mut s2, mut s3, mut s4) = (
+            stepup_samples,
+            authorize_samples,
+            transcript_samples,
+            deny_samples,
+        );
+        println!("SP-7 production-path evidence ({build} build, N={N}):");
         println!(
             "  step_up mint+validate : p50 {:?}  p95 {:?}  p99 {:?}",
             pct(&mut s1, 0.5),
@@ -3752,7 +3788,12 @@ mod autofill_origin_gate_tests {
             pct(&mut s2, 0.95),
             pct(&mut s2, 0.99)
         );
-        println!("  grant authorize DENY  : {denial:?} (full work before denial)");
+        println!(
+            "  grant authorize DENY  : p50 {:?}  p95 {:?}  p99 {:?} (full work before denial)",
+            pct(&mut s4, 0.5),
+            pct(&mut s4, 0.95),
+            pct(&mut s4, 0.99)
+        );
         println!(
             "  enrollment transcript : p50 {:?}  p95 {:?}  p99 {:?}",
             pct(&mut s3, 0.5),
@@ -3761,27 +3802,38 @@ mod autofill_origin_gate_tests {
         );
         println!("  {exe_note}");
 
-        // Handoff §7 targets with wide CI-load margin: every per-request
-        // layer must sit far below the 10 ms retrieval budget.
+        // Handoff §7 targets with wide CI-load margin (review N4: the
+        // transcript layer is budget-asserted too).
         const BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
         assert!(
             pct(&mut s2, 0.95) < BUDGET,
             "grant authorize p95 exceeds budget"
         );
         assert!(pct(&mut s1, 0.95) < BUDGET, "step-up p95 exceeds budget");
+        assert!(pct(&mut s3, 0.95) < BUDGET, "transcript p95 exceeds budget");
     }
 
     /// SP-7 evidence: warm end-to-end ServiceGetSecret over a REAL Unix
-    /// socket (transport handshake + sealed envelope + grant authorize).
-    /// `#[ignore]` — run in release mode via the drill script.
+    /// socket. `#[ignore]` — run via the drill script (release,
+    /// --test-threads=1: the set_base_dir isolation is process-global).
+    ///
+    /// Review S1 honesty note: `IpcClient::send` connects + performs the
+    /// full SessionHello/SessionAccept handshake (HKDF directional keys)
+    /// on EVERY call and drops the connection — this client API has no
+    /// long-lived-session mode. Each sample is therefore
+    /// reconnect + handshake + sealed frame + authorize + vault lookup:
+    /// a CONSERVATIVE SUPERSET of steady-state native-client cost.
     #[test]
     #[cfg(unix)]
     #[ignore]
     fn perf_evidence_real_socket_service_get() {
         const N: usize = 200;
-        // Own mini-harness: a real vault with one real entry the grant
-        // points at (full-success round trips, not the not_found shortcut).
+        // Review B1/S4: pin EVERY platform dir into the temp environment —
+        // grant store, audit chain, and config must never touch the
+        // operator's real state (round-1 of this test wrote a perf grant
+        // into the real store and sprayed the real audit log).
         let tmp = TempDir::new().unwrap();
+        crate::platform::set_base_dir(tmp.path().to_path_buf());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3808,12 +3860,14 @@ mod autofill_origin_gate_tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async { daemon_vault.unlock(b"test_password").await })
             .unwrap();
+        let grants_path = tmp.path().join("service-grants.json");
         let server = IpcServer::new_with_allowlist_path(
             tmp.path().join("perf.sock"),
             Arc::new(daemon_vault),
             "test-token".to_string(),
             tmp.path().join("allowlist.json"),
-        );
+        )
+        .with_service_grants_path(grants_path.clone());
         let socket = server.socket_path.clone();
 
         // A real grant for the retrieval path (no exe pins: that factor is
@@ -3829,7 +3883,10 @@ mod autofill_origin_gate_tests {
                 None,
             )
             .unwrap();
-        store.save_to_path(&server.service_grants_path).unwrap();
+        store.save_to_path(&grants_path).unwrap();
+        // One String copy of the token, cloned per op (review N4: avoid
+        // per-iteration to_string on the Zeroizing original).
+        let token_string = token.to_string();
         let server = Arc::new(server);
 
         rt.block_on(async {
@@ -3841,8 +3898,8 @@ mod autofill_origin_gate_tests {
             assert!(socket.exists(), "listener did not start");
             let client =
                 sentinelpass_protocol::IpcClient::new_with_token(socket, "test-token".into());
-            // Session handshake once (steady state = one long-lived
-            // connection, matching the native-client deployment shape).
+            // Warm-up + liveness (this send also handshakes — see the
+            // honesty note above; it is excluded from the samples).
             client.send(IpcMessage::CheckVault).await.unwrap();
             let mut samples = Vec::with_capacity(N);
             for _ in 0..N {
@@ -3852,7 +3909,7 @@ mod autofill_origin_gate_tests {
                         client_id: "perf-client".into(),
                         entry_id,
                         field: "title".into(),
-                        token: token.to_string(),
+                        token: token_string.clone(),
                     })
                     .await
                     .unwrap();
@@ -3864,7 +3921,7 @@ mod autofill_origin_gate_tests {
             }
             samples.sort();
             let idx = |p: f64| samples[((samples.len() as f64 - 1.0) * p) as usize];
-            println!("SP-7 real-socket ServiceGetSecret (warm, N={N}):");
+            println!("SP-7 real-socket ServiceGetSecret (N={N}, per-request reconnect+handshake included):");
             println!(
                 "  p50 {:?}  p95 {:?}  p99 {:?}  max {:?}",
                 idx(0.5),
@@ -3872,13 +3929,126 @@ mod autofill_origin_gate_tests {
                 idx(0.99),
                 samples[samples.len() - 1]
             );
-            // Handoff §7: warm added p95 < 10 ms for a small native client.
+            // Handoff §7: warm p95 < 10 ms for a small native client — and
+            // this measures the reconnect-inclusive superset.
             assert!(
                 idx(0.95) < std::time::Duration::from_millis(10),
                 "warm retrieval p95 exceeds the 10 ms budget"
             );
             running.abort();
         });
+    }
+
+    /// SP-7 evidence (review S3): time the REAL enrollment verification —
+    /// the daemon-side dominant cost (two pinned-gpg subprocesses in
+    /// verify_signature: key import + detached verify). Key generation and
+    /// signing are setup, not the measured path. `#[ignore]` — drill-only.
+    #[test]
+    #[ignore]
+    fn perf_evidence_enrollment_gpg_verification() {
+        use std::process::Command;
+        let gpg = std::env::var("SENTINELPASS_GPG_PATH")
+            .unwrap_or_else(|_| crate::enrollment::DEFAULT_GPG_PATH.to_string());
+        if !std::path::Path::new(&gpg).exists() {
+            eprintln!(
+                "skipping: no gpg at {gpg} (enrollment subprocess cost not measured on this host)"
+            );
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        crate::platform::set_base_dir(tmp.path().to_path_buf());
+        let work = tmp.path().join("gnupg-work");
+        std::fs::create_dir_all(&work).unwrap();
+        let home = work.join("gnupg");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let run = |args: &[&str]| {
+            let out = Command::new(&gpg)
+                .arg("--homedir")
+                .arg(&home)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "gpg {:?}: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        run(&[
+            "--batch",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            "perf@example.com",
+            "ed25519",
+            "sign",
+            "0",
+        ]);
+        let fp_text =
+            String::from_utf8_lossy(&run(&["--with-colons", "--list-keys"]).stdout).to_lowercase();
+        let fingerprint = fp_text
+            .lines()
+            .find(|l| l.starts_with("fpr:"))
+            .and_then(|l| l.split(':').find(|f| f.len() == 40))
+            .expect("fingerprint")
+            .to_string();
+        let pubkey = String::from_utf8_lossy(&run(&["--armor", "--export", &fingerprint]).stdout)
+            .to_string();
+        let transcript = b"canonical perf transcript bytes".to_vec();
+        let data_file = work.join("data.bin");
+        std::fs::write(&data_file, &transcript).unwrap();
+        let sig_out = Command::new(&gpg)
+            .arg("--homedir")
+            .arg(&home)
+            // --output -: gpg writes a detached signature to <file>.asc by
+            // default when given a file argument; force stdout so the
+            // armored text is captured (an empty capture = empty signature
+            // = cryptic downstream verify failure).
+            .args([
+                "--batch",
+                "--passphrase",
+                "",
+                "--detach-sign",
+                "--armor",
+                "--output",
+                "-",
+            ])
+            .arg(&data_file)
+            .output()
+            .unwrap();
+        assert!(sig_out.status.success(), "gpg sign failed");
+        let sig = String::from_utf8_lossy(&sig_out.stdout).to_string();
+        assert!(!sig.is_empty(), "gpg sign produced no armored output");
+
+        // The measured path: verify_signature (import + verify, isolated keyring).
+        const N: usize = 3;
+        let mut samples = Vec::with_capacity(N);
+        for _ in 0..N {
+            let t0 = std::time::Instant::now();
+            let verdict =
+                crate::enrollment::verify_signature(&gpg, &pubkey, &transcript, &sig, &fingerprint);
+            samples.push(t0.elapsed());
+            assert!(
+                verdict.is_ok(),
+                "real signature must verify: {:?}",
+                verdict
+                    .err()
+                    .map(|e| e.chars().take(2000).collect::<String>())
+            );
+        }
+        samples.sort();
+        println!("SP-7 enrollment gpg verification (real subprocess, N={N}):");
+        println!("  min {:?}  max {:?}", samples[0], samples[N - 1]);
+        // Handoff §7: enrollment p95 < 1 s — the daemon-side ceremony
+        // (transcript 35.6µs + THIS) must fit the budget with the human and
+        // network parts of the ceremony still excluded.
+        assert!(
+            samples[N - 1] < std::time::Duration::from_millis(1_000),
+            "gpg verification exceeds the 1 s enrollment budget"
+        );
     }
 
     #[test]

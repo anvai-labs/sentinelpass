@@ -3,16 +3,19 @@
 Measured with the REAL primitives on the REAL code paths — real
 HMAC-SHA256 step-up commitments, real SHA-256 token hashing with
 constant-time compares, real canonical enrollment transcripts, real
-sealed-IPC envelopes over a real Unix socket — replacing the simplified
-FNV-1a methodology that made the 2026-10-02 evidence PROVISIONAL.
+sealed-IPC envelopes over a real Unix socket, and the real pinned-gpg
+enrollment verification — replacing the simplified FNV-1a methodology
+that made the 2026-10-02 evidence PROVISIONAL.
 
 Method: `scripts/drills/drill-perf-production-path.sh` runs the
-`#[ignore]`-tagged `perf_evidence_*` tests in `sentinelpass-core` in
-RELEASE mode (dev builds carry debug assertions that skew timing; these
-are evidence tests, not per-PR gates). N=1,000 iterations per in-process
-layer (warm-up included in distribution — these are steady-state paths),
-N=200 full socket round-trips on one long-lived session. Reproduce with
-`bash scripts/drills/drill-perf-production-path.sh [--build]`.
+`#[ignore]`-tagged `perf_evidence_*` tests in `sentinelpass-core`
+(release build; the tests label themselves if run in debug) with
+`--test-threads=1` — REQUIRED, because the tests pin all platform dirs
+(grant store, audit chain, config) into their own temp dirs and never
+touch operator state. N=1,000 per in-process layer, N=200 socket
+round-trips, N=3 gpg verifications. Reproduce with
+`bash scripts/drills/drill-perf-production-path.sh [--build]`
+(`SENTINELPASS_GPG_PATH` pins gpg on hosts without `/usr/bin/gpg`).
 
 ## Results (macOS, Apple silicon, 10 cores, release, 2026-10-04)
 
@@ -20,31 +23,57 @@ N=200 full socket round-trips on one long-lived session. Reproduce with
 | --- | --- | --- | --- |
 | SP-0 step-up mint + single-use validate | 13.5 µs | 22.0 µs | 24.5 µs |
 | SP-1 grant authorize (token hash + ct compare) | 0.83 µs | 1.75 µs | 1.83 µs |
-| SP-1 authorize DENY (full work before denial) | 0.75 µs | — | — |
+| SP-1 authorize DENY (wrong token, full work) | 0.75 µs | sampled at N=1,000 — distribution overlaps the success path | |
 | SP-4 canonical enrollment transcript | 13.0 µs | 35.6 µs | 48.0 µs |
-| SP-3 `/proc/<pid>/exe` policy | EvidenceUnavailable on macOS (fail-closed denial verified; timed on Linux hosts via the same drill) | | |
-| **End-to-end warm `ServiceGetSecret` over a real Unix socket** (handshake + sealed envelope + authorize + vault lookup) | **732 µs** | **1.10 ms** | 2.02 ms (max 3.65 ms) |
+| SP-4 gpg verification (import + detached verify, real subprocess) | — | — | 572–578 ms (N=3, min–max) |
+| SP-3 `/proc/<pid>/exe` policy | EvidenceUnavailable on macOS (fail-closed denial verified; sampled timing on Linux hosts via the same drill) | | |
+| **End-to-end `ServiceGetSecret` over a real Unix socket** | **732 µs** | **1.10 ms** | 2.02 ms (max 3.65 ms) |
 
 ## Handoff §7 target compliance
 
 | Target | Result | Evidence |
 | --- | --- | --- |
-| Warm added p95 < 10 ms (small native client) | **PASS** | Full round-trip p95 = 1.10 ms — a 9× margin, and this measures the ENTIRE retrieval (transport + crypto + policy + lookup), a strict superset of the "added overhead" the target names |
-| Enrollment p95 < 1 s (excluding human/hardware) | **PASS** | Daemon-side transcript construction p95 = 35.6 µs; the gpg subprocess (~100–500 ms) is a one-time ceremony excluded per the handoff, and is NOT on any retrieval critical path |
+| Warm retrieval p95 < 10 ms (small native client) | **PASS** | p95 = 1.10 ms — a 9× margin. Honesty note: each sample includes reconnect + full session handshake (HKDF directional keys) because `IpcClient::send` connects per call and this client API has no long-lived-session mode — a CONSERVATIVE SUPERSET of steady-state native-client cost |
+| Enrollment p95 < 1 s (daemon-side) | **PASS (measured)** | Transcript 35.6 µs + the real pinned-gpg verification 572–578 ms — the whole daemon-side ceremony is measured, ≈0.6 s against the 1 s budget. The gpg subprocess is daemon-run, not human/hardware-bound (earlier drafts said otherwise — corrected); the human/network parts of the ceremony (key generation, delivering the signature) remain outside the daemon and outside this measurement |
 
 ## Notes
 
-- The denial path is NOT cheaper than the success path (0.75 µs vs
-  0.83 µs p50): every check completes before denying — no timing oracle.
-- Per-request retrieval cost decomposes as ~730 µs p50 end-to-end, of
-  which the authorize layer is 0.83 µs — the socket/transport and vault
-  lookup dominate, both pre-existing costs rather than service-identity
-  additions.
+- **Denial is not observably cheaper than success**: the wrong-token
+  denial performs the same SHA-256 hash and the same-length
+  constant-time compare before refusing (verified in code,
+  `service_grants.rs` authorize); the sampled distributions overlap
+  (deny p50 0.75 µs vs success 0.83 µs — the ~90 ns difference is below
+  measurement noise). We rest the no-timing-oracle claim on this
+  structure, not on the timing samples. One denial shape does
+  short-circuit BEFORE any compare — wrong client_id/entry/field is
+  rejected by the pre-filter without hashing; that shape reveals only
+  that no grant matches, never anything about a token.
+- **What the residual is**: the 732 µs p50 round-trip decomposes into
+  socket + handshake + sealed-frame crypto + authorize (0.83 µs) + the
+  per-request grant-store load from disk (JSON read) + vault entry
+  snapshot verification and AES-GCM decrypt + two audit appends. The
+  service-identity additions inside that are authorize + the grant-store
+  load; the rest is pre-existing retrieval cost.
+- **In-process layers are conservative, not steady-state i.i.d.**:
+  step-up `mint` and enrollment `begin` retain-scan a map that
+  accumulates consumed-but-unexpired entries within the TTL, so
+  per-sample cost drifts upward with iteration index at these Ns.
 - The full Argon2id KDF (~1 s at 256 MB) applies only at unlock /
   step-up password verification — by design, once per owner approval,
   never on the retrieval path.
-- Linux `/proc` exe-policy timing: run the same drill on a Linux host
-  (e.g. the dataserver3 qualification) to fill that column; correctness
-  is CI-covered on the ubuntu legs.
-- Security failures never fall back for speed; fail-closed on missing
-  evidence is verified on every non-Linux run of this drill.
+- Linux `/proc` exe-policy timing: run the same drill on a Linux host to
+  fill that column; correctness is CI-covered on the ubuntu legs.
+- **Two product defects found and fixed by this drill** (in
+  `daemon/enrollment.rs`): (1) the isolated keyring was created with
+  default permissions — gpg ≥ 2.4 refuses a group/other-readable
+  `--homedir`, so enrollment verification failed outright on modern
+  hosts (CI's older gpg only warned); now pinned 0700. (2) gpg's agent
+  socket exceeds the unix `sun_path` budget on macOS `/var/folders`
+  temp paths — verification now falls back to a short `/tmp` base when
+  the projected socket path is too long.
+- The first cut of this drill (before isolation) wrote one synthetic
+  grant into the operator's real grant store and appended 600 synthetic
+  events to the real audit log on the development Mac (2026-10-04
+  ~05:57). The bogus grant was removed; the audit chain is append-only
+  and was NOT rewritten — the events remain as the incident record.
+  Current tests pin all platform dirs and cannot recur this.
