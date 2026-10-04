@@ -108,9 +108,11 @@ closed.
 - **Perf:** drill transcripts on both hosts; doc
   `docs/SP7_PERFORMANCE_EVIDENCE_2026-10-04.md` (macOS + Linux columns,
   methodology, the exe-pin finding).
-- **Pending (owner-executed, needs sudo on the VPS host):** the
-  `systemd-creds encrypt/decrypt` round-trip on dataserver3 with a
-  synthetic value — one command, provided to the owner.
+- **Host-key round-trip on the VPS host: DONE (owner-executed,
+  2026-10-04)** — `systemd-creds encrypt --with-key=host` then `decrypt`
+  on dataserver3 returned the synthetic value byte-exact (the
+  unencrypted-media warning is the documented host-key caveat:
+  disk-snapshot access ≈ plaintext access).
 - **Deployment note (umask-002 hosts like dataserver3):** config/runtime
   dirs must be `chmod -R go-rwx` — the ADR-012 birth-mode check refuses
   group-accessible parents (hit and resolved during qualification).
