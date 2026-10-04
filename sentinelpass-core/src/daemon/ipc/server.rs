@@ -3959,6 +3959,11 @@ mod autofill_origin_gate_tests {
         crate::platform::set_base_dir(tmp.path().to_path_buf());
         let work = tmp.path().join("gnupg-work");
         std::fs::create_dir_all(&work).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let home = work.join("gnupg");
         std::fs::create_dir_all(&home).unwrap();
 

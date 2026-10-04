@@ -10,9 +10,11 @@ that made the 2026-10-02 evidence PROVISIONAL.
 Method: `scripts/drills/drill-perf-production-path.sh` runs the
 `#[ignore]`-tagged `perf_evidence_*` tests in `sentinelpass-core`
 (release build; the tests label themselves if run in debug) with
-`--test-threads=1` — REQUIRED, because the tests pin all platform dirs
-(grant store, audit chain, config) into their own temp dirs and never
-touch operator state. N=1,000 per in-process layer, N=200 socket
+`--test-threads=1` — REQUIRED: the tests set the platform base-dir
+override (first-write-wins: the first test's temp root serves the whole
+process, which is still always a drill temp root — operator state is
+never touched under any execution order) and the enrollment ceremony
+uses process-global gpg state. N=1,000 per in-process layer, N=200 socket
 round-trips, N=3 gpg verifications. Reproduce with
 `bash scripts/drills/drill-perf-production-path.sh [--build]`
 (`SENTINELPASS_GPG_PATH` pins gpg on hosts without `/usr/bin/gpg`).
@@ -45,9 +47,10 @@ round-trips, N=3 gpg verifications. Reproduce with
   (deny p50 0.75 µs vs success 0.83 µs — the ~90 ns difference is below
   measurement noise). We rest the no-timing-oracle claim on this
   structure, not on the timing samples. One denial shape does
-  short-circuit BEFORE any compare — wrong client_id/entry/field is
-  rejected by the pre-filter without hashing; that shape reveals only
-  that no grant matches, never anything about a token.
+  short-circuit BEFORE the compare — wrong client_id/entry/field is
+  rejected by the pre-filter after the SHA-256 hash but without the
+  constant-time compare; that shape reveals only that no grant matches,
+  never anything about a token.
 - **What the residual is**: the 732 µs p50 round-trip decomposes into
   socket + handshake + sealed-frame crypto + authorize (0.83 µs) + the
   per-request grant-store load from disk (JSON read) + vault entry

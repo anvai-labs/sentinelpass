@@ -128,6 +128,16 @@ fn temp_dir_unique(base: &std::path::Path) -> Result<std::path::PathBuf, String>
     rand::thread_rng().fill_bytes(&mut suffix);
     let dir = base.join(format!("sp-enroll-{}", hex::encode(suffix)));
     std::fs::create_dir(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
+    // Owner-only from birth: the work dir holds the transcript (client_id,
+    // entry_id, grant_id, fields, nonce, fingerprint in cleartext) and may
+    // land in SHARED /tmp via the socket-budget fallback — world-readable
+    // files there would broadcast grant metadata (review round 2).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot secure temp dir: {e}"))?;
+    }
     Ok(dir)
 }
 
