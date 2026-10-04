@@ -830,12 +830,25 @@ enum ServiceCredentialCommands {
         client_id: String,
 
         /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        /// (legacy mode only)
         #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
         token: Option<String>,
 
-        /// Domain or service key used to look up the credential
+        /// Domain or service key used to look up the credential (legacy
+        /// grant mode — mutually exclusive with --entry-id)
         #[arg(long)]
-        domain: String,
+        domain: Option<String>,
+
+        /// Exact entry id (service-grant mode, F3): retrieval switches to
+        /// the token-enforced exact-entry ServiceGetSecret path — the mode
+        /// compatible with the strict profile. Requires --service-token.
+        #[arg(long)]
+        entry_id: Option<i64>,
+
+        /// Service-grant token; defaults to $SENTINELPASS_SERVICE_TOKEN
+        /// (service-grant mode only)
+        #[arg(long, env = "SENTINELPASS_SERVICE_TOKEN")]
+        service_token: Option<String>,
 
         /// Field to provision
         #[arg(long, value_enum, default_value_t = SecretField::Password)]
@@ -869,6 +882,7 @@ enum ServiceCredentialCommands {
         no_verify: bool,
 
         /// If the daemon is locked, request biometric unlock before lookup
+        /// (legacy mode only; service-grant mode never prompts)
         #[arg(long)]
         biometric_unlock: bool,
 
@@ -888,12 +902,22 @@ enum ServiceCredentialCommands {
         client_id: String,
 
         /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        /// (legacy mode only)
         #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
         token: Option<String>,
 
-        /// Domain or service key used to look up the credential
+        /// Domain or service key used to look up the credential (legacy
+        /// grant mode — mutually exclusive with --entry-id)
         #[arg(long)]
-        domain: String,
+        domain: Option<String>,
+
+        /// Exact entry id (service-grant mode, F3) — see `install`
+        #[arg(long)]
+        entry_id: Option<i64>,
+
+        /// Service-grant token; defaults to $SENTINELPASS_SERVICE_TOKEN
+        #[arg(long, env = "SENTINELPASS_SERVICE_TOKEN")]
+        service_token: Option<String>,
 
         /// Field to compare
         #[arg(long, value_enum, default_value_t = SecretField::Password)]
@@ -1518,6 +1542,8 @@ fn main() -> Result<()> {
                 client_id,
                 token,
                 domain,
+                entry_id,
+                service_token,
                 field,
                 cred_name,
                 protection,
@@ -1533,6 +1559,8 @@ fn main() -> Result<()> {
                         client_id,
                         token,
                         domain,
+                        entry_id,
+                        service_token,
                         field,
                         cred_name,
                         protection,
@@ -1542,6 +1570,10 @@ fn main() -> Result<()> {
                         verify: !no_verify,
                         biometric_unlock,
                         prompt_reason,
+                        vault_path: cli
+                            .vault
+                            .clone()
+                            .unwrap_or_else(sentinelpass_core::get_default_vault_path),
                     },
                 )?;
             }
@@ -1549,6 +1581,8 @@ fn main() -> Result<()> {
                 client_id,
                 token,
                 domain,
+                entry_id,
+                service_token,
                 field,
                 cred_name,
                 credstore_dir,
@@ -1561,12 +1595,18 @@ fn main() -> Result<()> {
                         client_id,
                         token,
                         domain,
+                        entry_id,
+                        service_token,
                         field,
                         cred_name,
                         credstore_dir,
                         systemd_creds,
                         biometric_unlock,
                         prompt_reason,
+                        vault_path: cli
+                            .vault
+                            .clone()
+                            .unwrap_or_else(sentinelpass_core::get_default_vault_path),
                     },
                 )?;
                 if code != 0 {
@@ -2357,7 +2397,7 @@ mod tests {
                     },
             } => {
                 assert_eq!(client_id, "myautomation");
-                assert_eq!(domain, "sandhi:provider:apikey");
+                assert_eq!(domain.as_deref(), Some("sandhi:provider:apikey"));
                 assert!(matches!(field, SecretField::Password));
                 assert_eq!(cred_name, "myautomation.provider.apikey");
                 assert!(matches!(protection, ServiceProtection::HostKey));
@@ -2368,6 +2408,49 @@ mod tests {
                 assert!(!no_verify, "verification is on by default");
             }
             _ => panic!("expected service-credential install command"),
+        }
+    }
+
+    #[test]
+    fn parses_service_credential_install_service_grant_mode() {
+        // F3: --entry-id selects exact-entry service-grant retrieval;
+        // --service-token rides the flag (or SENTINELPASS_SERVICE_TOKEN).
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-credential",
+            "install",
+            "--client-id",
+            "sandesha-svc",
+            "--entry-id",
+            "42",
+            "--service-token",
+            "sps_test_token",
+            "--cred-name",
+            "sandesha.provider.key",
+            "--protection",
+            "host-key",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceCredential {
+                command:
+                    ServiceCredentialCommands::Install {
+                        client_id,
+                        domain,
+                        entry_id,
+                        service_token,
+                        ..
+                    },
+            } => {
+                assert_eq!(client_id, "sandesha-svc");
+                assert_eq!(entry_id, Some(42));
+                assert_eq!(service_token.as_deref(), Some("sps_test_token"));
+                assert!(
+                    domain.is_none(),
+                    "service-grant mode must not carry a domain"
+                );
+            }
+            _ => panic!("expected service-credential install (service-grant mode)"),
         }
     }
 

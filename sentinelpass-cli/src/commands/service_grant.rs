@@ -245,27 +245,8 @@ pub fn handle_get(
             "pass --token or set {SERVICE_TOKEN_ENV} (the service token shown when the grant was created)"
         );
     };
-    let field = field.to_ascii_lowercase();
-    if !matches!(field.as_str(), "username" | "password" | "title") {
-        anyhow::bail!("unknown field {field:?} (username, password, title)");
-    }
-
-    // Review S3: retrieval never prompts or unlocks — a locked vault is a
-    // typed failure with unlock guidance, not a hidden master-password
-    // prompt that would hang unattended/cron retrieval.
-    let backend = connect_backend_no_unlock(&vault_path)?;
-    let result = backend.call(VaultOp::ServiceGetSecret {
-        client_id,
-        entry_id,
-        field,
-        token,
-    })?;
-    let report = report(result)?;
-    report_error(&report)?;
-    let value = report
-        .get("value")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("daemon authorized the grant but returned no value"))?;
+    let (value, report) =
+        retrieve_service_secret(&vault_path, &client_id, entry_id, &field, &token)?;
     if output_json {
         // Verification-round nit: --json and --no-newline are
         // contradictory output modes — reject rather than half-honor.
@@ -286,6 +267,43 @@ pub fn handle_get(
         println!("{value}");
     }
     Ok(())
+}
+
+/// Shared exact-entry retrieval core (F3): fetch one field under a service
+/// grant without prompting or unlocking (review S3 discipline). Returns the
+/// raw value plus the full daemon report (for callers that surface JSON);
+/// callers decide disposition (print / pipe to systemd-creds / zeroize).
+/// Used by `service-grant get` AND `service-credential install/verify
+/// --entry-id`.
+pub fn retrieve_service_secret(
+    vault_path: &std::path::PathBuf,
+    client_id: &str,
+    entry_id: i64,
+    field: &str,
+    token: &str,
+) -> Result<(String, serde_json::Value)> {
+    let field = field.to_ascii_lowercase();
+    if !matches!(field.as_str(), "username" | "password" | "title") {
+        anyhow::bail!("unknown field {field:?} (username, password, title)");
+    }
+    // Review S3: retrieval never prompts or unlocks — a locked vault is a
+    // typed failure with unlock guidance, not a hidden master-password
+    // prompt that would hang unattended/cron retrieval.
+    let backend = connect_backend_no_unlock(vault_path)?;
+    let result = backend.call(VaultOp::ServiceGetSecret {
+        client_id: client_id.to_string(),
+        entry_id,
+        field,
+        token: token.to_string(),
+    })?;
+    let report = report(result)?;
+    report_error(&report)?;
+    let value = report
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("daemon authorized the grant but returned no value"))?;
+    Ok((value, report))
 }
 
 pub fn handle_revoke(vault_path: std::path::PathBuf, grant_id: String) -> Result<()> {
