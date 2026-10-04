@@ -3871,6 +3871,21 @@ mod autofill_origin_gate_tests {
         // file directly) gains nothing.
         let h = strict_harness();
         // Stage a perfectly valid legacy grant + token for this client.
+        // The allowlist save enforces the ADR-012 owner-private birth mode
+        // on its parent directory; TempDir's mode is umask-dependent on
+        // Linux (the #208/#209 lesson), so pin it explicitly like the
+        // sibling external-secret tests do.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = h
+                .server
+                .external_secret_allowlist_path
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let mut allowlist = crate::ExternalSecretAllowlist::default();
         allowlist
             .upsert_grant(
