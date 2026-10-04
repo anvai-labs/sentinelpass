@@ -1193,6 +1193,37 @@ impl IpcServer {
                 field,
                 purpose,
             } => {
+                // SP-1 / ADR-014 + verification follow-up F2: under the
+                // strict administrative profile, the legacy external-secret
+                // surface is disabled AUTHORITATIVELY at the daemon — the
+                // CLI-side env gate is UX only. A caller that unsets
+                // SENTINELPASS_REQUIRE_STEPUP, or edits
+                // external-secret-access.json directly, gains nothing:
+                // this daemon refuses to SERVE legacy grants. Exact-entry
+                // service grants (`sentinelpass service-grant …`) are the
+                // only retrieval surface under strict.
+                if self.require_stepup {
+                    log_external_secret_audit(
+                        self.audit_logger.as_deref(),
+                        Some(&client_id),
+                        &domain,
+                        Some(field.as_str()),
+                        purpose.as_deref().or(Some("legacy_denied_strict")),
+                        false,
+                        "SP-1 legacy external-secret retrieval denied under strict profile",
+                    );
+                    return IpcMessage::GetExternalSecretResponse {
+                        value: None,
+                        authorized: false,
+                        error: Some(
+                            "strict profile: legacy external-secret grants are disabled on \
+                             this daemon; use exact-entry service grants \
+                             (`sentinelpass service-grant get`)"
+                                .to_string(),
+                        ),
+                        locked: None,
+                    };
+                }
                 if !self.vault.is_unlocked().await {
                     return IpcMessage::GetExternalSecretResponse {
                         value: None,
@@ -3825,6 +3856,80 @@ mod autofill_origin_gate_tests {
                 ..
             } => {
                 assert!(error.unwrap().contains("step_up_required"))
+            }
+            other => panic!("unexpected: {}", variant_name(&other)),
+        }
+    }
+
+    #[test]
+    fn strict_profile_denies_legacy_external_secret_retrieval() {
+        // Verification follow-up F2: the legacy external-secret surface is
+        // disabled AUTHORITATIVELY at the daemon under the strict profile.
+        // This test proves the denial is NOT merely "no grant configured":
+        // a fully valid legacy grant + client token is STILL refused, so a
+        // caller that flips the CLI env var off (or edits the allowlist
+        // file directly) gains nothing.
+        let h = strict_harness();
+        // Stage a perfectly valid legacy grant + token for this client.
+        // The allowlist save enforces the ADR-012 owner-private birth mode
+        // on its parent directory; TempDir's mode is umask-dependent on
+        // Linux (the #208/#209 lesson), so pin it explicitly like the
+        // sibling external-secret tests do.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = h
+                .server
+                .external_secret_allowlist_path
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut allowlist = crate::ExternalSecretAllowlist::default();
+        allowlist
+            .upsert_grant(
+                "legacy-tool",
+                "example.com",
+                crate::ExternalSecretField::Password,
+                None,
+                false,
+            )
+            .unwrap();
+        let token = allowlist.mint_client_token("legacy-tool").unwrap();
+        allowlist
+            .save_to_path(&h.server.external_secret_allowlist_path)
+            .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let request = IpcEnvelope {
+            token: "test-token".to_string(),
+            client_token: Some(token),
+            origin: Some(Origin::NativeHost),
+            capability: Some(h.capability.clone()),
+            message: IpcMessage::GetExternalSecret {
+                client_id: "legacy-tool".into(),
+                domain: "example.com".into(),
+                field: crate::ExternalSecretField::Password,
+                purpose: None,
+            },
+        };
+        match handle(&rt, &h.server, request) {
+            IpcMessage::GetExternalSecretResponse {
+                value: None,
+                authorized: false,
+                error,
+                ..
+            } => {
+                let error = error.unwrap();
+                assert!(
+                    error.contains("strict profile"),
+                    "denial must name the strict profile, got: {error}"
+                );
+                assert!(
+                    error.contains("service-grant"),
+                    "denial must point at the service-grant surface, got: {error}"
+                );
             }
             other => panic!("unexpected: {}", variant_name(&other)),
         }

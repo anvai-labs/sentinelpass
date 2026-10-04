@@ -114,6 +114,13 @@ enum Commands {
         command: ServiceCredentialCommands,
     },
 
+    /// Manage exact-entry service grants (SP-1 / ADR-014): step-up-gated
+    /// administration, token-enforced retrieval for services
+    ServiceGrant {
+        #[command(subcommand)]
+        command: ServiceGrantCommands,
+    },
+
     /// Run a command with secrets injected as environment variables
     Exec {
         /// Local tool client id, for example `victor`
@@ -703,6 +710,111 @@ enum SecretTokenCommands {
         /// Optional client id filter
         #[arg(long)]
         client_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceGrantCommands {
+    /// Mint a service grant for one EXACT entry (step-up: prompts for the
+    /// master password). The service token is shown exactly once.
+    Create {
+        /// Service identity this grant belongs to (e.g. `sandesha-svc`)
+        #[arg(long)]
+        client_id: String,
+
+        /// EXACT entry id the grant may read (see `sentinelpass list`)
+        #[arg(long)]
+        entry_id: i64,
+
+        /// Comma-separated fields the grant may serve (username, password, title)
+        #[arg(long)]
+        fields: String,
+
+        /// Optional grant lifetime (e.g. 30m, 8h, 7d); default: no expiry
+        #[arg(long)]
+        expires_in: Option<String>,
+
+        /// Optional comma-separated hex SHA-256 digests of approved client
+        /// binaries (SP-3 executable policy; Linux /proc evidence)
+        #[arg(long)]
+        exe_sha256: Option<String>,
+
+        /// Optional 40-hex OpenPGP fingerprint; the grant stays PENDING
+        /// until the client proves key possession via enrollment
+        #[arg(long)]
+        key_fingerprint: Option<String>,
+    },
+
+    /// Retrieve one field under a service grant (token-enforced, never
+    /// step-up). Prints the raw value for scripting.
+    Get {
+        #[arg(long)]
+        client_id: String,
+
+        #[arg(long)]
+        entry_id: i64,
+
+        /// Field to retrieve (username, password, title)
+        #[arg(long)]
+        field: String,
+
+        /// Service token; defaults to $SENTINELPASS_SERVICE_TOKEN
+        #[arg(long, env = "SENTINELPASS_SERVICE_TOKEN")]
+        token: Option<String>,
+
+        /// Print the full daemon report as JSON instead of the raw value
+        #[arg(long)]
+        json: bool,
+
+        /// Omit the trailing newline — byte-exact output for pipelines
+        /// (e.g. `service-grant get --no-newline | ssh … 'systemd-creds
+        /// encrypt …'`); the default newline would corrupt the
+        /// provisioned credential
+        #[arg(short = 'n', long)]
+        no_newline: bool,
+    },
+
+    /// Revoke a grant by id (step-up). Existing tokens for the grant stop
+    /// working immediately.
+    Revoke {
+        #[arg(long)]
+        grant_id: String,
+    },
+
+    /// Start the OpenPGP enrollment ceremony for a fingerprinted grant
+    /// (step-up). Prints the canonical transcript the CLIENT must sign.
+    Enrollment {
+        #[command(subcommand)]
+        command: ServiceGrantEnrollmentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceGrantEnrollmentCommands {
+    /// Mint the single-use enrollment challenge (step-up). The transcript
+    /// is handed to the client verbatim.
+    Begin {
+        #[arg(long)]
+        client_id: String,
+    },
+
+    /// Submit the client's clearsigned transcript + public key. On
+    /// verification the grant's service token is minted and shown once.
+    Complete {
+        #[arg(long)]
+        client_id: String,
+
+        /// Nonce from `enrollment begin`
+        #[arg(long)]
+        nonce: String,
+
+        /// File with the client's armored (clearsigned) signature, or - for stdin
+        #[arg(long)]
+        signature: String,
+
+        /// File with the client's armored public key, or - for stdin
+        #[arg(long)]
+        public_key: String,
     },
 }
 
@@ -1323,6 +1435,83 @@ fn main() -> Result<()> {
         Commands::Secret { command } => {
             commands::secret::handle_secret_command(&command)?;
         }
+
+        Commands::ServiceGrant { command } => match command {
+            ServiceGrantCommands::Create {
+                client_id,
+                entry_id,
+                fields,
+                expires_in,
+                exe_sha256,
+                key_fingerprint,
+            } => {
+                commands::service_grant::handle_create(
+                    cli.vault
+                        .clone()
+                        .unwrap_or_else(sentinelpass_core::get_default_vault_path),
+                    client_id,
+                    entry_id,
+                    fields,
+                    expires_in,
+                    exe_sha256,
+                    key_fingerprint,
+                )?;
+            }
+            ServiceGrantCommands::Get {
+                client_id,
+                entry_id,
+                field,
+                token,
+                json,
+                no_newline,
+            } => {
+                commands::service_grant::handle_get(
+                    cli.vault
+                        .clone()
+                        .unwrap_or_else(sentinelpass_core::get_default_vault_path),
+                    client_id,
+                    entry_id,
+                    field,
+                    token,
+                    json,
+                    no_newline,
+                )?;
+            }
+            ServiceGrantCommands::Revoke { grant_id } => {
+                commands::service_grant::handle_revoke(
+                    cli.vault
+                        .clone()
+                        .unwrap_or_else(sentinelpass_core::get_default_vault_path),
+                    grant_id,
+                )?;
+            }
+            ServiceGrantCommands::Enrollment { command } => match command {
+                ServiceGrantEnrollmentCommands::Begin { client_id } => {
+                    commands::service_grant::handle_enrollment_begin(
+                        cli.vault
+                            .clone()
+                            .unwrap_or_else(sentinelpass_core::get_default_vault_path),
+                        client_id,
+                    )?;
+                }
+                ServiceGrantEnrollmentCommands::Complete {
+                    client_id,
+                    nonce,
+                    signature,
+                    public_key,
+                } => {
+                    commands::service_grant::handle_enrollment_complete(
+                        cli.vault
+                            .clone()
+                            .unwrap_or_else(sentinelpass_core::get_default_vault_path),
+                        client_id,
+                        nonce,
+                        signature,
+                        public_key,
+                    )?;
+                }
+            },
+        },
 
         Commands::ServiceCredential { command } => match command {
             ServiceCredentialCommands::Install {
@@ -1973,6 +2162,164 @@ mod tests {
                 assert_eq!(expires_in, Some("8h".to_string()));
             }
             _ => panic!("expected expiring secret allow command"),
+        }
+    }
+
+    #[test]
+    fn parses_service_grant_create_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-grant",
+            "create",
+            "--client-id",
+            "sandesha-svc",
+            "--entry-id",
+            "42",
+            "--fields",
+            "password,username",
+            "--expires-in",
+            "30d",
+            "--exe-sha256",
+            "aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899",
+            "--key-fingerprint",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::ServiceGrant {
+                command:
+                    ServiceGrantCommands::Create {
+                        client_id,
+                        entry_id,
+                        fields,
+                        expires_in,
+                        exe_sha256,
+                        key_fingerprint,
+                    },
+            } => {
+                assert_eq!(client_id, "sandesha-svc");
+                assert_eq!(entry_id, 42);
+                assert_eq!(fields, "password,username");
+                assert_eq!(expires_in.as_deref(), Some("30d"));
+                assert!(exe_sha256.is_some());
+                assert!(key_fingerprint.is_some());
+            }
+            _ => panic!("expected service-grant create command"),
+        }
+    }
+
+    #[test]
+    fn parses_service_grant_get_and_revoke_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-grant",
+            "get",
+            "--client-id",
+            "sandesha-svc",
+            "--entry-id",
+            "42",
+            "--field",
+            "password",
+            "--token",
+            "tok-123",
+            "--json",
+            "--no-newline",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceGrant {
+                command:
+                    ServiceGrantCommands::Get {
+                        client_id,
+                        entry_id,
+                        field,
+                        token,
+                        json,
+                        no_newline,
+                    },
+            } => {
+                assert_eq!(client_id, "sandesha-svc");
+                assert_eq!(entry_id, 42);
+                assert_eq!(field, "password");
+                assert_eq!(token.as_deref(), Some("tok-123"));
+                assert!(json);
+                assert!(no_newline, "byte-exact output mode must parse");
+            }
+            _ => panic!("expected service-grant get command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-grant",
+            "revoke",
+            "--grant-id",
+            "5f0d8e80-9d2c-4f6b-a1b3-7c9e2d4f6a8b",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceGrant {
+                command: ServiceGrantCommands::Revoke { grant_id },
+            } => assert_eq!(grant_id, "5f0d8e80-9d2c-4f6b-a1b3-7c9e2d4f6a8b"),
+            _ => panic!("expected service-grant revoke command"),
+        }
+    }
+
+    #[test]
+    fn parses_service_grant_enrollment_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-grant",
+            "enrollment",
+            "begin",
+            "--client-id",
+            "sandesha-svc",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceGrant {
+                command:
+                    ServiceGrantCommands::Enrollment {
+                        command: ServiceGrantEnrollmentCommands::Begin { client_id },
+                    },
+            } => assert_eq!(client_id, "sandesha-svc"),
+            _ => panic!("expected service-grant enrollment begin command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-grant",
+            "enrollment",
+            "complete",
+            "--client-id",
+            "sandesha-svc",
+            "--nonce",
+            "nonce-1",
+            "--signature",
+            "sig.asc",
+            "--public-key",
+            "pub.asc",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceGrant {
+                command:
+                    ServiceGrantCommands::Enrollment {
+                        command:
+                            ServiceGrantEnrollmentCommands::Complete {
+                                client_id,
+                                nonce,
+                                signature,
+                                public_key,
+                            },
+                    },
+            } => {
+                assert_eq!(client_id, "sandesha-svc");
+                assert_eq!(nonce, "nonce-1");
+                assert_eq!(signature, "sig.asc");
+                assert_eq!(public_key, "pub.asc");
+            }
+            _ => panic!("expected service-grant enrollment complete command"),
         }
     }
 
