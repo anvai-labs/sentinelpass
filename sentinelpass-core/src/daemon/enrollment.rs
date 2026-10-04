@@ -127,15 +127,54 @@ fn temp_dir_unique(base: &std::path::Path) -> Result<std::path::PathBuf, String>
     let mut suffix = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut suffix);
     let dir = base.join(format!("sp-enroll-{}", hex::encode(suffix)));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
+    std::fs::create_dir(&dir).map_err(|e| format!("cannot create temp dir: {e}"))?;
+    // Owner-only from birth: the work dir holds the transcript (client_id,
+    // entry_id, grant_id, fields, nonce, fingerprint in cleartext) and may
+    // land in SHARED /tmp via the socket-budget fallback — world-readable
+    // files there would broadcast grant metadata (review round 2).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot secure temp dir: {e}"))?;
+    }
     Ok(dir)
+}
+
+/// Unix-domain-socket path budget (sun_path minus headroom). gpg places
+/// its agent socket inside the --homedir; when the projected path is too
+/// long, gpg imports the key but exits nonzero ("can't connect to the
+/// gpg-agent: File name too long") — verification would fail on every
+/// macOS host whose TMPDIR is the long /var/folders form (found by the
+/// SP-7 perf drill on gpg 2.5.24).
+#[cfg(unix)]
+const UNIX_SOCKET_PATH_BUDGET: usize = 96;
+
+/// Pick a work dir whose keyring keeps gpg's agent-socket path inside the
+/// unix budget: prefer the caller's base, fall back to /tmp when the
+/// platform temp root is too deep (macOS /var/folders/...).
+fn socket_safe_base(base: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::path::Path;
+        let projected = base.join("sp-enroll-0000000000000000/gnupg/keyring/S.gpg-agent");
+        if projected.as_os_str().len() > UNIX_SOCKET_PATH_BUDGET {
+            if let Ok(short) = std::env::var("SENTINELPASS_GPG_SHORT_TMP") {
+                return std::path::PathBuf::from(short);
+            }
+            return Path::new("/tmp").to_path_buf();
+        }
+    }
+    base.to_path_buf()
 }
 
 /// Remove the temp dir on drop.
 struct TempDirGuard<'a>(&'a std::path::Path);
 impl Drop for TempDirGuard<'_> {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.0);
+        if std::env::var_os("SP_KEEP_ENROLL_TMP").is_none() {
+            let _ = std::fs::remove_dir_all(self.0);
+        }
     }
 }
 
@@ -155,15 +194,26 @@ pub fn verify_signature(
 ) -> Result<(), String> {
     use std::process::{Command, Stdio};
 
-    // Isolated per-verification environment (review F2/F7).
+    // Isolated per-verification environment (review F2/F7), on a path
+    // that keeps gpg's agent-socket inside the unix sun_path budget.
     let temp_base = std::env::temp_dir();
-    let work_dir = temp_dir_unique(&temp_base)?;
+    let work_dir = temp_dir_unique(&socket_safe_base(&temp_base))?;
     let _guard = TempDirGuard(&work_dir);
 
     let gnupg_home = work_dir.join("gnupg");
     let keyring_dir = gnupg_home.join("keyring");
     std::fs::create_dir_all(&keyring_dir)
         .map_err(|e| format!("cannot create isolated keyring: {e}"))?;
+    // gpg >= 2.4 refuses a --homedir with group/other permission bits
+    // ("unsafe permissions") — the import fails outright on modern hosts
+    // (found by the SP-7 perf drill on gpg 2.5.24; CI's older gpg only
+    // warned). The isolated keyring is owner-only by intent anyway.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&keyring_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot secure isolated keyring: {e}"))?;
+    }
 
     // Import the client's public key into the isolated keyring.
     let key_path = work_dir.join("client pubkey.asc");
