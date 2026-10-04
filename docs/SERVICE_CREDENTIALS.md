@@ -250,6 +250,27 @@ not serve legacy grants. Migration path: re-issue grants as service
 grants (`create`), then retrieve with `service-grant get`. The legacy
 surface remains available on non-strict daemons (desktop default).
 
+### Exact-entry install mode (F3, v0.16.0)
+
+`service-credential install/verify` accept `--entry-id` (+ `--service-token`
+or `SENTINELPASS_SERVICE_TOKEN`) instead of `--domain`: retrieval then uses
+the token-enforced exact-entry `ServiceGetSecret` path — never prompts,
+never unlocks a locked daemon, and works under the strict profile (where
+legacy `--domain` retrieval is refused by design):
+
+```bash
+sudo sentinelpass service-credential install \
+  --client-id sandesha-svc --entry-id 42 --field password \
+  --cred-name sandesha.provider.key \
+  --protection host-key   # same-host use only; see the F4 note below
+```
+
+`--entry-id` and `--domain` are mutually exclusive (fail-fast); the legacy
+token flag is refused in service-grant mode. The manifest records
+`entry:<id>` as the display label. For REMOTE targets use the
+`service-grant get --no-newline | ssh …` procedure below — host-key
+credentials are host-bound.
+
 ### Provisioning to a remote host (F4 procedure)
 
 Credentials are host-bound: encrypt ON the target with the target's own

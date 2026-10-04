@@ -18,8 +18,16 @@ use crate::{SecretField, ServiceProtection};
 
 pub(crate) struct InstallArgs {
     pub client_id: String,
+    /// Legacy grant token ($SENTINELPASS_CLIENT_TOKEN) — legacy mode only.
     pub token: Option<String>,
-    pub domain: String,
+    /// Legacy domain lookup — legacy mode only; None in service-grant mode.
+    pub domain: Option<String>,
+    /// Exact-entry service-grant mode (F3): Some(entry_id) switches
+    /// retrieval to ServiceGetSecret with the service token.
+    pub entry_id: Option<i64>,
+    /// Service-grant token ($SENTINELPASS_SERVICE_TOKEN) — required with
+    /// --entry-id.
+    pub service_token: Option<String>,
     pub field: SecretField,
     pub cred_name: String,
     pub protection: ServiceProtection,
@@ -29,18 +37,69 @@ pub(crate) struct InstallArgs {
     pub verify: bool,
     pub biometric_unlock: bool,
     pub prompt_reason: String,
+    pub vault_path: PathBuf,
 }
 
 pub(crate) struct VerifyArgs {
     pub client_id: String,
     pub token: Option<String>,
-    pub domain: String,
+    pub domain: Option<String>,
+    pub entry_id: Option<i64>,
+    pub service_token: Option<String>,
     pub field: SecretField,
     pub cred_name: String,
     pub credstore_dir: Option<PathBuf>,
     pub systemd_creds: Option<PathBuf>,
     pub biometric_unlock: bool,
     pub prompt_reason: String,
+    pub vault_path: PathBuf,
+}
+
+/// The secret source selected by the flags (F3): exact-entry service grant
+/// (`--entry-id`, the strict-profile-compatible path) or the legacy
+/// domain-scoped grant. Validated fail-fast BEFORE any preflight or fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SecretSource {
+    ServiceGrant {
+        entry_id: i64,
+        token: String,
+    },
+    Legacy {
+        domain: String,
+        token: Option<String>,
+    },
+}
+
+fn resolve_secret_source(
+    entry_id: Option<i64>,
+    service_token: Option<String>,
+    domain: Option<String>,
+    token: Option<String>,
+) -> Result<SecretSource> {
+    match (entry_id, domain) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "--entry-id (service-grant mode) and --domain (legacy mode) are mutually exclusive"
+        ),
+        (Some(entry_id), None) => {
+            if token.is_some() {
+                anyhow::bail!(
+                    "--token is the legacy grant token; in --entry-id mode pass \
+                     --service-token (or $SENTINELPASS_SERVICE_TOKEN)"
+                );
+            }
+            let Some(token) = service_token else {
+                anyhow::bail!(
+                    "--entry-id requires a service token: pass --service-token or set \
+                     SENTINELPASS_SERVICE_TOKEN"
+                );
+            };
+            Ok(SecretSource::ServiceGrant { entry_id, token })
+        }
+        (None, Some(domain)) => Ok(SecretSource::Legacy { domain, token }),
+        (None, None) => {
+            anyhow::bail!("pass either --entry-id (service-grant mode) or --domain (legacy mode)")
+        }
+    }
 }
 
 /// Resolve the credential store directory: explicit override, else the
@@ -79,30 +138,54 @@ fn tool_path(explicit: Option<&PathBuf>) -> PathBuf {
     PathBuf::from("systemd-creds")
 }
 
-/// Fetch the secret through the audited broker (grant + client token) and
-/// return it as zeroized bytes. Nothing is printed.
+/// Fetch the secret through the audited broker and return it as zeroized
+/// bytes. Nothing is printed. Service-grant mode never prompts/unlocks
+/// (S3 discipline); legacy mode keeps its biometric-unlock affordance.
 fn resolve_secret_bytes(
-    client_id: String,
-    token: Option<String>,
-    domain: String,
+    vault_path: &PathBuf,
+    client_id: &str,
+    source: &SecretSource,
     field: SecretField,
     biometric_unlock: bool,
     prompt_reason: String,
     purpose: &str,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let lookup = crate::run_async(crate::commands::secret::get_secret_from_daemon(
-        domain,
-        field,
-        biometric_unlock,
-        prompt_reason,
-        client_id,
-        Some(purpose.to_string()),
-        token,
-    ))??;
-    Ok(Zeroizing::new(lookup.value.into_bytes()))
+    match source {
+        SecretSource::ServiceGrant { entry_id, token } => {
+            let (value, _report) = crate::commands::service_grant::retrieve_service_secret(
+                vault_path,
+                client_id,
+                *entry_id,
+                field.as_str(),
+                token,
+            )?;
+            Ok(Zeroizing::new(value.into_bytes()))
+        }
+        SecretSource::Legacy { domain, token } => {
+            let lookup = crate::run_async(crate::commands::secret::get_secret_from_daemon(
+                domain.clone(),
+                field,
+                biometric_unlock,
+                prompt_reason,
+                client_id.to_string(),
+                Some(purpose.to_string()),
+                token.clone(),
+            ))??;
+            Ok(Zeroizing::new(lookup.value.into_bytes()))
+        }
+    }
 }
 
 pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
+    // Fail fast on contradictory source flags BEFORE any preflight or
+    // daemon contact (F3: mode confusion must not surface as a mid-run
+    // broker error).
+    let source = resolve_secret_source(
+        args.entry_id,
+        args.service_token.clone(),
+        args.domain.clone(),
+        args.token.clone(),
+    )?;
     let credstore_dir = resolve_credstore_dir(args.credstore_dir.as_ref())?;
     let tool = SystemdCredsTool::new(tool_path(args.systemd_creds.as_ref()));
 
@@ -115,9 +198,9 @@ pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let plaintext = resolve_secret_bytes(
-        args.client_id.clone(),
-        args.token,
-        args.domain.clone(),
+        &args.vault_path,
+        &args.client_id,
+        &source,
         args.field,
         args.biometric_unlock,
         args.prompt_reason,
@@ -144,7 +227,13 @@ pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
     manifest.upsert(ServiceCredentialRecord {
         cred_name: args.cred_name.clone(),
         client_id: args.client_id.clone(),
-        domain: args.domain.clone(),
+        // Display label: the exact entry in service-grant mode, the domain
+        // in legacy mode (metadata only — the source of truth is the flags
+        // the operator re-passes to `verify`).
+        domain: match &source {
+            SecretSource::ServiceGrant { entry_id, .. } => format!("entry:{entry_id}"),
+            SecretSource::Legacy { domain, .. } => domain.clone(),
+        },
         field: args.field.into(),
         protection: CoreProtectionMode::from(args.protection),
         credstore_dir: credstore_dir.to_string_lossy().to_string(),
@@ -215,10 +304,16 @@ pub(crate) fn handle_verify(args: VerifyArgs) -> Result<i32> {
     };
     let tool = SystemdCredsTool::new(tool_path(args.systemd_creds.as_ref()));
 
+    let source = resolve_secret_source(
+        args.entry_id,
+        args.service_token.clone(),
+        args.domain.clone(),
+        args.token.clone(),
+    )?;
     let plaintext = resolve_secret_bytes(
-        args.client_id,
-        args.token,
-        args.domain,
+        &args.vault_path,
+        &args.client_id,
+        &source,
         args.field,
         args.biometric_unlock,
         args.prompt_reason,
@@ -376,5 +471,59 @@ mod tests {
         } else {
             assert_eq!(default, PathBuf::from("systemd-creds"));
         }
+    }
+}
+
+#[cfg(test)]
+mod source_mode_tests {
+    use super::resolve_secret_source;
+    use crate::commands::service_credential::SecretSource;
+
+    #[test]
+    fn service_grant_mode_requires_its_own_token() {
+        let src = resolve_secret_source(Some(42), Some("sps_tok".into()), None, None).unwrap();
+        assert_eq!(
+            src,
+            SecretSource::ServiceGrant {
+                entry_id: 42,
+                token: "sps_tok".to_string()
+            }
+        );
+        // Missing service token is a fail-fast error, not a mid-run one.
+        let err = resolve_secret_source(Some(42), None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--service-token"), "{err}");
+        // The LEGACY token flag is refused in service-grant mode (mode
+        // confusion must not silently fall back).
+        let err = resolve_secret_source(Some(42), Some("sps".into()), None, Some("legacy".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--service-token"), "{err}");
+    }
+
+    #[test]
+    fn modes_are_mutually_exclusive_and_one_is_required() {
+        let err =
+            resolve_secret_source(Some(1), Some("t".into()), Some("example.com".into()), None)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("mutually exclusive"), "{err}");
+        let err = resolve_secret_source(None, None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--entry-id") && err.contains("--domain"),
+            "{err}"
+        );
+        // Legacy mode keeps its optional token (env may supply it).
+        let src = resolve_secret_source(None, None, Some("example.com".into()), None).unwrap();
+        assert_eq!(
+            src,
+            SecretSource::Legacy {
+                domain: "example.com".to_string(),
+                token: None
+            }
+        );
     }
 }
