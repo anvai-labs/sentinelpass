@@ -195,8 +195,10 @@ provisioning) until the repair — fail-closed by design.
 - The CLI prints paths, sizes, and verdicts — never secrets or ciphertext.
 - Ciphertext is verified (decrypt + constant-time compare) **before** the
   atomic rename; the previous credential survives any failed run.
-- Every provisioning fetch is broker-scoped (grant + client token) and
-  audited (`purpose=service-credential-install` / `-verify`).
+- Every provisioning fetch is broker-scoped (grant + client token). Legacy
+  (`--domain`) fetches are audited with `purpose=service-credential-install`
+  / `-verify`; service-grant (`--entry-id`) fetches are audited daemon-side
+  under the exact-entry path's own events (`service_get:*` purposes).
 
 ## Testing
 
@@ -259,7 +261,9 @@ never unlocks a locked daemon, and works under the strict profile (where
 legacy `--domain` retrieval is refused by design):
 
 ```bash
-sudo sentinelpass service-credential install \
+# The service token reaches the root process via the ENVIRONMENT — never as
+# a command-line argument (root's argv is world-readable via /proc/<pid>/cmdline):
+sudo --preserve-env=SENTINELPASS_SERVICE_TOKEN sentinelpass service-credential install \
   --client-id sandesha-svc --entry-id 42 --field password \
   --cred-name sandesha.provider.key \
   --protection host-key   # same-host use only; see the F4 note below

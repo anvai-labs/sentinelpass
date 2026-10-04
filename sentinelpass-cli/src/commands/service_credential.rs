@@ -82,9 +82,13 @@ fn resolve_secret_source(
         ),
         (Some(entry_id), None) => {
             if token.is_some() {
+                // Review S2: clap fills this from SENTINELPASS_CLIENT_TOKEN
+                // whenever that env var is exported — name the actual
+                // remediation (unset the legacy var), not just the flag.
                 anyhow::bail!(
-                    "--token is the legacy grant token; in --entry-id mode pass \
-                     --service-token (or $SENTINELPASS_SERVICE_TOKEN)"
+                    "a legacy grant token is set (--token / $SENTINELPASS_CLIENT_TOKEN) but \
+                     --entry-id uses service-grant mode: unset SENTINELPASS_CLIENT_TOKEN and \
+                     pass --service-token (or set SENTINELPASS_SERVICE_TOKEN)"
                 );
             }
             let Some(token) = service_token else {
@@ -95,7 +99,19 @@ fn resolve_secret_source(
             };
             Ok(SecretSource::ServiceGrant { entry_id, token })
         }
-        (None, Some(domain)) => Ok(SecretSource::Legacy { domain, token }),
+        (None, Some(domain)) => {
+            // Review N3: symmetric fail-fast — a stray service token must
+            // not be silently ignored in legacy mode (mode confusion gets
+            // a typed error, not a mid-run denial).
+            if service_token.is_some() {
+                anyhow::bail!(
+                    "a service token is set (--service-token / $SENTINELPASS_SERVICE_TOKEN) \
+                     but --domain uses legacy mode: unset SENTINELPASS_SERVICE_TOKEN or \
+                     switch to --entry-id"
+                );
+            }
+            Ok(SecretSource::Legacy { domain, token })
+        }
         (None, None) => {
             anyhow::bail!("pass either --entry-id (service-grant mode) or --domain (legacy mode)")
         }
@@ -152,13 +168,29 @@ fn resolve_secret_bytes(
 ) -> Result<Zeroizing<Vec<u8>>> {
     match source {
         SecretSource::ServiceGrant { entry_id, token } => {
-            let (value, _report) = crate::commands::service_grant::retrieve_service_secret(
+            // Review N3: --biometric-unlock is legacy-mode-only; refuse it
+            // here rather than silently ignoring an operator's intent.
+            if biometric_unlock {
+                anyhow::bail!(
+                    "--biometric-unlock applies to legacy (--domain) mode only; \
+                     service-grant mode never prompts or unlocks"
+                );
+            }
+            let (value, mut report) = crate::commands::service_grant::retrieve_service_secret(
                 vault_path,
                 client_id,
                 *entry_id,
                 field.as_str(),
                 token,
             )?;
+            // Review N4: the daemon report carries a duplicate of the
+            // secret. We never surface it here — drop the value field so
+            // the clone is freed immediately (the value itself rides in
+            // the Zeroizing below). Residual risk: allocator pages, the
+            // same accepted residual as every String-based IPC payload.
+            if let Some(slot) = report.get_mut("value") {
+                *slot = serde_json::Value::String(String::new());
+            }
             Ok(Zeroizing::new(value.into_bytes()))
         }
         SecretSource::Legacy { domain, token } => {
@@ -289,6 +321,14 @@ pub(crate) fn handle_install(args: InstallArgs) -> Result<()> {
 
 /// Returns a process exit code: 0 = match, 3 = mismatch/absent.
 pub(crate) fn handle_verify(args: VerifyArgs) -> Result<i32> {
+    // Mode validation FIRST — same fail-fast order as install (review N7:
+    // contradictory flags must fail before any manifest load or preflight).
+    let source = resolve_secret_source(
+        args.entry_id,
+        args.service_token.clone(),
+        args.domain.clone(),
+        args.token.clone(),
+    )?;
     // Directory precedence: explicit flag, else the manifest's recorded dir
     // for this credential, else the platform default (matches the `Verify`
     // help text and `remove`'s behavior — proxy review finding 5).
@@ -304,12 +344,6 @@ pub(crate) fn handle_verify(args: VerifyArgs) -> Result<i32> {
     };
     let tool = SystemdCredsTool::new(tool_path(args.systemd_creds.as_ref()));
 
-    let source = resolve_secret_source(
-        args.entry_id,
-        args.service_token.clone(),
-        args.domain.clone(),
-        args.token.clone(),
-    )?;
     let plaintext = resolve_secret_bytes(
         &args.vault_path,
         &args.client_id,
@@ -489,17 +523,24 @@ mod source_mode_tests {
                 token: "sps_tok".to_string()
             }
         );
-        // Missing service token is a fail-fast error, not a mid-run one.
+        // Missing service token is a fail-fast error, not a mid-run one
+        // (review N5: pin the DISTINCT remediation of each refusal).
         let err = resolve_secret_source(Some(42), None, None, None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("--service-token"), "{err}");
-        // The LEGACY token flag is refused in service-grant mode (mode
-        // confusion must not silently fall back).
+        assert!(err.contains("--entry-id requires a service token"), "{err}");
+        // A LEGACY token (flag or $SENTINELPASS_CLIENT_TOKEN) in
+        // service-grant mode names the env var to unset (review S2).
         let err = resolve_secret_source(Some(42), Some("sps".into()), None, Some("legacy".into()))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("--service-token"), "{err}");
+        assert!(err.contains("unset SENTINELPASS_CLIENT_TOKEN"), "{err}");
+        // Symmetric: a SERVICE token in legacy mode is refused, not
+        // ignored (review N3).
+        let err = resolve_secret_source(None, Some("sps".into()), Some("example.com".into()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unset SENTINELPASS_SERVICE_TOKEN"), "{err}");
     }
 
     #[test]
