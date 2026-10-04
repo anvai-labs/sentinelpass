@@ -1,5 +1,11 @@
 # SP-7 Performance Evidence — 2026-10-02
 
+> **SUPERSEDED (2026-10-04):** the FNV-1a methodology limitation noted
+> below is closed by `docs/SP7_PERFORMANCE_EVIDENCE_2026-10-04.md` —
+> measured with real primitives on the real code paths (including a full
+> real-socket round trip). This document is retained as the honest record
+> of the provisional claim and its correction.
+
 Benchmarks run on the development host (macOS, 10 cores) with a standalone
 Rust binary (`-O` optimization, warm-cache steady state, 10k–100k iterations,
 warm-up discarded). SP-3 (executable hashing) runs on CI's Linux legs where
