@@ -3613,6 +3613,274 @@ mod autofill_origin_gate_tests {
         });
     }
 
+    /// SP-7 production-path performance evidence (P2 follow-up): REAL
+    /// primitives on the REAL code paths — HMAC-SHA256 step-up mint+
+    /// validate, SHA-256+ct_eq grant authorize, canonical enrollment
+    /// transcript, /proc exe-policy check. `#[ignore]`: timing evidence run
+    /// in RELEASE mode via scripts/drills/drill-perf-production-path.sh,
+    /// not a per-PR gate (dev-build debug assertions and CI load skew
+    /// timings).
+    #[test]
+    #[ignore]
+    fn perf_evidence_in_process_layers() {
+        const N: usize = 1_000;
+        let mut stepup_samples = Vec::with_capacity(N);
+        let mut authorize_samples = Vec::with_capacity(N);
+        let mut transcript_samples = Vec::with_capacity(N);
+
+        let tmp = TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // Layer 1: step-up mint + single-use validation (real HMAC-SHA256
+        // commitment over a representative VaultOp serialization).
+        let state = crate::daemon::ipc::stepup::StepUpState::new();
+        let op = make_add_op("perf-step-up");
+        let op_bytes = serde_json::to_vec(&op).unwrap();
+        for _ in 0..N {
+            let t0 = std::time::Instant::now();
+            let (approval, _expires) = state.mint(0x5FE0_0001, &op_bytes);
+            let consumed = state.take_if_valid(&approval, 0x5FE0_0001, &op_bytes);
+            stepup_samples.push(t0.elapsed());
+            assert!(consumed.is_ok(), "minted approval must validate once");
+        }
+
+        // Layer 2: grant authorize (real SHA-256 token hash + constant-time
+        // compare) — mint one grant, then repeatedly authorize against it.
+        let store_path = tmp.path().join("service-grants.json");
+        let mut store = crate::service_grants::ServiceGrantStore::default();
+        let (_grant, token) = store
+            .mint_grant(
+                "perf-client",
+                7,
+                vec![crate::service_grants::ServiceField::Password],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store.save_to_path(&store_path).unwrap();
+        for _ in 0..N {
+            let t0 = std::time::Instant::now();
+            let hit = store.authorize(
+                "perf-client",
+                &token,
+                7,
+                crate::service_grants::ServiceField::Password,
+                chrono::Utc::now(),
+            );
+            authorize_samples.push(t0.elapsed());
+            assert!(hit.is_some(), "valid token must authorize");
+        }
+        // One cold denial path for contrast (wrong token, full work).
+        let t0 = std::time::Instant::now();
+        assert!(store
+            .authorize(
+                "perf-client",
+                "wrong-token",
+                7,
+                crate::service_grants::ServiceField::Password,
+                chrono::Utc::now()
+            )
+            .is_none());
+        let denial = t0.elapsed();
+
+        // Layer 3: canonical enrollment transcript construction.
+        let enrollment = crate::enrollment::EnrollmentState::new();
+        for _ in 0..N {
+            let t0 = std::time::Instant::now();
+            let (_nonce, _transcript) = enrollment.begin(
+                "perf-client",
+                uuid::Uuid::new_v4(),
+                7,
+                &["password"],
+                None,
+                "0123456789abcdef0123456789abcdef01234567",
+                None,
+            );
+            transcript_samples.push(t0.elapsed());
+        }
+
+        // Layer 4 (Linux only): executable policy over the REAL
+        // /proc/self/exe. Non-Linux: evidence is unavailable by design and
+        // the check denies fail-closed — recorded, not timed.
+        #[cfg(target_os = "linux")]
+        let exe_note = {
+            let digest = crate::exe_policy::resolve_exe_digest(std::process::id()).unwrap();
+            let pins = vec![digest];
+            let t0 = std::time::Instant::now();
+            let verdict = crate::exe_policy::check_policy(&pins, Some(std::process::id()));
+            let exe_elapsed = t0.elapsed();
+            assert!(matches!(
+                verdict,
+                crate::exe_policy::ExePolicyResult::Matched
+            ));
+            format!("exe_policy(/proc/self/exe) p50/p95 over 1 hash: {exe_elapsed:?}")
+        };
+        #[cfg(not(target_os = "linux"))]
+        let exe_note = {
+            let verdict =
+                crate::exe_policy::check_policy(&["aa".repeat(32)], Some(std::process::id()));
+            assert!(
+                matches!(
+                    verdict,
+                    crate::exe_policy::ExePolicyResult::EvidenceUnavailable(_)
+                ),
+                "non-Linux must deny fail-closed with unavailable evidence"
+            );
+            "exe_policy: EvidenceUnavailable on this platform (fail-closed denial verified, not timed)".to_string()
+        };
+
+        fn pct(samples: &mut [std::time::Duration], p: f64) -> std::time::Duration {
+            samples.sort();
+            samples[((samples.len() as f64 - 1.0) * p) as usize]
+        }
+        let (mut s1, mut s2, mut s3) = (stepup_samples, authorize_samples, transcript_samples);
+        println!("SP-7 production-path evidence (release mode, N={N}):");
+        println!(
+            "  step_up mint+validate : p50 {:?}  p95 {:?}  p99 {:?}",
+            pct(&mut s1, 0.5),
+            pct(&mut s1, 0.95),
+            pct(&mut s1, 0.99)
+        );
+        println!(
+            "  grant authorize       : p50 {:?}  p95 {:?}  p99 {:?}",
+            pct(&mut s2, 0.5),
+            pct(&mut s2, 0.95),
+            pct(&mut s2, 0.99)
+        );
+        println!("  grant authorize DENY  : {denial:?} (full work before denial)");
+        println!(
+            "  enrollment transcript : p50 {:?}  p95 {:?}  p99 {:?}",
+            pct(&mut s3, 0.5),
+            pct(&mut s3, 0.95),
+            pct(&mut s3, 0.99)
+        );
+        println!("  {exe_note}");
+
+        // Handoff §7 targets with wide CI-load margin: every per-request
+        // layer must sit far below the 10 ms retrieval budget.
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
+        assert!(
+            pct(&mut s2, 0.95) < BUDGET,
+            "grant authorize p95 exceeds budget"
+        );
+        assert!(pct(&mut s1, 0.95) < BUDGET, "step-up p95 exceeds budget");
+    }
+
+    /// SP-7 evidence: warm end-to-end ServiceGetSecret over a REAL Unix
+    /// socket (transport handshake + sealed envelope + grant authorize).
+    /// `#[ignore]` — run in release mode via the drill script.
+    #[test]
+    #[cfg(unix)]
+    #[ignore]
+    fn perf_evidence_real_socket_service_get() {
+        const N: usize = 200;
+        // Own mini-harness: a real vault with one real entry the grant
+        // points at (full-success round trips, not the not_found shortcut).
+        let tmp = TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let vault_path = tmp.path().join("vault.db");
+        let manager = VaultManager::create(&vault_path, b"test_password").unwrap();
+        let entry_id = manager
+            .add_entry(&crate::Entry {
+                entry_id: None,
+                title: "perf entry".to_string(),
+                username: "u".to_string(),
+                password: "p".to_string().into(),
+                url: None,
+                notes: None,
+                credential_type: crate::CredentialType::Password,
+                created_at: chrono::Utc::now(),
+                modified_at: chrono::Utc::now(),
+                favorite: false,
+            })
+            .unwrap();
+        drop(manager);
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { daemon_vault.unlock(b"test_password").await })
+            .unwrap();
+        let server = IpcServer::new_with_allowlist_path(
+            tmp.path().join("perf.sock"),
+            Arc::new(daemon_vault),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        );
+        let socket = server.socket_path.clone();
+
+        // A real grant for the retrieval path (no exe pins: that factor is
+        // timed separately on Linux where evidence exists).
+        let mut store = crate::service_grants::ServiceGrantStore::default();
+        let (_grant, token) = store
+            .mint_grant(
+                "perf-client",
+                entry_id,
+                vec![crate::service_grants::ServiceField::Title],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store.save_to_path(&server.service_grants_path).unwrap();
+        let server = Arc::new(server);
+
+        rt.block_on(async {
+            let running = tokio::spawn(server.run());
+            for _ in 0..100 {
+                if socket.exists() { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(socket.exists(), "listener did not start");
+            let client =
+                sentinelpass_protocol::IpcClient::new_with_token(socket, "test-token".into());
+            // Session handshake once (steady state = one long-lived
+            // connection, matching the native-client deployment shape).
+            client.send(IpcMessage::CheckVault).await.unwrap();
+            let mut samples = Vec::with_capacity(N);
+            for _ in 0..N {
+                let t0 = std::time::Instant::now();
+                let result = client
+                    .call_service(VaultOp::ServiceGetSecret {
+                        client_id: "perf-client".into(),
+                        entry_id,
+                        field: "title".into(),
+                        token: token.to_string(),
+                    })
+                    .await
+                    .unwrap();
+                samples.push(t0.elapsed());
+                assert!(
+                    matches!(result, VaultOpResult::Report(ref r) if r.get("status").and_then(|s| s.as_str()) == Some("authorized")),
+                    "every warm retrieval must authorize"
+                );
+            }
+            samples.sort();
+            let idx = |p: f64| samples[((samples.len() as f64 - 1.0) * p) as usize];
+            println!("SP-7 real-socket ServiceGetSecret (warm, N={N}):");
+            println!(
+                "  p50 {:?}  p95 {:?}  p99 {:?}  max {:?}",
+                idx(0.5),
+                idx(0.95),
+                idx(0.99),
+                samples[samples.len() - 1]
+            );
+            // Handoff §7: warm added p95 < 10 ms for a small native client.
+            assert!(
+                idx(0.95) < std::time::Duration::from_millis(10),
+                "warm retrieval p95 exceeds the 10 ms budget"
+            );
+            running.abort();
+        });
+    }
+
     #[test]
     fn step_up_allows_exactly_one_mutation() {
         let h = strict_harness();
@@ -4210,7 +4478,7 @@ mod autofill_origin_gate_tests {
                         client_id: "sandesha-svc".into(),
                         entry_id: 1,
                         field: "password".into(),
-                        token: token.clone(),
+                        token: token.to_string(),
                     },
                     stepup_approval: None,
                 },
@@ -4232,7 +4500,7 @@ mod autofill_origin_gate_tests {
                         client_id: "sandesha-svc".into(),
                         entry_id: 99,
                         field: "password".into(),
-                        token: token.clone(),
+                        token: token.to_string(),
                     },
                     stepup_approval: None,
                 },
