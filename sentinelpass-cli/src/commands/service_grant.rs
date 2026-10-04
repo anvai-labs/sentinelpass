@@ -4,15 +4,18 @@
 //! master-password step-up: `Backend::call` retries once with an
 //! interactive step-up when the daemon answers the typed
 //! `step_up_required` error. Retrieval (`get`) and enrollment completion
-//! are unattended-safe and never prompt for the master password.
+//! are unattended-safe: they never prompt for the master password and
+//! never unlock a locked daemon — a locked vault is a typed failure
+//! telling the operator to unlock (an owner act), not a hidden prompt.
 
 use anyhow::Result;
 use sentinelpass_protocol::{VaultOp, VaultOpResult};
 
 use crate::commands::service_client::{self, Backend};
 
-/// The service token may arrive by flag or by environment (never argv in
-/// steady-state scripts): `SENTINELPASS_SERVICE_TOKEN`.
+/// The service token may arrive by flag or environment (never argv in
+/// steady-state scripts): `SENTINELPASS_SERVICE_TOKEN`. clap's `env` on
+/// the flag resolves it; the literal lives here for error messages.
 const SERVICE_TOKEN_ENV: &str = "SENTINELPASS_SERVICE_TOKEN";
 
 fn connect_backend(vault_path: &std::path::PathBuf) -> Result<Backend> {
@@ -23,6 +26,41 @@ fn connect_backend(vault_path: &std::path::PathBuf) -> Result<Backend> {
         );
     }
     service_client::connect(vault_path, || crate::prompt_master_password(false))
+}
+
+/// Unattended-safe connection for retrieval-side ops (review S3): probe
+/// the daemon, REFUSE a locked vault with actionable guidance, and never
+/// prompt or unlock. Custom `--vault` paths are refused — service grants
+/// are daemon-served for the default vault only (no direct path exists
+/// by design).
+fn connect_backend_no_unlock(vault_path: &std::path::PathBuf) -> Result<Backend> {
+    if !vault_path.exists() {
+        anyhow::bail!(
+            "Vault not found at {}. Run `sentinelpass init` first.",
+            vault_path.display()
+        );
+    }
+    if *vault_path != sentinelpass_core::get_default_vault_path() {
+        anyhow::bail!(
+            "Service grants are served by the daemon for the default vault only; \
+             a custom --vault path cannot be used here."
+        );
+    }
+    let probed = crate::run_async(Backend::probe())??;
+    let Some(client) = probed else {
+        anyhow::bail!(
+            "No reachable SentinelPass daemon. Start it with `sentinelpass-daemon` \
+             (or launch the desktop app), then retry."
+        );
+    };
+    let backend = Backend::Daemon(client);
+    if !backend.is_unlocked()? {
+        anyhow::bail!(
+            "SentinelPass daemon is locked. Retrieval never prompts or unlocks: \
+             run `sentinelpass unlock` (owner act) and retry."
+        );
+    }
+    Ok(backend)
 }
 
 fn report(result: VaultOpResult) -> Result<serde_json::Value> {
@@ -41,12 +79,15 @@ fn print_report(report: &serde_json::Value) {
 
 fn report_error(report: &serde_json::Value) -> Result<()> {
     let status = report.get("status").and_then(|s| s.as_str()).unwrap_or("");
-    if status == "authorized"
-        || status == "created"
-        || status == "challenge"
-        || status == "enrolled"
-        || status == "revoked"
-    {
+    // Success statuses across the five service-grant ops (daemon
+    // inventory, server.rs service_secret_report call sites). Review B2:
+    // `pending_enrollment` IS a success — the grant is persisted and the
+    // enrollment ceremony is the documented next step; reporting it as a
+    // denial caused retry loops that minted duplicate pending grants.
+    if matches!(
+        status,
+        "authorized" | "created" | "pending_enrollment" | "challenge" | "enrolled" | "revoked"
+    ) {
         return Ok(());
     }
     let detail = report
@@ -54,7 +95,19 @@ fn report_error(report: &serde_json::Value) -> Result<()> {
         .and_then(|e| e.as_str())
         .map(|e| format!(": {e}"))
         .unwrap_or_default();
-    anyhow::bail!("daemon denied the operation (status: {status}){detail}")
+    // Review S4: distinguish the actionable non-denial outcomes — a
+    // locked vault (operator must unlock; the grant itself is fine) and
+    // a missing entry (grant may reference a deleted entry).
+    match status {
+        "locked" => anyhow::bail!(
+            "vault is locked — the daemon locked between connect and execution; \
+             unlock and retry{detail}"
+        ),
+        "not_found" => anyhow::bail!(
+            "no matching grant or entry (the grant may reference a deleted entry){detail}"
+        ),
+        _ => anyhow::bail!("daemon denied the operation (status: {status}){detail}"),
+    }
 }
 
 /// Parse a positive duration (`30m`, `8h`, `7d`) into unix-seconds-from-now.
@@ -78,7 +131,10 @@ fn expires_at_from(duration: &str) -> Result<i64> {
         _ => anyhow::bail!("Expiry unit must be one of s, m, h, or d"),
     }
     .ok_or_else(|| anyhow::anyhow!("Expiry out of range"))?;
-    Ok(chrono::Utc::now().timestamp() + secs)
+    chrono::Utc::now()
+        .timestamp()
+        .checked_add(secs)
+        .ok_or_else(|| anyhow::anyhow!("Expiry out of range"))
 }
 
 /// Validate the fields list against the daemon's accepted set before we
@@ -100,9 +156,12 @@ fn parse_fields(fields: &str) -> Result<Vec<String>> {
     Ok(parsed)
 }
 
-/// Validate a 40-hex OpenPGP fingerprint.
+/// Validate a 40-hex OpenPGP fingerprint. Normalized to LOWERCASE — the
+/// daemon's mint path requires exactly lowercase hex (review B1: an
+/// uppercase normalization made every fingerprinted create fail daemon-side
+/// after the step-up was already spent).
 fn parse_fingerprint(value: &str) -> Result<String> {
-    let fp = value.trim().to_ascii_uppercase();
+    let fp = value.trim().to_ascii_lowercase();
     if fp.len() != 40 || !fp.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!(
             "--key-fingerprint must be a full 40-hex-digit OpenPGP fingerprint (got {} chars)",
@@ -177,19 +236,24 @@ pub fn handle_get(
     field: String,
     token: Option<String>,
     output_json: bool,
+    no_newline: bool,
 ) -> Result<()> {
-    let token = match token.or_else(|| std::env::var(SERVICE_TOKEN_ENV).ok()) {
-        Some(token) => token,
-        None => anyhow::bail!(
+    // clap's `env` on the flag already resolves SENTINELPASS_SERVICE_TOKEN
+    // (review N6: no second manual env read).
+    let Some(token) = token else {
+        anyhow::bail!(
             "pass --token or set {SERVICE_TOKEN_ENV} (the service token shown when the grant was created)"
-        ),
+        );
     };
     let field = field.to_ascii_lowercase();
     if !matches!(field.as_str(), "username" | "password" | "title") {
         anyhow::bail!("unknown field {field:?} (username, password, title)");
     }
 
-    let backend = connect_backend(&vault_path)?;
+    // Review S3: retrieval never prompts or unlocks — a locked vault is a
+    // typed failure with unlock guidance, not a hidden master-password
+    // prompt that would hang unattended/cron retrieval.
+    let backend = connect_backend_no_unlock(&vault_path)?;
     let result = backend.call(VaultOp::ServiceGetSecret {
         client_id,
         entry_id,
@@ -204,8 +268,16 @@ pub fn handle_get(
         .ok_or_else(|| anyhow::anyhow!("daemon authorized the grant but returned no value"))?;
     if output_json {
         println!("{}", serde_json::to_string(&report).unwrap_or_default());
+    } else if no_newline {
+        // Review S5: byte-exact output for pipelines (e.g. systemd-creds
+        // encrypt over SSH) — the default newline would corrupt the
+        // provisioned credential.
+        use std::io::Write;
+        print!("{value}");
+        std::io::stdout()
+            .flush()
+            .map_err(|e| anyhow::anyhow!("failed to write output: {e}"))?;
     } else {
-        // Raw value only: this is a machine-facing retrieval surface.
         println!("{value}");
     }
     Ok(())
@@ -258,9 +330,18 @@ pub fn handle_enrollment_complete(
     signature: String,
     public_key: String,
 ) -> Result<()> {
+    // Review N8: both blobs cannot come from stdin — the second read
+    // would silently get "".
+    if signature == "-" && public_key == "-" {
+        anyhow::bail!(
+            "--signature and --public-key cannot BOTH read stdin; pass at least one as a file"
+        );
+    }
     let signature_armored = read_blob(&signature)?;
     let client_public_key = read_blob(&public_key)?;
-    let backend = connect_backend(&vault_path)?;
+    // Unattended-safe side of the ceremony (nonce + signature are the
+    // credentials): never prompts, never unlocks.
+    let backend = connect_backend_no_unlock(&vault_path)?;
     let result = backend.call(VaultOp::ServiceEnrollmentComplete {
         client_id,
         nonce,
@@ -295,20 +376,26 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_requires_40_hex() {
-        let ok = parse_fingerprint("0123456789abcdef0123456789ABCDEF01234567").unwrap();
-        assert_eq!(ok.len(), 40);
+    fn fingerprint_normalizes_to_lowercase_40_hex() {
+        // Review B1/N9: assert the EXACT normalized value — the daemon's
+        // mint path rejects uppercase hex, so any uppercase here would
+        // dead-end the enrollment ceremony after the step-up was spent.
+        let ok = parse_fingerprint("0123456789ABCDEF0123456789abcdef01234567").unwrap();
+        assert_eq!(ok, "0123456789abcdef0123456789abcdef01234567");
         assert!(parse_fingerprint("short").is_err());
         assert!(parse_fingerprint(&"g".repeat(40)).is_err());
         assert!(parse_fingerprint(&"a".repeat(39)).is_err());
     }
 
     #[test]
-    fn exe_pins_require_64_hex_each() {
-        let good = "a".repeat(64);
-        assert_eq!(parse_exe_pins(&good).unwrap().len(), 1);
-        let pair = format!("{},{}", "b".repeat(64), "c".repeat(64));
-        assert_eq!(parse_exe_pins(&pair).unwrap().len(), 2);
+    fn exe_pins_normalize_to_lowercase_64_hex_each() {
+        let good = "A".repeat(64);
+        assert_eq!(parse_exe_pins(&good).unwrap(), vec!["a".repeat(64)]);
+        let pair = format!("{},{}", "B".repeat(64), "c".repeat(64));
+        assert_eq!(
+            parse_exe_pins(&pair).unwrap(),
+            vec!["b".repeat(64), "c".repeat(64)]
+        );
         assert!(parse_exe_pins("nothex").is_err());
         assert!(parse_exe_pins(&"a".repeat(63)).is_err());
         assert!(parse_exe_pins("").is_err());
@@ -325,14 +412,37 @@ mod tests {
         assert!(expires_at_from("-5m").is_err());
         assert!(expires_at_from("5w").is_err());
         assert!(expires_at_from("99999999999999999999d").is_err());
+        // Review N7: no panic/wrap at the i64 ceiling.
+        assert!(expires_at_from("9223372036854775807s").is_err());
     }
 
     #[test]
     fn report_error_classifies_statuses() {
         let ok = serde_json::json!({"status": "authorized", "value": "v"});
         assert!(report_error(&ok).is_ok());
+        // Review B2: pending_enrollment is a SUCCESS (grant persisted);
+        // misreporting it as a denial caused duplicate-grant retry loops.
+        let pending = serde_json::json!({"status": "pending_enrollment"});
+        assert!(report_error(&pending).is_ok());
+        for status in ["created", "challenge", "enrolled", "revoked"] {
+            assert!(
+                report_error(&serde_json::json!({"status": status})).is_ok(),
+                "{status} must be a success"
+            );
+        }
         let denied = serde_json::json!({"status": "denied", "error": "no grant"});
         let err = report_error(&denied).unwrap_err().to_string();
         assert!(err.contains("denied") && err.contains("no grant"), "{err}");
+        // Review S4: locked/not_found get actionable wording, not
+        // "denied" (an operator with a valid grant must not re-mint).
+        let locked = serde_json::json!({"status": "locked"});
+        let err = report_error(&locked).unwrap_err().to_string();
+        assert!(err.contains("locked") && !err.contains("denied"), "{err}");
+        let missing = serde_json::json!({"status": "not_found"});
+        let err = report_error(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("no matching grant") && !err.contains("denied"),
+            "{err}"
+        );
     }
 }

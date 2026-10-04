@@ -256,9 +256,12 @@ Credentials are host-bound: encrypt ON the target with the target's own
 host key. Do not copy owner-encrypted blobs or export host keys.
 
 ```bash
-# owner machine → deliver approved plaintext over authenticated SSH stdin:
+# owner machine → deliver approved plaintext over authenticated SSH stdin.
+# --no-newline is REQUIRED: systemd-creds encrypts bytes verbatim, and the
+# default trailing newline would provision value\n (a corrupted credential
+# that also fails any byte-exact verification on the target):
 sentinelpass service-grant get --client-id sandesha-svc \
-  --entry-id 42 --field password |
+  --entry-id 42 --field password --no-newline |
   ssh user@target 'sudo systemd-creds encrypt --with-key=host \
     --name=sandesha.provider.key /dev/stdin \
     /etc/credstore.encrypted/sandesha.provider.key'

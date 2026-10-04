@@ -765,6 +765,13 @@ enum ServiceGrantCommands {
         /// Print the full daemon report as JSON instead of the raw value
         #[arg(long)]
         json: bool,
+
+        /// Omit the trailing newline — byte-exact output for pipelines
+        /// (e.g. `service-grant get --no-newline | ssh … 'systemd-creds
+        /// encrypt …'`); the default newline would corrupt the
+        /// provisioned credential
+        #[arg(short = 'n', long)]
+        no_newline: bool,
     },
 
     /// Revoke a grant by id (step-up). Existing tokens for the grant stop
@@ -1456,6 +1463,7 @@ fn main() -> Result<()> {
                 field,
                 token,
                 json,
+                no_newline,
             } => {
                 commands::service_grant::handle_get(
                     cli.vault
@@ -1466,6 +1474,7 @@ fn main() -> Result<()> {
                     field,
                     token,
                     json,
+                    no_newline,
                 )?;
             }
             ServiceGrantCommands::Revoke { grant_id } => {
@@ -2215,6 +2224,7 @@ mod tests {
             "--token",
             "tok-123",
             "--json",
+            "--no-newline",
         ])
         .unwrap();
         match cli.command {
@@ -2226,6 +2236,7 @@ mod tests {
                         field,
                         token,
                         json,
+                        no_newline,
                     },
             } => {
                 assert_eq!(client_id, "sandesha-svc");
@@ -2233,6 +2244,7 @@ mod tests {
                 assert_eq!(field, "password");
                 assert_eq!(token.as_deref(), Some("tok-123"));
                 assert!(json);
+                assert!(no_newline, "byte-exact output mode must parse");
             }
             _ => panic!("expected service-grant get command"),
         }
