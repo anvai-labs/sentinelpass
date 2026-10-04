@@ -506,6 +506,14 @@ Gotchas:
 3. **`main` → `develop` resyncs** are only for repair after a hotfix was
    genuinely cut on `main`; they must resolve develop wholly to main's tree
    and be verified byte-identical (`git diff origin/main` empty).
+4. **Rebase discipline for open PRs**: branch from fresh `origin/develop`;
+   if develop moves under an open PR, rebase (`git rebase --onto
+   origin/develop <old-base> <branch>`) before merge; after ANY rebase,
+   verify the final TREE matches what was reviewed (`git diff
+   <reviewed-commit> <branch>` empty) — reviews bind to trees, not SHAs.
+   Before requesting merge of any release/fix PR, verify the merge-base
+   actually contains the intended fixes (CI green proves nothing about
+   which changes a PR carries).
 - **Commit format:** `type(scope): imperative summary` (e.g., `fix(daemon): gate save path when vault is locked`)
 - **Branch protection:** CI required, 1 approval, no force pushes (both `main` and `develop`)
 - **Pre-commit hook:** `.githooks/pre-commit` runs lint + test scripts for changed Rust/TS files. Configure with `git config core.hooksPath .githooks`
