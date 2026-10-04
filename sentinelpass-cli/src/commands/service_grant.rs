@@ -267,6 +267,11 @@ pub fn handle_get(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("daemon authorized the grant but returned no value"))?;
     if output_json {
+        // Verification-round nit: --json and --no-newline are
+        // contradictory output modes — reject rather than half-honor.
+        if no_newline {
+            anyhow::bail!("--json and --no-newline are mutually exclusive output modes");
+        }
         println!("{}", serde_json::to_string(&report).unwrap_or_default());
     } else if no_newline {
         // Review S5: byte-exact output for pipelines (e.g. systemd-creds
