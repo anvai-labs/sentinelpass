@@ -1,5 +1,11 @@
 # Service Credentials (systemd) — Runbook
 
+**Grant-integrity update:** new service-grant storage uses authenticated envelopes.
+Unsigned stores require reviewed owner re-issuance, not automatic import. See
+[migration, validation and trust limits](SERVICE_GRANT_INTEGRITY.md). This does not
+change the legacy domain-grant examples below into a production recommendation;
+new Sandesha deployments use exact-entry grants and off-host owner provisioning.
+
 Restart-safe secret delivery for Linux servers: provision selected vault
 secrets into **systemd encrypted credentials** so units restart with no
 SentinelPass daemon, vault, or master password available. Design and threat

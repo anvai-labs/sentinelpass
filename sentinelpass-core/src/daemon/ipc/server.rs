@@ -149,6 +149,20 @@ impl IpcServer {
         self
     }
 
+    // A grant never unlocks the vault. Derive a short-lived authentication key
+    // from the active vault on every operation; no persistent second key file.
+    async fn service_grant_store_key(
+        &self,
+    ) -> std::result::Result<crate::service_grants::ServiceGrantStoreKey, IpcMessage> {
+        let Some(manager) = self.vault.manager().await else {
+            return Err(self.service_secret_report("locked", None, None));
+        };
+        manager
+            .current_dek()
+            .and_then(|dek| crate::service_grants::ServiceGrantStoreKey::from_dek(&dek))
+            .map_err(|_| self.service_secret_report("locked", None, None))
+    }
+
     /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
     /// Typed outcomes; `not_found` is only reachable AFTER grant
     /// validation (un-granted probing gets `denied`).
@@ -160,6 +174,10 @@ impl IpcServer {
         field: &str,
         token: &str,
     ) -> IpcMessage {
+        let store_key = match self.service_grant_store_key().await {
+            Ok(key) => key,
+            Err(response) => return response,
+        };
         let field = match field {
             "username" => crate::service_grants::ServiceField::Username,
             "password" => crate::service_grants::ServiceField::Password,
@@ -176,14 +194,26 @@ impl IpcServer {
         };
         let store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
+            &store_key,
         ) {
             Ok(store) => store,
             Err(e) => {
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::ExternalSecretAccess {
+                        client_id: Some(client_id.to_string()),
+                        domain: format!("entry:{entry_id}"),
+                        field: Some(field.as_str().to_string()),
+                        purpose: Some("service_get:grant_store_rejected".to_string()),
+                        success: false,
+                    },
+                    &format!("service grant store rejected {}", peer.provenance_token()),
+                );
                 return self.service_secret_report(
                     "denied",
                     None,
                     Some(format!("grant store unavailable (fail closed): {e}")),
-                )
+                );
             }
         };
         let grant = store.authorize(client_id, token, entry_id, field, chrono::Utc::now());
@@ -359,6 +389,10 @@ impl IpcServer {
         required_exe_sha256: Option<Vec<String>>,
         registration_key_fingerprint: Option<String>,
     ) -> IpcMessage {
+        let store_key = match self.service_grant_store_key().await {
+            Ok(key) => key,
+            Err(response) => return response,
+        };
         let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
             .iter()
             .map(|f| match f.as_str() {
@@ -394,6 +428,7 @@ impl IpcServer {
         let _guard = self.service_grants_lock.lock().unwrap();
         let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
+            &store_key,
         ) {
             Ok(store) => store,
             Err(e) => {
@@ -415,7 +450,7 @@ impl IpcServer {
             Ok(minted) => minted,
             Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
         };
-        if let Err(e) = store.save_to_path(&self.service_grants_path) {
+        if let Err(e) = store.save_to_path(&self.service_grants_path, &store_key) {
             // Review F6: NOT published — distinct from an authz denial.
             return self.service_secret_report("store_error", None, Some(e.to_string()));
         }
@@ -470,10 +505,15 @@ impl IpcServer {
         peer: &crate::daemon::transport::PeerContext,
         client_id: &str,
     ) -> IpcMessage {
+        let store_key = match self.service_grant_store_key().await {
+            Ok(key) => key,
+            Err(response) => return response,
+        };
         // Review M2: challenge minting is an owner act on the grant-policy
         // lifecycle — audited on every path like create/revoke/complete.
         let store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
+            &store_key,
         ) {
             Ok(store) => store,
             Err(e) => {
@@ -591,9 +631,14 @@ impl IpcServer {
             );
         }
 
+        let store_key = match self.service_grant_store_key().await {
+            Ok(key) => key,
+            Err(response) => return response,
+        };
         // Load the store to get the expected fingerprint.
         let store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
+            &store_key,
         ) {
             Ok(store) => store,
             Err(e) => {
@@ -631,12 +676,17 @@ impl IpcServer {
 
         match verification {
             Ok(Ok(())) => {
+                let store_key = match self.service_grant_store_key().await {
+                    Ok(key) => key,
+                    Err(response) => return response,
+                };
                 // F4: re-validate INSIDE the lock — a concurrent revoke
                 // during the multi-second verification window must be
                 // honored, not silently overridden.
                 let _guard = self.service_grants_lock.lock().unwrap();
                 let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
                     &self.service_grants_path,
+                    &store_key,
                 ) {
                     Ok(s) => s,
                     Err(e) => {
@@ -682,7 +732,7 @@ impl IpcServer {
                         return self.service_secret_report("denied", None, Some(e.to_string()))
                     }
                 };
-                if let Err(e) = store.save_to_path(&self.service_grants_path) {
+                if let Err(e) = store.save_to_path(&self.service_grants_path, &store_key) {
                     return self.service_secret_report("store_error", None, Some(e.to_string()));
                 }
                 let entry_id = store
@@ -741,12 +791,17 @@ impl IpcServer {
         peer: &crate::daemon::transport::PeerContext,
         grant_id_str: &str,
     ) -> IpcMessage {
+        let store_key = match self.service_grant_store_key().await {
+            Ok(key) => key,
+            Err(response) => return response,
+        };
         let Ok(grant_id) = uuid::Uuid::parse_str(grant_id_str) else {
             return self.service_secret_report("denied", None, Some("malformed grant id".into()));
         };
         let _guard = self.service_grants_lock.lock().unwrap();
         let mut store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
+            &store_key,
         ) {
             Ok(store) => store,
             Err(e) => {
@@ -760,7 +815,7 @@ impl IpcServer {
         if !store.revoke(grant_id) {
             return self.service_secret_report("not_found", None, None);
         }
-        match store.save_to_path(&self.service_grants_path) {
+        match store.save_to_path(&self.service_grants_path, &store_key) {
             Ok(()) => {
                 log_daemon_audit(
                     self.audit_logger.as_deref(),
@@ -3790,7 +3845,11 @@ mod autofill_origin_gate_tests {
                 None,
             )
             .unwrap();
-        store.save_to_path(&store_path).unwrap();
+        let key = crate::service_grants::ServiceGrantStoreKey::from_dek(
+            &crate::crypto::DataEncryptionKey::new().unwrap(),
+        )
+        .unwrap();
+        store.save_to_path(&store_path, &key).unwrap();
         let now = chrono::Utc::now();
         for _ in 0..N {
             let t0 = std::time::Instant::now();
@@ -3995,7 +4054,8 @@ mod autofill_origin_gate_tests {
                 None,
             )
             .unwrap();
-        store.save_to_path(&grants_path).unwrap();
+        let store_key = rt.block_on(server.service_grant_store_key()).unwrap();
+        store.save_to_path(&grants_path, &store_key).unwrap();
         // One String copy of the token, cloned per op (review N4: avoid
         // per-iteration to_string on the Zeroizing original).
         let token_string = token.to_string();
@@ -5016,6 +5076,61 @@ mod autofill_origin_gate_tests {
             token: "t".into(),
         }
         .requires_admin_step_up());
+    }
+
+    #[test]
+    fn authenticated_grant_store_tamper_and_locked_vault_deny_retrieval() {
+        let (h, path) = sp1_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let key = rt.block_on(h.server.service_grant_store_key()).unwrap();
+        let mut store = crate::service_grants::ServiceGrantStore::default();
+        let (_, token) = store
+            .mint_grant(
+                "svc",
+                1,
+                vec![crate::service_grants::ServiceField::Password],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        store.save_to_path(&path, &key).unwrap();
+        let get = || {
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::ServiceGetSecret {
+                        client_id: "svc".into(),
+                        entry_id: 1,
+                        field: "password".into(),
+                        token: token.to_string(),
+                    },
+                    stepup_approval: None,
+                },
+                None,
+            )
+        };
+        assert_eq!(
+            report_value(handle(&rt, &h.server, get()))["status"],
+            "authorized"
+        );
+        let original = std::fs::read(&path).unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let mut payload: serde_json::Value =
+            serde_json::from_str(envelope["payload"].as_str().unwrap()).unwrap();
+        // This is valid policy JSON, not the malformed-schema case covered below.
+        payload["grants"][0]["fields"] = serde_json::json!(["password", "username"]);
+        envelope["payload"] = serde_json::json!(serde_json::to_string(&payload).unwrap());
+        std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert_eq!(
+            report_value(handle(&rt, &h.server, get()))["status"],
+            "denied"
+        );
+        std::fs::write(&path, original).unwrap();
+        rt.block_on(h.server.vault.lock());
+        assert_eq!(
+            report_value(handle(&rt, &h.server, get()))["status"],
+            "locked"
+        );
     }
 
     #[test]
