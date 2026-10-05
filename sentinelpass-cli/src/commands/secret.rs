@@ -354,9 +354,16 @@ pub fn render_external_secret_audit_report(
                 // daemon rows for EntryGet/ExportAll & co. carry
                 // client_id: None — rendering them here would mislabel
                 // every owner read as a "legacy" external-tool access.
-                if purpose
-                    .as_deref()
-                    .is_some_and(|p| p.starts_with("vault_read:"))
+                // The is_none() conjunct is LOAD-BEARING (review round
+                // 3): purpose is caller-supplied free text, so a
+                // purpose-only filter let a legacy caller hide its rows
+                // from this view by sending purpose="vault_read:...".
+                // Daemon vault_read rows always carry client_id None;
+                // every caller-originated row carries Some — unforgeable.
+                if event_client_id.is_none()
+                    && purpose
+                        .as_deref()
+                        .is_some_and(|p| p.starts_with("vault_read:"))
                 {
                     return None;
                 }
@@ -648,4 +655,56 @@ fn strict_stepup_profile_enabled() -> bool {
     std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod audit_view_tests {
+    use super::*;
+
+    fn entry(client_id: Option<String>, purpose: &str) -> sentinelpass_core::AuditEntry {
+        sentinelpass_core::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            event_type: sentinelpass_core::AuditEventType::ExternalSecretAccess {
+                client_id,
+                domain: "example.com".to_string(),
+                field: Some("password".to_string()),
+                purpose: Some(purpose.to_string()),
+                success: true,
+            },
+            severity: 1,
+            context: String::new(),
+            pid: None,
+            tid: None,
+            chain: None,
+        }
+    }
+
+    #[test]
+    fn spoofed_vault_read_purpose_cannot_hide_caller_rows() {
+        // Review round 3: purpose is caller-supplied free text — the
+        // purpose-only filter let a legacy caller hide from the operator
+        // view by sending purpose="vault_read:...". The client_id.is_none()
+        // conjunct makes the discrimination unforgeable.
+        let rows = vec![
+            // Daemon-originated owner read: hidden from the legacy view.
+            entry(None, "vault_read:entry_get"),
+            // Caller-originated row WEARING the prefix: MUST still render.
+            entry(Some("sneaky-tool".to_string()), "vault_read:hide"),
+            // Ordinary legacy row: renders.
+            entry(Some("tool".to_string()), "tool-purpose"),
+        ];
+        let report = render_external_secret_audit_report(&rows, None, false);
+        assert!(
+            report.contains("sneaky-tool"),
+            "spoofed-prefix caller row must render:\n{report}"
+        );
+        assert!(
+            report.contains("tool-purpose"),
+            "ordinary caller row must render:\n{report}"
+        );
+        assert!(
+            !report.contains("vault_read:entry_get"),
+            "daemon owner-read row must stay filtered:\n{report}"
+        );
+    }
 }

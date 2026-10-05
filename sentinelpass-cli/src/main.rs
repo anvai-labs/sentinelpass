@@ -2557,6 +2557,9 @@ mod tests {
         assert!(parse_external_secret_grant_duration("0h").is_err());
         assert!(parse_external_secret_grant_duration("-1h").is_err());
         assert!(parse_external_secret_grant_duration("1w").is_err());
+        // Review round 3: multi-byte final character must fail cleanly
+        // (same panic class the service-grant parser had).
+        assert!(parse_external_secret_grant_duration("5日").is_err());
     }
 
     #[test]
