@@ -450,7 +450,8 @@ impl IpcServer {
             Err(e) => return self.service_secret_report("denied", None, Some(e.to_string())),
         };
         if let Err(e) = store.save_to_path(&self.service_grants_path, &store_key) {
-            // Review F6: NOT published — distinct from an authz denial.
+            // Publication may precede a durability error. Do not acknowledge
+            // success or conflate an I/O failure with authorization denial.
             return self.service_secret_report("store_error", None, Some(e.to_string()));
         }
         // Review F3: audit the policy mutation (no secret material).

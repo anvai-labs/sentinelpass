@@ -103,15 +103,13 @@ fn report_error(report: &serde_json::Value) -> Result<()> {
             "vault is locked — the daemon locked between connect and execution; \
              unlock and retry{detail}"
         ),
-        // Review M4: the daemon deliberately distinguishes store_error
-        // ("NOT published — the change did not persist") from authz
-        // denials. Reporting it as "denied" made operators believe a
-        // revoke succeeded while the grant is still live (and invited
-        // create retries that minted duplicate pending grants).
+        // A post-rename sync error may leave the new policy visible without
+        // a durable acknowledgement. Neither success nor unchanged state can
+        // be inferred; keep this distinct from an authorization denial.
         "store_error" => anyhow::bail!(
-            "grant-store write failed — the change was NOT persisted; treat the \
-             grant's state as UNCHANGED (a revoked grant is still live; a created \
-             grant may not exist — check state before retrying){detail}"
+            "grant-store write or durability confirmation failed — the state may \
+             have changed; do not assume a revocation is durable. Inspect the \
+             current policy before an owner-authorized retry{detail}"
         ),
         "not_found" => anyhow::bail!(
             "no matching grant or entry (the grant may reference a deleted entry){detail}"
@@ -487,14 +485,16 @@ mod tests {
             err.contains("no matching grant") && !err.contains("denied"),
             "{err}"
         );
-        // Review M4: store_error means NOT PERSISTED — must not read as a
-        // denial (an operator would believe a failed revoke succeeded
-        // while the grant is still live).
+        // Errors can occur after publication. Never promise unchanged state
+        // or acknowledge a durable revocation when confirmation failed.
         let store_err = serde_json::json!({"status": "store_error"});
         let err = report_error(&store_err).unwrap_err().to_string();
         assert!(!err.contains("denied"), "{err}");
         assert!(
-            err.contains("NOT persisted") && err.contains("UNCHANGED"),
+            err.contains("state may have changed")
+                && err.contains("do not assume a revocation is durable")
+                && !err.contains("UNCHANGED")
+                && !err.contains("NOT persisted"),
             "{err}"
         );
     }
