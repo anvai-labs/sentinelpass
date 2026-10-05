@@ -36,7 +36,7 @@
 This document outlines the technical design for extending SentinelPass to support:
 1. **iOS apps** (iPhone/iPad)
 2. **Android apps** (Phone/Tablet)
-3. **Thick client auto-fill** for native Windows/macOS applications
+3. **Thick client auto-fill** for native Windows/macOS applications *(retired 2026-10-05 — see docs/NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md; the list item is historical context, not a deliverable)*
 
 ### Design Principles
 

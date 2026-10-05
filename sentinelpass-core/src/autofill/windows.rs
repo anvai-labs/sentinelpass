@@ -28,6 +28,12 @@ fn context_for_window(hwnd: HWND) -> Result<AutoFillContext> {
     // SAFETY: the generated binding supplies the buffer pointer AND its length
     // with the correct Win32 ABI. Titles may be empty or truncated; they never
     // become an authority/domain assertion. The API handles a disappearing HWND.
+    // KNOWN AMBIGUITY (review nit 2, deliberately tolerated): GetWindowTextW
+    // returns 0 both for an empty title and for API failure, and Win32 leaves
+    // the last-error value STALE on success paths — so the two cannot be
+    // reliably distinguished and an API failure yields Ok(""). Acceptable
+    // here: the title is diagnostics/provenance only and never an authority
+    // assertion (a wrong-empty title cannot widen any decision).
     let length = unsafe { GetWindowTextW(hwnd, &mut buffer) };
     let length = usize::try_from(length)
         .ok()
