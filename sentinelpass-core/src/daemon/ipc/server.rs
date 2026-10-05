@@ -467,19 +467,32 @@ impl IpcServer {
     /// for the named client's pre-approved grant. Owner step-up gated.
     async fn service_enrollment_begin(
         &self,
-        _peer: &crate::daemon::transport::PeerContext,
+        peer: &crate::daemon::transport::PeerContext,
         client_id: &str,
     ) -> IpcMessage {
+        // Review M2: challenge minting is an owner act on the grant-policy
+        // lifecycle — audited on every path like create/revoke/complete.
         let store = match crate::service_grants::ServiceGrantStore::load_from_path(
             &self.service_grants_path,
         ) {
             Ok(store) => store,
             Err(e) => {
+                log_daemon_audit(
+                    self.audit_logger.as_deref(),
+                    crate::AuditEventType::ExternalSecretAccess {
+                        client_id: Some(client_id.to_string()),
+                        domain: "enrollment".to_string(),
+                        field: None,
+                        purpose: Some("enrollment:begin_store_unavailable".to_string()),
+                        success: false,
+                    },
+                    &format!("SP-4 enrollment begin {}", peer.provenance_token()),
+                );
                 return self.service_secret_report(
                     "denied",
                     None,
                     Some(format!("grant store unavailable: {e}")),
-                )
+                );
             }
         };
         // Find the pre-approved grant for this client (with a fingerprint).
@@ -489,6 +502,17 @@ impl IpcServer {
                 && g.registration_key_fingerprint.is_some()
         });
         let Some(grant) = grant else {
+            log_daemon_audit(
+                self.audit_logger.as_deref(),
+                crate::AuditEventType::ExternalSecretAccess {
+                    client_id: Some(client_id.to_string()),
+                    domain: "enrollment".to_string(),
+                    field: None,
+                    purpose: Some("enrollment:begin_no_pending_grant".to_string()),
+                    success: false,
+                },
+                &format!("SP-4 enrollment begin {}", peer.provenance_token()),
+            );
             return self.service_secret_report(
                 "denied",
                 None,
@@ -514,6 +538,21 @@ impl IpcServer {
             exe_digest.as_deref(),
             fingerprint,
             grant.expires_at.map(|e| e.timestamp()),
+        );
+        log_daemon_audit(
+            self.audit_logger.as_deref(),
+            crate::AuditEventType::ExternalSecretAccess {
+                client_id: Some(client_id.to_string()),
+                domain: "enrollment".to_string(),
+                field: None,
+                purpose: Some("enrollment:challenge_minted".to_string()),
+                success: true,
+            },
+            &format!(
+                "SP-4 enrollment challenge minted for grant {} {}",
+                grant.grant_id,
+                peer.provenance_token()
+            ),
         );
         IpcMessage::ServiceResult {
             outcome: ServiceOutcome::Ok {
@@ -1199,9 +1238,17 @@ impl IpcServer {
                 // CLI-side env gate is UX only. A caller that unsets
                 // SENTINELPASS_REQUIRE_STEPUP, or edits
                 // external-secret-access.json directly, gains nothing:
-                // this daemon refuses to SERVE legacy grants. Exact-entry
-                // service grants (`sentinelpass service-grant …`) are the
-                // only retrieval surface under strict.
+                // this daemon refuses to SERVE legacy grants.
+                //
+                // Boundary honesty (review M1, docs/SECURITY_REVIEW_0.16.0.md):
+                // this is a policy-forcing measure against the LEGACY
+                // surface, not a read-containment boundary. The vault's own
+                // unattended-safe read ops (EntryGet & co., ADR-013's read
+                // model) remain available to any same-UID caller holding
+                // the IPC token — those now carry daemon-layer audits with
+                // peer provenance (see the sensitive-read audit in
+                // dispatch_service_call). Same-UID remains the real
+                // boundary (TD-SEC-10).
                 if self.require_stepup {
                     log_external_secret_audit(
                         self.audit_logger.as_deref(),
@@ -2404,32 +2451,83 @@ impl IpcServer {
                     ))
                 }
             }
-            op => match self.vault.manager().await {
-                None => ServiceOutcome::from(ServiceError::new(
-                    codes::VAULT_LOCKED,
-                    "vault is locked; unlock it first",
-                )),
-                Some(vault) => {
-                    // `spawn_blocking` needs 'static: DaemonVault hands out an
-                    // Arc'd manager. Serialization of vault ops comes from
-                    // VaultManager's internal db mutex (review F5: the Arc
-                    // clone means concurrent service tasks DO run in
-                    // parallel; SQLite access — and therefore one write at a
-                    // time — is serialized inside the manager).
-                    let joined = tokio::task::spawn_blocking(move || {
-                        LiveVaultService::new(&vault).execute(&op)
-                    })
-                    .await;
-                    match joined {
-                        Ok(Ok(result)) => ServiceOutcome::from(result),
-                        Ok(Err(service_error)) => ServiceOutcome::from(service_error),
-                        Err(e) => ServiceOutcome::from(ServiceError::new(
-                            codes::INTERNAL,
-                            format!("service task failed: {}", e),
-                        )),
+            // Review M1 (docs/SECURITY_REVIEW_0.16.0.md): the sensitive
+            // plaintext reads below are unattended-safe by design
+            // (ADR-013's read model — the CLI/UI owner flows), but they
+            // bypass the service-grant surface and therefore the strict
+            // profile's containment story. They carry the daemon-layer
+            // audit WITH peer provenance here so a same-UID compromise is
+            // at least forensically visible (the vault layer's own
+            // CredentialViewed rows carry no client identity or peer).
+            // The descriptor is captured before `op` moves into the
+            // blocking task; the audit fires AFTER the outcome is known
+            // so the success flag is real, not optimistic.
+            op => {
+                let sensitive_read = match &op {
+                    VaultOp::EntryGet { entry_id } => {
+                        Some((format!("entry:{entry_id}"), None, "vault_read:entry_get"))
                     }
+                    VaultOp::TotpCode { entry_id } => Some((
+                        format!("entry:{entry_id}"),
+                        Some("totp"),
+                        "vault_read:totp_code",
+                    )),
+                    VaultOp::SshKeyGet {
+                        key_id,
+                        include_private,
+                    } => Some((
+                        format!("ssh-key:{key_id}"),
+                        None,
+                        if *include_private {
+                            "vault_read:ssh_private"
+                        } else {
+                            "vault_read:ssh_public"
+                        },
+                    )),
+                    _ => None,
+                };
+                let outcome = match self.vault.manager().await {
+                    None => ServiceOutcome::from(ServiceError::new(
+                        codes::VAULT_LOCKED,
+                        "vault is locked; unlock it first",
+                    )),
+                    Some(vault) => {
+                        // `spawn_blocking` needs 'static: DaemonVault hands out an
+                        // Arc'd manager. Serialization of vault ops comes from
+                        // VaultManager's internal db mutex (review F5: the Arc
+                        // clone means concurrent service tasks DO run in
+                        // parallel; SQLite access — and therefore one write at a
+                        // time — is serialized inside the manager).
+                        let joined = tokio::task::spawn_blocking(move || {
+                            LiveVaultService::new(&vault).execute(&op)
+                        })
+                        .await;
+                        match joined {
+                            Ok(Ok(result)) => ServiceOutcome::from(result),
+                            Ok(Err(service_error)) => ServiceOutcome::from(service_error),
+                            Err(e) => ServiceOutcome::from(ServiceError::new(
+                                codes::INTERNAL,
+                                format!("service task failed: {}", e),
+                            )),
+                        }
+                    }
+                };
+                if let Some((domain, field, purpose)) = sensitive_read {
+                    let success = matches!(outcome, ServiceOutcome::Ok { .. });
+                    log_daemon_audit(
+                        self.audit_logger.as_deref(),
+                        crate::AuditEventType::ExternalSecretAccess {
+                            client_id: None,
+                            domain,
+                            field: field.map(str::to_string),
+                            purpose: Some(purpose.to_string()),
+                            success,
+                        },
+                        &format!("vault read {}", peer.provenance_token()),
+                    );
                 }
-            },
+                outcome
+            }
         };
         IpcMessage::ServiceResult { outcome }
     }
@@ -4053,6 +4151,44 @@ mod autofill_origin_gate_tests {
         assert!(
             samples[N - 1] < std::time::Duration::from_millis(1_000),
             "gpg verification exceeds the 1 s enrollment budget"
+        );
+    }
+
+    /// Review M1 (docs/SECURITY_REVIEW_0.16.0.md): sensitive plaintext
+    /// reads (EntryGet/TotpCode/SshKeyGet) must leave a daemon-layer audit
+    /// row WITH peer provenance — they bypass the service-grant surface,
+    /// so the audit is the forensic record. `#[ignore]` + --test-threads=1
+    /// via the drill: set_base_dir is process-global first-write-wins.
+    #[test]
+    #[ignore]
+    fn sensitive_vault_reads_are_audited_with_provenance() {
+        let tmp = TempDir::new().unwrap();
+        crate::platform::set_base_dir(tmp.path().to_path_buf());
+        let h = strict_harness();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let msg = handle(
+            &rt,
+            &h.server,
+            envelope(
+                IpcMessage::ServiceCall {
+                    op: VaultOp::EntryGet { entry_id: 1 },
+                    stepup_approval: None,
+                },
+                Some(h.capability.clone()),
+            ),
+        );
+        // The op itself may succeed or fail (no entry 1 in this vault) —
+        // the point is the AUDIT row exists either way, with real success.
+        let _ = service_outcome(msg);
+        let audit_dir = crate::platform::ensure_audit_log_dir().unwrap();
+        let log = std::fs::read_to_string(audit_dir.join("audit.log")).unwrap_or_default();
+        assert!(
+            log.contains("vault_read:entry_get"),
+            "EntryGet must leave a daemon-layer audit row; log:\n{log}"
+        );
+        assert!(
+            log.contains("vault read "),
+            "the audit row must carry the peer provenance token; log:\n{log}"
         );
     }
 

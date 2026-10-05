@@ -252,6 +252,18 @@ not serve legacy grants. Migration path: re-issue grants as service
 grants (`create`), then retrieve with `service-grant get`. The legacy
 surface remains available on non-strict daemons (desktop default).
 
+**Boundary honesty (security review M1, docs/SECURITY_REVIEW_0.16.0.md):
+this is a policy-forcing measure against the LEGACY surface, not a
+read-containment boundary.** The vault's own unattended-safe read ops
+(`EntryGet`, `TotpCode`, `SshKeyGet` — the owner CLI/UI flows, ADR-013's
+read model) remain available to any same-UID caller holding the IPC
+token, strict or not. Those reads now carry daemon-layer audit rows with
+peer provenance (`vault_read:*` events), so same-UID access is at least
+forensically visible — but same-UID remains the real boundary (TD-SEC-10
+per-service UID isolation is the tracked remediation). The strict profile
+DOES deny the write/capture surfaces outright (`SaveSecret`,
+`SaveCredential`, site-permission grants/revokes, bare `SyncNow`).
+
 ### Exact-entry install mode (F3, v0.16.0)
 
 `service-credential install/verify` accept `--entry-id` (+ `--service-token`

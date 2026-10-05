@@ -292,11 +292,14 @@ pub fn render_client_tokens(client_id: Option<&str>) -> String {
 
 pub fn parse_external_secret_grant_duration(value: &str) -> Result<chrono::Duration> {
     let value = value.trim();
-    if value.len() < 2 {
+    // Char-boundary-safe (review M3 twin: the byte-index split_at panicked
+    // on multi-byte final characters).
+    let Some((amount, unit)) = ["s", "m", "h", "d"]
+        .iter()
+        .find_map(|u| value.strip_suffix(u).map(|amount| (amount, *u)))
+    else {
         anyhow::bail!("Grant duration must use a positive number plus s, m, h, or d");
-    }
-
-    let (amount, unit) = value.split_at(value.len() - 1);
+    };
     let amount: i64 = amount
         .parse()
         .map_err(|_| anyhow::anyhow!("Grant duration amount must be a positive integer"))?;

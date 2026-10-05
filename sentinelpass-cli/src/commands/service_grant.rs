@@ -103,6 +103,16 @@ fn report_error(report: &serde_json::Value) -> Result<()> {
             "vault is locked — the daemon locked between connect and execution; \
              unlock and retry{detail}"
         ),
+        // Review M4: the daemon deliberately distinguishes store_error
+        // ("NOT published — the change did not persist") from authz
+        // denials. Reporting it as "denied" made operators believe a
+        // revoke succeeded while the grant is still live (and invited
+        // create retries that minted duplicate pending grants).
+        "store_error" => anyhow::bail!(
+            "grant-store write failed — the change was NOT persisted; treat the \
+             grant's state as UNCHANGED (a revoked grant is still live; a created \
+             grant may not exist — check state before retrying){detail}"
+        ),
         "not_found" => anyhow::bail!(
             "no matching grant or entry (the grant may reference a deleted entry){detail}"
         ),
@@ -111,12 +121,17 @@ fn report_error(report: &serde_json::Value) -> Result<()> {
 }
 
 /// Parse a positive duration (`30m`, `8h`, `7d`) into unix-seconds-from-now.
+/// Char-boundary-safe (review M3: the byte-index split_at panicked when the
+/// last character was multi-byte, e.g. `--expires-in "5日"`).
 fn expires_at_from(duration: &str) -> Result<i64> {
     let duration = duration.trim();
-    if duration.len() < 2 {
+    let Some(unit) = ["s", "m", "h", "d"]
+        .iter()
+        .find_map(|u| duration.strip_suffix(u).map(|amount| (amount, *u)))
+    else {
         anyhow::bail!("Expiry must be a positive number plus s, m, h, or d");
-    }
-    let (amount, unit) = duration.split_at(duration.len() - 1);
+    };
+    let (amount, unit) = unit;
     let amount: i64 = amount
         .parse()
         .map_err(|_| anyhow::anyhow!("Expiry amount must be a positive integer"))?;
