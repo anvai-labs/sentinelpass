@@ -19,24 +19,42 @@ round-trips, N=3 gpg verifications. Reproduce with
 `bash scripts/drills/drill-perf-production-path.sh [--build]`
 (`SENTINELPASS_GPG_PATH` pins gpg on hosts without `/usr/bin/gpg`).
 
-## Results (macOS, Apple silicon, 10 cores, release, 2026-10-04)
+## Results
 
-| Layer | p50 | p95 | p99 |
-| --- | --- | --- | --- |
-| SP-0 step-up mint + single-use validate | 13.5 µs | 22.0 µs | 24.5 µs |
-| SP-1 grant authorize (token hash + ct compare) | 0.83 µs | 1.75 µs | 1.83 µs |
-| SP-1 authorize DENY (wrong token, full work) | 0.75 µs | sampled at N=1,000 — distribution overlaps the success path | |
-| SP-4 canonical enrollment transcript | 13.0 µs | 35.6 µs | 48.0 µs |
-| SP-4 gpg verification (import + detached verify, real subprocess) | — | — | 572–578 ms (N=3, min–max) |
-| SP-3 `/proc/<pid>/exe` policy | EvidenceUnavailable on macOS (fail-closed denial verified; sampled timing on Linux hosts via the same drill) | | |
-| **End-to-end `ServiceGetSecret` over a real Unix socket** | **732 µs** | **1.10 ms** | 2.02 ms (max 3.65 ms) |
+Two hosts, same drill, release builds. macOS: Apple silicon, 10 cores,
+gpg 2.5.24 (homebrew). Linux: dataserver3 (Ubuntu, kernel 7.0, 32
+cores), gpg 2.4.8 — the Linux run supplies the `/proc` exe-policy column
+macOS cannot (EvidenceUnavailable there by design, fail-closed verified).
+
+| Layer | macOS p50 | macOS p95 | Linux p50 | Linux p95 |
+| --- | --- | --- | --- | --- |
+| SP-0 step-up mint + single-use validate | 13.5 µs | 22.0 µs | 46.9 µs | 75.5 µs |
+| SP-1 grant authorize (token hash + ct compare) | 0.83 µs | 1.75 µs | 2.70 µs | 2.77 µs |
+| SP-1 authorize DENY (wrong token, full work) | 0.75 µs | overlaps success | 1.80 µs | 1.86 µs |
+| SP-4 canonical enrollment transcript | 13.0 µs | 35.6 µs | 38.1 µs | 70.0 µs |
+| SP-4 gpg verification (real subprocess, N=3 min–max) | 572–578 ms | | 29.1–29.6 ms | |
+| SP-3 `/proc/<pid>/exe` policy (real, N=50) | unavailable (fail-closed verified) | | **55.9 ms** | **89.8 ms** |
+| **End-to-end `ServiceGetSecret`, real Unix socket** | 732 µs | 1.10 ms | 1.20 ms | 1.52 ms |
+
+### Honest finding: exe-pinned retrieval exceeds the 10 ms "warm added" budget
+
+The unpinned retrieval path (the socket rows) is comfortably inside the
+handoff §7 budget on both hosts. But a grant WITH `--exe-sha256` pins
+pays the executable-policy hash on the checked path: **~56–90 ms per
+check on the Linux host** — I/O-bound by binary size (the drill hashes
+its own multi-hundred-MB test binary; smaller service binaries cost
+proportionally less). This exceeds the 10 ms budget and is recorded
+rather than hidden: the budget claim applies to the UNPINNED path;
+exe-pinned grants trade latency for binary-identity assurance. Follow-up
+(TD): cache the per-pid digest for a short TTL — the pin check would
+then cost one hash per process per TTL window instead of per request.
 
 ## Handoff §7 target compliance
 
 | Target | Result | Evidence |
 | --- | --- | --- |
-| Warm retrieval p95 < 10 ms (small native client) | **PASS** | p95 = 1.10 ms — a 9× margin. Honesty note: each sample includes reconnect + full session handshake (HKDF directional keys) because `IpcClient::send` connects per call and this client API has no long-lived-session mode — a CONSERVATIVE SUPERSET of steady-state native-client cost |
-| Enrollment p95 < 1 s (daemon-side) | **PASS (measured)** | Transcript 35.6 µs + the real pinned-gpg verification 572–578 ms — the whole daemon-side ceremony is measured, ≈0.6 s against the 1 s budget. The gpg subprocess is daemon-run, not human/hardware-bound (earlier drafts said otherwise — corrected); the human/network parts of the ceremony (key generation, delivering the signature) remain outside the daemon and outside this measurement |
+| Warm retrieval p95 < 10 ms (small native client) | **PASS** (unpinned path; see the exe-pin finding above) | p95 = 1.10 ms (macOS) / 1.52 ms (Linux) — a 9× margin. Honesty note: each sample includes reconnect + full session handshake (HKDF directional keys) because `IpcClient::send` connects per call and this client API has no long-lived-session mode — a CONSERVATIVE SUPERSET of steady-state native-client cost |
+| Enrollment p95 < 1 s (daemon-side) | **PASS (measured)** | Transcript ≤70 µs + the real pinned-gpg verification 29–578 ms (host-dependent) — the whole daemon-side ceremony is measured, ≈0.6 s against the 1 s budget. The gpg subprocess is daemon-run, not human/hardware-bound (earlier drafts said otherwise — corrected); the human/network parts of the ceremony (key generation, delivering the signature) remain outside the daemon and outside this measurement |
 
 ## Notes
 
