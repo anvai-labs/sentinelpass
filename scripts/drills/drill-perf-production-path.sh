@@ -35,7 +35,9 @@
 #
 # The tests pin ALL platform dirs (grants/audit/config) into their own
 # temp dirs (review B1/S4) and therefore REQUIRE --test-threads=1 (the
-# drill enforces it).
+# drill enforces it). The same invocation also runs the security-fix
+# evidence test (sensitive_vault_reads_are_audited_with_provenance):
+# 4 tests total.
 # Evidence: perf-production-path-<timestamp>.txt next to the invocation
 # dir; exit 0 = all targets met AND the expected tests actually ran.
 
@@ -68,13 +70,13 @@ REPORT="$REPORT_DIR/perf-production-path-$TS.txt"
 
 # pipefail propagates cargo's exit status through tee; --test-threads=1 is
 # REQUIRED (process-global platform-dir pinning in the tests).
-cargo test --release -p sentinelpass-core perf_evidence -- --ignored --nocapture --test-threads=1 2>&1 | tee "$REPORT"
+cargo test --release -p sentinelpass-core -- --ignored --nocapture --test-threads=1 perf_evidence sensitive_vault_reads 2>&1 | tee "$REPORT"
 
 # Review S5: a filter that matches ZERO tests exits 0 — a silent no-op
 # PASS. Require the positive test count (3 perf tests; the gpg one
 # self-skips when gpg is absent but still reports "ok").
-if ! grep -qE "test result: ok\. 3 passed" "$REPORT"; then
-    echo "FAIL: expected exactly 3 perf-evidence tests to run — see $REPORT" >&2
+if ! grep -qE "test result: ok\. 4 passed" "$REPORT"; then
+    echo "FAIL: expected exactly 4 evidence tests to run — see $REPORT" >&2
     exit 1
 fi
 if grep -qE "test result: FAILED|panicked at" "$REPORT"; then

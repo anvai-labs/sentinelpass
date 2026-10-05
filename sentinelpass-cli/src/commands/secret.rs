@@ -292,11 +292,14 @@ pub fn render_client_tokens(client_id: Option<&str>) -> String {
 
 pub fn parse_external_secret_grant_duration(value: &str) -> Result<chrono::Duration> {
     let value = value.trim();
-    if value.len() < 2 {
+    // Char-boundary-safe (review M3 twin: the byte-index split_at panicked
+    // on multi-byte final characters).
+    let Some((amount, unit)) = ["s", "m", "h", "d"]
+        .iter()
+        .find_map(|u| value.strip_suffix(u).map(|amount| (amount, *u)))
+    else {
         anyhow::bail!("Grant duration must use a positive number plus s, m, h, or d");
-    }
-
-    let (amount, unit) = value.split_at(value.len() - 1);
+    };
     let amount: i64 = amount
         .parse()
         .map_err(|_| anyhow::anyhow!("Grant duration amount must be a positive integer"))?;
@@ -347,6 +350,23 @@ pub fn render_external_secret_audit_report(
                     return None;
                 }
 
+                // Owner-side vault reads (security-fix review round 2):
+                // daemon rows for EntryGet/ExportAll & co. carry
+                // client_id: None — rendering them here would mislabel
+                // every owner read as a "legacy" external-tool access.
+                // The is_none() conjunct is LOAD-BEARING (review round
+                // 3): purpose is caller-supplied free text, so a
+                // purpose-only filter let a legacy caller hide its rows
+                // from this view by sending purpose="vault_read:...".
+                // Daemon vault_read rows always carry client_id None;
+                // every caller-originated row carries Some — unforgeable.
+                if event_client_id.is_none()
+                    && purpose
+                        .as_deref()
+                        .is_some_and(|p| p.starts_with("vault_read:"))
+                {
+                    return None;
+                }
                 let event_client_normalized = event_client_id
                     .as_deref()
                     .map(|value| value.trim().to_ascii_lowercase());
@@ -635,4 +655,56 @@ fn strict_stepup_profile_enabled() -> bool {
     std::env::var_os("SENTINELPASS_REQUIRE_STEPUP")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod audit_view_tests {
+    use super::*;
+
+    fn entry(client_id: Option<String>, purpose: &str) -> sentinelpass_core::AuditEntry {
+        sentinelpass_core::AuditEntry {
+            timestamp: chrono::Utc::now(),
+            event_type: sentinelpass_core::AuditEventType::ExternalSecretAccess {
+                client_id,
+                domain: "example.com".to_string(),
+                field: Some("password".to_string()),
+                purpose: Some(purpose.to_string()),
+                success: true,
+            },
+            severity: 1,
+            context: String::new(),
+            pid: None,
+            tid: None,
+            chain: None,
+        }
+    }
+
+    #[test]
+    fn spoofed_vault_read_purpose_cannot_hide_caller_rows() {
+        // Review round 3: purpose is caller-supplied free text — the
+        // purpose-only filter let a legacy caller hide from the operator
+        // view by sending purpose="vault_read:...". The client_id.is_none()
+        // conjunct makes the discrimination unforgeable.
+        let rows = vec![
+            // Daemon-originated owner read: hidden from the legacy view.
+            entry(None, "vault_read:entry_get"),
+            // Caller-originated row WEARING the prefix: MUST still render.
+            entry(Some("sneaky-tool".to_string()), "vault_read:hide"),
+            // Ordinary legacy row: renders.
+            entry(Some("tool".to_string()), "tool-purpose"),
+        ];
+        let report = render_external_secret_audit_report(&rows, None, false);
+        assert!(
+            report.contains("sneaky-tool"),
+            "spoofed-prefix caller row must render:\n{report}"
+        );
+        assert!(
+            report.contains("tool-purpose"),
+            "ordinary caller row must render:\n{report}"
+        );
+        assert!(
+            !report.contains("vault_read:entry_get"),
+            "daemon owner-read row must stay filtered:\n{report}"
+        );
+    }
 }

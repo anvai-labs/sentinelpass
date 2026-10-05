@@ -103,6 +103,16 @@ fn report_error(report: &serde_json::Value) -> Result<()> {
             "vault is locked — the daemon locked between connect and execution; \
              unlock and retry{detail}"
         ),
+        // Review M4: the daemon deliberately distinguishes store_error
+        // ("NOT published — the change did not persist") from authz
+        // denials. Reporting it as "denied" made operators believe a
+        // revoke succeeded while the grant is still live (and invited
+        // create retries that minted duplicate pending grants).
+        "store_error" => anyhow::bail!(
+            "grant-store write failed — the change was NOT persisted; treat the \
+             grant's state as UNCHANGED (a revoked grant is still live; a created \
+             grant may not exist — check state before retrying){detail}"
+        ),
         "not_found" => anyhow::bail!(
             "no matching grant or entry (the grant may reference a deleted entry){detail}"
         ),
@@ -111,12 +121,17 @@ fn report_error(report: &serde_json::Value) -> Result<()> {
 }
 
 /// Parse a positive duration (`30m`, `8h`, `7d`) into unix-seconds-from-now.
+/// Char-boundary-safe (review M3: the byte-index split_at panicked when the
+/// last character was multi-byte, e.g. `--expires-in "5日"`).
 fn expires_at_from(duration: &str) -> Result<i64> {
     let duration = duration.trim();
-    if duration.len() < 2 {
+    let Some(unit) = ["s", "m", "h", "d"]
+        .iter()
+        .find_map(|u| duration.strip_suffix(u).map(|amount| (amount, *u)))
+    else {
         anyhow::bail!("Expiry must be a positive number plus s, m, h, or d");
-    }
-    let (amount, unit) = duration.split_at(duration.len() - 1);
+    };
+    let (amount, unit) = unit;
     let amount: i64 = amount
         .parse()
         .map_err(|_| anyhow::anyhow!("Expiry amount must be a positive integer"))?;
@@ -434,6 +449,11 @@ mod tests {
         assert!(expires_at_from("0s").is_err());
         assert!(expires_at_from("-5m").is_err());
         assert!(expires_at_from("5w").is_err());
+        // Review M3: multi-byte final characters must fail cleanly, not
+        // panic on a char boundary (the byte-index split_at did).
+        assert!(expires_at_from("5日").is_err());
+        assert!(expires_at_from("日").is_err());
+        assert!(expires_at_from("m").is_err());
         assert!(expires_at_from("99999999999999999999d").is_err());
         // Review N7: no panic/wrap at the i64 ceiling.
         assert!(expires_at_from("9223372036854775807s").is_err());
@@ -465,6 +485,16 @@ mod tests {
         let err = report_error(&missing).unwrap_err().to_string();
         assert!(
             err.contains("no matching grant") && !err.contains("denied"),
+            "{err}"
+        );
+        // Review M4: store_error means NOT PERSISTED — must not read as a
+        // denial (an operator would believe a failed revoke succeeded
+        // while the grant is still live).
+        let store_err = serde_json::json!({"status": "store_error"});
+        let err = report_error(&store_err).unwrap_err().to_string();
+        assert!(!err.contains("denied"), "{err}");
+        assert!(
+            err.contains("NOT persisted") && err.contains("UNCHANGED"),
             "{err}"
         );
     }
