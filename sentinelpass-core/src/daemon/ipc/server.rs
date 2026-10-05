@@ -151,16 +151,12 @@ impl IpcServer {
 
     // A grant never unlocks the vault. Derive a short-lived authentication key
     // from the active vault on every operation; no persistent second key file.
-    async fn service_grant_store_key(
-        &self,
-    ) -> std::result::Result<crate::service_grants::ServiceGrantStoreKey, IpcMessage> {
-        let Some(manager) = self.vault.manager().await else {
-            return Err(self.service_secret_report("locked", None, None));
-        };
+    async fn service_grant_store_key(&self) -> Option<crate::service_grants::ServiceGrantStoreKey> {
+        let manager = self.vault.manager().await?;
         manager
             .current_dek()
             .and_then(|dek| crate::service_grants::ServiceGrantStoreKey::from_dek(&dek))
-            .map_err(|_| self.service_secret_report("locked", None, None))
+            .ok()
     }
 
     /// SP-1 / ADR-014: retrieval-only exact-entry service secret access.
@@ -175,8 +171,8 @@ impl IpcServer {
         token: &str,
     ) -> IpcMessage {
         let store_key = match self.service_grant_store_key().await {
-            Ok(key) => key,
-            Err(response) => return response,
+            Some(key) => key,
+            None => return self.service_secret_report("locked", None, None),
         };
         let field = match field {
             "username" => crate::service_grants::ServiceField::Username,
@@ -390,8 +386,8 @@ impl IpcServer {
         registration_key_fingerprint: Option<String>,
     ) -> IpcMessage {
         let store_key = match self.service_grant_store_key().await {
-            Ok(key) => key,
-            Err(response) => return response,
+            Some(key) => key,
+            None => return self.service_secret_report("locked", None, None),
         };
         let parsed: std::result::Result<Vec<crate::service_grants::ServiceField>, _> = fields
             .iter()
@@ -506,8 +502,8 @@ impl IpcServer {
         client_id: &str,
     ) -> IpcMessage {
         let store_key = match self.service_grant_store_key().await {
-            Ok(key) => key,
-            Err(response) => return response,
+            Some(key) => key,
+            None => return self.service_secret_report("locked", None, None),
         };
         // Review M2: challenge minting is an owner act on the grant-policy
         // lifecycle — audited on every path like create/revoke/complete.
@@ -632,8 +628,8 @@ impl IpcServer {
         }
 
         let store_key = match self.service_grant_store_key().await {
-            Ok(key) => key,
-            Err(response) => return response,
+            Some(key) => key,
+            None => return self.service_secret_report("locked", None, None),
         };
         // Load the store to get the expected fingerprint.
         let store = match crate::service_grants::ServiceGrantStore::load_from_path(
@@ -677,8 +673,8 @@ impl IpcServer {
         match verification {
             Ok(Ok(())) => {
                 let store_key = match self.service_grant_store_key().await {
-                    Ok(key) => key,
-                    Err(response) => return response,
+                    Some(key) => key,
+                    None => return self.service_secret_report("locked", None, None),
                 };
                 // F4: re-validate INSIDE the lock — a concurrent revoke
                 // during the multi-second verification window must be
@@ -792,8 +788,8 @@ impl IpcServer {
         grant_id_str: &str,
     ) -> IpcMessage {
         let store_key = match self.service_grant_store_key().await {
-            Ok(key) => key,
-            Err(response) => return response,
+            Some(key) => key,
+            None => return self.service_secret_report("locked", None, None),
         };
         let Ok(grant_id) = uuid::Uuid::parse_str(grant_id_str) else {
             return self.service_secret_report("denied", None, Some("malformed grant id".into()));
