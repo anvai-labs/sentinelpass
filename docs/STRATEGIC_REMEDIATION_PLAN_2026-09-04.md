@@ -514,6 +514,11 @@ foundation before sync or mobile.
 | 1.0 RC | Feature freeze, independent audit, signing, recovery/restore drills |
 | 1.0 | Release only after all security gates close |
 
+October 5 clarification: native desktop autofill was a roadmap intention, not
+delivered functionality. Its direct-vault prototype is now retired; future work
+must satisfy [native autofill authorization and destination-binding gates](NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md).
+The Tauri UI, explicit Copy actions and browser extension are separate paths.
+
 ## 12. Definition of Done for 1.0
 
 - Recovery is independent of the old password and verified during onboarding.

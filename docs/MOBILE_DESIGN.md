@@ -1,5 +1,11 @@
 # Mobile Apps & Thick Client Auto-fill - Technical Design
 
+> **Native desktop autofill update (2026-10-05):** the unshipped direct-vault
+> input/clipboard prototype is retired on Windows, macOS and Linux. Native
+> application autofill below is future design, not available functionality. The
+> Tauri desktop UI and browser-extension autofill remain separate supported paths.
+> See [retirement and reintroduction gates](NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md).
+
 > **SUPERSEDED IN PART (2026-09-11, ADR-009 rev 2 / ADR-006):** every
 > CloudKit / iCloud / Google Drive sync section below (design sketch, platform
 > table "Cloud Sync" column, `CloudKitSync` / `GoogleDriveSync` /
@@ -811,7 +817,10 @@ class GoogleDriveSyncService(private val drive: Drive) {
 
 ### Overview
 
-Thick client auto-fill enables SentinelPass to inject credentials directly into native (non-browser) applications on Windows and macOS.
+This proposed feature would fill credentials into native (non-browser) applications.
+It is not currently available. The retired prototype must not be re-enabled from
+this historical sketch; daemon authorization and destination-binding requirements
+in the retirement decision take precedence.
 
 ### Windows Credential Provider Integration
 
