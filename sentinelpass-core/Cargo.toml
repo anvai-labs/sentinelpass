@@ -13,6 +13,8 @@ categories.workspace = true
 [features]
 default = []
 sync = ["reqwest"]
+# Compatibility flag for the retired native-autofill API; no XTest linkage.
+x11 = []
 
 [dependencies]
 anvai-secure-io = { path = "../anvai-secure-io" }
@@ -84,7 +86,6 @@ keyring = "2.3"
 block = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11 = { version = "2.21", features = ["xlib", "xtst", "xinerama"], optional = true }
 keyring = "2.3"
 
 [lints.rust.unexpected_cfgs]
