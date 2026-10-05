@@ -212,6 +212,9 @@ impl IpcServer {
                 );
             }
         };
+        // Verification is complete. Do not retain the derived key across the
+        // executable-hash or entry-fetch awaits below (a lock may arrive there).
+        drop(store_key);
         let grant = store.authorize(client_id, token, entry_id, field, chrono::Utc::now());
         let authorized = grant.is_some();
         // SP-3 / ADR-016: executable policy (see exe_policy.rs) —
@@ -645,6 +648,10 @@ impl IpcServer {
                 )
             }
         };
+        // GPG verification can outlive a concurrent vault lock. Release this
+        // key now; successful verification derives a fresh key after rechecking
+        // the live vault below, before any authenticated policy update.
+        drop(store_key);
         // F5: find by the grant_id bound into the challenge, not by
         // an arbitrary client-id scan.
         let grant = store.grants.get(&challenge.grant_id);

@@ -18,10 +18,19 @@ An unsigned legacy document, wrong vault key, edited policy, unknown format or
 invalid MAC fails closed. Unknown fields and duplicate grant IDs still reject the
 whole policy. Reads are bounded to 1 MiB, refuse non-regular files and Unix symlinks,
 and use nonblocking open to avoid hanging on a substituted FIFO. Writes keep the
-existing owner-only atomic publication. No new dependencies or crypto primitives.
+existing owner-only atomic publication. Unix parent-directory open/fsync failures
+now return an error rather than acknowledging durability. On Windows, replacement
+uses `MoveFileExW` with `MOVEFILE_WRITE_THROUGH` and no cross-volume copy fallback.
+A post-publication error is reported as `store_error`; the new policy may already
+be visible, so inspect/retry under owner authorization instead of rolling back to
+old grants. These are OS-level durability requests, not a physical power-loss
+qualification of every filesystem/device. No new dependencies or crypto primitives.
 
-The authentication key exists only in a short-lived zeroizing wrapper; no second
-key file is written. A locked vault cannot authenticate/serve grants. Lock state is
+The authentication key is held in a short-lived zeroizing wrapper; no second
+key file is written. Retrieval drops it before executable/entry-fetch awaits,
+and enrollment drops it before external GPG verification. New requests to a
+locked vault cannot authenticate/serve grants; already in-flight operations are
+not synchronously canceled by lock. Lock state is
 checked again after external enrollment verification, before its policy update.
 Fresh, operation-bound password step-up continues to guard grant creation,
 revocation and enrollment initiation. The existing enrollment completion proof
@@ -46,8 +55,11 @@ Recovery must review and reissue grants, not reactivate stale policy from backup
 
 ## Explicit limits and deployment choice
 
-- A valid old envelope can be replayed together with an old state snapshot. This
-  change does not provide a rollback-resistant external monotonic counter.
+- Replaying the grant file alone can reactivate an old revoked grant if the vault
+  DEK is unchanged and its old token is still known. This change does not provide
+  a rollback-resistant external monotonic counter. Never treat a restored grant
+  file as approved current policy; rotate provider credentials to invalidate
+  previously delivered values as well.
 - A compromised unlocked daemon/root/hypervisor can obtain keys, replace the
   verifier, or observe plaintext. This is not a hardware trust boundary.
 - The owner IPC socket still exposes broader reads under the existing same-UID

@@ -35,7 +35,7 @@ const STORE_FILE: &str = "service-grants.json";
 const MAX_STORE_BYTES: u64 = 1024 * 1024;
 const STORE_DOMAIN: &[u8] = b"sentinelpass-service-grants-envelope-v2\0";
 
-/// Domain-separated authentication key. Never persisted or cached across lock.
+/// Domain-separated authentication key. Never persisted or kept in a shared cache.
 /// This protects offline policy edits, not a compromised unlocked daemon/root.
 pub struct ServiceGrantStoreKey(Zeroizing<[u8; 32]>);
 
@@ -101,6 +101,52 @@ fn open_payload(bytes: &[u8], key: &ServiceGrantStoreKey) -> Result<String> {
         .verify_slice(&mac)
         .map_err(|_| invalid())?;
     Ok(envelope.payload)
+}
+
+#[cfg(not(windows))]
+fn publish_store(temp: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp, path)
+}
+
+#[cfg(windows)]
+fn publish_store(temp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
+        let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if value.contains(&0) {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        value.push(0);
+        Ok(value)
+    };
+    let from = wide(temp)?;
+    let to = wide(path)?;
+    // Same-directory replacement: never allow a cross-volume copy/delete.
+    // SAFETY: both buffers are NUL-terminated and remain alive for the call.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+#[cfg(not(windows))]
+fn sync_store_parent(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_store_parent(_parent: &Path) -> std::io::Result<()> {
+    // publish_store already requested write-through publication. Opening a
+    // directory with std::fs::File::open is not the Windows durability API.
+    Ok(())
 }
 
 /// Fields a service grant may expose (subset of the entry surface; ADR-014).
@@ -255,6 +301,17 @@ impl ServiceGrantStore {
     /// revocation can be lost to a power cut — the rename metadata was
     /// never made durable and the pre-revoke file reappears).
     pub fn save_to_path(&self, path: &Path, key: &ServiceGrantStoreKey) -> Result<()> {
+        self.save_to_path_with_sync(path, key, sync_store_parent)
+    }
+
+    // Explicit I/O boundary also permits deterministic durability-failure tests
+    // without process-global fault switches that race other tests or consumers.
+    fn save_to_path_with_sync(
+        &self,
+        path: &Path,
+        key: &ServiceGrantStoreKey,
+        sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<()> {
         if let Ok(meta) = std::fs::symlink_metadata(path) {
             if meta.file_type().is_symlink() {
                 return Err(PasswordManagerError::InvalidInput(format!(
@@ -305,15 +362,18 @@ impl ServiceGrantStore {
                     ))
                 })?;
             drop(file);
-            std::fs::rename(&temp, path).map_err(|e| {
+            publish_store(&temp, path).map_err(|e| {
                 PasswordManagerError::InvalidInput(format!(
                     "Failed to publish service grant store: {e}"
                 ))
             })?;
             // Durably record the rename itself (crash-safe publication).
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+            sync_parent(parent).map_err(|_| {
+                PasswordManagerError::InvalidInput(
+                    "grant store published but durability unconfirmed; inspect before retrying"
+                        .into(),
+                )
+            })?;
             Ok(())
         })();
         if result.is_err() {
@@ -624,6 +684,59 @@ mod tests {
                 "accepted edit: {field}"
             );
         }
+    }
+
+    #[test]
+    fn revocation_sync_failure_is_reported_without_rolling_back_publication() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(STORE_FILE);
+        let mut s = store();
+        let (grant, token) = s
+            .mint_grant("svc", 42, vec![ServiceField::Password], None, None, None)
+            .unwrap();
+        s.save_to_path(&path, &key()).unwrap();
+        assert!(s.revoke(grant.grant_id));
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+        ] {
+            let result = s.save_to_path_with_sync(&path, &key(), |parent| {
+                assert_eq!(parent, tmp.path());
+                Err(std::io::Error::from(kind))
+            });
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("published but durability unconfirmed"));
+            // Publication may already be visible. Never resurrect the old
+            // authorization while handling a post-rename error.
+            let visible = ServiceGrantStore::load_from_path(&path, &key()).unwrap();
+            assert!(visible
+                .authorize("svc", &token, 42, ServiceField::Password, Utc::now())
+                .is_none());
+            assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+        }
+        // Owner-controlled retry can establish a durable acknowledgement.
+        s.save_to_path(&path, &key()).unwrap();
+    }
+
+    #[test]
+    fn authenticated_payload_still_rejects_unknown_and_duplicate_fields() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(STORE_FILE);
+        for payload in [
+            r#"{"grants":[],"future_field":1}"#,
+            r#"{"grants":[],"grants":[]}"#,
+        ] {
+            std::fs::write(&path, seal_payload(payload.into(), &key()).unwrap()).unwrap();
+            assert!(ServiceGrantStore::load_from_path(&path, &key()).is_err());
+        }
+        let empty = String::from(r#"{"grants":[]}"#);
+        let sealed = String::from_utf8(seal_payload(empty, &key()).unwrap()).unwrap();
+        // Duplicate outer fields are rejected even when the original MAC is valid.
+        let duplicate = sealed.replacen('{', r#"{"format_version":2,"#, 1);
+        std::fs::write(&path, duplicate).unwrap();
+        assert!(ServiceGrantStore::load_from_path(&path, &key()).is_err());
     }
 
     #[test]
