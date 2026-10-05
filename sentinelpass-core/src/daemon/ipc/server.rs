@@ -2484,6 +2484,20 @@ impl IpcServer {
                             "vault_read:ssh_public"
                         },
                     )),
+                    // Review round 2: ExportAll is the highest-yield
+                    // unaudited read (every exportable entry, plaintext,
+                    // profile-conditional step-up on the DEFAULT profile);
+                    // HealthReport and strength-bearing RegistryOverview
+                    // bulk-decrypt server-side the same way.
+                    VaultOp::ExportAll => {
+                        Some(("export:all".to_string(), None, "vault_read:export_all"))
+                    }
+                    VaultOp::HealthReport => {
+                        Some(("health".to_string(), None, "vault_read:health_report"))
+                    }
+                    VaultOp::RegistryOverview {
+                        include_strength: true,
+                    } => Some(("registry".to_string(), None, "vault_read:registry_strength")),
                     _ => None,
                 };
                 let outcome = match self.vault.manager().await {
@@ -4189,6 +4203,12 @@ mod autofill_origin_gate_tests {
         assert!(
             log.contains("vault read "),
             "the audit row must carry the peer provenance token; log:\n{log}"
+        );
+        // The success flag must be the REAL outcome, not optimistic:
+        // entry 1 does not exist in this harness's vault.
+        assert!(
+            log.contains("\"success\":false"),
+            "a failed read must record success:false; log:\n{log}"
         );
     }
 

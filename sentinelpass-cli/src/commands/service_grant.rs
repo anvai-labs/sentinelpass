@@ -449,6 +449,11 @@ mod tests {
         assert!(expires_at_from("0s").is_err());
         assert!(expires_at_from("-5m").is_err());
         assert!(expires_at_from("5w").is_err());
+        // Review M3: multi-byte final characters must fail cleanly, not
+        // panic on a char boundary (the byte-index split_at did).
+        assert!(expires_at_from("5日").is_err());
+        assert!(expires_at_from("日").is_err());
+        assert!(expires_at_from("m").is_err());
         assert!(expires_at_from("99999999999999999999d").is_err());
         // Review N7: no panic/wrap at the i64 ceiling.
         assert!(expires_at_from("9223372036854775807s").is_err());
@@ -480,6 +485,16 @@ mod tests {
         let err = report_error(&missing).unwrap_err().to_string();
         assert!(
             err.contains("no matching grant") && !err.contains("denied"),
+            "{err}"
+        );
+        // Review M4: store_error means NOT PERSISTED — must not read as a
+        // denial (an operator would believe a failed revoke succeeded
+        // while the grant is still live).
+        let store_err = serde_json::json!({"status": "store_error"});
+        let err = report_error(&store_err).unwrap_err().to_string();
+        assert!(!err.contains("denied"), "{err}");
+        assert!(
+            err.contains("NOT persisted") && err.contains("UNCHANGED"),
             "{err}"
         );
     }

@@ -350,6 +350,16 @@ pub fn render_external_secret_audit_report(
                     return None;
                 }
 
+                // Owner-side vault reads (security-fix review round 2):
+                // daemon rows for EntryGet/ExportAll & co. carry
+                // client_id: None — rendering them here would mislabel
+                // every owner read as a "legacy" external-tool access.
+                if purpose
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("vault_read:"))
+                {
+                    return None;
+                }
                 let event_client_normalized = event_client_id
                     .as_deref()
                     .map(|value| value.trim().to_ascii_lowercase());
