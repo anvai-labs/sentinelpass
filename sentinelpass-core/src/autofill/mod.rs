@@ -1,9 +1,14 @@
-//! Auto-fill functionality for thick client applications
+//! Compatibility surface for the retired native-autofill prototype.
 //!
-//! This module provides cross-platform auto-fill capabilities:
-//! - Windows: Detect password fields and auto-fill via SendInput/clipboard
-//! - macOS: Keychain integration and Accessibility API
-//! - Linux: X11/Wayland support (future)
+//! Credential search/delivery is disabled: window titles, entry IDs and a direct
+//! vault reference do not establish consent or destination authority. Browser
+//! autofill uses the separate daemon/native-host protocol, not this module.
+
+fn native_autofill_unavailable() -> crate::PasswordManagerError {
+    crate::PasswordManagerError::NotImplemented(
+        "Native autofill is disabled until daemon authorization and destination binding are implemented; use the browser extension".into(),
+    )
+}
 
 #[cfg(windows)]
 pub mod windows;
@@ -67,31 +72,13 @@ impl AutoFillManager {
         windows::get_context()
     }
 
-    /// Search for credentials matching the given domain
+    /// Disabled: a caller-supplied domain/title is not an authorized native target.
     pub async fn find_credentials(
         &self,
-        domain: &str,
-        vault_manager: &crate::vault::VaultManager,
+        _domain: &str,
+        _vault_manager: &crate::vault::VaultManager,
     ) -> Result<Vec<CredentialMatch>, crate::PasswordManagerError> {
-        // List all entries and filter by domain
-        let entries = vault_manager.list_entries()?;
-
-        let matches: Vec<CredentialMatch> = entries
-            .into_iter()
-            .filter(|entry| {
-                // Check if entry matches the domain
-                !entry.username.is_empty()
-                    || entry.title.to_lowercase().contains(&domain.to_lowercase())
-            })
-            .map(|entry| CredentialMatch {
-                id: entry.entry_id.to_string(),
-                domain: domain.to_string(),
-                username: entry.username.clone(),
-                title: entry.title.clone(),
-            })
-            .collect();
-
-        Ok(matches)
+        Err(native_autofill_unavailable())
     }
 
     /// Auto-fill credentials via clipboard
@@ -134,6 +121,86 @@ impl Default for AutoFillManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(target_os = "linux", feature = "x11"))]
+    use super::linux as native;
+    #[cfg(target_os = "macos")]
+    use super::macos as native;
+
+    #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "x11")))]
+    #[tokio::test]
+    async fn native_platform_paths_deny_before_vault_or_desktop_access() {
+        let vault = unavailable_vault();
+        for id in ["1", "not-an-id"] {
+            let credential = synthetic_match(id);
+            for result in [
+                native::autofill_via_clipboard(&credential, &vault).await,
+                native::autofill_via_input(&credential, &vault).await,
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(crate::PasswordManagerError::NotImplemented(_))
+                ));
+            }
+        }
+        assert!(matches!(
+            native::get_context(),
+            Err(crate::PasswordManagerError::NotImplemented(_))
+        ));
+        assert!(matches!(
+            native::register_hotkey(6, 0x74),
+            Err(crate::PasswordManagerError::NotImplemented(_))
+        ));
+    }
+
+    // No key, schema, audit logger or default config directory. Any accidental
+    // vault read would produce a different error, rather than the expected denial.
+    pub(super) fn unavailable_vault() -> crate::vault::VaultManager {
+        crate::vault::VaultManager {
+            key_hierarchy: crate::crypto::KeyHierarchy::new(),
+            db: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::database::Database::open(":memory:").unwrap(),
+            )),
+            vault_path: ":memory:".into(),
+            audit_logger: None,
+            epoch_sidecar: None,
+            vault_uuid: None,
+            session_epoch: std::sync::atomic::AtomicI64::new(0),
+        }
+    }
+
+    #[cfg(any(
+        windows,
+        target_os = "macos",
+        all(target_os = "linux", feature = "x11")
+    ))]
+    pub(super) fn synthetic_match(id: &str) -> CredentialMatch {
+        CredentialMatch {
+            id: id.into(),
+            domain: "example.invalid".into(),
+            username: "synthetic".into(),
+            title: "synthetic".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_search_never_enumerates_vault_for_title_or_domain() {
+        let vault = unavailable_vault();
+        for domain in [
+            "",
+            "example.invalid",
+            "https://example.invalid",
+            "*",
+            "example.invalid - Google Chrome",
+        ] {
+            assert!(matches!(
+                AutoFillManager::new()
+                    .find_credentials(domain, &vault)
+                    .await,
+                Err(crate::PasswordManagerError::NotImplemented(_))
+            ));
+        }
+    }
 
     #[test]
     fn test_autofill_manager_creation() {

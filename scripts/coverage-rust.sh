@@ -26,10 +26,11 @@ fi
 mkdir -p target/llvm-cov
 
 echo "[rust] Running LLVM coverage (line threshold: ${MIN_LINES}%)"
-# Build with specific features (x11 requires X11 libraries not available in CI)
+# Build with specific features. The x11 flag is a documented no-op since
+# the native-autofill retirement (docs/NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md);
+# sync is the only optional feature that links extra code.
 if [[ "$(uname)" == "Linux" ]]; then
-  # On Linux, exclude x11 feature to avoid requiring X11 libraries
-  # Only enable the sync feature which is the only optional feature in sentinelpass-core
+  # Enable sync; the x11 no-op flag needs no system libraries
   FEATURES="--features sentinelpass-core/sync"
 else
   # On macOS/Windows, use default features

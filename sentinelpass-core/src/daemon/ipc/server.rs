@@ -831,8 +831,8 @@ impl IpcServer {
                 );
                 self.service_secret_report("revoked", None, None)
             }
-            // Review F6: revocation NOT published — the grant is still
-            // live on disk; say so distinctly.
+            // Publication may already have happened before a durability failure;
+            // report uncertain state, never acknowledge durable revocation.
             Err(e) => self.service_secret_report("store_error", None, Some(e.to_string())),
         }
     }

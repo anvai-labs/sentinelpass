@@ -4678,7 +4678,6 @@ dependencies = [
  "url",
  "uuid",
  "windows 0.61.3",
- "x11",
  "zeroize",
 ]
 

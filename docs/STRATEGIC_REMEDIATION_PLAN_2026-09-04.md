@@ -510,9 +510,14 @@ foundation before sync or mobile.
 | 0.9 | Key slots, recovery, envelope/schema v2, migration |
 | 0.10 | Transactions, backup, daemon ownership, IPC, desktop/browser hardening |
 | 0.11 | Sync protocol v2 beta and relay operations |
-| 0.12 | Android/iOS beta and native autofill |
+| 0.12 | Android/iOS beta and native autofill *(native desktop autofill later retired — docs/NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md)* |
 | 1.0 RC | Feature freeze, independent audit, signing, recovery/restore drills |
 | 1.0 | Release only after all security gates close |
+
+October 5 clarification: native desktop autofill was a roadmap intention, not
+delivered functionality. Its direct-vault prototype is now retired; future work
+must satisfy [native autofill authorization and destination-binding gates](NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md).
+The Tauri UI, explicit Copy actions and browser extension are separate paths.
 
 ## 12. Definition of Done for 1.0
 
