@@ -172,8 +172,22 @@ fn socket_safe_base(base: &std::path::Path) -> std::path::PathBuf {
 struct TempDirGuard<'a>(&'a std::path::Path);
 impl Drop for TempDirGuard<'_> {
     fn drop(&mut self) {
-        if std::env::var_os("SP_KEEP_ENROLL_TMP").is_none() {
-            let _ = std::fs::remove_dir_all(self.0);
+        if std::env::var_os("SP_KEEP_ENROLL_TMP").is_some() {
+            // Review M5: the dir holds the transcript (client_id, entry_id,
+            // grant_id, nonce, fingerprint in cleartext) — a silently kept
+            // dir is a forensic surprise. Debug hatch, loudly announced.
+            tracing::warn!(
+                path = %self.0.display(),
+                "SP_KEEP_ENROLL_TMP set — enrollment temp dir NOT removed"
+            );
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(self.0) {
+            tracing::warn!(
+                path = %self.0.display(),
+                error = %e,
+                "failed to remove enrollment temp dir"
+            );
         }
     }
 }

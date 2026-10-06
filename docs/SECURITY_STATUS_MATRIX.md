@@ -67,6 +67,13 @@ Status definitions:
 
 ## Release Interpretation
 
+Native thick-client autofill prototype: **Disabled** (2026-10-05). Direct-vault
+search, clipboard/input delivery and hotkey paths now fail before vault/desktop
+access on Windows/macOS/Linux; broken handwritten Windows FFI is removed. Windows
+diagnostic titles use generated bindings and assert no origin. Browser-extension
+autofill is a separate implementation and retains the status above. See
+[the retirement decision and reintroduction gates](NATIVE_AUTOFILL_RETIREMENT_2026-10-05.md).
+
 - `Experimental` surfaces are not approved for production credentials.
 - SentinelPass does **not** defend against malicious code running as the local user
   (same-UID processes can read the IPC token and any credential the user can); this

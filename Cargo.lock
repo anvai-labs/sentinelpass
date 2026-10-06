@@ -4611,7 +4611,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-cli"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4636,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-core"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "anvai-secure-io",
@@ -4678,13 +4678,12 @@ dependencies = [
  "url",
  "uuid",
  "windows 0.61.3",
- "x11",
  "zeroize",
 ]
 
 [[package]]
 name = "sentinelpass-daemon"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "rpassword",
@@ -4700,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-host"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "sentinelpass-core",
@@ -4711,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-mobile-bridge"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "cbindgen",
  "chrono",
@@ -4729,7 +4728,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-protocol"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -4749,7 +4748,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-relay"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4778,7 +4777,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-ui"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "arboard",

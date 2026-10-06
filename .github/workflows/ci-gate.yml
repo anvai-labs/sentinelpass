@@ -173,17 +173,32 @@ jobs:
 
             # ---- 4. Poll; only trust successful API responses. A failed poll
             # (rate limit, 5xx, network) must never look like "zero pending".
-            # NOTE: `gh api` has no --arg; inject the run id via jq's env
-            # (verified live: env.GITHUB_RUN_ID resolves in gh's gojq). We
-            # exclude our own check run by its run URL only — excluding by
-            # job name would swallow any other workflow's job named "Gate"
-            # and break entirely if this job is renamed.
+            # NOTE: `gh api` has no --arg; inject the run ids via jq's env
+            # (verified live: env.* resolves in gh's gojq). We exclude the
+            # check runs of EVERY CI Gate run on this SHA — our own AND any
+            # sibling — by run URL. Excluding only the own run id let two
+            # Gate runs on one SHA poison each other (a failed sibling's
+            # "Gate" check run made every rerun fail on it; the deadlock
+            # needed a fresh SHA to break — 2026-10-05, PR #250). Excluding
+            # by job name would swallow any other workflow's job named
+            # "Gate" and break entirely if this job is renamed.
+            GATE_RUN_IDS="$(gh api \
+                 -H "Accept: application/vnd.github+json" \
+                 "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}" \
+                 --jq '[.workflow_runs[]
+                       | select(.name == "CI Gate")
+                       | (.id | tostring)] | join("|")' 2>/dev/null || true)"
+            # Fail-safe: if the runs listing failed (empty list), fall back
+            # to excluding at least our own run so the gate cannot deadlock
+            # on its own pending row.
+            GATE_RUN_IDS="${GATE_RUN_IDS:-${GITHUB_RUN_ID}}"
+            export GATE_RUN_IDS
             if gh api \
                  --paginate \
                  -H "Accept: application/vnd.github+json" \
                  "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
                  --jq '.check_runs[]
-                       | select((((.html_url // "") | contains("/runs/" + env.GITHUB_RUN_ID + "/")) | not))
+                       | select((((.html_url // "") | test("/runs/(" + (env.GATE_RUN_IDS // "0") + ")/")) | not))
                        | [.name, .status, (.conclusion // "-")]
                        | @tsv' > checks.tsv.tmp 2> poll_err.txt; then
               fail_streak=0

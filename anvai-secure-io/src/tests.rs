@@ -3,7 +3,7 @@ use std::{
     fs,
     os::unix::fs::{symlink, PermissionsExt},
     process::Command,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, Mutex},
 };
 use tempfile::TempDir;
 
@@ -217,6 +217,12 @@ fn concurrent_create_has_one_winner_and_reads_never_see_partial_replacement() {
 }
 
 const CHILD_PATH: &str = "ANVAI_SECURE_IO_TEST_PATH";
+// Serialize subprocess tests: an unrelated concurrent fork can inherit a held
+// flock descriptor until exec closes it (even with CLOEXEC). That transient
+// reference would invalidate the immediate release-on-drop assertion below.
+// Keep the assertion strict; exclude only unrelated forks from its lifetime.
+static SUBPROCESS_TEST: Mutex<()> = Mutex::new(());
+
 pub(crate) fn checkpoint(point: &str) {
     if std::env::var("ANVAI_SECURE_IO_TEST_CRASH").as_deref() == Ok(point) {
         std::process::exit(86);
@@ -246,6 +252,7 @@ fn child(path: &Path) -> Command {
 
 #[test]
 fn locks_exclude_other_processes_and_release_on_drop() {
+    let _subprocess_test = SUBPROCESS_TEST.lock().unwrap();
     let (tmp, dir) = dir();
     let lock = dir.lock(Path::new("lock")).unwrap();
     assert!(child(tmp.path())
@@ -259,6 +266,7 @@ fn locks_exclude_other_processes_and_release_on_drop() {
 
 #[test]
 fn process_crashes_leave_only_complete_old_or_new_files() {
+    let _subprocess_test = SUBPROCESS_TEST.lock().unwrap();
     for (point, expected) in [
         ("before-publication", b"old"),
         ("after-publication", b"new"),
