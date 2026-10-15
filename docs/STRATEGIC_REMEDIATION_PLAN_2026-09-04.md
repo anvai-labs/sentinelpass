@@ -531,3 +531,189 @@ The Tauri UI, explicit Copy actions and browser extension are separate paths.
 - Release artifacts and updater metadata are signed and independently verifiable.
 - No critical/high independent-audit finding remains unresolved.
 - Public documentation and the security status matrix match shipped behavior.
+
+## 13. Data assessment and foundational remediation (2026-10-14)
+
+Scope: the 0.17 workspace at `84c7f58`, followed by the foundational changes on
+`fix/sync-contract-and-durability`. This is a diagnostic review, not production
+certification. **Readiness remains unverified; sync remains experimental.**
+No production deployment, migration, write test, or load test was performed.
+
+Evidence labels: **Observed** = inspected source/configuration; **Measured** =
+executed local check; **Inferred** = reasoning from those facts; **Unknown** =
+missing evidence. Test data is synthetic; test timings are not service benchmarks.
+
+### Requirements, authority and data flow
+
+**Observed:** local credential/SSH/TOTP storage, browser autofill through the
+daemon, CLI/desktop operations, encrypted backup/restore, and optional device
+sync. Rust and bundled SQLite are the relevant implementation constraints; no
+language or database replacement is justified by the evidence.
+
+**Unknown:** user counts, actual vault and tenant size distributions, growth,
+request/read/write mix, concurrent devices, latency/freshness SLOs, availability,
+RPO/RTO, production topology, retention/deletion obligations, budget and named
+operational owners. Repository defaults are not workload evidence.
+
+```mermaid
+flowchart LR
+    UI[CLI / desktop / browser] --> IPC[Daemon authorization and live vault]
+    IPC --> V[Local SQLite vault + external authenticated receipts]
+    M[Mobile bridge / mobile-owned vault] --> V
+    V --> O[Pending versions / outbox pages]
+    O --> R[Signed HTTP + relay device authorization]
+    R --> T[Relay SQLite transaction: CAS state + log + result + cursor]
+    T --> P[Authenticated pull page]
+    P --> V
+    V --> B[Verified encrypted backup bundle]
+```
+
+The mobile arrow describes the same storage role on a mobile device, not access
+to the desktop's live database. Desktop compatibility paths also exist; the
+daemon and maintenance lock define supported desktop ownership boundaries.
+
+| State / owner role | Grain and keys | Authority and commit/recovery boundary |
+|---|---|---|
+| Local durable vault / vault owner | Local integer entry/key/TOTP IDs; stable sync UUIDs; vault UUID and key epoch | Encrypted local contents plus authenticated receipt state. `ContentTransaction` publishes pending receipts before SQLite commit, then finalizes; failure after SQL commit can be an uncertain outcome. Recover only a complete old/new snapshot. |
+| Local relationships / core maintainer | Entry-to-domain mappings and keyed domain tags; one TOTP parent relationship; entity membership constraints | Domain tags/equality indexes are derived lookup aids, not credential authority. NULL optional values, deletion flags and mapping ownership participate in integrity checks. |
+| Process/request state / daemon maintainer | Unlocked keys, manager/DB locks; request-local capability and receipt evidence | Keys disappear on lock/process exit. New `VerifiedRead` owns its SQLite transaction and evidence for one list request. No authorization/receipt TTL cache was added. |
+| Durable outbox / sync maintainer | One current pending version and acknowledged version per object | Network sends occur outside the local DB lock. Conditional acknowledgment SQL preserves later edits, deletion flags and unresolved conflicts. Local deduplication alone does not prove exactly-once effects. |
+| Relay / relay operator | Current object `(vault_id, object_id)`; log `(vault_id, server_sequence)`; result `(mutation_id, device_id, vault_id)` bound to object | Opaque encrypted payloads and auth/routing metadata only. CAS state, appended mutation, result, epoch and sequence commit in one SQLite transaction. Retries replay stored results; after result expiry CAS prevents an old mutation applying again. |
+| Pull / receiving vault owner | Ordered vault-log page; durable cursor; per-object conflict alternative; bounded dead-letter records | Verify metadata and eligibility before application. Apply/disposition and cursor commit together. Dead-letter overflow fails closed; reconciliation is an explicit operational responsibility. |
+| Backup / vault owner and release maintainer | Encrypted snapshot plus authenticated manifest | Staged verification and restore tests exist. Backup scheduling, off-host copies, retention and deployed restore objectives remain Unknown. |
+
+**Observed model:** normalized transactional entities and relationships, with
+encrypted fields and derived lookup tags. Local integer keys and distributed
+UUID identity have different purposes. Relay mutation history is protocol
+history, not a business-time warehouse or a guarantee of historical analytics.
+Client timestamps do not replace CAS versions or server ordering. Adding stars,
+snowflake schemas, SCD/Data Vault structures, CDC infrastructure, a lake, or a
+search/vector service would not resolve the demonstrated failures. AI/ranked
+semantic search is outside this review's paths; ordinary domain lookup remains
+subject to authorization and integrity checks.
+
+**Observed physical design:** embedded row-oriented SQLite, file-backed WAL on
+local vaults and relay, foreign keys, primary/unique keys, pending-state indexes,
+and ordered vault-log keys. WAL durability, in-memory caches, process deployment,
+and replication are separate properties. Device sync is application replication;
+it is not SQLite sharding. LSM memtables/SSTables, Bloom-filter tuning and LSM
+compaction do not apply to this engine. Existing SQLite access and bounded
+application maps suffice for this slice. Full integrity snapshots and some
+per-object/domain SQL queries remain material costs.
+
+### Rubric
+
+Scores use the requested 0–4 scale. No dimension is 4: an agreed production
+workload and operational validation are absent. Confidence concerns the evidence
+shown, not a certification of the whole product.
+
+| Dimension | Weight | Before → after | Evidence location (relative to repository root) | Confidence / gaps |
+|---|---:|---|---|---|
+| A. Requirements and ownership | 8 | U → U | `README.md`, this requirements inventory | Low; deployment/workload/SLOs/named owners Unknown |
+| B. Model, keys, history | 12 | 3 → 3 | `sentinelpass-core/src/database/{schema,migrations,fixtures}.rs`; relay `storage/mod.rs` | Medium; tested constraints/migrations; business retention history Unknown |
+| C. Engine fit / placement | 8 | 3 → 3 | Workspace `Cargo.toml`, `Cargo.lock`; core `database/schema.rs`; relay `storage/mod.rs` | Medium; local embedded OLTP fits observed roles; shared-relay capacity unmeasured |
+| D. Queries / physical plans | 10 | 2 → 2 | Core `database/repository.rs`, `sync/{change_tracker,outbox}.rs`; relay `handlers/sync_v2.rs` | Medium; bounded scans, offset correction; N+1/snapshot costs and representative plans remain |
+| E. Algorithms / bounds | 8 | 1 → 2 | Core `sync/{outbox,client}.rs`, `vault/content_guard.rs`; relay `rate_limit.rs`, `app_state.rs` | Medium; row/wire/key/job bounds tested; not a global memory bound, remaining full snapshots and other handlers |
+| F. Pipeline contracts / quality | 10 | 0 → 2 | `sentinelpass-relay/tests/sync_wire.rs`; core `sync/engine.rs` | High for wire defect/fix; Medium overall; real wire tests plus model tests, operational reconciliation/backfill unvalidated |
+| G. Transactions / replay | 10 | 0 → 3 | Core `sync/outbox.rs`; relay `handlers/sync_v2.rs`; both `fault_injection.rs` | High for local invariants; crash/network/retry tests are bounded evidence, not all-environment exactly-once proof |
+| H. Security / lifecycle | 10 | 2 → 2 | `SECURITY_ARCHITECTURE.md`; core `vault/content_guard.rs`, `daemon/ipc`; relay `auth.rs` | Medium; auth/tamper regression evidence; cross-platform guarantees, deletion retention and joint artifact rollback remain |
+| I. Maintenance / amplification | 6 | 1 → 2 | Lockfile, core `database/schema.rs`; relay `cleanup.rs` | Medium; patched engine/checkpoint progress; v2 history growth and maintenance contention remain |
+| J. Recovery / observability | 8 | 2 → 2 | Core `vault/backup_ops.rs`; `.github/workflows/drills.yml`; checkpoint tracing | Medium; local restore/fault coverage; deployment RPO/RTO, alerts and restore rehearsal Unknown |
+| K. AI/search evaluation | 5 | N/A → N/A | Inspected credential/domain lookup and sync paths | High; no AI, embeddings or ranked retrieval in these paths |
+| L. Simplicity / maintainability | 5 | 3 → 3 | Focused commits, existing SQLite/HTTP architecture, regression tests | Medium; no new service; platform qualification and retained-history design still needed |
+
+Scored weight = 87; applicable weight = 95 (includes A=U, excludes K=N/A).
+Before: weighted points 36.25, **assessed score 41.7/100**.
+After: weighted points 52.25, **assessed score 60.1/100**.
+Both have **evidence coverage 91.6%**: `100 × 87 / 95`.
+Scores are `100 × weighted points / 87`; Unknowns are not passes or zeros.
+
+No confirmed critical authorization/integrity/data-loss defect was established
+in this bounded review. Required production guarantees remain unverified and
+therefore block a positive readiness recommendation regardless of this average.
+The engine upgrade addresses a documented SQLite WAL-reset defect; actual
+exposure of a deployed SentinelPass process was not demonstrated. See SQLite's
+[WAL-reset explanation](https://www.sqlite.org/wal.html#walreset) and
+[patched release notes](https://www.sqlite.org/releaselog/3_51_3.html).
+
+### Prioritized findings, decisions and tradeoffs
+
+| Priority / severity / effort | Failure evidence and current → implemented behavior | Invariant, alternatives and costs |
+|---|---|---|
+| 1 / High / Medium | **Measured:** actual client/relay serde models disagreed on `object_type` versus `entry_type`, preventing push/pull. Canonical wire field plus read alias and real HTTP tests replace incompatible contracts. | MAC input unchanged; duplicate field spellings rejected. A: minimal serde correction selected. B: SQL cannot fix a wire contract. C: keep existing behavior fails round trip. No new service or migration. |
+| 2 / High / Medium | **Measured:** a delayed v1 ack changed local `(version=2, ack=0, pending)` to `(2,1,synced)`. Conditional SQL now preserves pending edits/deletes/conflicts and monotonic ack/cursors. Relay rejected CAS no longer advances epoch; reused IDs cannot relabel another object. | A: application read/modify/write would race across writers. B: transactional predicates selected; bounded ack HashMap replaces repeated linear matching. C: existing behavior can suppress unsent work. O(page) map memory and indexed updates; conflicting results fail closed. Ciphertext equality is not required because retries re-encrypt with fresh randomness. |
+| 3 / High, exposure conditional / Medium | **Observed:** bundled SQLite 3.44.0 predates the WAL-reset fix. Upgrade to rusqlite 0.40.2 / SQLite 3.53.2. **Measured:** the old checkpoint `.execute()` reported `ExecuteReturnedResults`; now query and log actual progress. | Preserve FULL durability and authorizer fault coverage. A: reducing connection overlap cannot substitute for a patched engine. B: qualified bundled upgrade selected. C: staying on the affected version retains the known risk. Dependency/platform qualification cost; no schema change. Checkpoint is not backup or history compaction. |
+| 4 / High / Medium | **Measured baseline probe:** 500 tiny mutations encoded to 204,035 bytes against a 65,536-byte default body cap. Collect bounded row pages, batch exact encoded bytes, cap chunked responses, and bound pull pages. | A: bounded client pages selected; B: SQL keyset windows keep extraction near data; C: count-only batches fail under size skew. 128 row payloads plus receipt snapshot remain material memory; a single object is explicitly refused if oversized. Serialization adds CPU; no throughput claim. |
+| 5 / High for shared relay / Complex overall | **Observed:** v2 ignored configured object quota, rate maps never evicted, SQLite ran inline on the async executor. Enforce retained-identity quota; bound/expire rate maps; move auth/v2 and cleanup work to blocking workers. | A: bounded maps/work admission selected. B: quota count and writes share a SQL transaction; database pooling/sharding is premature without measurements. C: existing behavior has unbounded keys and ignored quota. O(K) expiry scans at most once/minute; 16 queued/running auth/v2 jobs; at saturation deny new work. Tombstones consume identity quota. History bytes and other handler execution remain open work. |
+| 6 / Medium / Medium | **Observed:** listing authenticated the full snapshot then reloaded/re-MACed the whole receipt document per row. One transaction-bound `VerifiedRead` now validates rows against request-local evidence. Offset without LIMIT is corrected; equal titles use entry ID as a tie breaker. | A: request-local reuse selected. B: SQL still supplies the stable snapshot; sorting encrypted titles in SQL would not preserve logical order. C: keeping repeated reads adds avoidable work. **Inferred:** receipt parsing changes from once-per-row to once-per-request; retained receipt-map memory is O(vault size). Latency benefit is unmeasured. No cross-request cache or weakened revocation checks. |
+| 7 / High readiness gate / Complex | **Observed:** local backup/fault tests exist, while actual retention/RPO/RTO and maintenance-active capacity are Unknown. Correct stale documentation and checkpoint diagnostics; retain explicit operational gates below. | A: local probes/metrics first. B: durable snapshots and cursor protocol required before log deletion. C: indefinite retention preserves replay but disk growth is unbounded. Additional queue/cache/warehouse components have no demonstrated justification. |
+
+### Verification and remaining acceptance gates
+
+**Measured local evidence:** `cargo test --workspace` passed 1,130 tests, with
+4 existing ignored tests (not counted as passed). The sync-enabled suite includes
+real HTTP serialization/auth/retry/pull tests, chunked oversized success/error
+replies, delayed edit/delete/conflict acknowledgments, integer extremes,
+transactional quota rollback, key-map saturation/expiry, CAS/epoch behavior,
+bounded scan progress, migration fixtures, authorizer canary/fault sweeps, backup
+restore fixtures, pinned-reader checkpoints and request-local receipt concurrency.
+`cargo +1.89.0 check -p sentinelpass-core --features sync --locked` also passed.
+Workspace Clippy (`--all-targets -- -D warnings`), formatting, and the final
+affected suites (137 sync tests; 82 relay tests plus 2 real HTTP tests) passed.
+The whole-product latency, peak memory and recovery-time benefits are **Unknown**.
+
+Acceptance for this implementation slice: canonical real-client round trip;
+no newer pending mutation cleared by an old ack; no epoch/cursor advance from a
+rejected operation; fault sweeps yield complete old/new state; every encoded push
+fits 65,536 bytes, every pull fits 4 MiB, oversized input never silently advances
+its cursor; retained-identity quota and rate-map/job bounds hold; later requests
+recheck receipt integrity. Existing four ignored tests remain visible gaps.
+
+Remaining work in foundational order (roles proposed; named owners Unknown):
+
+1. **Core/security and release maintainers:** qualify Windows/macOS/mobile builds,
+   platform file custody, and restored bundles with the patched engine. Run
+   independent concurrent writer/checkpoint/restore crash tests on supported
+   filesystems. Threshold: no partial authenticated state or integrity errors;
+   old/new receipt recovery and all existing negative tests continue to pass.
+2. **Relay/sync maintainers plus product owner:** specify offline-device lifetime,
+   deletion obligations and a snapshot/bootstrap cursor contract before pruning
+   v2 history. Decide what happens to a device behind the retention floor. Test
+   late reconnect, deletes, revoked devices, lost acknowledgments, expired
+   idempotency records, schema evolution and replay/backfill from that floor.
+   Threshold: no resurrection, omission or unauthorized recovery. Until then,
+   v2 history bytes remain unbounded and shared-relay sizing is unverified.
+3. **Core and relay maintainers:** inspect the remaining full receipt scans,
+   per-object/domain reads, management handlers and cleanup window sort under
+   representative data. Use cold/warm caches, hot tenants, size skew, concurrent
+   edits, retries and maintenance-active WAL/checkpoint workloads. Record rows
+   examined, bytes transferred, RSS, queue denials, checkpoint progress and
+   end-to-end latency. Numeric latency/capacity targets must come from the
+   workload owner; they are currently Unknown. Keep simpler code unless measured
+   cost justifies batching, another index, or incremental maintenance.
+4. **Operations and vault owners:** establish backup schedule/location, disk
+   headroom and log-growth alerts, conflict/dead-letter reconciliation, and
+   measured restore drills. Threshold: authenticated restore meets agreed RPO/RTO
+   and every skipped mutation has an operator-visible disposition. RPO/RTO and
+   alert thresholds require deployment evidence; no guarantee is asserted here.
+
+Rollout/rollback: review focused commits against `develop`; local validation
+precedes remote CI. No schema/crypto-envelope migration is introduced. Test the
+new client against both field spellings, then stage relay/client upgrades on
+disposable vault copies. Existing vaults over the retained-object quota can read
+and update existing identities but cannot add new ones; review occupancy before
+rollout. Do not delete history to make room. Preserve authenticated backups and
+receipts. Roll back behavior independently where possible while retaining a
+patched SQLite engine; reopening newer-engine files with an older engine needs
+explicit compatibility validation. Do not roll back to the known broken wire or
+ack behavior as an operational recovery strategy. Deployment is not authorized
+or performed by this assessment.
+
+Learning notes: a state/version predicate is the database equivalent of a
+compare-and-swap, and transaction scope is what makes it safe across writers.
+WAL checkpoints move physical pages, while replay cursors describe logical
+history. Row-count and byte bounds control different resources. A short Rust
+exercise is to extend the outbox tests with reordered duplicate acknowledgments
+and concurrent tombstones, then assert monotonically increasing acknowledged
+versions and that every newer edit remains pending. Use generated keys and
+synthetic data; do not weaken a failing assertion to make an upgrade pass.

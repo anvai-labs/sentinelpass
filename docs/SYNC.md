@@ -8,17 +8,12 @@
 > `docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md`. The protocol details below remain
 > useful implementation documentation for v1, not target-state security claims.
 >
-> **v2 note (2026-09-10):** sync protocol v2 (ADR-006) stages 1–2 have
-> landed — see "Sync Protocol v2" below. The CLIENT engine now speaks v2
-> exclusively (`/api/v2/*`); relay push and client pull pages are
-> transactional with unappliable mutations dead-lettered (bounded,
-> fail-closed). The v1 relay endpoints remain for older clients until v1
-> retirement (WBS-624), when the relay hard-rejects them. v2 is NOT yet
-> approved for production credentials: conflict preservation, authenticated
-> metadata enforcement on apply, epoch/revocation checks on every request,
-> pairing upgrade, and v1 retirement are still landing (ADR-006 stage
-> plan). Sync stays experimental until the phase gate (model-based + chaos
-> convergence evidence) passes.
+> **v2 update (2026-10-14):** the client uses v2 sync. The relay defaults
+> to rejecting v1 sync endpoints (`allow_v1 = false`). Conflict preservation,
+> authenticated metadata checks, epoch gates and v2 pairing are implemented;
+> sync remains experimental. The current
+> [data assessment and implementation gates](STRATEGIC_REMEDIATION_PLAN_2026-09-04.md#13-data-assessment-and-foundational-remediation-2026-10-14)
+> distinguish local regression evidence from outstanding operational validation.
 
 End-to-end encrypted sync between SentinelPass devices via a relay server. The relay never sees plaintext — all payloads are encrypted with the vault's DEK before leaving the device.
 
@@ -51,10 +46,11 @@ The client engine pushes and pulls over `/api/v2/*`:
   days) and are capped per device (`max_mutation_results_per_device`);
   after expiry a duplicate is re-evaluated by the CAS guard and REJECTED,
   never replayed. The CLIENT handles every rejection without wedging:
-  an `Applied` ack matching the sent version completes the outbox entry; a
-  conflict at-or-beyond the attempted version adopts the relay baseline
-  (the pull reconciles content); a conflict behind it re-bases the row for
-  a fresh mutation id.
+  an `Applied` ack matching the sent object and version advances its durable
+  acknowledged version monotonically. Newer edits/deletions remain pending,
+  and unresolved conflicts remain conflicted. A conflict at-or-beyond the
+  attempted version preserves the local alternative as a conflict; a conflict
+  behind it re-bases the row for a fresh mutation id.
 - **CAS acceptance.** A mutation applies iff its `expected_version` equals
   the relay's stored current version (0 = create). Same-version overwrites
   do not exist in v2 — the v1 clock-gamed LWW tie-break is gone.
@@ -307,13 +303,51 @@ All sync commands live under `sentinelpass sync`:
 |-----|---------|-------------|
 | `listen_addr` | `127.0.0.1:8743` | Bind address |
 | `storage_path` | `relay.db` | SQLite database path |
-| `max_entries_per_vault` | `10000` | Max sync entries per vault |
-| `max_payload_size` | `65536` | Max encrypted payload bytes |
+| `max_entries_per_vault` | `10000` | v2 retained object identities, including tombstones; existing updates/retries remain allowed at capacity |
+| `max_payload_size` | `65536` | Entire encoded HTTP request body, including JSON/base64 framing |
 | `rate_limit_per_minute` | `60` | Requests per minute per device |
 | `pairing_ttl_secs` | `300` | Bootstrap blob expiration |
 | `max_active_pairings` | `5` | Concurrent unexpired pairing slots |
-| `tombstone_retention_days` | `90` | Days to keep tombstones |
+| `tombstone_retention_days` | `90` | v1 tombstone cleanup only; does not prune the v2 log or v2 tombstones |
 | `nonce_window_secs` | `300` | Auth nonce dedup window |
+
+### Transport and storage bounds
+
+The canonical mutation JSON field is `entry_type`; readers also accept the early
+client spelling `object_type`. Supplying both is rejected. Metadata MAC bytes
+and deterministic mutation identities are unchanged.
+
+The client scans at most 128 pending rows at a time using rowid bounds captured
+for all object types in one initial SQLite snapshot. Inserts after those bounds
+wait for the next cycle. It sends at most 500 mutations and 65,536 encoded bytes
+per request. A single object exceeding that byte budget causes an explicit error
+and remains pending. There is no automatic capability negotiation: a relay
+configured below the default body budget can reject a client page. Raising the
+relay limit does not raise the client's push budget.
+
+Relay pull pages stop at both their row limit and a 4 MiB encoded response budget.
+The client enforces a 4 MiB success-body limit and an 8 KiB error-body limit while
+reading chunks, including responses without Content-Length. Oversized historical
+objects are refused explicitly; cursors do not silently pass them.
+
+Authentication and v2 push/pull use a shared limit of 16 outstanding blocking
+database jobs. Saturation returns HTTP 429. A cancelled request can still commit
+its already-started job; durable mutation identity makes retry essential. Cleanup
+runs as one blocking job at a time. Other management handlers still need separate
+executor review. The relay continues to serialize SQLite access through one
+connection; this change is not a throughput or availability guarantee.
+
+Each rate-limit map holds at most 10,000 keys of at most 256 bytes. Expired windows
+are reclaimed at most once per minute; active hourly/daily quotas are not evicted
+to admit new identities. At capacity, new identities can receive 429 until space
+expires. These are implementation safety limits, not validated deployment sizing.
+
+The v2 log and object tombstones remain durable without automatic history pruning.
+Object quotas bound identity count, not bytes or version history. Monitor disk
+headroom and log growth. A safe history-retention protocol must establish a
+recoverable snapshot and a policy for devices behind the retained cursor before
+deleting log rows. A passive SQLite checkpoint copies eligible WAL frames; it is
+neither log-history compaction, WAL truncation, compression, nor backup.
 
 ### API Endpoints
 

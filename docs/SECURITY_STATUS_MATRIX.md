@@ -1,5 +1,11 @@
 # Security Status Matrix
 
+**2026-10-14 scoped update:** see the
+[data assessment and foundational remediation](STRATEGIC_REMEDIATION_PLAN_2026-09-04.md#13-data-assessment-and-foundational-remediation-2026-10-14)
+for sync wire compatibility, delayed acknowledgments, patched SQLite,
+transport/resource bounds, and request-local receipt verification. This does not
+upgrade sync's experimental status or certify the historical matrix below.
+
 See [2026-09-22 at-rest remediation](SECURITY_REMEDIATION_2026-09-22.md) for the latest implementation delta, validation scope and remaining local rollback/memory/platform limits.
 
 **Last reviewed:** 2026-09-11
