@@ -25,6 +25,7 @@ use axum::http::Extensions;
 use axum::Json;
 use base64::Engine;
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -106,8 +107,8 @@ impl MutationOutcome {
 }
 
 /// A stored idempotency row: (outcome, rejection_reason_json,
-/// resulting_version, server_sequence).
-type StoredMutationResult = (String, Option<String>, Option<i64>, Option<i64>);
+/// resulting_version, server_sequence, object_id).
+type StoredMutationResult = (String, Option<String>, Option<i64>, Option<i64>, String);
 
 /// Response for `POST /api/v2/sync/push`: one durable result per mutation,
 /// in request order.
@@ -174,9 +175,9 @@ pub fn validate_shape(m: &MutationV2) -> Result<(), RelayError> {
             m.entry_type
         )));
     }
-    if m.resulting_version == 0 {
+    if m.resulting_version == 0 || m.resulting_version > i64::MAX as u64 {
         return Err(RelayError::BadRequest(
-            "resulting_version must be at least 1".into(),
+            "resulting_version must be between 1 and i64::MAX".into(),
         ));
     }
     if m.resulting_version <= m.expected_version
@@ -221,6 +222,11 @@ pub async fn push_v2(
             "Too many mutations per push (max {MAX_MUTATIONS_PER_PUSH})"
         )));
     }
+    if req.device_sequence > i64::MAX as u64 {
+        return Err(RelayError::BadRequest(
+            "device_sequence exceeds i64::MAX".into(),
+        ));
+    }
 
     let mut conn = state.storage.conn()?;
     let now = Utc::now().timestamp();
@@ -247,6 +253,8 @@ pub async fn push_v2(
             [&vault_id],
             |row| row.get(0),
         )
+        .optional()
+        .map_err(|e| RelayError::Database(e.to_string()))?
         .unwrap_or(0);
 
     let mut results: Vec<MutationResult> = Vec::with_capacity(req.mutations.len());
@@ -271,14 +279,28 @@ pub async fn push_v2(
         // --- Idempotency: a duplicate returns its ORIGINAL durable result.
         let stored: Option<StoredMutationResult> = tx
             .query_row(
-                "SELECT outcome, rejection_reason, resulting_version, server_sequence
+                "SELECT outcome, rejection_reason, resulting_version, server_sequence, object_id
                  FROM mutation_results
                  WHERE mutation_id = ?1 AND device_id = ?2 AND vault_id = ?3",
                 rusqlite::params![m.mutation_id.to_string(), device_id.to_string(), &vault_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
-            .ok();
-        if let Some((outcome, reason, res_version, seq)) = stored {
+            .optional()
+            .map_err(|e| RelayError::Database(e.to_string()))?;
+        if let Some((outcome, reason, res_version, seq, object_id)) = stored {
+            if object_id != m.object_id.to_string() {
+                return Err(RelayError::BadRequest(
+                    "mutation_id is already bound to another object".into(),
+                ));
+            }
             let outcome = match outcome.as_str() {
                 "applied" => MutationOutcome::Applied {
                     resulting_version: res_version.unwrap_or_default() as u64,
@@ -324,8 +346,6 @@ pub async fn push_v2(
                     m.key_epoch - vault_epoch
                 )));
             }
-            vault_epoch = m.key_epoch;
-            epoch_changed = true;
         }
 
         // --- CAS version guard (WBS-603/608): apply iff the stored current
@@ -336,7 +356,8 @@ pub async fn push_v2(
                 rusqlite::params![&vault_id, m.object_id.to_string()],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()
+            .map_err(|e| RelayError::Database(e.to_string()))?;
 
         let applies = match current {
             None => m.expected_version == 0,
@@ -361,6 +382,12 @@ pub async fn push_v2(
                 outcome: reason_to_outcome(&reason),
             });
             continue;
+        }
+
+        // A rejected CAS must not advance authority for other mutations.
+        if m.key_epoch > vault_epoch {
+            vault_epoch = m.key_epoch;
+            epoch_changed = true;
         }
 
         // --- Apply: allocate the next server sequence, then write the log
@@ -810,6 +837,103 @@ mod tests {
         let conn = state.storage.conn().unwrap();
         conn.query_row("SELECT COUNT(*) FROM mutation_results", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejected_epoch_advance_does_not_block_a_current_epoch_write() {
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let (device, vault, object) = setup(&state);
+        let mut rejected = sample_mutation(&vault, object, 5, 6);
+        rejected.origin_device_id = device;
+        rejected.key_epoch = 100;
+        let mut valid = sample_mutation(&vault, object, 0, 1);
+        valid.origin_device_id = device;
+        let response = push_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(PushRequestV2 {
+                device_sequence: 1,
+                mutations: vec![rejected, valid],
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!response.results[0].outcome.is_applied_outcome());
+        assert!(response.results[1].outcome.is_applied_outcome());
+        assert_eq!(
+            state
+                .storage
+                .conn()
+                .unwrap()
+                .query_row(
+                    "SELECT key_epoch FROM vault_epochs WHERE vault_id=?1",
+                    [&vault],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reused_mutation_id_for_another_object_rolls_back_the_request() {
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let (device, vault, object) = setup(&state);
+        let mut original = sample_mutation(&vault, object, 0, 1);
+        original.origin_device_id = device;
+        push_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(PushRequestV2 {
+                device_sequence: 1,
+                mutations: vec![original.clone()],
+            }),
+        )
+        .await
+        .unwrap();
+        let mut valid = sample_mutation(&vault, Uuid::new_v4(), 0, 1);
+        valid.origin_device_id = device;
+        original.object_id = Uuid::new_v4();
+        let error = push_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(PushRequestV2 {
+                device_sequence: 2,
+                mutations: vec![valid, original],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, RelayError::BadRequest(_)));
+        let conn = state.storage.conn().unwrap();
+        for table in ["sync_entries_v2", "sync_mutations_v2", "mutation_results"] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT last_sequence FROM device_sequences WHERE device_id=?1",
+                [device.to_string()],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn versions_must_fit_sqlite_integer_without_wrapping() {
+        let vault = Uuid::new_v4().to_string();
+        let mut mutation =
+            sample_mutation(&vault, Uuid::new_v4(), i64::MAX as u64 - 1, i64::MAX as u64);
+        assert!(validate_shape(&mutation).is_ok());
+        mutation.expected_version += 1;
+        mutation.resulting_version += 1;
+        assert!(validate_shape(&mutation).is_err());
     }
 
     /// THE WBS-603 positive: a duplicate push returns the ORIGINAL applied

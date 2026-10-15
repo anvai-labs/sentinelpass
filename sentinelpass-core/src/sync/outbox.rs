@@ -20,7 +20,8 @@ use crate::sync::v2::{
 };
 use crate::DatabaseError;
 use crate::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// One collected pending change as a ready-to-push mutation.
@@ -105,8 +106,8 @@ fn acked_version_for(
             [object_id.to_string()],
             |row| row.get(0),
         )
-        .map_err(DatabaseError::Sqlite)
-        .ok();
+        .optional()
+        .map_err(DatabaseError::Sqlite)?;
     Ok(acked.unwrap_or(0).max(0) as u64)
 }
 
@@ -134,7 +135,8 @@ pub struct AckSummary {
 /// Per-object rules:
 /// - `Applied{R}` — honored ONLY when `R` equals the resulting version WE
 ///   sent (anything else is a relay misreport and is ignored): the row
-///   leaves the outbox (`sync_state = 'synced'`, `sync_acked_version = R`).
+///   advances the acknowledged version monotonically. A newer local edit
+///   remains pending; a concurrent unresolved conflict remains conflicted.
 /// - `Rejected{VersionConflict{C}}` — the relay's current version is C:
 ///   - `C >= R` (our attempted resulting version): the local edit is
 ///     UNSYNCED content — mark the row CONFLICTED (never silently
@@ -161,20 +163,31 @@ pub fn apply_push_acks(
         .map_err(DatabaseError::Sqlite)?;
 
     let mut summary = AckSummary::default();
+    let by_id: HashMap<_, _> = mutations
+        .iter()
+        .map(|m| (m.mutation.mutation_id, m))
+        .collect();
+    let mut seen = HashSet::new();
     for result in results {
-        let Some(outbox) = mutations
-            .iter()
-            .find(|m| m.mutation.mutation_id == result.mutation_id)
-        else {
+        let Some(outbox) = by_id.get(&result.mutation_id) else {
             // A result for a mutation we did not send: ignore (cannot route).
             continue;
         };
+        if result.object_id != outbox.object_id || !seen.insert(result.mutation_id) {
+            summary.suspicious_acks += 1;
+            continue;
+        }
         let table = match outbox.object_type {
             SyncEntryType::Credential => "entries",
             SyncEntryType::SshKey => "ssh_keys",
             SyncEntryType::TotpSecret => "totp_secrets",
         };
         let sent_resulting = outbox.mutation.resulting_version;
+        let sent = i64::try_from(sent_resulting.as_u64()).map_err(|_| {
+            crate::PasswordManagerError::InvalidInput(
+                "sync version exceeds SQLite integer range".into(),
+            )
+        })?;
         match &result.outcome {
             crate::sync::v2::MutationOutcome::Applied {
                 resulting_version, ..
@@ -195,23 +208,25 @@ pub fn apply_push_acks(
                 }
                 tx.execute(
                     &format!(
-                        "UPDATE {table} SET sync_state = 'synced', sync_acked_version = ?1,
-                         last_synced_at = ?2 WHERE sync_id = ?3"
+                        "UPDATE {table} SET
+                         sync_state = CASE
+                             WHEN sync_state = 'conflict' THEN 'conflict'
+                             WHEN sync_version > MAX(sync_acked_version, ?1) THEN 'pending'
+                             ELSE 'synced' END,
+                         sync_acked_version = MAX(sync_acked_version, ?1),
+                         last_synced_at = ?2 WHERE sync_id = ?3 AND sync_version >= ?1"
                     ),
-                    rusqlite::params![
-                        resulting_version.as_u64() as i64,
-                        now,
-                        outbox.object_id.to_string()
-                    ],
+                    rusqlite::params![sent, now, outbox.object_id.to_string()],
                 )
                 .map_err(DatabaseError::Sqlite)?;
                 // A stored alternative at or below the applied version is
                 // stale — remove it so the conflict surface stays truthful.
                 tx.execute(
-                    "DELETE FROM sync_conflicts WHERE object_id = ?1 AND remote_version <= ?2",
+                    &format!("DELETE FROM sync_conflicts WHERE object_id = ?1 AND remote_version <= ?2
+                     AND EXISTS (SELECT 1 FROM {table} WHERE sync_id = ?1 AND sync_state = 'synced')"),
                     rusqlite::params![
                         outbox.object_id.to_string(),
-                        resulting_version.as_u64() as i64
+                        sent
                     ],
                 )
                 .map_err(DatabaseError::Sqlite)?;
@@ -220,8 +235,11 @@ pub fn apply_push_acks(
             crate::sync::v2::MutationOutcome::Rejected { reason } => match reason {
                 crate::sync::v2::RejectionReason::VersionConflict { current_version } => {
                     summary.conflicts += 1;
-                    let current = current_version.as_u64() as i64;
-                    let sent = sent_resulting.as_u64() as i64;
+                    let current = i64::try_from(current_version.as_u64()).map_err(|_| {
+                        crate::PasswordManagerError::InvalidInput(
+                            "relay version exceeds SQLite integer range".into(),
+                        )
+                    })?;
                     if current >= sent {
                         // The relay is at or beyond our attempt: the local
                         // edit is UNSYNCED content — never silently adopted.
@@ -230,9 +248,10 @@ pub fn apply_push_acks(
                         // the user resolves (WBS-611).
                         tx.execute(
                             &format!(
-                                "UPDATE {table} SET sync_state = 'conflict' WHERE sync_id = ?1"
+                                "UPDATE {table} SET sync_state = 'conflict' WHERE sync_id = ?1
+                                 AND sync_acked_version < ?2"
                             ),
-                            rusqlite::params![outbox.object_id.to_string()],
+                            rusqlite::params![outbox.object_id.to_string(), sent],
                         )
                         .map_err(DatabaseError::Sqlite)?;
                     } else {
@@ -245,9 +264,19 @@ pub fn apply_push_acks(
                                 "UPDATE {table} SET sync_state = 'pending',
                                  sync_acked_version = MAX(sync_acked_version, ?1),
                                  sync_version = MAX(sync_version, ?2)
-                                 WHERE sync_id = ?3"
+                                 WHERE sync_id = ?3 AND sync_acked_version < ?4
+                                 AND sync_state != 'conflict'"
                             ),
-                            rusqlite::params![current, sent + 1, outbox.object_id.to_string()],
+                            rusqlite::params![
+                                current,
+                                sent.checked_add(1).ok_or_else(|| {
+                                    crate::PasswordManagerError::InvalidInput(
+                                        "sync version exhausted".into(),
+                                    )
+                                })?,
+                                outbox.object_id.to_string(),
+                                sent
+                            ],
                         )
                         .map_err(DatabaseError::Sqlite)?;
                     }
@@ -273,7 +302,12 @@ pub fn apply_push_acks(
     }
 
     let mut config = crate::sync::config::SyncConfig::load(&tx)?;
-    config.last_push_sequence = server_cursor;
+    if server_cursor > i64::MAX as u64 {
+        return Err(crate::PasswordManagerError::InvalidInput(
+            "relay cursor exceeds SQLite integer range".into(),
+        ));
+    }
+    config.last_push_sequence = config.last_push_sequence.max(server_cursor);
     // The PUSH-response cursor is a relay CLAIM with no client-side
     // evidence — it is diagnostic only and MUST NOT advance the trusted
     // lineage high-water: a >500-entry backlog (multi-chunk push) would
@@ -337,6 +371,133 @@ mod tests {
 
     fn relay_vault() -> Uuid {
         Uuid::from_u128(0xABCD)
+    }
+
+    #[test]
+    fn delayed_ack_preserves_newer_edits_deletes_and_conflicts() {
+        for (state, deleted) in [("pending", 0), ("pending", 1), ("conflict", 0)] {
+            let db = outbox_db();
+            let dek = DataEncryptionKey::new().unwrap();
+            let id = Uuid::new_v4();
+            insert_pending(db.conn(), &dek, &id, 1, 0, "pending");
+            let sent = collect_pending_mutations(db.conn(), &dek, Uuid::new_v4(), relay_vault(), 1)
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE entries SET sync_version=2,sync_state=?1,is_deleted=?2",
+                    rusqlite::params![state, deleted],
+                )
+                .unwrap();
+            let ack = MutationResult {
+                mutation_id: sent[0].mutation.mutation_id,
+                object_id: id,
+                outcome: MutationOutcome::Applied {
+                    resulting_version: ObjectVersion(1),
+                    server_sequence: ServerCursor(1),
+                },
+            };
+            apply_push_acks(db.conn(), &sent, &[ack.clone()], 1).unwrap();
+            apply_push_acks(db.conn(), &sent, &[ack], 1).unwrap();
+            let actual = db
+                .conn()
+                .query_row(
+                    "SELECT sync_version,sync_acked_version,sync_state,is_deleted FROM entries",
+                    [],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(actual, (2, 1, state.into(), deleted));
+        }
+    }
+
+    #[test]
+    fn old_results_cannot_regress_an_acknowledged_version() {
+        let db = outbox_db();
+        let dek = DataEncryptionKey::new().unwrap();
+        let id = Uuid::new_v4();
+        insert_pending(db.conn(), &dek, &id, 1, 0, "pending");
+        let sent =
+            collect_pending_mutations(db.conn(), &dek, Uuid::new_v4(), relay_vault(), 1).unwrap();
+        db.conn()
+            .execute_batch(
+                "UPDATE entries SET sync_version=3,sync_acked_version=3,sync_state='synced'",
+            )
+            .unwrap();
+        for outcome in [
+            MutationOutcome::Applied {
+                resulting_version: ObjectVersion(1),
+                server_sequence: ServerCursor(1),
+            },
+            MutationOutcome::Rejected {
+                reason: RejectionReason::VersionConflict {
+                    current_version: ObjectVersion(2),
+                },
+            },
+            MutationOutcome::Rejected {
+                reason: RejectionReason::VersionConflict {
+                    current_version: ObjectVersion(0),
+                },
+            },
+        ] {
+            let ack = MutationResult {
+                mutation_id: sent[0].mutation.mutation_id,
+                object_id: id,
+                outcome,
+            };
+            apply_push_acks(db.conn(), &sent, &[ack], 1).unwrap();
+            assert_eq!(
+                db.conn()
+                    .query_row(
+                        "SELECT sync_version,sync_acked_version,sync_state FROM entries",
+                        [],
+                        |r| Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, String>(2)?
+                        ))
+                    )
+                    .unwrap(),
+                (3, 3, "synced".into())
+            );
+        }
+    }
+
+    #[test]
+    fn ack_for_another_object_cannot_clear_pending_work() {
+        let db = outbox_db();
+        let dek = DataEncryptionKey::new().unwrap();
+        let id = Uuid::new_v4();
+        insert_pending(db.conn(), &dek, &id, 1, 0, "pending");
+        let sent =
+            collect_pending_mutations(db.conn(), &dek, Uuid::new_v4(), relay_vault(), 1).unwrap();
+        let ack = MutationResult {
+            mutation_id: sent[0].mutation.mutation_id,
+            object_id: Uuid::new_v4(),
+            outcome: MutationOutcome::Applied {
+                resulting_version: ObjectVersion(1),
+                server_sequence: ServerCursor(1),
+            },
+        };
+        assert_eq!(
+            apply_push_acks(db.conn(), &sent, &[ack], 1)
+                .unwrap()
+                .suspicious_acks,
+            1
+        );
+        assert_eq!(
+            db.conn()
+                .query_row("SELECT sync_state FROM entries", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "pending"
+        );
     }
 
     #[test]
