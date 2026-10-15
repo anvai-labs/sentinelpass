@@ -38,3 +38,4 @@ futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+sentinelpass-core = { path = "../sentinelpass-core", features = ["sync"] }

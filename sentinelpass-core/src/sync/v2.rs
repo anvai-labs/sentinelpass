@@ -209,6 +209,9 @@ pub struct MutationV2 {
     pub vault_id: Uuid,
     /// Stable object identity (the v1 `sync_id`).
     pub object_id: Uuid,
+    // Canonical relay field; accept early client documents on read. This
+    // changes JSON names only, never the canonical metadata MAC input.
+    #[serde(rename = "entry_type", alias = "object_type")]
     pub object_type: crate::sync::models::SyncEntryType,
     /// Version the sender believes the relay currently stores. The relay
     /// applies iff this equals the stored current version (CAS; 0 = create).

@@ -52,6 +52,7 @@ pub struct MutationV2 {
     pub mutation_id: Uuid,
     pub vault_id: Uuid,
     pub object_id: Uuid,
+    #[serde(alias = "object_type")]
     pub entry_type: String,
     pub expected_version: u64,
     pub resulting_version: u64,
