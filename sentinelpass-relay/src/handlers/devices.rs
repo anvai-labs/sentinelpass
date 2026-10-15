@@ -150,11 +150,12 @@ pub async fn register_device(
 
     // Register device — public_key is immutable after registration;
     // revoke + re-register through the pairing flow to rotate keys.
-    tx.execute(
+    let registered = tx.execute(
         "INSERT INTO devices (device_id, vault_id, device_name, device_type, public_key, registered_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(device_id) DO UPDATE SET
-            device_name = excluded.device_name",
+            device_name = excluded.device_name
+         WHERE devices.vault_id = excluded.vault_id",
         rusqlite::params![
             &device_id_str,
             &vault_id_str,
@@ -165,6 +166,13 @@ pub async fn register_device(
         ],
     )
     .map_err(|e| RelayError::Database(e.to_string()))?;
+    if registered == 0 {
+        // The proof (if supplied), vault scaffolding and counters roll back
+        // with this transaction. A globally unique ID grants no authority.
+        return Err(RelayError::Conflict(
+            "device ID is already registered to another vault".into(),
+        ));
+    }
 
     // Init device sequence
     tx.execute(
@@ -469,6 +477,68 @@ mod tests {
         match err {
             RelayError::BadRequest(msg) => assert!(msg.contains("255")),
             other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_vault_device_collision_cannot_rename_or_consume_proof() {
+        for with_proof in [false, true] {
+            let state = test_state();
+            let victim = register_request(Uuid::new_v4());
+            let victim_id = victim.device_id;
+            let _ = register_device(State(state.clone()), Json(victim))
+                .await
+                .unwrap();
+            let attacker_vault = Uuid::new_v4();
+            let mut request = register_request(attacker_vault);
+            request.device_id = victim_id;
+            request.device_name = "unauthorized rename".into();
+            let token = Uuid::new_v4().to_string();
+            let proof = STANDARD.encode([9; 32]);
+            if with_proof {
+                seed_existing_device(&state, attacker_vault);
+                seed_registration_proof(
+                    &state,
+                    attacker_vault,
+                    &token,
+                    &proof,
+                    Utc::now().timestamp() + 300,
+                );
+                request.pairing_token = Some(token);
+                request.registration_proof = Some(proof.clone());
+            }
+            assert!(matches!(
+                register_device(State(state.clone()), Json(request)).await,
+                Err(RelayError::Conflict(_))
+            ));
+            let conn = state.storage.conn().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT device_name FROM devices WHERE device_id=?1",
+                    [victim_id.to_string()],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                "Test Device"
+            );
+            let attacker_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM vaults WHERE vault_id=?1)",
+                    [attacker_vault.to_string()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(attacker_exists, with_proof);
+            if with_proof {
+                let consumed: bool = conn
+                    .query_row(
+                        "SELECT consumed FROM pairing_registration_proofs WHERE proof_hash=?1",
+                        [hash_registration_proof_b64(&proof).unwrap()],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(!consumed);
+            }
         }
     }
 
