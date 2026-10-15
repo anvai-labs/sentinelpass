@@ -40,6 +40,15 @@ pub async fn register_device(
     State(state): State<RelayAppState>,
     Json(req): Json<RegisterDeviceRequest>,
 ) -> Result<Json<serde_json::Value>, RelayError> {
+    state
+        .run_blocking(move |state| register_device_inner(State(state), Json(req)))
+        .await
+}
+
+fn register_device_inner(
+    State(state): State<RelayAppState>,
+    Json(req): Json<RegisterDeviceRequest>,
+) -> Result<Json<serde_json::Value>, RelayError> {
     let public_key = base64::engine::general_purpose::STANDARD
         .decode(&req.public_key)
         .map_err(|e| RelayError::BadRequest(format!("Invalid public key: {}", e)))?;
@@ -191,6 +200,15 @@ pub async fn list_devices(
     State(state): State<RelayAppState>,
     extensions: Extensions,
 ) -> Result<Json<Vec<DeviceInfo>>, RelayError> {
+    state
+        .run_blocking(move |state| list_devices_inner(State(state), extensions))
+        .await
+}
+
+fn list_devices_inner(
+    State(state): State<RelayAppState>,
+    extensions: Extensions,
+) -> Result<Json<Vec<DeviceInfo>>, RelayError> {
     let device_id = extensions
         .get::<Uuid>()
         .ok_or_else(|| RelayError::Auth("No device ID".to_string()))?;
@@ -232,6 +250,18 @@ pub async fn list_devices(
 
 /// POST /api/v1/devices/{id}/revoke -- Revoke a device, preventing further sync operations.
 pub async fn revoke_device(
+    State(state): State<RelayAppState>,
+    axum::extract::Path(target_id): axum::extract::Path<String>,
+    extensions: Extensions,
+) -> Result<Json<serde_json::Value>, RelayError> {
+    state
+        .run_blocking(move |state| {
+            revoke_device_inner(State(state), axum::extract::Path(target_id), extensions)
+        })
+        .await
+}
+
+fn revoke_device_inner(
     State(state): State<RelayAppState>,
     axum::extract::Path(target_id): axum::extract::Path<String>,
     extensions: Extensions,

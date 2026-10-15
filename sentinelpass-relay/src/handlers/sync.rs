@@ -71,6 +71,16 @@ pub async fn push(
     extensions: Extensions,
     Json(req): Json<PushRequest>,
 ) -> Result<Json<PushResponse>, RelayError> {
+    state
+        .run_blocking(move |state| push_inner(State(state), extensions, Json(req)))
+        .await
+}
+
+fn push_inner(
+    State(state): State<RelayAppState>,
+    extensions: Extensions,
+    Json(req): Json<PushRequest>,
+) -> Result<Json<PushResponse>, RelayError> {
     let device_id = extensions
         .get::<Uuid>()
         .ok_or_else(|| RelayError::Auth("No device ID".to_string()))?;
@@ -253,6 +263,16 @@ pub async fn pull(
     extensions: Extensions,
     Json(req): Json<PullRequest>,
 ) -> Result<Json<PullResponse>, RelayError> {
+    state
+        .run_blocking(move |state| pull_inner(State(state), extensions, Json(req)))
+        .await
+}
+
+fn pull_inner(
+    State(state): State<RelayAppState>,
+    extensions: Extensions,
+    Json(req): Json<PullRequest>,
+) -> Result<Json<PullResponse>, RelayError> {
     let device_id = extensions
         .get::<Uuid>()
         .ok_or_else(|| RelayError::Auth("No device ID".to_string()))?;
@@ -355,6 +375,15 @@ pub async fn full_pull(
 
 /// GET /api/v1/sync/status -- Return sync status for the authenticated device.
 pub async fn status(
+    State(state): State<RelayAppState>,
+    extensions: Extensions,
+) -> Result<Json<serde_json::Value>, RelayError> {
+    state
+        .run_blocking(move |state| status_inner(State(state), extensions))
+        .await
+}
+
+fn status_inner(
     State(state): State<RelayAppState>,
     extensions: Extensions,
 ) -> Result<Json<serde_json::Value>, RelayError> {

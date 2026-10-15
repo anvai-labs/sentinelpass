@@ -73,9 +73,9 @@ pub async fn auth_middleware(
                 .map_err(|e| RelayError::Database(e.to_string()))?;
 
                 // Cleanup expired nonces (best-effort)
-                conn.execute(
-                    "DELETE FROM seen_nonces WHERE seen_at < ?1",
-                    [now - state.config.nonce_window_secs],
+                crate::cleanup::prune_expired_nonces(
+                    &conn,
+                    now.saturating_sub(state.config.nonce_window_secs.max(1)),
                 )
                 .ok();
             }

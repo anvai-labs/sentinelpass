@@ -56,6 +56,11 @@ fn default_max_mutation_results_per_device() -> usize {
     4_096
 }
 
+/// Convert configured durations without wrapping into an already-expired time.
+pub(crate) fn deadline_after(now: i64, seconds: u64) -> i64 {
+    i64::try_from(i128::from(now) + i128::from(seconds)).unwrap_or(i64::MAX)
+}
+
 impl Default for RelayConfig {
     fn default() -> Self {
         Self {
@@ -80,6 +85,20 @@ impl Default for RelayConfig {
 }
 
 impl RelayConfig {
+    /// Cleanup retention in SQLite's signed timestamp domain, saturated on overflow.
+    pub fn pairing_attempt_retention_secs(&self) -> i64 {
+        i64::try_from(
+            self.pairing_ttl_secs
+                .saturating_add(self.pairing_fetch_backoff_max_secs),
+        )
+        .unwrap_or(i64::MAX)
+    }
+
+    /// Mutation-result retention without truncating a large configured duration.
+    pub fn mutation_result_retention_secs(&self) -> i64 {
+        i64::try_from(self.mutation_result_ttl_secs).unwrap_or(i64::MAX)
+    }
+
     /// Load configuration from a TOML file at the given path.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
@@ -143,6 +162,22 @@ impl RelayConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extreme_durations_do_not_wrap_expiry_or_cleanup_cutoffs() {
+        assert_eq!(deadline_after(10_000, 300), 10_300);
+        assert_eq!(deadline_after(10_000, u64::MAX), i64::MAX);
+        assert_eq!(deadline_after(i64::MAX, 1), i64::MAX);
+        assert_eq!(deadline_after(-1, 1), 0);
+        let config = RelayConfig {
+            pairing_ttl_secs: u64::MAX,
+            pairing_fetch_backoff_max_secs: u64::MAX,
+            mutation_result_ttl_secs: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(config.pairing_attempt_retention_secs(), i64::MAX);
+        assert_eq!(config.mutation_result_retention_secs(), i64::MAX);
+    }
 
     #[test]
     fn default_config_is_valid() {

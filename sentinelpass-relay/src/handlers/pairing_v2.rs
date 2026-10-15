@@ -68,6 +68,16 @@ pub async fn upload_bootstrap_v2(
     extensions: Extensions,
     Json(req): Json<UploadBootstrapV2Request>,
 ) -> Result<Json<serde_json::Value>, RelayError> {
+    state
+        .run_blocking(move |state| upload_bootstrap_v2_inner(State(state), extensions, Json(req)))
+        .await
+}
+
+fn upload_bootstrap_v2_inner(
+    State(state): State<RelayAppState>,
+    extensions: Extensions,
+    Json(req): Json<UploadBootstrapV2Request>,
+) -> Result<Json<serde_json::Value>, RelayError> {
     let uploader_device_id = extensions
         .get::<Uuid>()
         .ok_or_else(|| RelayError::Auth("No device ID".to_string()))?;
@@ -94,7 +104,7 @@ pub async fn upload_bootstrap_v2(
 
     let mut conn = state.storage.conn()?;
     let now = Utc::now().timestamp();
-    let expires_at = now + state.config.pairing_ttl_secs as i64;
+    let expires_at = crate::config::deadline_after(now, state.config.pairing_ttl_secs);
     let tx = conn
         .transaction()
         .map_err(|e| RelayError::Database(e.to_string()))?;
@@ -180,6 +190,15 @@ pub async fn retrieve_bootstrap_v2(
     State(state): State<RelayAppState>,
     Json(req): Json<RetrieveBootstrapV2Request>,
 ) -> Result<Json<RetrieveBootstrapV2Response>, RelayError> {
+    state
+        .run_blocking(move |state| retrieve_bootstrap_v2_inner(State(state), Json(req)))
+        .await
+}
+
+fn retrieve_bootstrap_v2_inner(
+    State(state): State<RelayAppState>,
+    Json(req): Json<RetrieveBootstrapV2Request>,
+) -> Result<Json<RetrieveBootstrapV2Response>, RelayError> {
     let secret = parse_secret(&req.secret)?;
 
     let mut conn = state.storage.conn()?;
@@ -223,7 +242,8 @@ pub async fn retrieve_bootstrap_v2(
         let multiplier = 1_u64.checked_shl(overflow.min(16)).unwrap_or(u64::MAX);
         let base = state.config.pairing_fetch_backoff_base_secs.max(1);
         let max = state.config.pairing_fetch_backoff_max_secs.max(base);
-        let blocked_until = now + base.saturating_mul(multiplier).min(max) as i64;
+        let blocked_until =
+            crate::config::deadline_after(now, base.saturating_mul(multiplier).min(max));
         tx.execute(
             "UPDATE pairing_fetch_attempts SET blocked_until = ?2 WHERE token_hash = ?1",
             rusqlite::params![&lookup_hash, blocked_until],

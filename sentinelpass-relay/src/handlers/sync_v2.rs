@@ -952,6 +952,33 @@ mod tests {
             .unwrap();
             assert!(response.results[0].outcome.is_applied_outcome());
         }
+        // Even beyond legacy tombstone retention, v2 must retain the deleted
+        // identity and its log so offline peers cannot resurrect or omit it.
+        crate::cleanup::run_cleanup(
+            &state.storage,
+            &crate::cleanup::test_policy(),
+            &mut crate::cleanup::CleanupCursor::default(),
+            chrono::Utc::now().timestamp() + 200 * 24 * 3600,
+        )
+        .unwrap();
+        {
+            let conn = state.storage.conn().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sync_entries_v2 WHERE is_tombstone = 1",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM sync_mutations_v2", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        }
         assert!(push_v2(
             State(state.clone()),
             auth_extensions(device),
@@ -1261,11 +1288,15 @@ mod tests {
         .unwrap();
         assert!(first.results[0].outcome.is_applied_outcome());
 
-        // Simulate retention expiry of the idempotency record.
-        {
-            let conn = state.storage.conn().unwrap();
-            conn.execute("DELETE FROM mutation_results", []).unwrap();
-        }
+        // Run actual maintenance beyond the result TTL. V2 state/history must
+        // survive cleanup, including when the original ack can no longer replay.
+        crate::cleanup::run_cleanup(
+            &state.storage,
+            &crate::cleanup::test_policy(),
+            &mut crate::cleanup::CleanupCursor::default(),
+            chrono::Utc::now().timestamp() + 8 * 24 * 3600,
+        )
+        .unwrap();
 
         let expired_retry = push_v2(State(state.clone()), auth_extensions(device_id), Json(req))
             .await
@@ -1828,7 +1859,16 @@ mod tests {
         }
         drop(conn);
 
-        crate::cleanup::run_cleanup(&storage, 90, 60, 300, 7 * 24 * 3600, 2).unwrap();
+        crate::cleanup::run_cleanup(
+            &storage,
+            &crate::cleanup::CleanupPolicy {
+                max_mutation_results_per_device: 2,
+                ..crate::cleanup::test_policy()
+            },
+            &mut crate::cleanup::CleanupCursor::default(),
+            now,
+        )
+        .unwrap();
 
         let remaining: Vec<String> = {
             let conn = storage.conn().unwrap();
@@ -1864,6 +1904,16 @@ pub struct MigrationClaimResponse {
 }
 
 pub async fn migration_claim(
+    State(state): State<RelayAppState>,
+    extensions: Extensions,
+    Json(req): Json<MigrationClaimRequest>,
+) -> Result<Json<MigrationClaimResponse>, RelayError> {
+    state
+        .run_blocking(move |state| migration_claim_inner(State(state), extensions, Json(req)))
+        .await
+}
+
+fn migration_claim_inner(
     State(state): State<RelayAppState>,
     extensions: Extensions,
     Json(req): Json<MigrationClaimRequest>,

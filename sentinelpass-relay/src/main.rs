@@ -58,8 +58,8 @@ async fn main() -> anyhow::Result<()> {
         storage.clone(),
         cfg.tombstone_retention_days,
         cfg.nonce_window_secs,
-        (cfg.pairing_ttl_secs + cfg.pairing_fetch_backoff_max_secs) as i64,
-        cfg.mutation_result_ttl_secs as i64,
+        cfg.pairing_attempt_retention_secs(),
+        cfg.mutation_result_retention_secs(),
         cfg.max_mutation_results_per_device,
     );
 

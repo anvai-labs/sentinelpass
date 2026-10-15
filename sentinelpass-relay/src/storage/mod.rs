@@ -236,7 +236,19 @@ impl RelayStorage {
             CREATE INDEX IF NOT EXISTS idx_pairing_fetch_attempts_last_attempt
                 ON pairing_fetch_attempts(last_attempt_at);
             CREATE INDEX IF NOT EXISTS idx_pairing_fetch_attempts_blocked_until
-                ON pairing_fetch_attempts(blocked_until);",
+                ON pairing_fetch_attempts(blocked_until);
+
+            -- Incremental cleanup ranges; consumed rows are a small subset.
+            CREATE INDEX IF NOT EXISTS idx_pairing_consumed
+                ON pairing_bootstraps(expires_at) WHERE consumed = 1;
+            CREATE INDEX IF NOT EXISTS idx_pairing_v2_consumed
+                ON pairing_bootstraps_v2(expires_at) WHERE consumed = 1;
+            CREATE INDEX IF NOT EXISTS idx_pairing_proofs_consumed
+                ON pairing_registration_proofs(expires_at) WHERE consumed = 1;
+            CREATE INDEX IF NOT EXISTS idx_pairing_fetch_attempts_cleanup
+                ON pairing_fetch_attempts(MAX(last_attempt_at, blocked_until));
+            CREATE INDEX IF NOT EXISTS idx_sync_entries_tombstone_age
+                ON sync_entries(received_at) WHERE is_tombstone = 1;",
         )?;
         Ok(())
     }
