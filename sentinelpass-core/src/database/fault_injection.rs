@@ -14,7 +14,7 @@
 //! documented degraded outcome), and the clean run proves the
 //! complete-NEW state.
 //!
-//! VALIDITY INVARIANT: the authorizer fires only at PREPARE. rusqlite 0.30
+//! VALIDITY INVARIANT: the authorizer fires only at PREPARE. rusqlite 0.40
 //! prepares fresh on every `execute`/`query_row` (no statement cache unless
 //! `prepare_cached` is used — this codebase uses it nowhere). A future
 //! rusqlite upgrade that routes `execute` through a cache would silently
@@ -97,14 +97,15 @@ fn install_fault_inner(
         } else {
             Authorization::Allow
         }
-    }));
+    })).expect("install write-fault authorizer");
     WriteFaultGuard { seen }
 }
 
 /// Remove any authorizer from `conn` (call in EVERY test path — success or
 /// failure — so later statements are never spuriously denied).
 pub(crate) fn clear_write_fault(conn: &rusqlite::Connection) {
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .expect("remove write-fault authorizer");
 }
 
 #[cfg(test)]
@@ -113,7 +114,7 @@ mod tests {
 
     /// The harness validity canary: the authorizer must fire on EVERY
     /// prepare, including a re-preparation of the IDENTICAL SQL — rusqlite
-    /// 0.30 prepares fresh per execute, but a future statement cache would
+    /// 0.40 prepares fresh per execute, but a future statement cache would
     /// silently bypass it (see the module docs' validity invariant).
     #[test]
     fn authorizer_fires_on_every_prepare() {

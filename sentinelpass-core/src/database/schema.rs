@@ -66,6 +66,16 @@ pub struct Database {
     conn: Connection,
 }
 
+/// SQLite's passive checkpoint result. A reader can pin uncheckpointed
+/// frames; successful execution does not mean the WAL has been truncated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointStatus {
+    pub busy: bool,
+    /// -1 when this database does not use WAL (e.g. an in-memory database).
+    pub wal_frames: i64,
+    pub checkpointed_frames: i64,
+}
+
 impl Database {
     /// Open a database at the specified path.
     ///
@@ -216,10 +226,9 @@ impl Database {
     /// Uses `pragma_update` (not `execute`) for pragmas that return a result row
     /// such as `journal_mode`, which would cause an error with plain `execute`.
     fn apply_pragmas(conn: &Connection) -> Result<()> {
-        use rusqlite::DatabaseName;
         conn.pragma_update(None, "foreign_keys", true)
             .map_err(DatabaseError::Sqlite)?;
-        conn.pragma_update(Some(DatabaseName::Main), "journal_mode", "WAL")
+        conn.pragma_update(Some("main"), "journal_mode", "WAL")
             .map_err(DatabaseError::Sqlite)?;
         conn.pragma_update(None, "busy_timeout", 5000i64)
             .map_err(DatabaseError::Sqlite)?;
@@ -235,14 +244,20 @@ impl Database {
 
     /// Trigger a passive WAL checkpoint to reclaim space after bulk writes.
     ///
-    /// A passive checkpoint writes dirty WAL pages back to the main database
-    /// file without blocking readers or the writer. Call this after large sync
-    /// operations so the WAL file doesn't grow unboundedly.
-    pub fn wal_checkpoint(&self) -> Result<()> {
-        self.conn
-            .execute("PRAGMA wal_checkpoint(PASSIVE)", [])
-            .map_err(DatabaseError::Sqlite)?;
-        Ok(())
+    /// Copies available WAL frames to the main file without waiting for
+    /// readers/writers. This is neither truncation nor a backup; pinned
+    /// readers may prevent completion. Inspect the returned progress.
+    pub fn wal_checkpoint(&self) -> Result<CheckpointStatus> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                Ok(CheckpointStatus {
+                    busy: row.get::<_, i64>(0)? != 0,
+                    wal_frames: row.get(1)?,
+                    checkpointed_frames: row.get(2)?,
+                })
+            })
+            .map_err(DatabaseError::Sqlite)?)
     }
 
     /// Initialize the database schema (creates current tables for new vaults)
@@ -968,6 +983,63 @@ mod tests {
         // feeding an LWW see-saw, and the applied sync_version corrupted
         // to OLD+1 whenever the local row was >1 version behind).
         assert!(!trigger_names.contains(&"update_entry_modified_timestamp".to_string()));
+    }
+
+    #[test]
+    fn bundled_sqlite_includes_wal_reset_fix() {
+        assert!(
+            rusqlite::version_number() >= 3_051_003,
+            "SQLite {} predates the WAL reset fix",
+            rusqlite::version()
+        );
+    }
+
+    #[test]
+    fn passive_checkpoint_reports_reader_pinned_frames_and_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint.db");
+        let writer = Database::open(&path).unwrap();
+        writer.conn().execute_batch("PRAGMA wal_autocheckpoint=0; CREATE TABLE checkpoint_probe(value INTEGER); INSERT INTO checkpoint_probe VALUES(1)").unwrap();
+        let initial = writer.wal_checkpoint().unwrap();
+        assert!(!initial.busy);
+        assert_eq!(initial.wal_frames, initial.checkpointed_frames);
+
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT value FROM checkpoint_probe", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        writer
+            .conn()
+            .execute("UPDATE checkpoint_probe SET value=2", [])
+            .unwrap();
+        let pinned = writer.wal_checkpoint().unwrap();
+        assert!(pinned.wal_frames > pinned.checkpointed_frames);
+        reader.execute_batch("ROLLBACK").unwrap();
+        let completed = writer.wal_checkpoint().unwrap();
+        assert!(!completed.busy);
+        assert_eq!(completed.wal_frames, completed.checkpointed_frames);
+        drop(writer);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .conn()
+                .query_row("SELECT value FROM checkpoint_probe", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            reopened
+                .conn()
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
     }
 
     #[test]

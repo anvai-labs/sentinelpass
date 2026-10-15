@@ -31,7 +31,8 @@ impl WriteFaultGuard {
     /// Remove the authorizer from the connection (every test path must clear,
     /// success or failure, or later statements are spuriously denied).
     pub(crate) fn clear(&self, conn: &rusqlite::Connection) {
-        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .expect("remove write-fault authorizer");
     }
 }
 
@@ -54,6 +55,6 @@ pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -
         } else {
             Authorization::Allow
         }
-    }));
+    })).expect("install write-fault authorizer");
     WriteFaultGuard { seen }
 }

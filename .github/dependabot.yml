@@ -25,13 +25,11 @@ updates:
         versions: [">=0.13"]
       - dependency-name: windows
         versions: [">=0.62"]
-    # rusqlite 0.31+ spans ten breaking minors from our 0.30 base (including a
-    # multi-year bundled-SQLite jump) AND would invalidate the fault-injection
-    # behavior invariant (authorizer fires only at PREPARE — see the header of
-    # database/fault_injection.rs). Upgrade via a dedicated reviewed slice
-    # exercising the migration ladder and the v6/v7/v8 restore fixtures.
+    # Breaking rusqlite upgrades require the authorizer PREPARE canary,
+    # migration ladder, and v6/v7/v8 restore fixtures. Patch updates within
+    # the qualified 0.40 line remain eligible for automatic PRs.
       - dependency-name: rusqlite
-        versions: [">=0.31"]
+        versions: [">=0.41"]
     # jni 0.22 changes the JNIEnv/JString APIs the mobile bridge pins
     # (Android/iOS CI legs fail to build) — migrate via a dedicated
     # mobile-bridge slice with the JNI contract tests.

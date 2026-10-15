@@ -505,7 +505,17 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
 
         // Passive checkpoint: flush WAL pages written during push/pull back to the
         // main database file without blocking readers.
-        let _ = db.wal_checkpoint();
+        match db.wal_checkpoint() {
+            Ok(status) => tracing::debug!(
+                busy = status.busy,
+                wal_frames = status.wal_frames,
+                checkpointed_frames = status.checkpointed_frames,
+                "sync passive checkpoint"
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "sync passive checkpoint failed after committed sync")
+            }
+        }
 
         let conflict_count = crate::sync::outbox::count_sync_conflicts(db.conn())?;
         Ok(SyncStatus {
