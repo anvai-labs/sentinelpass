@@ -536,7 +536,7 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// idempotent, so a failure mid-batch costs a retry of the unacked
     /// remainder only.
     async fn push_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
-        let (mutations, device_sequence) = {
+        let device_sequence = {
             let db = self
                 .db
                 .lock()
@@ -544,55 +544,70 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
             let conn = db.conn();
 
             let config = SyncConfig::load(conn)?;
-            let relay_vault_id = config.vault_id.ok_or_else(|| {
-                PasswordManagerError::InvalidInput("Sync vault ID missing".to_string())
-            })?;
-            let (_, epoch) = crate::vault::envelope_ops::read_local_identity(conn)?;
-
-            let mutations = outbox::collect_pending_mutations(
-                conn,
-                dek,
-                self.device_id,
-                relay_vault_id,
-                epoch,
-            )?;
             // Framing counter: diagnostic only in v2 (idempotency keys carry
             // correctness). A retry deliberately re-sends the same value.
-            let device_sequence = DeviceSequence(config.last_push_sequence + 1);
-            (mutations, device_sequence)
+            DeviceSequence(
+                config
+                    .last_push_sequence
+                    .checked_add(1)
+                    .filter(|v| *v <= i64::MAX as u64)
+                    .ok_or_else(|| {
+                        PasswordManagerError::InvalidInput("sync framing counter exhausted".into())
+                    })?,
+            )
         };
 
-        let total = mutations.len();
-        if total == 0 {
-            return Ok(0);
-        }
+        let mut total = 0;
+        // Credentials precede TOTP children. Rejected or unreadable identities
+        // advance the scan cursor but remain durable for the next sync cycle.
+        for kind in [
+            SyncEntryType::Credential,
+            SyncEntryType::SshKey,
+            SyncEntryType::TotpSecret,
+        ] {
+            let mut after = i64::MIN;
+            loop {
+                let page = {
+                    let db = self
+                        .db
+                        .lock()
+                        .map_err(|_| DatabaseError::LockPoisoned("push page".into()))?;
+                    outbox::collect_pending_page(db.conn(), dek, self.device_id, kind, after)?
+                };
+                let Some(through) = page.through else {
+                    break;
+                };
+                after = through;
+                for range in outbox::push_ranges(&page.mutations, device_sequence)? {
+                    let chunk = &page.mutations[range];
+                    let request = PushRequestV2 {
+                        device_sequence,
+                        mutations: chunk.iter().map(|m| m.mutation.clone()).collect(),
+                    };
+                    let response = self.client.push_v2(&request).await?;
 
-        for chunk in mutations.chunks(outbox::MAX_PUSH_MUTATIONS) {
-            let request = PushRequestV2 {
-                device_sequence,
-                mutations: chunk.iter().map(|m| m.mutation.clone()).collect(),
-            };
-            let response = self.client.push_v2(&request).await?;
-
-            // Per-object durable checkpoint (WBS-604/605): only Applied
-            // objects leave the outbox; rejections stay pending with their
-            // acked version untouched. One transaction with the relay-cursor
-            // diagnostic.
-            {
-                let db = self
-                    .db
-                    .lock()
-                    .map_err(|_| DatabaseError::LockPoisoned("mark acked".to_string()))?;
-                outbox::apply_push_acks(
-                    db.conn(),
-                    chunk,
-                    &response.results,
-                    response.server_cursor.as_u64(),
-                )?;
+                    // Per-object durable checkpoint (WBS-604/605): only Applied
+                    // objects leave the outbox; rejections stay pending with their
+                    // acked version untouched. One transaction with the relay-cursor
+                    // diagnostic.
+                    {
+                        let db = self
+                            .db
+                            .lock()
+                            .map_err(|_| DatabaseError::LockPoisoned("mark acked".to_string()))?;
+                        outbox::apply_push_acks(
+                            db.conn(),
+                            chunk,
+                            &response.results,
+                            response.server_cursor.as_u64(),
+                        )?;
+                    }
+                    total += chunk.len() as u64;
+                }
             }
         }
 
-        Ok(total as u64)
+        Ok(total)
     }
 
     /// Pull remote changes from the relay's vault log and apply them

@@ -37,6 +37,107 @@ pub struct OutboxMutation {
 /// (`relay::handlers::sync_v2::MAX_MUTATIONS_PER_PUSH`).
 pub const MAX_PUSH_MUTATIONS: usize = 500;
 
+/// Match the relay's default HTTP body budget, including JSON/base64 framing.
+pub const MAX_PUSH_BYTES: usize = 65_536;
+/// Bound payload materialization independently of the number of pending rows.
+pub const OUTBOX_PAGE_ROWS: usize = 128;
+
+pub(super) struct OutboxPage {
+    pub mutations: Vec<OutboxMutation>,
+    /// Last examined identity, including rows skipped by a payload collector.
+    pub through: Option<i64>,
+}
+
+/// Scan each identity once per sync cycle. Retried/rejected rows remain
+/// durable but cannot cause an infinite loop in the same cycle. A concurrent
+/// edit behind the cursor is picked up on the next cycle.
+pub(super) fn collect_pending_page(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    device_id: Uuid,
+    object_type: SyncEntryType,
+    after: i64,
+) -> Result<OutboxPage> {
+    let read = conn
+        .unchecked_transaction()
+        .map_err(DatabaseError::Sqlite)?;
+    let table = match object_type {
+        SyncEntryType::Credential => "entries",
+        SyncEntryType::SshKey => "ssh_keys",
+        SyncEntryType::TotpSecret => "totp_secrets",
+    };
+    let through: Option<i64> = read
+        .query_row(
+            &format!(
+                "SELECT MAX(scan_id) FROM (SELECT rowid AS scan_id FROM {table}
+         WHERE sync_state='pending' AND rowid>?1 ORDER BY rowid LIMIT ?2)"
+            ),
+            rusqlite::params![after, OUTBOX_PAGE_ROWS as i64],
+            |r| r.get(0),
+        )
+        .map_err(DatabaseError::Sqlite)?;
+    let Some(end) = through else {
+        return Ok(OutboxPage {
+            mutations: Vec::new(),
+            through,
+        });
+    };
+    let config = crate::sync::config::SyncConfig::load(&read)?;
+    let vault = config
+        .vault_id
+        .ok_or_else(|| crate::PasswordManagerError::InvalidInput("Sync vault ID missing".into()))?;
+    let (_, epoch) = crate::vault::envelope_ops::read_local_identity(&read)?;
+    let collect = match object_type {
+        SyncEntryType::Credential => crate::sync::change_tracker::collect_credential_range,
+        SyncEntryType::SshKey => crate::sync::change_tracker::collect_ssh_key_range,
+        SyncEntryType::TotpSecret => crate::sync::change_tracker::collect_totp_range,
+    };
+    let blobs = collect(&read, dek, device_id, after, end)?;
+    let mutations = mutations_from_blobs(&read, dek, device_id, vault, epoch, blobs)?;
+    Ok(OutboxPage { mutations, through })
+}
+
+/// Preflight a page before sending any of it. Oversized single objects remain
+/// pending with an explicit error; they are never silently dropped or acked.
+pub(super) fn push_ranges(
+    mutations: &[OutboxMutation],
+    device_sequence: crate::sync::v2::DeviceSequence,
+) -> Result<Vec<std::ops::Range<usize>>> {
+    let encode_error =
+        |e: serde_json::Error| crate::PasswordManagerError::InvalidInput(e.to_string());
+    let framing = serde_json::to_vec(&crate::sync::v2::PushRequestV2 {
+        device_sequence,
+        mutations: Vec::new(),
+    })
+    .map_err(encode_error)?
+    .len();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    let mut bytes = framing;
+    for (i, item) in mutations.iter().enumerate() {
+        let size = serde_json::to_vec(&item.mutation)
+            .map_err(encode_error)?
+            .len();
+        if size > MAX_PUSH_BYTES - framing {
+            return Err(crate::PasswordManagerError::InvalidInput(format!(
+                "sync object {} exceeds the {}-byte request budget; it remains pending",
+                item.object_id, MAX_PUSH_BYTES,
+            )));
+        }
+        let comma = usize::from(i > start);
+        if i - start == MAX_PUSH_MUTATIONS || bytes + comma + size > MAX_PUSH_BYTES {
+            ranges.push(start..i);
+            start = i;
+            bytes = framing;
+        }
+        bytes += usize::from(i > start) + size;
+    }
+    if start < mutations.len() {
+        ranges.push(start..mutations.len());
+    }
+    Ok(ranges)
+}
+
 /// Collect every pending local change as v2 mutations.
 ///
 /// `relay_vault_id` is the shared RELAY vault identity (routing + MAC
@@ -51,8 +152,6 @@ pub fn collect_pending_mutations(
     relay_vault_id: Uuid,
     key_epoch: i64,
 ) -> Result<Vec<OutboxMutation>> {
-    let mac_key = derive_metadata_mac_key(dek)?;
-
     let blobs = {
         let mut all: Vec<SyncEntryBlob> = collect_pending_credential_blobs(conn, dek, device_id)?;
         all.extend(collect_pending_ssh_key_blobs(conn, dek, device_id)?);
@@ -60,6 +159,18 @@ pub fn collect_pending_mutations(
         all
     };
 
+    mutations_from_blobs(conn, dek, device_id, relay_vault_id, key_epoch, blobs)
+}
+
+fn mutations_from_blobs(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    device_id: Uuid,
+    relay_vault_id: Uuid,
+    key_epoch: i64,
+    blobs: Vec<SyncEntryBlob>,
+) -> Result<Vec<OutboxMutation>> {
+    let mac_key = derive_metadata_mac_key(dek)?;
     let mut out = Vec::with_capacity(blobs.len());
     for blob in blobs {
         let acked = acked_version_for(conn, blob.sync_id, blob.entry_type)?;
@@ -76,7 +187,7 @@ pub fn collect_pending_mutations(
             key_epoch,
             origin_device_id: device_id,
             is_tombstone: blob.is_tombstone,
-            encrypted_payload: blob.encrypted_payload.clone(),
+            encrypted_payload: blob.encrypted_payload,
         };
         let mutation =
             build_mutation(&mac_key, &input).map_err(crate::PasswordManagerError::Crypto)?;
@@ -371,6 +482,90 @@ mod tests {
 
     fn relay_vault() -> Uuid {
         Uuid::from_u128(0xABCD)
+    }
+
+    #[test]
+    fn pending_pages_advance_even_when_rows_remain_pending() {
+        let db = outbox_db();
+        let dek = DataEncryptionKey::new().unwrap();
+        let config = crate::sync::config::SyncConfig {
+            vault_id: Some(relay_vault()),
+            ..Default::default()
+        };
+        config.save(db.conn()).unwrap();
+        for id in 1..=(OUTBOX_PAGE_ROWS + 2) {
+            insert_pending(
+                db.conn(),
+                &dek,
+                &Uuid::from_u128(id as u128),
+                1,
+                0,
+                "pending",
+            );
+        }
+        let device = Uuid::new_v4();
+        let first =
+            collect_pending_page(db.conn(), &dek, device, SyncEntryType::Credential, i64::MIN)
+                .unwrap();
+        assert_eq!(first.mutations.len(), OUTBOX_PAGE_ROWS);
+        let next = collect_pending_page(
+            db.conn(),
+            &dek,
+            device,
+            SyncEntryType::Credential,
+            first.through.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(next.mutations.len(), 2);
+        let last = collect_pending_page(
+            db.conn(),
+            &dek,
+            device,
+            SyncEntryType::Credential,
+            next.through.unwrap(),
+        )
+        .unwrap();
+        assert!(last.through.is_none());
+        // Scanning alone never acknowledges work.
+        assert_eq!(
+            crate::sync::change_tracker::count_pending_changes(db.conn()).unwrap(),
+            (OUTBOX_PAGE_ROWS + 2) as u64
+        );
+    }
+
+    #[test]
+    fn push_batches_obey_encoded_bytes_and_reject_oversized_single_objects() {
+        use crate::sync::v2::{DeviceSequence, PushRequestV2};
+        let db = outbox_db();
+        let dek = DataEncryptionKey::new().unwrap();
+        insert_pending(db.conn(), &dek, &Uuid::new_v4(), 1, 0, "pending");
+        let template = collect_pending_mutations(db.conn(), &dek, Uuid::new_v4(), relay_vault(), 1)
+            .unwrap()
+            .remove(0);
+        let mut mutations = vec![template; MAX_PUSH_MUTATIONS + 1];
+        let sequence = DeviceSequence(i64::MAX as u64);
+        let ranges = push_ranges(&mutations, sequence).unwrap();
+        assert!(ranges.len() > 1);
+        assert_eq!(
+            ranges.iter().map(|r| r.len()).sum::<usize>(),
+            mutations.len()
+        );
+        for range in ranges {
+            let request = PushRequestV2 {
+                device_sequence: sequence,
+                mutations: mutations[range]
+                    .iter()
+                    .map(|m| m.mutation.clone())
+                    .collect(),
+            };
+            assert!(request.mutations.len() <= MAX_PUSH_MUTATIONS);
+            assert!(serde_json::to_vec(&request).unwrap().len() <= MAX_PUSH_BYTES);
+        }
+        mutations[0].mutation.encrypted_payload = vec![0; MAX_PUSH_BYTES];
+        assert!(push_ranges(&mutations, sequence)
+            .unwrap_err()
+            .to_string()
+            .contains("remains pending"));
     }
 
     #[test]

@@ -31,6 +31,8 @@ use uuid::Uuid;
 
 /// Maximum mutations accepted per v2 push request.
 pub const MAX_MUTATIONS_PER_PUSH: usize = 500;
+/// Must fit the core client's transport ceiling (pinned by integration tests).
+pub const MAX_PULL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // TD-NET-06: the per-entry payload size is bounded by the GLOBAL
 // request-body limit layer (max_payload_size) — one consistent limit set.
 // The request body is base64 (~1.37x decoded), so the decoded payload is
@@ -48,7 +50,7 @@ const MAX_EPOCH_JUMP: i64 = 100_000;
 
 /// v2 mutation received by the relay (serde-compatible with the client's
 /// `sentinelpass_core::sync::v2::MutationV2`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MutationV2 {
     pub mutation_id: Uuid,
     pub vault_id: Uuid,
@@ -161,6 +163,15 @@ pub struct PullResponseV2 {
 /// exercised directly by the `fuzz_sync_mutation` target so the JSON-decode
 /// + shape-validation surface can never drift away from its fuzz coverage.
 pub fn validate_shape(m: &MutationV2) -> Result<(), RelayError> {
+    if serde_json::to_vec(m)
+        .map_err(|e| RelayError::BadRequest(e.to_string()))?
+        .len()
+        > MAX_PULL_RESPONSE_BYTES - 256
+    {
+        return Err(RelayError::BadRequest(
+            "mutation exceeds the pull response budget".into(),
+        ));
+    }
     if m.vault_id.is_nil() || m.object_id.is_nil() || m.mutation_id.is_nil() {
         return Err(RelayError::BadRequest(
             "mutation ids must not be nil".into(),
@@ -620,6 +631,8 @@ pub async fn pull_v2(
         .map_err(|e| RelayError::Database(e.to_string()))?;
 
     let mut entries: Vec<MutationLogEntry> = Vec::new();
+    // Reserve more than the envelope, cursor, has_more and comma overhead.
+    let mut page_bytes = 128;
     let mut has_more = false;
     let rows = stmt
         .query_map(rusqlite::params![&vault_id, req.since, limit + 1], |row| {
@@ -660,7 +673,7 @@ pub async fn pull_v2(
             metadata_mac,
             payload,
         ) = row;
-        entries.push(MutationLogEntry {
+        let entry = MutationLogEntry {
             server_sequence: seq,
             mutation: MutationLogMutation {
                 mutation_id: Uuid::parse_str(&mutation_id)
@@ -679,7 +692,22 @@ pub async fn pull_v2(
                 encrypted_payload: base64::engine::general_purpose::STANDARD.encode(&payload),
                 metadata_mac,
             },
-        });
+        };
+        let bytes = serde_json::to_vec(&entry)
+            .map_err(|e| RelayError::Database(e.to_string()))?
+            .len()
+            + 1;
+        if bytes > MAX_PULL_RESPONSE_BYTES - page_bytes {
+            if entries.is_empty() {
+                return Err(RelayError::BadRequest(
+                    "stored mutation exceeds the pull response budget".into(),
+                ));
+            }
+            has_more = true;
+            break;
+        }
+        page_bytes += bytes;
+        entries.push(entry);
     }
 
     let cursor = entries
@@ -837,6 +865,55 @@ mod tests {
         let conn = state.storage.conn().unwrap();
         conn.query_row("SELECT COUNT(*) FROM mutation_results", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pull_byte_pages_preserve_cursor_and_all_mutations() {
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let (device, vault, _) = setup(&state);
+        for _ in 0..3 {
+            let mut mutation = sample_mutation(&vault, Uuid::new_v4(), 0, 1);
+            mutation.origin_device_id = device;
+            mutation.encrypted_payload = STANDARD.encode(vec![0; 1024 * 1024]);
+            push_v2(
+                State(state.clone()),
+                auth_extensions(device),
+                Json(PushRequestV2 {
+                    device_sequence: 1,
+                    mutations: vec![mutation],
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        let page = pull_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(PullRequestV2 {
+                since: 0,
+                limit: Some(500),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(page.entries.len(), 2);
+        assert!(page.has_more);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_PULL_RESPONSE_BYTES);
+        let next = pull_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(PullRequestV2 {
+                since: page.cursor,
+                limit: Some(500),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(next.cursor, 3);
+        assert!(!next.has_more);
     }
 
     #[tokio::test]

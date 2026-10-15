@@ -55,6 +55,7 @@ pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -
         } else {
             Authorization::Allow
         }
-    })).expect("install write-fault authorizer");
+    }))
+    .expect("install write-fault authorizer");
     WriteFaultGuard { seen }
 }

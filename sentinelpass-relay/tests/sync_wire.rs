@@ -39,6 +39,10 @@ async fn real_client_push_retry_and_pull_preserve_all_object_types() {
     // This integration-test executable has a single test; its environment is
     // isolated from the unit-test binaries and production relay processes.
     std::env::set_var("SENTINELPASS_ALLOW_LOOPBACK_RELAY", "1");
+    assert_eq!(
+        sentinelpass_core::sync::client::MAX_RELAY_RESPONSE_BYTES,
+        sentinelpass_relay::handlers::sync_v2::MAX_PULL_RESPONSE_BYTES
+    );
     let dir = tempfile::tempdir().unwrap();
     let storage = RelayStorage::open(&dir.path().join("relay.db")).unwrap();
     let vault = Uuid::new_v4();
@@ -173,4 +177,39 @@ async fn real_client_push_retry_and_pull_preserve_all_object_types() {
         serde_json::from_value::<sentinelpass_relay::handlers::sync_v2::PushRequestV2>(ambiguous)
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn client_bounds_chunked_success_and_error_bodies() {
+    use axum::{body::Body, http::StatusCode, response::Response, routing::post, Router};
+    std::env::set_var("SENTINELPASS_ALLOW_LOOPBACK_RELAY", "1");
+    for status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
+        let router = Router::new().route(
+            "/api/v2/sync/push",
+            post(move || async move {
+                // No Content-Length: the streaming path must enforce the limit too.
+                let chunks = futures_util::stream::iter(
+                    (0..65).map(|_| Ok::<_, std::io::Error>(vec![b'x'; 65_536])),
+                );
+                Response::builder()
+                    .status(status)
+                    .body(Body::from_stream(chunks))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let _running = RunningRelay(tokio::spawn(server::serve(router, listener)));
+        let mut bytes = [0; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let client = SyncClient::new(&url, Uuid::new_v4(), SigningKey::from_bytes(&bytes)).unwrap();
+        let error = client
+            .push_v2(&PushRequestV2 {
+                device_sequence: DeviceSequence(1),
+                mutations: vec![],
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
 }

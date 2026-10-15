@@ -97,7 +97,8 @@ fn install_fault_inner(
         } else {
             Authorization::Allow
         }
-    })).expect("install write-fault authorizer");
+    }))
+    .expect("install write-fault authorizer");
     WriteFaultGuard { seen }
 }
 

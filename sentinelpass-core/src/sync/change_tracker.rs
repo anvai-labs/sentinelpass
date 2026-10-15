@@ -16,6 +16,17 @@ pub fn collect_pending_credential_blobs(
     dek: &DataEncryptionKey,
     device_id: Uuid,
 ) -> Result<Vec<SyncEntryBlob>> {
+    collect_credential_range(conn, dek, device_id, i64::MIN, i64::MAX)
+}
+
+/// Inclusive upper and exclusive lower rowid bounds, selected by the outbox.
+pub(super) fn collect_credential_range(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    device_id: Uuid,
+    after: i64,
+    through: i64,
+) -> Result<Vec<SyncEntryBlob>> {
     let _read = if conn.is_autocommit() {
         Some(
             conn.unchecked_transaction()
@@ -30,12 +41,13 @@ pub fn collect_pending_credential_blobs(
             "SELECT entry_id, sync_id, sync_version, modified_at, is_deleted,
                     title, username, password, url, notes, credential_type, favorite, created_at
              FROM entries
-             WHERE sync_state = 'pending'",
+             WHERE sync_state = 'pending' AND rowid > ?1 AND rowid <= ?2
+             ORDER BY rowid",
         )
         .map_err(DatabaseError::Sqlite)?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([after, through], |row| {
             Ok((
                 row.get::<_, i64>(0)?,             // entry_id
                 row.get::<_, String>(1)?,          // sync_id
@@ -240,18 +252,29 @@ pub fn collect_pending_ssh_key_blobs(
     dek: &DataEncryptionKey,
     device_id: Uuid,
 ) -> Result<Vec<SyncEntryBlob>> {
+    collect_ssh_key_range(conn, dek, device_id, i64::MIN, i64::MAX)
+}
+
+pub(super) fn collect_ssh_key_range(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    device_id: Uuid,
+    after: i64,
+    through: i64,
+) -> Result<Vec<SyncEntryBlob>> {
     let mut stmt = conn
         .prepare(
             "SELECT key_id, sync_id, sync_version, modified_at, is_deleted,
                     name, comment, key_type, key_size, public_key,
                     private_key_encrypted, nonce, auth_tag, fingerprint, created_at
              FROM ssh_keys
-             WHERE sync_state = 'pending'",
+             WHERE sync_state = 'pending' AND rowid > ?1 AND rowid <= ?2
+             ORDER BY rowid",
         )
         .map_err(DatabaseError::Sqlite)?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([after, through], |row| {
             Ok((
                 row.get::<_, String>(1)?,                         // sync_id
                 row.get::<_, i64>(2)?,                            // sync_version
@@ -410,6 +433,16 @@ pub fn collect_pending_totp_blobs(
     dek: &DataEncryptionKey,
     device_id: Uuid,
 ) -> Result<Vec<SyncEntryBlob>> {
+    collect_totp_range(conn, dek, device_id, i64::MIN, i64::MAX)
+}
+
+pub(super) fn collect_totp_range(
+    conn: &Connection,
+    dek: &DataEncryptionKey,
+    device_id: Uuid,
+    after: i64,
+    through: i64,
+) -> Result<Vec<SyncEntryBlob>> {
     let mut stmt = conn
         .prepare(
             "SELECT t.totp_id, t.sync_id, t.sync_version, t.created_at, t.is_deleted,
@@ -418,12 +451,13 @@ pub fn collect_pending_totp_blobs(
                     e.sync_id as parent_sync_id
              FROM totp_secrets t
              LEFT JOIN entries e ON t.entry_id = e.entry_id
-             WHERE t.sync_state = 'pending'",
+             WHERE t.sync_state = 'pending' AND t.rowid > ?1 AND t.rowid <= ?2
+             ORDER BY t.rowid",
         )
         .map_err(DatabaseError::Sqlite)?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([after, through], |row| {
             Ok((
                 row.get::<_, String>(1)?,                          // sync_id
                 row.get::<_, i64>(2)?,                             // sync_version

@@ -11,6 +11,48 @@ use std::future::Future;
 use std::pin::Pin;
 use uuid::Uuid;
 
+/// Transport ceiling, including JSON/base64 framing. Relay pull pagination
+/// uses the same budget; this is a safety bound, not a workload/SLO claim.
+pub const MAX_RELAY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RELAY_ERROR_BYTES: usize = 8 * 1024;
+
+async fn bounded_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let status = response.status();
+    let limit = if status.is_success() {
+        MAX_RELAY_RESPONSE_BYTES
+    } else {
+        MAX_RELAY_ERROR_BYTES
+    };
+    let too_large = || {
+        PasswordManagerError::InvalidInput(format!(
+            "Relay response {} exceeds the {}-byte limit",
+            status, limit
+        ))
+    };
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err(too_large());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))?
+    {
+        if chunk.len() > limit - body.len() {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        return Err(PasswordManagerError::InvalidInput(format!(
+            "Relay error {}: {}",
+            status,
+            String::from_utf8_lossy(&body)
+        )));
+    }
+    Ok(body)
+}
+
 /// The v2 sync transport surface the engine consumes (ADR-006).
 ///
 /// A trait so the engine can be driven against an in-memory relay model in
@@ -365,9 +407,7 @@ impl SyncClient {
             )));
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
+        let body: serde_json::Value = serde_json::from_slice(&bounded_response(resp).await?)
             .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))?;
 
         let encrypted = base64::engine::general_purpose::STANDARD
@@ -402,19 +442,7 @@ impl SyncClient {
             .await
             .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
-            return Err(PasswordManagerError::InvalidInput(format!(
-                "Relay error {}: {}",
-                status, body
-            )));
-        }
-
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))
+        bounded_response(resp).await
     }
 
     async fn signed_get(&self, path: &str) -> Result<Vec<u8>> {
@@ -434,19 +462,7 @@ impl SyncClient {
             .await
             .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
-            return Err(PasswordManagerError::InvalidInput(format!(
-                "Relay error {}: {}",
-                status, body
-            )));
-        }
-
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))
+        bounded_response(resp).await
     }
 }
 
