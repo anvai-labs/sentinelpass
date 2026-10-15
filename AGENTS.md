@@ -35,6 +35,12 @@ Use Rust 2021 idioms and keep code `rustfmt`-clean. Rust uses 4-space indentatio
 ## Testing Guidelines
 Most Rust tests are inline unit tests (`#[cfg(test)]`) inside modules, especially in `sentinelpass-core/src/*`. Add tests close to changed code, and use descriptive behavior-focused names (for example: `locks_after_failed_attempts`). Run `cargo test --workspace` before opening a PR; for focused work use `cargo test -p sentinelpass-core`. For extension/web changes, run `npm run web:typecheck` and `npm run test:ts`; for browser behavior changes, also check the relevant guide under `browser-extension/` or `browser-extension/e2e/`.
 
+## Branching Ground Rules
+
+- Feature and fix PRs target **`develop`** (CI-gated + review) — never `main` directly.
+- **`develop` → `main`** happens only as a single-commit (squash) release/promotion PR; releases are tagged on `main`.
+- After a genuine main-side hotfix, the `main` → `develop` resync must resolve develop wholly to main's tree and be verified byte-identical (`git diff origin/main` empty).
+
 ## Commit & Pull Request Guidelines
 Recent history favors Conventional Commit style, e.g. `feat(ui): add ...` and `feat(security): ...`. Use `type(scope): imperative summary` when possible, keep commits focused, and avoid mixing refactors with behavior changes. PRs should include:
 - clear summary and rationale,

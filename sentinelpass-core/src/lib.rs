@@ -17,6 +17,7 @@ pub mod keepass;
 pub mod lockout;
 pub mod platform;
 pub mod registry;
+pub mod service_credentials;
 pub mod ssh;
 pub mod sync;
 pub mod totp;
@@ -53,6 +54,12 @@ pub use platform::{
 pub use registry::{
     compute_equality_tag, Criticality, Entity, EntityKind, EntitySummary, EntryPosture,
     LifecycleSource, RegistryOverview, ReuseCluster, RotationStatus, SweepReport, TagUpsert,
+};
+pub use service_credentials::{
+    default_credstore_dir, install_credential, preflight_credstore_dir, remove_credential,
+    validate_credential_name, verify_installed, InstallOptions, InstallReceipt, ProtectionMode,
+    ServiceCredentialManifest, ServiceCredentialRecord, SystemdCredsTool,
+    DEFAULT_SYSTEM_CREDSTORE_DIR, MAX_CREDENTIAL_BYTES,
 };
 pub use ssh::{SshAgentClient, SshKey, SshKeyGenerator, SshKeyImporter, SshKeySummary, SshKeyType};
 pub use totp::{parse_otpauth_uri, ParsedTotpUri, TotpAlgorithm, TotpCode, TotpSecretMetadata};

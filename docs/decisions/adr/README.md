@@ -31,6 +31,5 @@ large features — no implementation lands before the governing ADR is accepted.
 | [ADR-008](ADR-008-authenticated-backup-and-verified-restore.md) | Authenticated backup and verified restore | Accepted (rev 2) |
 | [ADR-009](ADR-009-mobile-abi-and-platform-keystore.md) | Mobile ABI and platform-keystore boundary | Accepted (rev 2) |
 | [ADR-010](ADR-010-release-assurance-and-provenance.md) | Release assurance and provenance | Accepted (rev 2) |
-
-
-- [ADR-011: Shared private-file custody](ADR-011-shared-private-file-custody.md) — Linux extraction and allowlist adoption.
+| [ADR-011](ADR-011-service-credentials-systemd.md) | Restart-safe service credentials via systemd | Accepted |
+| [ADR-012](ADR-012-shared-private-file-custody.md) | Shared private-file custody | Accepted |

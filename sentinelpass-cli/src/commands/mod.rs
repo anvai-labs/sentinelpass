@@ -9,6 +9,7 @@ pub mod recovery;
 pub mod registry;
 pub mod secret;
 pub mod service_client;
+pub mod service_credential;
 pub mod ssh;
 pub mod sync;
 pub mod totp;

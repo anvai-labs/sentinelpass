@@ -133,6 +133,9 @@ jobs:
           android_paths='($0 ~ /^(sentinelpass-core|sentinelpass-mobile-bridge|android)\// || $0 == ".github/workflows/android.yml") { found=1 } END { exit !found }'
           ios_paths='($0 ~ /^(sentinelpass-core|sentinelpass-mobile-bridge|ios)\// || $0 == ".github/workflows/ios.yml") { found=1 } END { exit !found }'
           e2e_paths='($0 ~ /^browser-extension\/(chrome|e2e)\// || $0 == ".github/workflows/extension-e2e.yml") { found=1 } END { exit !found }'
+          # Mirrors shared-secure-io.yml's own paths filter (MSRV leg for
+          # anvai-secure-io; added with the crate's adoption, review F1).
+          secure_io_paths='($0 ~ /^anvai-secure-io\// || $0 == "Cargo.lock" || $0 == ".github/workflows/shared-secure-io.yml") { found=1 } END { exit !found }'
 
           if [ "$docs_only" = false ]; then
             if printf '%s\n' "$non_docs" | awk "$build_all_paths"; then
@@ -146,6 +149,9 @@ jobs:
             fi
             if printf '%s\n' "$non_docs" | awk "$e2e_paths"; then
               expect+=('Run Browser Integration Tests')
+            fi
+            if printf '%s\n' "$non_docs" | awk "$secure_io_paths"; then
+              expect+=('linux-msrv')
             fi
           fi
           echo "Expected anchor checks (${#expect[@]}):"

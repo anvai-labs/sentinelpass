@@ -108,6 +108,12 @@ enum Commands {
         command: SecretCommands,
     },
 
+    /// Provision restart-safe Linux systemd encrypted service credentials
+    ServiceCredential {
+        #[command(subcommand)]
+        command: ServiceCredentialCommands,
+    },
+
     /// Run a command with secrets injected as environment variables
     Exec {
         /// Local tool client id, for example `victor`
@@ -701,6 +707,127 @@ enum SecretTokenCommands {
 }
 
 #[derive(Subcommand)]
+enum ServiceCredentialCommands {
+    /// Provision (or rotate) one secret as a systemd encrypted credential.
+    /// The secret travels daemon -> systemd-creds via a stdin pipe only; the
+    /// ciphertext is decrypt-verified BEFORE the atomic rename that replaces
+    /// any previous credential. Rotation is the same command re-run.
+    Install {
+        /// Local tool client id whose grant authorizes the lookup
+        #[arg(long)]
+        client_id: String,
+
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
+        /// Domain or service key used to look up the credential
+        #[arg(long)]
+        domain: String,
+
+        /// Field to provision
+        #[arg(long, value_enum, default_value_t = SecretField::Password)]
+        field: SecretField,
+
+        /// systemd credential name == credstore filename (filename-safe ASCII)
+        #[arg(long)]
+        cred_name: String,
+
+        /// At-rest protection mode (required; null/auto semantics are refused)
+        #[arg(long, value_enum)]
+        protection: ServiceProtection,
+
+        /// Optional systemd-creds --not-after= value (credential stops
+        /// decrypting after this date; a rotation forcing function)
+        #[arg(long)]
+        not_after: Option<String>,
+
+        /// Credential store directory (default /etc/credstore.encrypted)
+        #[arg(long)]
+        credstore_dir: Option<std::path::PathBuf>,
+
+        /// systemd-creds binary path (default: PATH lookup)
+        #[arg(long, env = "SENTINELPASS_SYSTEMD_CREDS")]
+        systemd_creds: Option<std::path::PathBuf>,
+
+        /// Skip the decrypt-and-compare pre-publish verification (not
+        /// recommended; only when the protection key is unavailable to the
+        /// installing process)
+        #[arg(long)]
+        no_verify: bool,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Prompt shown by the OS biometric dialog
+        #[arg(
+            long,
+            default_value = "Unlock SentinelPass to provision a service credential"
+        )]
+        prompt_reason: String,
+    },
+
+    /// Decrypt the installed credential and compare (constant-time) against
+    /// the current vault value. Exit 0 = match, 3 = mismatch/absent.
+    Verify {
+        /// Local tool client id whose grant authorizes the lookup
+        #[arg(long)]
+        client_id: String,
+
+        /// Per-client grant token; defaults to $SENTINELPASS_CLIENT_TOKEN
+        #[arg(long, env = "SENTINELPASS_CLIENT_TOKEN")]
+        token: Option<String>,
+
+        /// Domain or service key used to look up the credential
+        #[arg(long)]
+        domain: String,
+
+        /// Field to compare
+        #[arg(long, value_enum, default_value_t = SecretField::Password)]
+        field: SecretField,
+
+        /// Credential name to verify
+        #[arg(long)]
+        cred_name: String,
+
+        /// Credential store directory (default: the manifest's, or
+        /// /etc/credstore.encrypted)
+        #[arg(long)]
+        credstore_dir: Option<std::path::PathBuf>,
+
+        /// systemd-creds binary path (default: PATH lookup)
+        #[arg(long, env = "SENTINELPASS_SYSTEMD_CREDS")]
+        systemd_creds: Option<std::path::PathBuf>,
+
+        /// If the daemon is locked, request biometric unlock before lookup
+        #[arg(long)]
+        biometric_unlock: bool,
+
+        /// Prompt shown by the OS biometric dialog
+        #[arg(
+            long,
+            default_value = "Unlock SentinelPass to verify a service credential"
+        )]
+        prompt_reason: String,
+    },
+
+    /// List provisioned credentials (metadata only, never secrets)
+    List,
+
+    /// Remove an installed credential and its manifest row
+    Remove {
+        /// Credential name to remove
+        #[arg(long)]
+        cred_name: String,
+
+        /// Credential store directory (default: the manifest's recorded dir)
+        #[arg(long)]
+        credstore_dir: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum PasskeyCommands {
     /// Add a metadata-only reference to a platform passkey
     Add {
@@ -834,6 +961,37 @@ enum SecretOutputFormat {
     #[value(name = "exports")]
     Exports,
     Json,
+}
+
+/// At-rest protection for a provisioned service credential. The mode is
+/// deliberately explicit: `null`/`auto` systemd key modes are refused by
+/// construction (ADR-011).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ServiceProtection {
+    /// Encrypt to the host key (/var/lib/systemd/credential.secret). A
+    /// complete disk snapshot includes that key — see the runbook.
+    #[value(name = "host-key")]
+    HostKey,
+    /// Bind decryption to the host's TPM2 chip (no key on disk).
+    Tpm2,
+}
+
+impl From<ServiceProtection> for sentinelpass_core::ProtectionMode {
+    fn from(value: ServiceProtection) -> Self {
+        match value {
+            ServiceProtection::HostKey => Self::HostKey,
+            ServiceProtection::Tpm2 => Self::Tpm2,
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceProtection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ServiceProtection::HostKey => "host-key",
+            ServiceProtection::Tpm2 => "tpm2",
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1165,6 +1323,77 @@ fn main() -> Result<()> {
         Commands::Secret { command } => {
             commands::secret::handle_secret_command(&command)?;
         }
+
+        Commands::ServiceCredential { command } => match command {
+            ServiceCredentialCommands::Install {
+                client_id,
+                token,
+                domain,
+                field,
+                cred_name,
+                protection,
+                not_after,
+                credstore_dir,
+                systemd_creds,
+                no_verify,
+                biometric_unlock,
+                prompt_reason,
+            } => {
+                commands::service_credential::handle_install(
+                    commands::service_credential::InstallArgs {
+                        client_id,
+                        token,
+                        domain,
+                        field,
+                        cred_name,
+                        protection,
+                        not_after,
+                        credstore_dir,
+                        systemd_creds,
+                        verify: !no_verify,
+                        biometric_unlock,
+                        prompt_reason,
+                    },
+                )?;
+            }
+            ServiceCredentialCommands::Verify {
+                client_id,
+                token,
+                domain,
+                field,
+                cred_name,
+                credstore_dir,
+                systemd_creds,
+                biometric_unlock,
+                prompt_reason,
+            } => {
+                let code = commands::service_credential::handle_verify(
+                    commands::service_credential::VerifyArgs {
+                        client_id,
+                        token,
+                        domain,
+                        field,
+                        cred_name,
+                        credstore_dir,
+                        systemd_creds,
+                        biometric_unlock,
+                        prompt_reason,
+                    },
+                )?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            ServiceCredentialCommands::List => {
+                commands::service_credential::handle_list()?;
+            }
+            ServiceCredentialCommands::Remove {
+                cred_name,
+                credstore_dir,
+            } => {
+                commands::service_credential::handle_remove(cred_name, credstore_dir)?;
+            }
+        },
 
         Commands::Exec {
             client_id,
@@ -1744,6 +1973,139 @@ mod tests {
                 assert_eq!(expires_in, Some("8h".to_string()));
             }
             _ => panic!("expected expiring secret allow command"),
+        }
+    }
+
+    #[test]
+    fn parses_service_credential_install_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-credential",
+            "install",
+            "--client-id",
+            "myautomation",
+            "--domain",
+            "sandhi:provider:apikey",
+            "--cred-name",
+            "myautomation.provider.apikey",
+            "--protection",
+            "host-key",
+            "--credstore-dir",
+            "/etc/credstore.encrypted",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::ServiceCredential {
+                command:
+                    ServiceCredentialCommands::Install {
+                        client_id,
+                        domain,
+                        field,
+                        cred_name,
+                        protection,
+                        credstore_dir,
+                        no_verify,
+                        ..
+                    },
+            } => {
+                assert_eq!(client_id, "myautomation");
+                assert_eq!(domain, "sandhi:provider:apikey");
+                assert!(matches!(field, SecretField::Password));
+                assert_eq!(cred_name, "myautomation.provider.apikey");
+                assert!(matches!(protection, ServiceProtection::HostKey));
+                assert_eq!(
+                    credstore_dir.as_deref(),
+                    Some(std::path::Path::new("/etc/credstore.encrypted"))
+                );
+                assert!(!no_verify, "verification is on by default");
+            }
+            _ => panic!("expected service-credential install command"),
+        }
+    }
+
+    #[test]
+    fn service_credential_install_requires_explicit_protection() {
+        let err = Cli::try_parse_from([
+            "sentinelpass",
+            "service-credential",
+            "install",
+            "--client-id",
+            "myautomation",
+            "--domain",
+            "sandhi:provider:apikey",
+            "--cred-name",
+            "myautomation.provider.apikey",
+        ])
+        .err()
+        .expect("install without --protection must be a usage error");
+        assert!(
+            err.to_string().contains("--protection"),
+            "missing protection mode must be a usage error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn service_credential_rejects_unknown_protection_mode() {
+        let err = Cli::try_parse_from([
+            "sentinelpass",
+            "service-credential",
+            "install",
+            "--client-id",
+            "c",
+            "--domain",
+            "d",
+            "--cred-name",
+            "n",
+            "--protection",
+            "null",
+        ])
+        .err()
+        .expect("protection 'null' must be rejected");
+        assert!(err.to_string().contains("invalid value"), "got: {err}");
+    }
+
+    #[test]
+    fn parses_service_credential_verify_and_remove_contract() {
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-credential",
+            "verify",
+            "--client-id",
+            "myautomation",
+            "--domain",
+            "sandhi:provider:apikey",
+            "--cred-name",
+            "myautomation.provider.apikey",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceCredential {
+                command: ServiceCredentialCommands::Verify { cred_name, .. },
+            } => assert_eq!(cred_name, "myautomation.provider.apikey"),
+            _ => panic!("expected service-credential verify command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "sentinelpass",
+            "service-credential",
+            "remove",
+            "--cred-name",
+            "myautomation.provider.apikey",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::ServiceCredential {
+                command:
+                    ServiceCredentialCommands::Remove {
+                        cred_name,
+                        credstore_dir,
+                    },
+            } => {
+                assert_eq!(cred_name, "myautomation.provider.apikey");
+                assert!(credstore_dir.is_none());
+            }
+            _ => panic!("expected service-credential remove command"),
         }
     }
 
