@@ -318,6 +318,9 @@ impl<'a> EntryRepository for SqliteEntryRepository<'a> {
             param_index += 1;
         }
         if let Some(offset) = filter.offset {
+            if filter.limit.is_none() {
+                query.push_str(" LIMIT -1");
+            }
             query.push_str(&format!(" OFFSET ?{}", param_index));
             params.push(Box::new(offset));
             let _ = param_index; // suppress unused warning
@@ -709,5 +712,16 @@ mod tests {
         };
         let entries = repo.list_raw(filter).unwrap();
         assert_eq!(entries.len(), 5);
+
+        let remaining = repo
+            .list_raw(EntryFilter {
+                offset: Some(7),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining
+            .windows(2)
+            .all(|rows| rows[0].entry_id < rows[1].entry_id));
     }
 }

@@ -718,10 +718,10 @@ impl VaultManager {
     /// Convert raw entry row to summary (decrypt only title and username)
     fn row_to_summary(
         &self,
-        conn: &rusqlite::Connection,
+        verified: &content_guard::VerifiedRead<'_>,
         row: &RawEntryRow,
     ) -> Result<EntrySummary> {
-        content_guard::verify_row(conn, self.key_hierarchy.dek()?, row)?;
+        verified.verify_row(row)?;
         let cred = CredentialType::parse(&row.credential_type)?;
         let title = self
             .open_entry_field(
@@ -973,22 +973,22 @@ impl VaultManager {
         }
 
         let db = self.lock_db()?;
-        let _read_snapshot = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
-        content_guard::verify_snapshot(db.conn(), self.key_hierarchy.dek()?)?;
+        let verified = content_guard::VerifiedRead::begin(db.conn(), self.key_hierarchy.dek()?)?;
         let repo = SqliteEntryRepository::new(&db);
         let raw_rows = repo.list_raw(EntryFilter::default())?;
 
         // Convert raw rows to summaries
         let mut entries = raw_rows
             .iter()
-            .map(|row| self.row_to_summary(db.conn(), row))
+            .map(|row| self.row_to_summary(&verified, row))
             .collect::<Result<Vec<_>>>()?;
 
         // Sort entries alphabetically by title
-        entries.sort_by(|a, b| a.title.cmp(&b.title));
+        entries.sort_by(|a, b| {
+            a.title
+                .cmp(&b.title)
+                .then_with(|| a.entry_id.cmp(&b.entry_id))
+        });
 
         // Log credentials list operation
         if let Some(ref logger) = self.audit_logger {
@@ -1022,11 +1022,7 @@ impl VaultManager {
         }
 
         let db = self.lock_db()?;
-        let _read_snapshot = db
-            .conn()
-            .unchecked_transaction()
-            .map_err(DatabaseError::Sqlite)?;
-        content_guard::verify_snapshot(db.conn(), self.key_hierarchy.dek()?)?;
+        let verified = content_guard::VerifiedRead::begin(db.conn(), self.key_hierarchy.dek()?)?;
         let repo = SqliteEntryRepository::new(&db);
 
         // Get total count
@@ -1043,7 +1039,7 @@ impl VaultManager {
         // Convert raw rows to summaries
         let items = raw_rows
             .iter()
-            .map(|row| self.row_to_summary(db.conn(), row))
+            .map(|row| self.row_to_summary(&verified, row))
             .collect::<Result<Vec<_>>>()?;
 
         // Calculate if there are more results

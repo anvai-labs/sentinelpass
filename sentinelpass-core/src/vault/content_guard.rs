@@ -443,21 +443,51 @@ pub(crate) fn initialize(conn: &Connection, dek: &DataEncryptionKey) -> Result<(
 }
 
 pub(crate) fn verify_snapshot(conn: &Connection, dek: &DataEncryptionKey) -> Result<()> {
+    verified_receipts(conn, dek).map(|_| ())
+}
+
+/// Request-local evidence coupled to the SQLite read transaction that was
+/// verified. Never reused across requests or after releasing that snapshot.
+pub(super) struct VerifiedRead<'a> {
+    _tx: Transaction<'a>,
+    receipts: Option<Receipts>,
+}
+
+impl<'a> VerifiedRead<'a> {
+    pub(super) fn begin(conn: &'a Connection, dek: &DataEncryptionKey) -> Result<Self> {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(DatabaseError::Sqlite)?;
+        let receipts = verified_receipts(&tx, dek)?;
+        Ok(Self { _tx: tx, receipts })
+    }
+
+    pub(super) fn verify_row(&self, row: &RawEntryRow) -> Result<()> {
+        if let Some(receipts) = &self.receipts {
+            if receipts.get(&format!("entry:{}", row.entry_id)) != Some(&fingerprint(row, false)?) {
+                return Err(refusal());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn verified_receipts(conn: &Connection, dek: &DataEncryptionKey) -> Result<Option<Receipts>> {
     let Some((path, lock)) = paths(conn) else {
-        return Ok(());
+        return Ok(None);
     };
     let _lock = acquire(&lock)?;
     let key = key(dek)?;
     let state = match load(&path, key.as_ref(), &vault_id(conn)?)? {
         Some(state) => state,
-        None if !marked(conn)? => return Ok(()),
+        None if !marked(conn)? => return Ok(None),
         None => return Err(refusal()),
     };
     let current = snapshot(conn)?;
     if current != state.stable && state.pending.as_ref() != Some(&current) {
         return Err(refusal());
     }
-    Ok(())
+    Ok(Some(current))
 }
 
 pub(super) fn verify_copy(
@@ -547,6 +577,35 @@ mod tests {
             .unwrap();
         assert!(verify_snapshot(&conn, &dek).is_err());
         assert!(ContentTransaction::begin(&conn, &dek).is_err());
+    }
+
+    #[test]
+    fn verified_read_keeps_one_snapshot_and_next_request_rechecks_receipts() {
+        let (dir, conn, dek) = fixture();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let raw = || {
+            conn.query_row(
+            "SELECT entry_id,title,username,password,url,notes,credential_type,entry_nonce,auth_tag,created_at,modified_at,favorite,sync_id,sync_version FROM entries WHERE entry_id=1",
+            [], SqliteEntryRepository::parse_row).unwrap()
+        };
+        let read = VerifiedRead::begin(&conn, &dek).unwrap();
+        let old_row = raw();
+        read.verify_row(&old_row).unwrap();
+        let writer = Connection::open(dir.path().join("receipt.db")).unwrap();
+        let tx = ContentTransaction::begin(&writer, &dek).unwrap();
+        tx.execute("UPDATE entries SET password=X'04'", []).unwrap();
+        tx.commit().unwrap();
+        // Another connection committed after verification. This request still
+        // sees and authenticates exactly the original SQLite snapshot.
+        assert_eq!(raw().password, old_row.password);
+        read.verify_row(&old_row).unwrap();
+        drop(read);
+        let fresh = VerifiedRead::begin(&conn, &dek).unwrap();
+        assert!(fresh.verify_row(&old_row).is_err());
+        fresh.verify_row(&raw()).unwrap();
+        drop(fresh);
+        writer.execute("UPDATE entries SET notes=X''", []).unwrap();
+        assert!(VerifiedRead::begin(&conn, &dek).is_err());
     }
 
     #[test]
