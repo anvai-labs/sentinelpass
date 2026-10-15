@@ -536,17 +536,19 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
     /// idempotent, so a failure mid-batch costs a retry of the unacked
     /// remainder only.
     async fn push_changes(&self, dek: &DataEncryptionKey) -> Result<u64> {
-        let device_sequence = {
+        let (device_sequence, scans) = {
             let db = self
                 .db
                 .lock()
                 .map_err(|_| DatabaseError::LockPoisoned("push".to_string()))?;
             let conn = db.conn();
-
-            let config = SyncConfig::load(conn)?;
+            let read = conn
+                .unchecked_transaction()
+                .map_err(DatabaseError::Sqlite)?;
+            let config = SyncConfig::load(&read)?;
             // Framing counter: diagnostic only in v2 (idempotency keys carry
             // correctness). A retry deliberately re-sends the same value.
-            DeviceSequence(
+            let sequence = DeviceSequence(
                 config
                     .last_push_sequence
                     .checked_add(1)
@@ -554,17 +556,24 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                     .ok_or_else(|| {
                         PasswordManagerError::InvalidInput("sync framing counter exhausted".into())
                     })?,
-            )
+            );
+            // Capture all type bounds in the same snapshot: a newly inserted
+            // TOTP must not enter this cycle ahead of its new parent credential.
+            let scans = [
+                SyncEntryType::Credential,
+                SyncEntryType::SshKey,
+                SyncEntryType::TotpSecret,
+            ]
+            .into_iter()
+            .map(|kind| Ok((kind, outbox::scan_high_water(&read, kind)?)))
+            .collect::<Result<Vec<_>>>()?;
+            (sequence, scans)
         };
 
         let mut total = 0;
         // Credentials precede TOTP children. Rejected or unreadable identities
         // advance the scan cursor but remain durable for the next sync cycle.
-        for kind in [
-            SyncEntryType::Credential,
-            SyncEntryType::SshKey,
-            SyncEntryType::TotpSecret,
-        ] {
+        for (kind, high_water) in scans {
             let mut after = i64::MIN;
             loop {
                 let page = {
@@ -572,7 +581,14 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                         .db
                         .lock()
                         .map_err(|_| DatabaseError::LockPoisoned("push page".into()))?;
-                    outbox::collect_pending_page(db.conn(), dek, self.device_id, kind, after)?
+                    outbox::collect_pending_page(
+                        db.conn(),
+                        dek,
+                        self.device_id,
+                        kind,
+                        after,
+                        high_water,
+                    )?
                 };
                 let Some(through) = page.through else {
                     break;

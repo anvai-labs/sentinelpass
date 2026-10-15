@@ -48,6 +48,26 @@ pub(super) struct OutboxPage {
     pub through: Option<i64>,
 }
 
+fn object_table(object_type: SyncEntryType) -> &'static str {
+    match object_type {
+        SyncEntryType::Credential => "entries",
+        SyncEntryType::SshKey => "ssh_keys",
+        SyncEntryType::TotpSecret => "totp_secrets",
+    }
+}
+
+/// Freeze an upper row identity for the cycle, so continuous insertion cannot
+/// starve the pull phase. Subsequent inserts are picked up next cycle.
+pub(super) fn scan_high_water(conn: &Connection, object_type: SyncEntryType) -> Result<i64> {
+    let table = object_table(object_type);
+    conn.query_row(
+        &format!("SELECT COALESCE(MAX(rowid),0) FROM {table}"),
+        [],
+        |r| r.get(0),
+    )
+    .map_err(|e| DatabaseError::Sqlite(e).into())
+}
+
 /// Scan each identity once per sync cycle. Retried/rejected rows remain
 /// durable but cannot cause an infinite loop in the same cycle. A concurrent
 /// edit behind the cursor is picked up on the next cycle.
@@ -57,22 +77,19 @@ pub(super) fn collect_pending_page(
     device_id: Uuid,
     object_type: SyncEntryType,
     after: i64,
+    high_water: i64,
 ) -> Result<OutboxPage> {
     let read = conn
         .unchecked_transaction()
         .map_err(DatabaseError::Sqlite)?;
-    let table = match object_type {
-        SyncEntryType::Credential => "entries",
-        SyncEntryType::SshKey => "ssh_keys",
-        SyncEntryType::TotpSecret => "totp_secrets",
-    };
+    let table = object_table(object_type);
     let through: Option<i64> = read
         .query_row(
             &format!(
                 "SELECT MAX(scan_id) FROM (SELECT rowid AS scan_id FROM {table}
-         WHERE sync_state='pending' AND rowid>?1 ORDER BY rowid LIMIT ?2)"
+         WHERE sync_state='pending' AND rowid>?1 AND rowid<=?3 ORDER BY rowid LIMIT ?2)"
             ),
-            rusqlite::params![after, OUTBOX_PAGE_ROWS as i64],
+            rusqlite::params![after, OUTBOX_PAGE_ROWS as i64, high_water],
             |r| r.get(0),
         )
         .map_err(DatabaseError::Sqlite)?;
@@ -504,16 +521,25 @@ mod tests {
             );
         }
         let device = Uuid::new_v4();
-        let first =
-            collect_pending_page(db.conn(), &dek, device, SyncEntryType::Credential, i64::MIN)
-                .unwrap();
+        let high_water = scan_high_water(db.conn(), SyncEntryType::Credential).unwrap();
+        let first = collect_pending_page(
+            db.conn(),
+            &dek,
+            device,
+            SyncEntryType::Credential,
+            i64::MIN,
+            high_water,
+        )
+        .unwrap();
         assert_eq!(first.mutations.len(), OUTBOX_PAGE_ROWS);
+        insert_pending(db.conn(), &dek, &Uuid::new_v4(), 1, 0, "pending");
         let next = collect_pending_page(
             db.conn(),
             &dek,
             device,
             SyncEntryType::Credential,
             first.through.unwrap(),
+            high_water,
         )
         .unwrap();
         assert_eq!(next.mutations.len(), 2);
@@ -523,13 +549,14 @@ mod tests {
             device,
             SyncEntryType::Credential,
             next.through.unwrap(),
+            high_water,
         )
         .unwrap();
         assert!(last.through.is_none());
         // Scanning alone never acknowledges work.
         assert_eq!(
             crate::sync::change_tracker::count_pending_changes(db.conn()).unwrap(),
-            (OUTBOX_PAGE_ROWS + 2) as u64
+            (OUTBOX_PAGE_ROWS + 3) as u64
         );
     }
 
@@ -591,7 +618,7 @@ mod tests {
                     server_sequence: ServerCursor(1),
                 },
             };
-            apply_push_acks(db.conn(), &sent, &[ack.clone()], 1).unwrap();
+            apply_push_acks(db.conn(), &sent, std::slice::from_ref(&ack), 1).unwrap();
             apply_push_acks(db.conn(), &sent, &[ack], 1).unwrap();
             let actual = db
                 .conn()
