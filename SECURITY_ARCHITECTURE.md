@@ -715,8 +715,9 @@ removed from shipped binaries (1.0); the daemon-owned summary index
   higher-timestamp overwrites — the v1 clock-gameable LWW — do not exist in
   v2. Version steps and epoch jumps are sanity-bounded.
 - **Deterministic identity.** `mutation_id` is derived from
-  (vault, object, resulting version), so a retry of the SAME edit is
-  idempotent and a different edit can never collide with it.
+  (vault, object, resulting version), making retries of the same version stable.
+  Concurrent alternatives can share that logical identity; per-device result
+  identity and CAS determine acceptance, not a claim of collision-free edits.
 - **Durable idempotency.** Every mutation gets a result row committed in the
   SAME SQLite transaction as the object/log/sequence writes; a duplicate
   request is replayed its ORIGINAL stored result (aged-out duplicates are
@@ -733,10 +734,12 @@ removed from shipped binaries (1.0); the daemon-owned summary index
 ### 12.2 Authentication, lineage, and epoch gates
 
 - **Authenticated metadata.** Every mutation carries a DEK-derived
-  `metadata_mac` over its routing metadata; the relay verifies the MAC and
-  recomputes the deterministic id on apply — tampered metadata is
-  dead-lettered, never fanned out. The relay cannot compute or invert the
-  MAC (zero-knowledge preserved).
+  `metadata_mac` over its routing metadata. The receiving client verifies the
+  MAC and deterministic identity before applying pulled data; rejected data
+  receives a durable dead-letter disposition. The relay validates request
+  signatures and mutation shape/CAS but has no DEK and cannot authenticate
+  this MAC. A relay may forward invalid metadata; the client is the verification
+  boundary (zero-knowledge preserved).
 - **Epoch gates both directions.** The relay rejects mutations below the
   vault's forward-only epoch high-water (bounded jump so one device cannot
   brick peers with a huge claim); clients dead-letter pulled mutations below
@@ -762,8 +765,12 @@ exactly one fresh vault per origin, and clients gate v1-era configs.)
 
 ### 12.4 Known residuals (tracked, not claimed)
 
-- Pull pages are not atomic with the cursor; unappliable blobs
-  skip-and-advance (WBS-607 dead-lettering open).
+- Pull applications, conflict/dead-letter dispositions and cursor advancement
+  share one authenticated content transaction. Dead-letter overflow fails closed;
+  operator reconciliation and recovery objectives still require qualification.
+- V2 mutation history and tombstones are retained indefinitely. Incremental
+  metadata cleanup does not supply a safe offline-device history-retention
+  protocol or establish production disk/capacity limits.
 - Payload padding is not integrated (TD-NET-07); limit-set unification is
   WBS-621 (TD-NET-06).
 - Chaos fuzzing beyond the deterministic TV-006 three-device model

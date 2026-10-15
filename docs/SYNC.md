@@ -330,12 +330,28 @@ The client enforces a 4 MiB success-body limit and an 8 KiB error-body limit whi
 reading chunks, including responses without Content-Length. Oversized historical
 objects are refused explicitly; cursors do not silently pass them.
 
-Authentication and v2 push/pull use a shared limit of 16 outstanding blocking
-database jobs. Saturation returns HTTP 429. A cancelled request can still commit
-its already-started job; durable mutation identity makes retry essential. Cleanup
-runs as one blocking job at a time. Other management handlers still need separate
-executor review. The relay continues to serialize SQLite access through one
-connection; this change is not a throughput or availability guarantee.
+Authentication and all database handlers (including device management, pairing,
+migration claims and enabled legacy sync) share a limit of 16 outstanding blocking
+jobs. Saturation returns HTTP 429. A cancelled request retains its job permit
+until the work finishes and can still commit; sync clients must retry with the
+same mutation identity. The relay continues to serialize SQLite access through
+one connection; this is not a throughput or availability guarantee.
+
+Cleanup uses one separate blocking worker, deleting at most 256 rows per indexed
+statement and visiting at most 32 devices per pass. It releases the connection
+between batches and resumes after one second when a batch fills or the device
+sweep is unfinished; an idle sweep waits one hour. Per-device result pruning
+examines up to the configured retained count plus one batch. The cap is an
+eventual maintenance target, not an insertion-time storage bound. Sustained
+ingestion can outpace cleanup; row limits do not guarantee elapsed time or bytes.
+The disposable device traversal cursor restarts safely after process restart.
+Request-triggered nonce cleanup also deletes at most 256 rows.
+
+Pairing attempt history is retained until the configured retention interval has
+passed after both the last attempt and backoff expiry, so maintenance cannot clear
+an active backoff. Five additive cleanup indexes are created on relay open;
+existing databases incur index-build I/O and need disk headroom. Qualify startup
+on a disposable copy before rollout. No v2 history deletion or VACUUM is added.
 
 Each rate-limit map holds at most 10,000 keys of at most 256 bytes. Expired windows
 are reclaimed at most once per minute; active hourly/daily quotas are not evicted

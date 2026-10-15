@@ -613,11 +613,11 @@ shown, not a certification of the whole product.
 | B. Model, keys, history | 12 | 3 → 3 | `sentinelpass-core/src/database/{schema,migrations,fixtures}.rs`; relay `storage/mod.rs` | Medium; tested constraints/migrations; business retention history Unknown |
 | C. Engine fit / placement | 8 | 3 → 3 | Workspace `Cargo.toml`, `Cargo.lock`; core `database/schema.rs`; relay `storage/mod.rs` | Medium; local embedded OLTP fits observed roles; shared-relay capacity unmeasured |
 | D. Queries / physical plans | 10 | 2 → 2 | Core `database/repository.rs`, `sync/{change_tracker,outbox}.rs`; relay `handlers/sync_v2.rs` | Medium; bounded scans, offset correction; N+1/snapshot costs and representative plans remain |
-| E. Algorithms / bounds | 8 | 1 → 2 | Core `sync/{outbox,client}.rs`, `vault/content_guard.rs`; relay `rate_limit.rs`, `app_state.rs` | Medium; row/wire/key/job bounds tested; not a global memory bound, remaining full snapshots and other handlers |
+| E. Algorithms / bounds | 8 | 1 → 2 | Core `sync/{outbox,client}.rs`, `vault/content_guard.rs`; relay `rate_limit.rs`, `app_state.rs` | Medium; row/wire/key/job bounds tested across relay handlers; not a global memory bound; full snapshots and device populations remain |
 | F. Pipeline contracts / quality | 10 | 0 → 2 | `sentinelpass-relay/tests/sync_wire.rs`; core `sync/engine.rs` | High for wire defect/fix; Medium overall; real wire tests plus model tests, operational reconciliation/backfill unvalidated |
 | G. Transactions / replay | 10 | 0 → 3 | Core `sync/outbox.rs`; relay `handlers/sync_v2.rs`; both `fault_injection.rs` | High for local invariants; crash/network/retry tests are bounded evidence, not all-environment exactly-once proof |
 | H. Security / lifecycle | 10 | 2 → 2 | `SECURITY_ARCHITECTURE.md`; core `vault/content_guard.rs`, `daemon/ipc`; relay `auth.rs` | Medium; auth/tamper regression evidence; cross-platform guarantees, deletion retention and joint artifact rollback remain |
-| I. Maintenance / amplification | 6 | 1 → 2 | Lockfile, core `database/schema.rs`; relay `cleanup.rs` | Medium; patched engine/checkpoint progress; v2 history growth and maintenance contention remain |
+| I. Maintenance / amplification | 6 | 1 → 2 | Lockfile, core `database/schema.rs`; relay `cleanup.rs` | Medium; patched engine/checkpoint progress; indexed maintenance batches tested; v2 history growth and workload qualification remain |
 | J. Recovery / observability | 8 | 2 → 2 | Core `vault/backup_ops.rs`; `.github/workflows/drills.yml`; checkpoint tracing | Medium; local restore/fault coverage; deployment RPO/RTO, alerts and restore rehearsal Unknown |
 | K. AI/search evaluation | 5 | N/A → N/A | Inspected credential/domain lookup and sync paths | High; no AI, embeddings or ranked retrieval in these paths |
 | L. Simplicity / maintainability | 5 | 3 → 3 | Focused commits, existing SQLite/HTTP architecture, regression tests | Medium; no new service; platform qualification and retained-history design still needed |
@@ -644,7 +644,7 @@ exposure of a deployed SentinelPass process was not demonstrated. See SQLite's
 | 2 / High / Medium | **Measured:** a delayed v1 ack changed local `(version=2, ack=0, pending)` to `(2,1,synced)`. Conditional SQL now preserves pending edits/deletes/conflicts and monotonic ack/cursors. Relay rejected CAS no longer advances epoch; reused IDs cannot relabel another object. | A: application read/modify/write would race across writers. B: transactional predicates selected; bounded ack HashMap replaces repeated linear matching. C: existing behavior can suppress unsent work. O(page) map memory and indexed updates; conflicting results fail closed. Ciphertext equality is not required because retries re-encrypt with fresh randomness. |
 | 3 / High, exposure conditional / Medium | **Observed:** bundled SQLite 3.44.0 predates the WAL-reset fix. Upgrade to rusqlite 0.40.2 / SQLite 3.53.2. **Measured:** the old checkpoint `.execute()` reported `ExecuteReturnedResults`; now query and log actual progress. | Preserve FULL durability and authorizer fault coverage. A: reducing connection overlap cannot substitute for a patched engine. B: qualified bundled upgrade selected. C: staying on the affected version retains the known risk. Dependency/platform qualification cost; no schema change. Checkpoint is not backup or history compaction. |
 | 4 / High / Medium | **Measured baseline probe:** 500 tiny mutations encoded to 204,035 bytes against a 65,536-byte default body cap. Collect bounded row pages, batch exact encoded bytes, cap chunked responses, and bound pull pages. | A: bounded client pages selected; B: SQL keyset windows keep extraction near data; C: count-only batches fail under size skew. 128 row payloads plus receipt snapshot remain material memory; a single object is explicitly refused if oversized. Serialization adds CPU; no throughput claim. |
-| 5 / High for shared relay / Complex overall | **Observed:** v2 ignored configured object quota, rate maps never evicted, SQLite ran inline on the async executor. Enforce retained-identity quota; bound/expire rate maps; move auth/v2 and cleanup work to blocking workers. | A: bounded maps/work admission selected. B: quota count and writes share a SQL transaction; database pooling/sharding is premature without measurements. C: existing behavior has unbounded keys and ignored quota. O(K) expiry scans at most once/minute; 16 queued/running auth/v2 jobs; at saturation deny new work. Tombstones consume identity quota. History bytes and other handler execution remain open work. |
+| 5 / High for shared relay / Complex overall | **Observed:** v2 ignored configured object quota, rate maps never evicted, SQLite ran inline on the async executor. Enforce retained-identity quota; bound/expire rate maps; move auth/v2 and cleanup work to blocking workers. | A: bounded maps/work admission selected. B: quota count and writes share a SQL transaction; database pooling/sharding is premature without measurements. C: existing behavior has unbounded keys and ignored quota. O(K) expiry scans at most once/minute; 16 queued/running database-handler jobs; at saturation deny new work. Tombstones consume identity quota. History bytes and production capacity remain open work. |
 | 6 / Medium / Medium | **Observed:** listing authenticated the full snapshot then reloaded/re-MACed the whole receipt document per row. One transaction-bound `VerifiedRead` now validates rows against request-local evidence. Offset without LIMIT is corrected; equal titles use entry ID as a tie breaker. | A: request-local reuse selected. B: SQL still supplies the stable snapshot; sorting encrypted titles in SQL would not preserve logical order. C: keeping repeated reads adds avoidable work. **Inferred:** receipt parsing changes from once-per-row to once-per-request; retained receipt-map memory is O(vault size). Latency benefit is unmeasured. No cross-request cache or weakened revocation checks. |
 | 7 / High readiness gate / Complex | **Observed:** local backup/fault tests exist, while actual retention/RPO/RTO and maintenance-active capacity are Unknown. Correct stale documentation and checkpoint diagnostics; retain explicit operational gates below. | A: local probes/metrics first. B: durable snapshots and cursor protocol required before log deletion. C: indefinite retention preserves replay but disk growth is unbounded. Additional queue/cache/warehouse components have no demonstrated justification. |
 
@@ -684,8 +684,9 @@ Remaining work in foundational order (roles proposed; named owners Unknown):
    Threshold: no resurrection, omission or unauthorized recovery. Until then,
    v2 history bytes remain unbounded and shared-relay sizing is unverified.
 3. **Core and relay maintainers:** inspect the remaining full receipt scans,
-   per-object/domain reads, management handlers and cleanup window sort under
-   representative data. Use cold/warm caches, hot tenants, size skew, concurrent
+   per-object/domain reads and incremental relay maintenance under
+   representative data. The 2026-10-15 follow-up bounds handler admission and
+   replaces the cleanup window sort; capacity under sustained load remains Unknown. Use cold/warm caches, hot tenants, size skew, concurrent
    edits, retries and maintenance-active WAL/checkpoint workloads. Record rows
    examined, bytes transferred, RSS, queue denials, checkpoint progress and
    end-to-end latency. Numeric latency/capacity targets must come from the
@@ -698,7 +699,8 @@ Remaining work in foundational order (roles proposed; named owners Unknown):
    alert thresholds require deployment evidence; no guarantee is asserted here.
 
 Rollout/rollback: review focused commits against `develop`; local validation
-precedes remote CI. No schema/crypto-envelope migration is introduced. Test the
+precedes remote CI. No row-format or crypto-envelope migration is introduced;
+relay startup now builds five additive cleanup indexes (see follow-up below). Test the
 new client against both field spellings, then stage relay/client upgrades on
 disposable vault copies. Existing vaults over the retained-object quota can read
 and update existing identities but cannot add new ones; review occupancy before
@@ -717,3 +719,70 @@ exercise is to extend the outbox tests with reordered duplicate acknowledgments
 and concurrent tombstones, then assert monotonically increasing acknowledged
 versions and that every newer edit remains pending. Use generated keys and
 synthetic data; do not weaken a failing assertion to make an upgrade pass.
+
+
+### Follow-up implementation and evidence (2026-10-15)
+
+**Observed / Measured:** inspection of the remaining relay handlers found an
+unauthorized metadata write: an unauthenticated registration naming a fresh vault
+could reuse a known device UUID and rename that device in another vault. The
+public key and vault binding did not change; this was not demonstrated to expose
+credential contents. The registration upsert now requires matching vault identity
+and returns Conflict on collision. Its transaction rolls back proof consumption,
+vault creation and counter scaffolding. Tests cover both a fresh attacking vault
+and an existing attacking vault with its own valid pairing proof; authorized
+same-vault re-registration still preserves the original key.
+
+| Priority / severity / effort | Current → implemented behavior; preserved invariant | Alternatives, costs and benefit evidence |
+|---|---|---|
+| 1 / High / Simple | Cross-vault device UUID collision could rename the victim → vault-scoped upsert plus transactional rejection. No cross-vault metadata write or consumed proof on failure. | A: a separate application check can race with another connection. B: SQL ownership predicate in the existing transaction selected. C: retaining the global upsert violates ownership. Constant extra affected-row check; no new storage. Regression tests establish the refusal, not a latency improvement. Owner role: relay/security maintainer. |
+| 2 / High for availability / Medium | Management/pairing/migration/legacy handlers ran synchronous SQL or Argon2 work inline → all database handlers share existing 16-job admission. Cancelled work retains its permit until completion. | A: shared admission and blocking execution selected. B: adding a database pool would not remove synchronous work or establish write capacity. C: inline work can stall the executor. At most 16 admitted handler jobs plus one maintenance job; response/body/device-list memory is not globally bounded. Tests cover saturation, cancellation and recovery; throughput benefit is a hypothesis. Owner role: relay maintainer. |
+| 3 / Medium / Medium | Whole-table expiry deletes and a global per-device window sort → 256-row indexed deletes and at most 32 device visits per pass, with a resumable in-memory traversal cursor. V2 state/log rows are untouched. | A: loading and sorting results in Rust adds transfer and memory. B: indexed SQL ranges selected; five additive indexes cost disk, write amplification and startup build I/O. C: whole-table maintenance has no work bound. Each device examines up to retained-cap + batch rows; no duration/byte guarantee. Query-plan tests verify selected indexes and absence of temporary sorting on the bundled engine; production speed is unmeasured. Owner role: relay maintainer/operator. |
+| 4 / Medium / Simple | Attempt cleanup could disregard an active backoff if retention settings changed or were shorter than the block; large unsigned durations could wrap into expired timestamps → retain after both attempt/backoff expiry, saturate duration/deadline arithmetic. | A: checked conversion and arithmetic selected. B: an expression index supports the expiry range without transferring candidates to Rust. C: unchecked casts and the redundant OR predicate can shorten protection. Metadata remains longer after a block; tests assert active-block and exact-cutoff preservation plus extreme integer behavior. Owner role: relay/security maintainer. |
+
+**Measured local validation:** `cargo test --workspace` passed 1,138 tests with
+4 existing ignored tests (excluding duplicate child-process test summaries).
+After the final backlog-scheduling correction, the complete relay suite passed
+91 unit tests plus 2 HTTP integration tests. Workspace Clippy with all targets
+and warnings denied, formatting, and diff checks passed. No hosted CI was run.
+
+**Measured local acceptance:** relay tests cover bounded nonce batches, exact
+expiry boundaries, more than 32 devices with tied timestamps, per-device fairness,
+convergence after traversal restart, extreme caps/durations, active backoff,
+request cancellation, and actual cleanup followed by a stale mutation retry.
+V2 tombstones and logs survive cleanup beyond legacy retention and still consume
+identity quota. A file-backed SQLite test overlaps cleanup with an independent
+writer, a pinned reader and passive checkpoints; it verifies snapshot stability,
+checkpoint completion after releasing the reader, integrity_check and reopened
+contents. These are synthetic functional checks, not cold/warm cache benchmarks,
+process-kill or power-loss qualification.
+
+Cleanup is one blocking worker with a one-second delay while batches fill or a
+device traversal remains, and an hourly delay when idle. Each SQL statement
+commits independently and releases the connection; interruption may leave a
+partial sweep, which is safe to repeat. The cursor carries no authority and
+requires no durable checkpoint. Result caps and TTL cleanup are eventual targets;
+sustained arrivals can exceed reclamation, and there is no relay-wide byte bound.
+Existing v1 tombstone expiry remains a legacy behavior, not a v2 retention design.
+
+Rollout: apply only through review against develop; qualify index creation on an
+existing disposable database copy with representative size/skew and sufficient disk
+headroom. No production migration was performed. No row-format change is needed;
+older binaries ignore the additive indexes. Rollback may leave those indexes in
+place, but must retain the ownership predicate and active-backoff protection.
+Runtime cleanup can restart from the beginning without affecting sync cursors.
+Named owners, startup-time budget, capacity and latency thresholds remain Unknown.
+Before production approval, require zero unauthorized writes, zero lost replay
+history/tombstones, complete old/new transaction outcomes during crash injection,
+and the previously listed platform, restore, deletion and workload gates.
+
+The rubric remains **60.1/100 at 91.6% evidence coverage**. These fixes improve
+specific controls but do not supply the missing workload/SLO or operational
+qualification needed to raise whole-dimension scores. Readiness remains
+unverified. No PR or hosted CI is requested for this follow-up.
+
+Learning note: SQL LIMIT bounds the output/deletion batch, while the chosen index
+and OFFSET determine rows examined. Extend the Rust cleanup tests with a hot
+lexically first device and newly inserted later devices; verify every device is
+visited and no live replay row is removed. Repeating idempotent maintenance after
+restart differs from committing a replication cursor with its data effects.
