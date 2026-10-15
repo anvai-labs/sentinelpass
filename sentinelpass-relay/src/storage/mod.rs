@@ -24,6 +24,8 @@ impl RelayStorage {
         // pragma) passed. `pragma_update` is the correct setter for pragmas
         // that echo their value.
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),

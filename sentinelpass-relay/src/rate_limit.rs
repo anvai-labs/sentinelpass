@@ -4,6 +4,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Saturation denies new identities instead of evicting an active quota.
+const MAX_TRACKED_KEYS: usize = 10_000;
+const MAX_KEY_BYTES: usize = 256;
+
 /// Clock abstraction so ALL window math is deterministic under test
 /// (WBS-910 / TD-REL-06). Production uses the monotonic system clock; tests
 /// advance a fake clock FORWARD from the real `Instant::now()` instead of
@@ -34,6 +38,7 @@ pub struct RateLimiter {
     daily_buckets: Arc<Mutex<HashMap<String, DailyBucket>>>,
     daily_limit: u32,
     clock: Arc<dyn Clock>,
+    last_prune: Arc<Mutex<Instant>>,
 }
 
 #[allow(dead_code)]
@@ -66,6 +71,7 @@ impl RateLimiter {
         // Daily limit: 100x the per-minute rate (allows legitimate usage while preventing automated abuse)
         let daily_limit = requests_per_minute.saturating_mul(100);
 
+        let last_prune = Arc::new(Mutex::new(clock.now()));
         Self {
             buckets: Arc::new(Mutex::new(HashMap::new())),
             max_tokens: requests_per_minute,
@@ -75,12 +81,17 @@ impl RateLimiter {
             daily_buckets: Arc::new(Mutex::new(HashMap::new())),
             daily_limit,
             clock,
+            last_prune,
         }
     }
 
     pub fn check(&self, device_id: &str) -> bool {
         // One timestamp per decision: all three windows agree on "now".
         let now = self.clock.now();
+        if device_id.len() > MAX_KEY_BYTES {
+            return false;
+        }
+        self.prune_expired(now);
 
         // Check per-minute rate limit (token bucket)
         if !self.check_minute_limit(device_id, now) {
@@ -96,12 +107,35 @@ impl RateLimiter {
         self.check_daily_limit(device_id, now)
     }
 
+    fn prune_expired(&self, now: Instant) {
+        let mut last = self.last_prune.lock().unwrap_or_else(|e| e.into_inner());
+        if now.duration_since(*last) < Duration::from_secs(60) {
+            return;
+        }
+        self.buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, b| now.duration_since(b.last_refill) < Duration::from_secs(60));
+        self.hourly_buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, b| now.duration_since(b.window_start) < Duration::from_secs(3600));
+        self.daily_buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, b| now.duration_since(b.window_start) < Duration::from_secs(86400));
+        *last = now;
+    }
+
     fn check_minute_limit(&self, device_id: &str, now: Instant) -> bool {
         let mut buckets = match self.buckets.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        if buckets.len() >= MAX_TRACKED_KEYS && !buckets.contains_key(device_id) {
+            return false;
+        }
         let bucket = buckets.entry(device_id.to_string()).or_insert(TokenBucket {
             tokens: self.max_tokens as f64,
             last_refill: now,
@@ -126,6 +160,9 @@ impl RateLimiter {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        if buckets.len() >= MAX_TRACKED_KEYS && !buckets.contains_key(device_id) {
+            return false;
+        }
         let bucket = buckets
             .entry(device_id.to_string())
             .or_insert(HourlyBucket {
@@ -153,6 +190,9 @@ impl RateLimiter {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        if buckets.len() >= MAX_TRACKED_KEYS && !buckets.contains_key(device_id) {
+            return false;
+        }
         let bucket = buckets.entry(device_id.to_string()).or_insert(DailyBucket {
             count: 0,
             window_start: now,
@@ -215,6 +255,30 @@ mod tests {
         assert!(limiter.check("device-a"));
         assert!(limiter.check("device-a"));
         assert!(!limiter.check("device-a"));
+    }
+
+    #[test]
+    fn saturation_preserves_active_quotas_and_expiry_reclaims_capacity() {
+        let clock = Arc::new(FakeClock::new());
+        let limiter = RateLimiter::with_clock(clock.clone(), 1);
+        for id in 0..MAX_TRACKED_KEYS {
+            assert!(limiter.check(&format!("device-{id}")));
+        }
+        assert!(!limiter.check("new-device"));
+        assert!(!limiter.check("device-0"));
+        assert_eq!(limiter.buckets.lock().unwrap().len(), MAX_TRACKED_KEYS);
+        assert_eq!(
+            limiter.daily_buckets.lock().unwrap().len(),
+            MAX_TRACKED_KEYS
+        );
+        clock.advance(Duration::from_secs(60));
+        // Minute space is free, but active daily quotas must not be evicted.
+        assert!(!limiter.check("new-device"));
+        assert!(limiter.check("device-0"));
+        clock.advance(Duration::from_secs(86400));
+        assert!(limiter.check("new-device"));
+        assert_eq!(limiter.daily_buckets.lock().unwrap().len(), 1);
+        assert!(!limiter.check(&"x".repeat(MAX_KEY_BYTES + 1)));
     }
 
     #[test]

@@ -21,6 +21,13 @@ impl Drop for RunningRelay {
     }
 }
 
+fn allow_test_loopback() {
+    // Configure this test executable once, before either test starts clients
+    // or servers. This does not alter the parent application's environment.
+    static CONFIGURE: std::sync::Once = std::sync::Once::new();
+    CONFIGURE.call_once(|| std::env::set_var("SENTINELPASS_ALLOW_LOOPBACK_RELAY", "1"));
+}
+
 fn register(storage: &RelayStorage, vault: Uuid) -> (Uuid, SigningKey) {
     let device = Uuid::new_v4();
     let mut bytes = [0; 32];
@@ -36,9 +43,7 @@ fn register(storage: &RelayStorage, vault: Uuid) -> (Uuid, SigningKey) {
 
 #[tokio::test]
 async fn real_client_push_retry_and_pull_preserve_all_object_types() {
-    // This integration-test executable has a single test; its environment is
-    // isolated from the unit-test binaries and production relay processes.
-    std::env::set_var("SENTINELPASS_ALLOW_LOOPBACK_RELAY", "1");
+    allow_test_loopback();
     assert_eq!(
         sentinelpass_core::sync::client::MAX_RELAY_RESPONSE_BYTES,
         sentinelpass_relay::handlers::sync_v2::MAX_PULL_RESPONSE_BYTES
@@ -182,7 +187,7 @@ async fn real_client_push_retry_and_pull_preserve_all_object_types() {
 #[tokio::test]
 async fn client_bounds_chunked_success_and_error_bodies() {
     use axum::{body::Body, http::StatusCode, response::Response, routing::post, Router};
-    std::env::set_var("SENTINELPASS_ALLOW_LOOPBACK_RELAY", "1");
+    allow_test_loopback();
     for status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
         let router = Router::new().route(
             "/api/v2/sync/push",

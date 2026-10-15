@@ -37,45 +37,52 @@ pub async fn auth_middleware(
         .await
         .map_err(|e| RelayError::BadRequest(format!("Failed to read body: {}", e)))?;
 
-    let (device_id, _timestamp, nonce) = verify_auth(
-        &auth_header,
-        &method,
-        &path,
-        &body_bytes,
-        &state.storage,
-        state.config.nonce_window_secs,
-    )?;
+    let auth_body = body_bytes.clone();
+    let device_id = state
+        .run_blocking(move |state| {
+            let (device_id, _timestamp, nonce) = verify_auth(
+                &auth_header,
+                &method,
+                &path,
+                &auth_body,
+                &state.storage,
+                state.config.nonce_window_secs,
+            )?;
 
-    // Check nonce dedup
-    {
-        let conn = state.storage.conn()?;
-        let now = Utc::now().timestamp();
+            // Check nonce dedup
+            {
+                let conn = state.storage.conn()?;
+                let now = Utc::now().timestamp();
 
-        let seen: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM seen_nonces WHERE nonce = ?1)",
-                [&nonce],
-                |row| row.get(0),
-            )
-            .map_err(|e| RelayError::Database(e.to_string()))?;
+                let seen: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM seen_nonces WHERE nonce = ?1)",
+                        [&nonce],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| RelayError::Database(e.to_string()))?;
 
-        if seen {
-            return Err(RelayError::Auth("Nonce reused".to_string()));
-        }
+                if seen {
+                    return Err(RelayError::Auth("Nonce reused".to_string()));
+                }
 
-        conn.execute(
-            "INSERT INTO seen_nonces (nonce, device_id, seen_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![nonce, device_id.to_string(), now],
-        )
-        .map_err(|e| RelayError::Database(e.to_string()))?;
+                conn.execute(
+                    "INSERT INTO seen_nonces (nonce, device_id, seen_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![nonce, device_id.to_string(), now],
+                )
+                .map_err(|e| RelayError::Database(e.to_string()))?;
 
-        // Cleanup expired nonces (best-effort)
-        conn.execute(
-            "DELETE FROM seen_nonces WHERE seen_at < ?1",
-            [now - state.config.nonce_window_secs],
-        )
-        .ok();
-    }
+                // Cleanup expired nonces (best-effort)
+                conn.execute(
+                    "DELETE FROM seen_nonces WHERE seen_at < ?1",
+                    [now - state.config.nonce_window_secs],
+                )
+                .ok();
+            }
+
+            Ok(device_id)
+        })
+        .await?;
 
     // Per-device rate limiting after auth verification and nonce consumption.
     let device_key = format!("auth:{}", device_id);
@@ -120,7 +127,7 @@ fn verify_auth(
 
     // Check timestamp freshness (5 min window)
     let now = Utc::now().timestamp();
-    if (now - timestamp).abs() > nonce_window_secs.max(1) {
+    if now.abs_diff(timestamp) > nonce_window_secs.max(1) as u64 {
         return Err(RelayError::Auth("Request expired".to_string()));
     }
 
@@ -313,6 +320,22 @@ mod tests {
         match result.unwrap_err() {
             RelayError::Auth(msg) => assert!(msg.contains("expired")),
             other => panic!("expected Auth error, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn extreme_timestamps_are_rejected_without_integer_overflow() {
+        let storage = RelayStorage::in_memory().unwrap();
+        for timestamp in [i64::MIN, i64::MAX] {
+            let header = format!(
+                "SentinelPass-Ed25519 {}:{timestamp}:nonce:{}",
+                Uuid::new_v4(),
+                STANDARD.encode([0; 64])
+            );
+            assert!(
+                matches!(verify_auth(&header, "POST", "/api/v2/sync/push", b"", &storage, 300),
+                Err(RelayError::Auth(message)) if message == "Request expired")
+            );
         }
     }
 

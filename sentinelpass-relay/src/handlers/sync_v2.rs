@@ -224,6 +224,16 @@ pub async fn push_v2(
     extensions: Extensions,
     Json(req): Json<PushRequestV2>,
 ) -> Result<Json<PushResponseV2>, RelayError> {
+    state
+        .run_blocking(move |state| push_v2_inner(state, extensions, req))
+        .await
+}
+
+fn push_v2_inner(
+    state: RelayAppState,
+    extensions: Extensions,
+    req: PushRequestV2,
+) -> Result<Json<PushResponseV2>, RelayError> {
     let device_id = extensions
         .get::<Uuid>()
         .ok_or_else(|| RelayError::Auth("No device ID".to_string()))?;
@@ -270,6 +280,15 @@ pub async fn push_v2(
 
     let mut results: Vec<MutationResult> = Vec::with_capacity(req.mutations.len());
     let mut epoch_changed = false;
+    // Retained identities include tombstones: deleting an object must not
+    // discard its CAS baseline or permit unbounded create/delete churn.
+    let mut object_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sync_entries_v2 WHERE vault_id=?1",
+            [&vault_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| RelayError::Database(e.to_string()))?;
 
     for m in &req.mutations {
         // Static shape first: a malformed mutation is a terminal request
@@ -350,13 +369,11 @@ pub async fn push_v2(
             });
             continue;
         }
-        if m.key_epoch > vault_epoch {
-            if m.key_epoch - vault_epoch > MAX_EPOCH_JUMP {
-                return Err(RelayError::BadRequest(format!(
-                    "key_epoch advance of {} exceeds the maximum jump of {MAX_EPOCH_JUMP}",
-                    m.key_epoch - vault_epoch
-                )));
-            }
+        if m.key_epoch > vault_epoch && m.key_epoch - vault_epoch > MAX_EPOCH_JUMP {
+            return Err(RelayError::BadRequest(format!(
+                "key_epoch advance of {} exceeds the maximum jump of {MAX_EPOCH_JUMP}",
+                m.key_epoch - vault_epoch
+            )));
         }
 
         // --- CAS version guard (WBS-603/608): apply iff the stored current
@@ -393,6 +410,15 @@ pub async fn push_v2(
                 outcome: reason_to_outcome(&reason),
             });
             continue;
+        }
+
+        if current.is_none() {
+            if object_count as u64 >= state.config.max_entries_per_vault as u64 {
+                return Err(RelayError::BadRequest(
+                    "vault retained-object quota reached".into(),
+                ));
+            }
+            object_count += 1;
         }
 
         // A rejected CAS must not advance authority for other mutations.
@@ -601,6 +627,16 @@ pub async fn pull_v2(
     State(state): State<RelayAppState>,
     extensions: Extensions,
     Json(req): Json<PullRequestV2>,
+) -> Result<Json<PullResponseV2>, RelayError> {
+    state
+        .run_blocking(move |state| pull_v2_inner(state, extensions, req))
+        .await
+}
+
+fn pull_v2_inner(
+    state: RelayAppState,
+    extensions: Extensions,
+    req: PullRequestV2,
 ) -> Result<Json<PullResponseV2>, RelayError> {
     let device_id = extensions
         .get::<Uuid>()
@@ -868,14 +904,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pull_byte_pages_preserve_cursor_and_all_mutations() {
-        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
-        let (device, vault, _) = setup(&state);
-        for _ in 0..3 {
-            let mut mutation = sample_mutation(&vault, Uuid::new_v4(), 0, 1);
-            mutation.origin_device_id = device;
-            mutation.encrypted_payload = STANDARD.encode(vec![0; 1024 * 1024]);
-            push_v2(
+    async fn object_quota_is_transactional_and_preserves_retries_and_deletes() {
+        let config = RelayConfig {
+            max_entries_per_vault: 1,
+            ..Default::default()
+        };
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), config);
+        let (device, vault, object) = setup(&state);
+        let mut first = sample_mutation(&vault, object, 0, 1);
+        first.origin_device_id = device;
+        let mut second = first.clone();
+        second.object_id = Uuid::new_v4();
+        second.mutation_id = Uuid::new_v4();
+        let too_many = PushRequestV2 {
+            device_sequence: 1,
+            mutations: vec![first.clone(), second.clone()],
+        };
+        assert!(push_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(too_many)
+        )
+        .await
+        .is_err());
+        assert_eq!(stored_result_count(&state), 0);
+        // Retry and deletion of the retained identity still work at capacity.
+        for mutation in [
+            first.clone(),
+            first.clone(),
+            MutationV2 {
+                mutation_id: Uuid::new_v4(),
+                expected_version: 1,
+                resulting_version: 2,
+                is_tombstone: true,
+                ..first
+            },
+        ] {
+            let response = push_v2(
                 State(state.clone()),
                 auth_extensions(device),
                 Json(PushRequestV2 {
@@ -885,6 +950,58 @@ mod tests {
             )
             .await
             .unwrap();
+            assert!(response.results[0].outcome.is_applied_outcome());
+        }
+        assert!(push_v2(
+            State(state.clone()),
+            auth_extensions(device),
+            Json(PushRequestV2 {
+                device_sequence: 2,
+                mutations: vec![second],
+            })
+        )
+        .await
+        .is_err());
+        let conn = state.storage.conn().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT current_sequence FROM sequence_counters WHERE vault_id=?1",
+                [&vault],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT key_epoch FROM vault_epochs WHERE vault_id=?1",
+                [&vault],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_byte_pages_preserve_cursor_and_all_mutations() {
+        let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
+        let (device, vault, _) = setup(&state);
+        for _ in 0..3 {
+            let mut mutation = sample_mutation(&vault, Uuid::new_v4(), 0, 1);
+            mutation.origin_device_id = device;
+            mutation.encrypted_payload = STANDARD.encode(vec![0; 1024 * 1024]);
+            let response = push_v2(
+                State(state.clone()),
+                auth_extensions(device),
+                Json(PushRequestV2 {
+                    device_sequence: 1,
+                    mutations: vec![mutation],
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(response.results[0].outcome.is_applied_outcome());
         }
         let page = pull_v2(
             State(state.clone()),
@@ -958,7 +1075,7 @@ mod tests {
         let (device, vault, object) = setup(&state);
         let mut original = sample_mutation(&vault, object, 0, 1);
         original.origin_device_id = device;
-        push_v2(
+        let response = push_v2(
             State(state.clone()),
             auth_extensions(device),
             Json(PushRequestV2 {
@@ -968,6 +1085,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(response.results[0].outcome.is_applied_outcome());
         let mut valid = sample_mutation(&vault, Uuid::new_v4(), 0, 1);
         valid.origin_device_id = device;
         original.object_id = Uuid::new_v4();

@@ -18,15 +18,24 @@ pub fn spawn_cleanup_task(
         let mut interval = time::interval(Duration::from_secs(3600)); // hourly
         loop {
             interval.tick().await;
-            if let Err(e) = run_cleanup(
-                &storage,
-                tombstone_retention_days,
-                nonce_window_secs,
-                pairing_fetch_attempt_retention_secs,
-                mutation_result_ttl_secs,
-                max_mutation_results_per_device,
-            ) {
-                tracing::error!("Cleanup error: {}", e);
+            let cleanup_storage = storage.clone();
+            // At most one cleanup job is outstanding; SQLite's mutex still
+            // serializes it with requests, but it does not block the executor.
+            let result = tokio::task::spawn_blocking(move || {
+                run_cleanup(
+                    &cleanup_storage,
+                    tombstone_retention_days,
+                    nonce_window_secs,
+                    pairing_fetch_attempt_retention_secs,
+                    mutation_result_ttl_secs,
+                    max_mutation_results_per_device,
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(%error, "Cleanup error"),
+                Err(error) => tracing::error!(%error, "Cleanup worker failed"),
             }
         }
     });
@@ -44,14 +53,14 @@ pub(crate) fn run_cleanup(
     let now = chrono::Utc::now().timestamp();
 
     // Prune nonces older than the configured freshness window (minimum 1 second)
-    let nonce_cutoff = now - nonce_window_secs.max(1);
+    let nonce_cutoff = now.saturating_sub(nonce_window_secs.max(1));
     conn.execute("DELETE FROM seen_nonces WHERE seen_at < ?1", [nonce_cutoff])
         .map_err(|e| e.to_string())?;
 
     // Prune aged-out v2 mutation results (bounded idempotency state,
     // WBS-603): after expiry a duplicate is re-evaluated by the CAS guard,
     // which rejects it rather than replaying it.
-    let result_cutoff = now - mutation_result_ttl_secs.max(1);
+    let result_cutoff = now.saturating_sub(mutation_result_ttl_secs.max(1));
     conn.execute(
         "DELETE FROM mutation_results WHERE created_at < ?1",
         [result_cutoff],
@@ -88,7 +97,7 @@ pub(crate) fn run_cleanup(
         [now],
     )
     .map_err(|e| e.to_string())?;
-    let pairing_fetch_cutoff = now - pairing_fetch_attempt_retention_secs.max(60);
+    let pairing_fetch_cutoff = now.saturating_sub(pairing_fetch_attempt_retention_secs.max(60));
     conn.execute(
         "DELETE FROM pairing_fetch_attempts
          WHERE (blocked_until <= ?1 AND last_attempt_at < ?2) OR last_attempt_at < ?2",
@@ -97,7 +106,10 @@ pub(crate) fn run_cleanup(
     .map_err(|e| e.to_string())?;
 
     // Prune old tombstones
-    let tombstone_cutoff = now - (tombstone_retention_days as i64 * 86400);
+    let retention = i64::try_from(tombstone_retention_days)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(86400);
+    let tombstone_cutoff = now.saturating_sub(retention);
     conn.execute(
         "DELETE FROM sync_entries WHERE is_tombstone = 1 AND received_at < ?1",
         [tombstone_cutoff],
