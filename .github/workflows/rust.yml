@@ -38,6 +38,8 @@ jobs:
         run: cargo run -p sentinelpass-protocol --example generate_custody_bindings -- --check
       - name: Check Sandesha recovery binding vectors
         run: cargo run -p sentinelpass-protocol --example check_sandesha_binding
+      - name: Test protocol crate as packaged for publication
+        run: bash scripts/test-protocol-package.sh
 
   # TypeScript TDD - runs in parallel
   web_tdd:

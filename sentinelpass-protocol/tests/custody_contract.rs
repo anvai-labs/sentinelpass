@@ -5,33 +5,30 @@ const REFERENCE: &str = r#"{"objectId":"object-1","revision":"1","keyEpoch":"1",
 
 #[test]
 fn custody_scope_rejects_positional_array_metadata() {
-    let bytes = include_bytes!("../../bindings/custody/scope.array.invalid.json");
+    let bytes = include_bytes!("fixtures/scope.array.invalid.json");
     assert!(CustodyScope::decode(bytes).is_err());
     assert!(serde_json::from_slice::<CustodyScope>(bytes).is_err());
 }
 
 #[test]
 fn custody_reference_rejects_positional_array_metadata() {
-    let bytes = include_bytes!("../../bindings/custody/reference.array.invalid.json");
+    let bytes = include_bytes!("fixtures/reference.array.invalid.json");
     assert!(ObjectRef::decode(bytes).is_err());
     assert!(serde_json::from_slice::<ObjectRef>(bytes).is_err());
 }
 
 #[test]
 fn custody_capabilities_rejects_positional_array_metadata() {
-    let bytes = include_bytes!("../../bindings/custody/capabilities.array.invalid.json");
+    let bytes = include_bytes!("fixtures/capabilities.array.invalid.json");
     assert!(ProviderCapabilities::decode(bytes).is_err());
     assert!(serde_json::from_slice::<ProviderCapabilities>(bytes).is_err());
 }
 
 #[test]
 fn custody_golden_metadata_round_trips_without_coercion() {
+    assert_eq!(include_str!("fixtures/scope.golden.json").trim(), SCOPE);
     assert_eq!(
-        include_str!("../../bindings/custody/scope.golden.json").trim(),
-        SCOPE
-    );
-    assert_eq!(
-        include_str!("../../bindings/custody/reference.golden.json").trim(),
+        include_str!("fixtures/reference.golden.json").trim(),
         REFERENCE
     );
     let scope = CustodyScope::decode(SCOPE.as_bytes()).unwrap();

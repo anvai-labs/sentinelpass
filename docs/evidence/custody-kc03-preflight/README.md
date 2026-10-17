@@ -4,7 +4,8 @@
 [Workcard](../../CUSTODY_KC03_WORKCARD.md) records the actual native recovery
 entry point, storage-runtime gap, macOS peer limitation and ordered acceptance.
 
-`inputs.json` pins 48 SentinelPass and 13 Sandesha files. Producer evidence pins
+The original manifest pins 48 SentinelPass and 13 Sandesha files; current
+`inputs.json` additionally pins five package-local canonical metadata fixtures. Producer evidence pins
 come from the KC-02 validation receipt, with current transport and contract files
 added. Consumer pins cover the inspected recovery interfaces, native sources and
 manifest/lockfile. They are not a complete vendor/package provenance inventory.
@@ -46,9 +47,15 @@ KC-03B/C for proof, cancellation, migration and resource requirements.
 Release-preparation update: PR269 is merged after clean review and45 green checks;
 the [binding vectors](../custody-binding-v1/README.md) and
 [native graph preflight](../custody-native-graph/README.md) now have separate receipts.
-`inputs-1df0279.json` preserves the original pins. Current `inputs.json` refreshes
+`inputs-1df0279.json` preserves the original pins. The version preparation captured in `inputs-d354eff.json` refreshes
 only Cargo.toml/Cargo.lock for the0.18.0 version bump; eight first-party packages
 change version and registry package records are byte-equivalent as parsed TOML.
 The before/after hashes and scope are explicit in `versionOnlyRefresh`. All61
-current pins match. Historical runtime/performance/review receipts still identify
+version-preparation pins matched. Historical runtime/performance/review receipts still identify
 their original candidate; this refresh does not rewrite their measured source.
+
+Publication qualification refresh: `packagingOnlyRefresh` records the generator
+and test include-path corrections, plus five canonical fixture pins. Cross-language
+fixture copies remain byte-identical and are checked by the generated-binding CI
+gate. All66 current pins match; `source-check.json` remains the historical61-file
+receipt. The packaged-crate test exercises the archive without workspace parents.

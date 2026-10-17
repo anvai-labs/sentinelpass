@@ -26,10 +26,10 @@
       "sentinelpass-core/src/daemon/vault_state.rs": "c56ea23a5f2b2eb5530d4cf2ecdce39af072f028eab49f50d5f542d2d840677a",
       "sentinelpass-core/src/daemon/ipc/stepup.rs": "7a2784e7692ab5d62b116acbd3fff88d5520595154662298605b67e64308a61f",
       "sentinelpass-core/src/audit.rs": "36aa8d337aca24878bb79926bc5932c2f676d80b7ea699fc02a8aa9c65030dcf",
-      "sentinelpass-protocol/examples/generate_custody_bindings.rs": "2350c525d109d986815bfba3588c0cb80ec94bc5a4946fe75f799717d60523e0",
+      "sentinelpass-protocol/examples/generate_custody_bindings.rs": "dcbcb07b7a87fa5d13bc17e54d55a93252cc57b929398bd2e48b2513dd659622",
       "sentinelpass-protocol/examples/custody_validator.ts.in": "0447ee2d9a70a7bb9e33640cec125c5a88c3a3da73b6ca5c8656e1444766d5f4",
       "sentinelpass-protocol/examples/custody_ports.ts.in": "9aa7d2ef1cf7d0eae805a48ba0b84c3c09f3abc1bc76f42f267fc58659b30c51",
-      "sentinelpass-protocol/tests/custody_contract.rs": "4f4c612fcd22b73392891a7d3f5684dce480587f1aa59f62e98949ef0d4051d9",
+      "sentinelpass-protocol/tests/custody_contract.rs": "1dc303b3c98e24da56a792df77e9a40c051c2a7dc134fc169240e4ae20928851",
       "sentinelpass-mobile-bridge/tests/custody_contract.rs": "f20f968239d27d74f3c6a6b16f3eaa36b6c7635ee45f18859c20cba04a3d2772",
       "sentinelpass-mobile-bridge/tests/jni_contract.rs": "45fe7ab6fd52ea9fa14ee83721defca5956e609d2583bbb06849f9d90abcf85f",
       "tests/custody-contract.test.ts": "1f8d22c1efe2e105d83d58ae1c920e2ad2d5d5d1dd6b887bb94ecef8838dcc69",
@@ -52,7 +52,12 @@
       "bindings/custody/capabilities.array.invalid.json": "44a434cdb7ef7261512476f316867f56ffda2acc49a3238afdbfac37ce966036",
       "sentinelpass-core/src/daemon/transport/mod.rs": "54ab4430c8a1a1e65cf5b39d77c34f947f9c25356d648adaa34d168e80d6f785",
       "sentinelpass-core/src/daemon/transport/unix.rs": "0845e5a1c772c9171d2fff7c59982a687ddc5ebf6598067e0de8e37d9c192677",
-      "docs/SANDESHA_USER_KEY_CUSTODY_CONTRACT_2026-10-16.md": "8ddd37ce9a628c1e2c47bb3d856cc752192e468c1ea8616bd0f9666f3dc7b94c"
+      "docs/SANDESHA_USER_KEY_CUSTODY_CONTRACT_2026-10-16.md": "8ddd37ce9a628c1e2c47bb3d856cc752192e468c1ea8616bd0f9666f3dc7b94c",
+      "sentinelpass-protocol/tests/fixtures/scope.golden.json": "5e840c042ef7e4da2253a2c6377295e5a4a9a621b4c204908f2bd3ae30fded1f",
+      "sentinelpass-protocol/tests/fixtures/reference.golden.json": "7c6a19673fd1231ffb96848f403deb47d675fa6831a21b94512c976bec31e93a",
+      "sentinelpass-protocol/tests/fixtures/scope.array.invalid.json": "f42148c58bd5bd85f4844a8e2acf4b7af5eabab3cb7456764c36f5b085c1ca50",
+      "sentinelpass-protocol/tests/fixtures/reference.array.invalid.json": "0d6d94dc5eea8703aa8ca4c5ed8677568f417a1febcb194fdb09fdc0272d6f7a",
+      "sentinelpass-protocol/tests/fixtures/capabilities.array.invalid.json": "44a434cdb7ef7261512476f316867f56ffda2acc49a3238afdbfac37ce966036"
     },
     "sandesha": {
       "lib/encryption/recovery/contract.ts": "b8bc84812abadf1a77d7ab09228859accb9f4e15827da98e7cc1888a10b29591",
@@ -83,5 +88,20 @@
         "after": "27cd090b1ab7d12ad54e2f6661950ec9e9ac500895be12ad460370e3955c38d2"
       }
     }
+  },
+  "packagingOnlyRefresh": {
+    "reason": "Make published protocol tests self-contained; generated bindings retain byte-identical fixtures and --check drift enforcement. No runtime source change.",
+    "previousManifest": "inputs-d354eff.json",
+    "files": {
+      "sentinelpass-protocol/examples/generate_custody_bindings.rs": {
+        "before": "2350c525d109d986815bfba3588c0cb80ec94bc5a4946fe75f799717d60523e0",
+        "after": "dcbcb07b7a87fa5d13bc17e54d55a93252cc57b929398bd2e48b2513dd659622"
+      },
+      "sentinelpass-protocol/tests/custody_contract.rs": {
+        "before": "4f4c612fcd22b73392891a7d3f5684dce480587f1aa59f62e98949ef0d4051d9",
+        "after": "1dc303b3c98e24da56a792df77e9a40c051c2a7dc134fc169240e4ae20928851"
+      }
+    },
+    "addedCanonicalFixturePins": 5
   }
 }

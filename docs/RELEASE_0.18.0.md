@@ -21,6 +21,10 @@ installer gates remain required. This file does not assert publication has occur
   source-drift tooling and native integration workcards. The combined OpenPGP graph
   is isolated evidence only; it adds no shipping runtime dependency or capability.
 
+- Make protocol crate test fixtures self-contained and check the extracted archive
+  in CI. Align the fuzz lockfile local versions and require the desktop feature
+  and packaging gates before crates.io publication as well as GitHub release.
+
 ## Limits
 
 This release does not enable Sandesha recovery enrollment, browser secret transfer,
