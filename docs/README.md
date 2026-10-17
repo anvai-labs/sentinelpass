@@ -52,6 +52,7 @@ Quick reference to all project documentation. Most docs live at the repository r
 | Document | Description | Keywords |
 |----------|-------------|----------|
 | [docs/GAP_REVIEW_2026-05-08.md](./GAP_REVIEW_2026-05-08.md) | Current gap review and integration plan for developer secrets, passkeys, and biometrics | audit, victor, api keys, passkeys, biometric, typed credentials |
+| [Sandesha user-key custody contract](SANDESHA_USER_KEY_CUSTODY_CONTRACT_2026-10-16.md) / [handoff](SANDESHA_USER_KEY_CUSTODY_HANDOFF_2026-10-16.md) | Proposed optional personal-vault/OS custody, Rust/TS/native contract, cross-device lifecycle and qualification plan; not shipped | Sandesha, keys, custody, keystore, device, recovery |
 | [docs/STRATEGIC_REMEDIATION_PLAN_2026-09-04.md](./STRATEGIC_REMEDIATION_PLAN_2026-09-04.md) | Active security-first remediation program through 1.0 | recovery, envelope v2, sync v2, IPC, mobile, release gates |
 | [docs/GAP_REVIEW_2026-02-26.md](./GAP_REVIEW_2026-02-26.md) | Evidence-based gap audit across security, features, design, and implementation | audit, review, gaps, security posture |
 | [docs/PASSKEY_PRODUCT_DESIGN.md](./PASSKEY_PRODUCT_DESIGN.md) | Product and security boundary for passkey references before implementation | passkeys, WebAuthn, AuthenticationServices, FIDO, credential provider |

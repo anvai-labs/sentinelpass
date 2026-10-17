@@ -41,6 +41,7 @@
 mod abi;
 mod backup;
 mod bridge;
+mod custody;
 mod error;
 mod ffi;
 mod slot;

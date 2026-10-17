@@ -137,8 +137,21 @@ const GENESIS_DOMAIN: &[u8] = b"sentinelpass-audit-chain-genesis-v1";
 const CHAIN_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 
 /// Audit log entry types
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum CustodyAuditOperation {
+    Put,
+    Remove,
+    Grant,
+    Deliver,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditEventType {
+    /// Fixed operation labels only; never owner IDs, references or secret bytes.
+    PersonalCustody {
+        operation: CustodyAuditOperation,
+        success: bool,
+    },
     /// Vault operations
     VaultCreated,
     VaultUnlocked {
@@ -1260,7 +1273,8 @@ impl AuditLogger {
             AuditEventType::V2BlobMigration => 3,
 
             // High severity (4)
-            AuditEventType::CredentialDeleted { .. }
+            AuditEventType::PersonalCustody { .. }
+            | AuditEventType::CredentialDeleted { .. }
             | AuditEventType::BruteForceDetected { .. } => 4,
 
             // Medium-high severity (3)

@@ -111,8 +111,12 @@ fn parse_kotlin_externals(src: &str) -> Vec<NativeDecl> {
 /// Parse Rust `extern "system" fn Java_com_sentinelpass_VaultBridge_<name>(...) -> Ret`
 /// exports, including multi-line signatures.
 fn parse_rust_jni_exports(src: &str) -> Vec<NativeDecl> {
+    parse_rust_exports_for(src, JNI_CLASS_PREFIX)
+}
+
+fn parse_rust_exports_for(src: &str, prefix: &str) -> Vec<NativeDecl> {
     let mut decls = Vec::new();
-    let needle = format!("extern \"system\" fn {}", JNI_CLASS_PREFIX);
+    let needle = format!("extern \"system\" fn {prefix}");
     let mut chars_rest = src;
     while let Some(pos) = chars_rest.find(&needle) {
         let after = &chars_rest[pos + needle.len()..];
@@ -178,8 +182,38 @@ fn expected_jni_type(kotlin_type: &str) -> &'static str {
         "Int" => "jint",
         "Boolean" => "jboolean",
         "String" => "JString",
+        "ByteArray" => "JByteArray",
         other => panic!("unmapped Kotlin native param type `{other}` — extend the contract map"),
     }
+}
+
+#[test]
+fn generated_custody_jni_metadata_declaration_matches_export() {
+    let kotlin = fs::read_to_string(repo_root().join(
+        "android/SentinelPass/app/src/main/java/com/sentinelpass/custody/CustodyContract.kt",
+    ))
+    .unwrap();
+    assert!(kotlin.contains("package com.sentinelpass.custody"));
+    assert!(kotlin.contains("@JvmStatic external fun validateMetadata"));
+    let declarations = parse_kotlin_externals(&kotlin);
+    let exports = parse_rust_exports_for(
+        &rust_source(),
+        "Java_com_sentinelpass_custody_CustodyContract_",
+    );
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(exports.len(), 1);
+    let declaration = &declarations[0];
+    let export = &exports[0];
+    assert_eq!(declaration.name, export.name);
+    assert_eq!(
+        declaration
+            .params
+            .iter()
+            .map(|p| expected_jni_type(p))
+            .collect::<Vec<_>>(),
+        export.params
+    );
+    assert_eq!(expected_jni_ret(&declaration.ret), export.ret);
 }
 
 /// Kotlin return type → expected JNI return type in the Rust export.

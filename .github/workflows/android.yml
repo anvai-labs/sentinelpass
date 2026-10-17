@@ -104,6 +104,10 @@ jobs:
                 exit 1
               fi
             done
+            if ! llvm-nm -D --defined-only "$so" | grep -q "Java_com_sentinelpass_custody_CustodyContract_validateMetadata$"; then
+              echo "::error::$so is missing custody metadata validation JNI symbol"
+              exit 1
+            fi
             if llvm-nm -D --defined-only "$so" | grep -Eq "$STALE_RE"; then
               echo "::error::$so exports stale (pre-WBS-802) VaultManager/DriveSync symbols"
               llvm-nm -D --defined-only "$so" | grep -E "$STALE_RE"

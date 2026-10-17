@@ -1,0 +1,23 @@
+
+// Type-level intent only: adapters MUST use private registries and native peer
+// binding. These declarations implement no bridge and mint no capability.
+declare const receiverBrand: unique symbol;
+declare const sourceBrand: unique symbol;
+declare const approvalBrand: unique symbol;
+export interface RuntimeReceiver { readonly [receiverBrand]: true }
+export interface RuntimeSource { readonly [sourceBrand]: true }
+export interface StepUpApproval { readonly [approvalBrand]: true }
+export interface CustodyLease {
+  deliverTo(receiver: RuntimeReceiver, signal?: AbortSignal): Promise<void>;
+  close(): void;
+}
+export interface CustodyProviderV1 {
+  describe(): Promise<ProviderCapabilities>;
+  acquire(scope: CustodyScope, ref: ObjectRef, signal?: AbortSignal): Promise<CustodyLease>;
+}
+export interface CustodyAdminV1 {
+  put(scope: CustodyScope, expected: ObjectRef | null, source: RuntimeSource,
+    approval: StepUpApproval, signal?: AbortSignal): Promise<ObjectRef>;
+  remove(scope: CustodyScope, expected: ObjectRef, approval: StepUpApproval,
+    signal?: AbortSignal): Promise<void>;
+}

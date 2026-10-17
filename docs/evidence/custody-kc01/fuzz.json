@@ -1,0 +1,15 @@
+{
+  "command": "cargo +nightly fuzz run fuzz_custody_metadata -- -max_total_time=60 -max_len=8192",
+  "exitCode": 0,
+  "runs": 5777483,
+  "seconds": 61,
+  "crashes": 0,
+  "consoleExcerpt": "Done 5777483 runs in 61 second(s)",
+  "scope": "metadata parsers only; no vault or platform secrets",
+  "sha256": {
+    "fuzz/fuzz_targets/fuzz_custody_metadata.rs": "f389b786a2ace91021f82065566e83c67c4873ee1f753217d0551d631c652ef4",
+    "sentinelpass-protocol/src/custody.rs": "9d1ebc1f5fb20cb1d6008c15351325e8c1f6826a461b3377a820d2925069b20c",
+    "fuzz/Cargo.lock": "8f1580291176931a60fbf42bb15efd95edd7164e24af66797eb3dc632c1d8636",
+    "fuzz/target/aarch64-apple-darwin/release/fuzz_custody_metadata": "38c1bfc36a308c05737945f7da98f462196dfecf31a0a4b50c55abe951b726dc"
+  }
+}

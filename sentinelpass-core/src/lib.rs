@@ -8,6 +8,7 @@ pub mod autofill;
 pub mod biometric;
 pub mod biometric_hello;
 pub mod crypto;
+pub mod custody;
 pub mod daemon;
 pub mod database;
 pub mod domain;

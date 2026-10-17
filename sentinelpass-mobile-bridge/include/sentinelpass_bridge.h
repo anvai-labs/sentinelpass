@@ -206,6 +206,21 @@ enum SPErrorCode sp_bridge_negotiate(uint32_t client_abi_version, struct SPBridg
 void sp_bytes_free(const uint8_t *ptr, uintptr_t len);
 
 /**
+ * Validate custody v1 metadata only; Success grants no authority or capability.
+ * `kind`: 1 = CustodyScope, 2 = ObjectRef, 3 = ProviderCapabilities. The metadata
+ * is UTF-8 JSON, bounded to 4096 bytes. Unknown/duplicate fields fail closed.
+ * The caller must first negotiate ABI v2; custody access is NOT advertised.
+ *
+ * # Safety
+ * For a nonzero length <=4096, metadata must point to that many readable bytes
+ * for this call. The buffer is borrowed, never retained or freed by Rust.
+ */
+enum SPErrorCode sp_custody_validate_metadata(uint32_t client_abi_version,
+                                              uint32_t kind,
+                                              const uint8_t *metadata,
+                                              uintptr_t metadata_len);
+
+/**
  * Add a new entry.
  *
  * Ownership (WBS-804 rule 2): on `Success` the caller MUST release

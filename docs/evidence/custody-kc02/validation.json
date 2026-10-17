@@ -1,0 +1,172 @@
+{
+  "collectedAt": "2026-10-17T04:34:32.894Z",
+  "status": "local synthetic candidate; independent review and exact-head CI pending",
+  "sourceBase": "84c7f58d012b428a4f8635d87ae988e0f1ebfc31",
+  "branch": "feat/personal-custody-contract",
+  "committed": false,
+  "checks": [
+    {
+      "command": "cargo test -p sentinelpass-core custody --lib",
+      "result": "passed",
+      "logSha256": "997cfb9a738beabcd68b1af5ac6fec4a0c7d758f63ef72233f707c23384c327a"
+    },
+    {
+      "command": "cargo test -p sentinelpass-core native_audit_records_outcomes_without_recovery_or_authority_canaries --lib",
+      "result": "passed",
+      "logSha256": "c0ccdafa817dafe01eb9528643bbc733a9109acbe5018cf4c6f7b428e71d9181"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "passed",
+      "logSha256": "c6173926b28ee4d17c4b98d88c5bac84d884d2a81ed6540beded29d8ceda18fa"
+    },
+    {
+      "command": "node scripts/qualify-custody.mjs docs/evidence/custody-kc01/performance.json",
+      "result": "passed",
+      "receiptSha256": "a82b58f990da3d6310ec73b6ade33f48ed248eecadcd05609c733ada68dc1ac6"
+    },
+    {
+      "command": "node scripts/qualify-custody.mjs docs/evidence/custody-kc02/performance.json --storage",
+      "result": "passed",
+      "receiptSha256": "06abcf7512280454e967a142b2ce1e8e4eef39c60cce631ee5d5eb6e2abd4d6d"
+    },
+    {
+      "command": "cargo test --workspace",
+      "result": "passed",
+      "logSha256": "e00a2d1bda18d6a5988441d821a9611c680e940bd2b009be5a39506e81f51f36"
+    },
+    {
+      "command": "npm run web:typecheck",
+      "result": "passed",
+      "logSha256": "d79aab3222d5aaa85f3d3d2ec9752dbf9f190b5624fad0492f6eabec58d7b942"
+    },
+    {
+      "command": "npm run test:ts",
+      "result": "passed",
+      "logSha256": "3423d7dd2900cf1731927171c9d99c52c18138293752e10dd9f431cd39b773f2"
+    },
+    {
+      "command": "bash scripts/test-custody-native.sh",
+      "result": "passed",
+      "logSha256": "f3d42d9dd9b076e084971631ba64cc829cf4c32f6a186aa60bedd12a3060ec13"
+    },
+    {
+      "command": "cargo run -p sentinelpass-protocol --example generate_custody_bindings -- --check",
+      "result": "passed",
+      "logSha256": "37f9bf1ef9fcea461aca58162ec586fe4e5d7409e11aa9f0880a5c7e0d60f085"
+    }
+  ],
+  "additionalChecks": [
+    "cargo fmt --all -- --check passed",
+    "git diff --check passed",
+    "both performance receipt source hash maps match"
+  ],
+  "workspaceResults": [
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s",
+    "1 passed; 0 failed; 0 ignored; 0 measured; 884 filtered out; finished in 0.00s",
+    "879 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 109.32s",
+    "10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.65s",
+    "1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s",
+    "4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+    "4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s",
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+  ],
+  "initialWorkspaceFailure": {
+    "test": "step_up_real_client_keeps_approval_connection",
+    "reason": "temporary socket existed before it accepted connections",
+    "resolution": "test setup waits for a successful connection; isolated and final workspace reruns passed"
+  },
+  "sourceSha256": {
+    "Cargo.lock": "17c9426e5836158ceb4a61e8ed69ff1f716978c7f035048210b1bba22cc68824",
+    "sentinelpass-protocol/src/custody.rs": "9d1ebc1f5fb20cb1d6008c15351325e8c1f6826a461b3377a820d2925069b20c",
+    "sentinelpass-core/src/custody/mod.rs": "586b24a112e998b6bd2955bfb46349c9c74700b28c4db6a1912b1d7d26cd9faa",
+    "Cargo.toml": "459a4edcea979efafde95be17f4e5b29374423c890d339f02ff716fa012aa340",
+    "sentinelpass-core/Cargo.toml": "c7280f38bb2e839b6295a447637d9fdc4c266f7b0180066c0122bee3f4f2ea3d",
+    "sentinelpass-mobile-bridge/src/abi.rs": "45b804e98a6ae0061f9eb16bc46909d129368b674e16ce117e7245b4f6969ec0",
+    "sentinelpass-core/src/custody/personal.rs": "666e5ec9483ce2d921533bca00dca0161871d583f034ffd96a2370e968ec2045",
+    "sentinelpass-core/src/custody/personal/tests.rs": "fea8b0b5c7c8dea6541defe5548c640e751d319fb42d00b2ad97efffd3dac5ad",
+    "sentinelpass-core/src/custody/workers.rs": "0884a6180eaeef630e336060a26dd62d8686fd2fea612d1cf4874ed04d12c8ce",
+    "sentinelpass-core/src/vault/custody_ops.rs": "d16b8087849f81c62996be50974bdbb5aaf446a1dd4bac6d3f58f8a4733c9e88",
+    "sentinelpass-core/src/vault/custody_tests.rs": "617b763e80ba904ab78628ee9145ae6e39ca1229cc9e3dc096bcaf8b87dc4787",
+    "sentinelpass-core/src/vault/content_guard.rs": "90176bca8c9c80e01a7246c4f9a68193232b6d551675d4f4c27e150259d14447",
+    "sentinelpass-core/src/vault/activation_ops.rs": "e9413ef304ca35d555aef90937154451d9a773365a3d1baa2a49ea478a8ff8a0",
+    "sentinelpass-core/src/vault/rekey_ops.rs": "6168121f52ef9b6c43830855fb6f272450cd0de63608e88e6be68adac82e1add",
+    "sentinelpass-core/src/database/schema.rs": "48b89c497c3958c1276dd4970a13e4c1d4618171b902a3e921d5afcb7c1e636a",
+    "sentinelpass-core/src/database/migrations.rs": "72922f07ff2489d1a75e5cf0d630f1ef3c60feb6280582d5d922d5bc84ff34eb",
+    "sentinelpass-core/src/database/fixtures.rs": "829eb43dcfff1cbdfeaa0573f61f1ae225caeb446ca7519a8d6cf5b1272a5550",
+    "sentinelpass-core/src/crypto/aad.rs": "97aee35fc6c9ac10e00ec9aab6a67d3c333d7334ecc6863581a11a4bf244f6bf",
+    "sentinelpass-core/src/daemon/vault_state.rs": "c56ea23a5f2b2eb5530d4cf2ecdce39af072f028eab49f50d5f542d2d840677a",
+    "sentinelpass-core/src/daemon/ipc/stepup.rs": "7a2784e7692ab5d62b116acbd3fff88d5520595154662298605b67e64308a61f",
+    "sentinelpass-core/src/audit.rs": "36aa8d337aca24878bb79926bc5932c2f676d80b7ea699fc02a8aa9c65030dcf",
+    "sentinelpass-protocol/examples/generate_custody_bindings.rs": "2350c525d109d986815bfba3588c0cb80ec94bc5a4946fe75f799717d60523e0",
+    "sentinelpass-protocol/examples/custody_validator.ts.in": "0447ee2d9a70a7bb9e33640cec125c5a88c3a3da73b6ca5c8656e1444766d5f4",
+    "sentinelpass-protocol/examples/custody_ports.ts.in": "9aa7d2ef1cf7d0eae805a48ba0b84c3c09f3abc1bc76f42f267fc58659b30c51",
+    "sentinelpass-protocol/tests/custody_contract.rs": "fe9cdc661354acd000c07d24f0a6ca752cfdac11e7f5b5ac5adf5e2348546f0c",
+    "sentinelpass-mobile-bridge/tests/custody_contract.rs": "c1f96c84b5accd2e326d103f5e64be82e018b5db9dddc2403b35af7d95a836bf",
+    "sentinelpass-mobile-bridge/tests/jni_contract.rs": "45fe7ab6fd52ea9fa14ee83721defca5956e609d2583bbb06849f9d90abcf85f",
+    "tests/custody-contract.test.ts": "cff390fb974fe54576b858d56497d09c253d648552ef5d33368bfbd48ca0dbb9",
+    "tests/native/custody/main.swift": "636949dc83574136975b26056828e2a4ee33f1a3df671d07eac1df279a1b0bef",
+    "tests/native/custody/com/sentinelpass/custody/CustodyContract.java": "50ec80f5ea28f886ab0623f1e461f89f7641f590cf396cf16e17ba51d7ab82f8",
+    "sentinelpass-core/src/custody/synthetic.rs": "48d7d2b9e24621f84206f1cb3c25fbdff7695a19694349f1e12ae5ca8721af40",
+    "sentinelpass-core/src/custody/tests.rs": "cfc951269e819804b13989413ce6cf5da431f7dfe4e5c6f77d22a53a10d1c866",
+    "sentinelpass-mobile-bridge/src/custody.rs": "1845f0383b40c8c21c524141f7d1ef777c98dc1674655863637016a5b81d6c2c",
+    "sentinelpass-mobile-bridge/src/ffi.rs": "94e35e2b08511a8bde435cd327dfacdfceaddb6741c7876251f0ef9184479bef",
+    "sentinelpass-mobile-bridge/src/jni.rs": "e1cf821ae78f4bfd43fffbcd1d0c258f6c846acff8ffae44d4af5b50557f8bdc",
+    "bindings/custody/v1.ts": "9590f043263e25bb187481c40ea346a59754ceb88b3dcf5b5574b9680e702c95",
+    "bindings/custody/CustodyContract.swift": "3370d2eb52afd226d562265c2f87400894399cdef8eb964609177a098d8b0065",
+    "android/SentinelPass/app/src/main/java/com/sentinelpass/custody/CustodyContract.kt": "217bcfbbe817c322718a0d0627484a6c3656072e40e95ed7cb60b09235cd06f5",
+    "sentinelpass-mobile-bridge/include/sentinelpass_bridge.h": "309827054efecb08af7d3accf5e3b3705ddd3e6a17114799406ff806e5fd66c0",
+    "scripts/qualify-custody.mjs": "7fb7b9beff2372e1d726cfb0e2606e22c01c112caac661523f43c8be6a399e4e",
+    "sentinelpass-core/src/daemon/ipc/server.rs": "68abba0f5e735804415acee290638e81a913005278bb9c60f1f00ba4201e81fd",
+    "sentinelpass-core/src/vault/mod.rs": "f692a5e06414a510cba6b0f66eadfd1cae7db56f3d2d57ffffc6e89efcd8c54e"
+  },
+  "performanceSha256": {
+    "docs/evidence/custody-kc01/performance.json": "a82b58f990da3d6310ec73b6ade33f48ed248eecadcd05609c733ada68dc1ac6",
+    "docs/evidence/custody-kc02/performance.json": "06abcf7512280454e967a142b2ce1e8e4eef39c60cce631ee5d5eb6e2abd4d6d"
+  },
+  "limitations": [
+    "synthetic trusted-UI enrollment only",
+    "no production provider constructor or secret IPC transport",
+    "uninterruptible OS workers retain bounded native data until return",
+    "accepted mutations may finish after cancellation; fresh authenticated outcome inspection required",
+    "independent adversarial review and exact-head CI pending",
+    "no mobile sync, OS/hardware or cross-device qualification"
+  ],
+  "scheduling": {
+    "redFirstSha256": "039e83f2c223add09c8dab4d361695d81a27984154c95227c029e4eb241cedda",
+    "readWorkersPerOwner": 8,
+    "adminWorkersPerOwner": 1,
+    "processWorkers": 64,
+    "auditWorkersWithinProcess": 8,
+    "blockedWaiterTestTimeoutMs": 200,
+    "acceptedCommitMayFinishAfterCancellation": true,
+    "auditPersistence": "bounded best effort; warm delivery does not await it"
+  },
+  "retention": {
+    "redFirstSha256": "ecf2b54a659765e744565192a30f1578c046b976e873a2609b5394bc2a66a2db",
+    "durableGrants": "metadata only; plaintext field excluded from production compilation",
+    "restart": "daemon drop/reopen preserves objects and rejects retained sources, approvals and read handles",
+    "audit": "native success/replay-denial outcomes; synthetic raw/hex/base64 canaries, passwords, approval IDs and owner/object IDs absent",
+    "artifacts": "temporary vault, receipt and audit files scanned for raw recovery canary",
+    "finalTestAdjustment": "A full workspace run now covers the final audit-reader source, followed by host-native and web checks."
+  },
+  "review": {
+    "entryPoint": "docs/evidence/custody-kc02/REVIEW.md",
+    "independentAcceptance": false,
+    "remoteDevelopRechecked": "84c7f58d012b428a4f8635d87ae988e0f1ebfc31"
+  },
+  "snapshotOrigin": "Local validation before review checkpoint; source hashes identify the tested files.",
+  "checkpointNote": "Staged diff identified an extra blank line at template EOF; moved the separator into the generator. Generated bindings are byte-identical, generator check and formatting pass, performance/source hashes refreshed."
+}
