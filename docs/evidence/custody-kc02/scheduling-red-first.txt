@@ -1,0 +1,24 @@
+   Compiling sentinelpass-core v0.17.0 (/Users/vijaysingh/code/sentinelpass/sentinelpass-core)
+warning: unused import: `super::*`
+ --> sentinelpass-core/src/custody/workers.rs:3:9
+  |
+3 |     use super::*;
+  |         ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0425]: cannot find function `run` in this scope
+  --> sentinelpass-core/src/custody/workers.rs:29:22
+   |
+29 |         let future = run(budget.clone(), Cancellation::new(), &cancel, Instant::now() + Duration::from_secs(5), move |_| {
+   |                      ^^^ not found in this scope
+
+error[E0425]: cannot find function `run` in this scope
+  --> sentinelpass-core/src/custody/workers.rs:37:20
+   |
+37 | ...   assert_eq!(run(budget.clone(), Cancellation::new(), &Cancellation::new(), Instant::now() + Duration::from_secs(5), |_| Ok(()))...
+   |                  ^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `sentinelpass-core` (lib test) generated 1 warning
+error: could not compile `sentinelpass-core` (lib test) due to 2 previous errors; 1 warning emitted

@@ -164,6 +164,10 @@ else
                 exit 1
             fi
         done
+        if ! "$NM_BIN" -D --defined-only "$SO" | grep -q "Java_com_sentinelpass_custody_CustodyContract_validateMetadata\$"; then
+            log_error "$SO is missing custody metadata validation JNI symbol"
+            exit 1
+        fi
         if "$NM_BIN" -D --defined-only "$SO" | grep -Eq "Java_com_sentinelpass_(VaultManager|DriveSync)_"; then
             log_error "$SO exports stale (pre-WBS-802) VaultManager/DriveSync symbols"
             exit 1

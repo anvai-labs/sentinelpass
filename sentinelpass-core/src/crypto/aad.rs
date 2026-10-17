@@ -92,6 +92,7 @@ pub enum ObjectType {
     RegistryEntity,
     KeySlot,
     DomainMapping,
+    PersonalCustody,
 }
 
 /// Typed AAD inputs: every field GCM's tag will bind this envelope to.

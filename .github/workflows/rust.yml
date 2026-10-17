@@ -34,6 +34,8 @@ jobs:
           web-build: false
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check generated custody bindings
+        run: cargo run -p sentinelpass-protocol --example generate_custody_bindings -- --check
 
   # TypeScript TDD - runs in parallel
   web_tdd:
@@ -126,6 +128,10 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --verbose
+
+      - name: Test custody metadata through host JVM and Swift/C
+        if: runner.os == 'macOS'
+        run: bash scripts/test-custody-native.sh
 
       - name: Test timeout safety net
         if: runner.os == 'Windows'

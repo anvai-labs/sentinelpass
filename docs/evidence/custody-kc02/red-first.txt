@@ -1,0 +1,132 @@
+   Compiling sentinelpass-core v0.17.0 (/Users/vijaysingh/code/sentinelpass/sentinelpass-core)
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> sentinelpass-core/src/vault/custody_tests.rs:15:5
+   |
+15 |     NativeSecret(bytes)
+   |     ^^^^^^^^^^^^
+   |
+   = note: a struct named `NativeSecret` exists in another namespace
+note: constructor is not visible here due to private fields
+  --> sentinelpass-core/src/custody/mod.rs:37:25
+   |
+37 | pub struct NativeSecret(Zeroizing<[u8; SECRET_BYTES]>);
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+help: consider making the field publicly accessible
+  --> sentinelpass-core/src/custody/mod.rs:37:25
+   |
+37 | pub struct NativeSecret(pub Zeroizing<[u8; SECRET_BYTES]>);
+   |                         +++
+
+error[E0599]: no method named `custody_put` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:23:11
+    |
+ 23 |     vault.custody_put(&scope, None, &first, &value).unwrap();
+    |           ^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_put` not found for this struct
+
+error[E0599]: no method named `custody_read` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:25:19
+    |
+ 25 |     assert!(vault.custody_read(&scope, &first).is_ok());
+    |                   ^^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_read` not found for this struct
+
+error[E0599]: no method named `custody_put` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:26:19
+    |
+ 26 |     assert!(vault.custody_put(&scope, None, &first, &value).is_err());
+    |                   ^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_put` not found for this struct
+
+error[E0599]: no method named `custody_read` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:29:19
+    |
+ 29 |     assert!(vault.custody_read(&wrong_owner, &first).is_err());
+    |                   ^^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_read` not found for this struct
+
+error[E0599]: no method named `custody_put` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:32:11
+    |
+ 32 |     vault.custody_put(&scope, Some(&first), &next, &value).unwrap();
+    |           ^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_put` not found for this struct
+
+error[E0599]: no method named `custody_read` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:33:19
+    |
+ 33 |     assert!(vault.custody_read(&scope, &first).is_err());
+    |                   ^^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_read` not found for this struct
+
+error[E0599]: no method named `custody_remove` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:34:19
+    |
+ 34 |     assert!(vault.custody_remove(&scope, &first).is_err());
+    |                   ^^^^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_remove` not found for this struct
+
+error[E0599]: no method named `custody_remove` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:35:11
+    |
+ 35 |     vault.custody_remove(&scope, &next).unwrap();
+    |           ^^^^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_remove` not found for this struct
+
+error[E0599]: no method named `custody_read` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:36:19
+    |
+ 36 |     assert!(vault.custody_read(&scope, &next).is_err());
+    |                   ^^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_read` not found for this struct
+
+error[E0599]: no method named `custody_put` found for struct `vault::VaultManager` in the current scope
+   --> sentinelpass-core/src/vault/custody_tests.rs:37:19
+    |
+ 37 |     assert!(vault.custody_put(&scope, None, &first, &value).is_err());
+    |                   ^^^^^^^^^^^ method not found in `vault::VaultManager`
+    |
+   ::: sentinelpass-core/src/vault/mod.rs:108:1
+    |
+108 | pub struct VaultManager {
+    | ----------------------- method `custody_put` not found for this struct
+
+Some errors have detailed explanations: E0423, E0599.
+For more information about an error, try `rustc --explain E0423`.
+error: could not compile `sentinelpass-core` (lib test) due to 11 previous errors

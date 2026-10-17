@@ -7,6 +7,9 @@ mod activation_ops;
 pub mod backup_ops;
 mod biometric_ops;
 pub(crate) mod content_guard;
+pub(crate) mod custody_ops;
+#[cfg(test)]
+mod custody_tests;
 pub(crate) mod domain_ops;
 pub(crate) mod envelope_ops;
 pub(crate) mod epoch_guard;

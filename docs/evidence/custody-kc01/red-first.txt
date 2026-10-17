@@ -1,0 +1,38 @@
+KC-01 red-first execution excerpts, 2026-10-16. Synthetic data only.
+These are excerpts, not reconstructed full compiler logs.
+
+1. Before the protocol custody module existed:
+   cargo test -p sentinelpass-protocol --test custody_contract
+   exit 101
+   error[E0432]: unresolved import `sentinelpass_protocol::custody`
+   --> sentinelpass-protocol/tests/custody_contract.rs:1:28
+
+2. Before the native ports/lease engine existed:
+   cargo test -p sentinelpass-core custody::tests --lib
+   exit 101
+   error[E0425]: cannot find type `CustodyScope` in this scope
+   error[E0425]: cannot find function `fixture` in this scope
+   error: could not compile `sentinelpass-core` (lib test) due to 26 previous errors
+
+3. Before the metadata C entry point existed:
+   cargo test -p sentinelpass-mobile-bridge --test custody_contract
+   exit 101
+   error[E0432]: unresolved import `sentinelpass_mobile_bridge::sp_custody_validate_metadata`
+
+Regression found in the first broader Rust run (fixed):
+   every_c_export_is_panic_contained FAILED
+   export `sp_custody_validate_metadata` is not panic-contained
+   (body must open with catch_panic/catch_panic_void)
+The new entry points used local catch_unwind wrappers. Changed them to the
+repository's existing catch_panic/catch_jni wrappers without relaxing the tests.
+
+Host Swift probe compile failure (fixed):
+   cannot convert value of type 'Int' to expected argument type 'UInt'
+The generated C uintptr_t length is UInt in Swift. Added an explicit conversion
+from the bounded Data buffer's nonnegative count, then reran the real host probe.
+
+Initial performance run passed but preceded synthetic lock/unlock transitions
+and proactive idle-expiry timers; it is superseded by performance.json. Frozen
+thresholds are unchanged. Initial p95 trial-max timings were 0.021667 ms (1 owner)
+and 0.336917 ms (8 owners). Initial RSS deltas were 196608 and 32768 bytes;
+those measured after warmups, so they are not the final acceptance measurements.

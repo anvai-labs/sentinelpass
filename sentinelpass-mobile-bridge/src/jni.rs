@@ -111,6 +111,37 @@ fn catch_jni<T>(default: T, op: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Generated CustodyContract metadata boundary. ByteArray avoids lossy JNI
+/// string conversion. Cap length before copying. No secret transport or grants.
+#[no_mangle]
+#[cfg(feature = "jni")]
+pub extern "system" fn Java_com_sentinelpass_custody_CustodyContract_validateMetadata(
+    env: JNIEnv,
+    _class: jni::objects::JClass,
+    abi: jint,
+    kind: jint,
+    metadata: jni::objects::JByteArray,
+) -> jint {
+    catch_jni(ErrorCode::Panic as jint, || {
+        if crate::abi::negotiate(abi as u32).is_err() {
+            return ErrorCode::AbiUnsupported as jint;
+        }
+        if metadata.is_null() {
+            return ErrorCode::InvalidParam as jint;
+        }
+        let Ok(len) = env.get_array_length(&metadata) else {
+            return ErrorCode::InvalidParam as jint;
+        };
+        if len <= 0 || len as usize > sentinelpass_core::custody::MAX_METADATA_BYTES {
+            return ErrorCode::InvalidParam as jint;
+        }
+        let Ok(bytes) = env.convert_byte_array(metadata) else {
+            return ErrorCode::InvalidParam as jint;
+        };
+        crate::custody::validate(abi as u32, kind as u32, &bytes) as jint
+    })
+}
+
 // ============================================================================
 // ABI Negotiation - JNI (WBS-803)
 // ============================================================================
