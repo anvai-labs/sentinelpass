@@ -1,5 +1,5 @@
 {
-  "collectedAt": "2026-10-17T04:34:32.894Z",
+  "collectedAt": "2026-10-17T05:21:38.378Z",
   "status": "local synthetic candidate; independent review and exact-head CI pending",
   "sourceBase": "84c7f58d012b428a4f8635d87ae988e0f1ebfc31",
   "branch": "feat/personal-custody-contract",
@@ -16,24 +16,14 @@
       "logSha256": "c0ccdafa817dafe01eb9528643bbc733a9109acbe5018cf4c6f7b428e71d9181"
     },
     {
-      "command": "cargo clippy --workspace --all-targets -- -D warnings",
-      "result": "passed",
-      "logSha256": "c6173926b28ee4d17c4b98d88c5bac84d884d2a81ed6540beded29d8ceda18fa"
-    },
-    {
       "command": "node scripts/qualify-custody.mjs docs/evidence/custody-kc01/performance.json",
       "result": "passed",
-      "receiptSha256": "a82b58f990da3d6310ec73b6ade33f48ed248eecadcd05609c733ada68dc1ac6"
+      "receiptSha256": "a8d15169b0f39a14530b99a6e014d504024d50dc306e01228d2902d00d18a3a8"
     },
     {
       "command": "node scripts/qualify-custody.mjs docs/evidence/custody-kc02/performance.json --storage",
       "result": "passed",
-      "receiptSha256": "06abcf7512280454e967a142b2ce1e8e4eef39c60cce631ee5d5eb6e2abd4d6d"
-    },
-    {
-      "command": "cargo test --workspace",
-      "result": "passed",
-      "logSha256": "e00a2d1bda18d6a5988441d821a9611c680e940bd2b009be5a39506e81f51f36"
+      "receiptSha256": "29e0622e24843666792da8093d5e14226b9bc36b876f07d4ce10b8a91b31970e"
     },
     {
       "command": "npm run web:typecheck",
@@ -54,6 +44,21 @@
       "command": "cargo run -p sentinelpass-protocol --example generate_custody_bindings -- --check",
       "result": "passed",
       "logSha256": "37f9bf1ef9fcea461aca58162ec586fe4e5d7409e11aa9f0880a5c7e0d60f085"
+    },
+    {
+      "command": "cargo test --workspace",
+      "result": "passed",
+      "logSha256": "8c5ee5b61c4a762c9488ea32363e36f9dc9d0fafcbd29c1f536840a4dc565286"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "passed",
+      "logSha256": "834e130d7370b50a01d9d1eddfe83bda9d926b53e40f21907b98db525c5785a4"
+    },
+    {
+      "command": "cargo audit --json",
+      "result": "passed",
+      "logSha256": "af3b78ad0d67b7805c7dd41f242d3d19b6019cce66397601d7757ae1c49f85f0"
     }
   ],
   "additionalChecks": [
@@ -63,22 +68,22 @@
   ],
   "workspaceResults": [
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
-    "55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s",
+    "55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s",
     "1 passed; 0 failed; 0 ignored; 0 measured; 884 filtered out; finished in 0.00s",
-    "879 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 109.32s",
-    "10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+    "879 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 121.75s",
+    "10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
-    "30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.65s",
+    "30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.56s",
     "1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
-    "10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.03s",
+    "10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.11s",
     "4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
     "51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
     "4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
-    "74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s",
+    "74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s",
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
-    "12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+    "12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
-    "3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s",
+    "3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s",
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
     "0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
@@ -89,7 +94,7 @@
     "resolution": "test setup waits for a successful connection; isolated and final workspace reruns passed"
   },
   "sourceSha256": {
-    "Cargo.lock": "17c9426e5836158ceb4a61e8ed69ff1f716978c7f035048210b1bba22cc68824",
+    "Cargo.lock": "0a4f044720cc2b23475c088cb3f98b7cab0e9e477b58119c511560c8f015e06d",
     "sentinelpass-protocol/src/custody.rs": "9d1ebc1f5fb20cb1d6008c15351325e8c1f6826a461b3377a820d2925069b20c",
     "sentinelpass-core/src/custody/mod.rs": "586b24a112e998b6bd2955bfb46349c9c74700b28c4db6a1912b1d7d26cd9faa",
     "Cargo.toml": "459a4edcea979efafde95be17f4e5b29374423c890d339f02ff716fa012aa340",
@@ -133,8 +138,8 @@
     "sentinelpass-core/src/vault/mod.rs": "f692a5e06414a510cba6b0f66eadfd1cae7db56f3d2d57ffffc6e89efcd8c54e"
   },
   "performanceSha256": {
-    "docs/evidence/custody-kc01/performance.json": "a82b58f990da3d6310ec73b6ade33f48ed248eecadcd05609c733ada68dc1ac6",
-    "docs/evidence/custody-kc02/performance.json": "06abcf7512280454e967a142b2ce1e8e4eef39c60cce631ee5d5eb6e2abd4d6d"
+    "docs/evidence/custody-kc01/performance.json": "a8d15169b0f39a14530b99a6e014d504024d50dc306e01228d2902d00d18a3a8",
+    "docs/evidence/custody-kc02/performance.json": "29e0622e24843666792da8093d5e14226b9bc36b876f07d4ce10b8a91b31970e"
   },
   "limitations": [
     "synthetic trusted-UI enrollment only",
@@ -165,8 +170,12 @@
   "review": {
     "entryPoint": "docs/evidence/custody-kc02/REVIEW.md",
     "independentAcceptance": false,
-    "remoteDevelopRechecked": "84c7f58d012b428a4f8635d87ae988e0f1ebfc31"
+    "remoteDevelopRechecked": "84c7f58d012b428a4f8635d87ae988e0f1ebfc31",
+    "pr": "https://github.com/anvai-labs/sentinelpass/pull/269",
+    "initialCheckpoint": "1032ed6ab7aadfec25b367f4ee0818f8cae01678",
+    "initialCi": "37 checks passed, 8 skipped; RustSec, Security Audit, Linux SBOM packaging and aggregate Gate failed on existing dependency advisories",
+    "securityRemediation": "docs/evidence/custody-kc02/ci-security-remediation.json"
   },
-  "snapshotOrigin": "Local validation before review checkpoint; source hashes identify the tested files.",
+  "snapshotOrigin": "Local validation for the dependency-remediation follow-up to checkpoint 1032ed6; source hashes identify the tested files.",
   "checkpointNote": "Staged diff identified an extra blank line at template EOF; moved the separator into the generator. Generated bindings are byte-identical, generator check and formatting pass, performance/source hashes refreshed."
 }

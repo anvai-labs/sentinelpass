@@ -1,0 +1,93 @@
+{
+  "collectedAt": "2026-10-17T05:18:08.175Z",
+  "initialHead": "1032ed6ab7aadfec25b367f4ee0818f8cae01678",
+  "pr": "https://github.com/anvai-labs/sentinelpass/pull/269",
+  "initialFindings": 9,
+  "originalJobs": {
+    "rustsec": "https://github.com/anvai-labs/sentinelpass/actions/runs/39003414181/job/117310888902",
+    "linuxSbom": "https://github.com/anvai-labs/sentinelpass/actions/runs/39003414194/job/117310915352"
+  },
+  "advisories": [
+    "RUSTSEC-2026-0338",
+    "RUSTSEC-2026-0339",
+    "RUSTSEC-2026-0340",
+    "RUSTSEC-2026-0341",
+    "RUSTSEC-2026-0342",
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0347",
+    "RUSTSEC-2026-0348",
+    "RUSTSEC-2026-0349"
+  ],
+  "updates": [
+    {
+      "name": "quinn-proto",
+      "from": "0.11.15",
+      "to": "0.11.18"
+    },
+    {
+      "name": "rustls",
+      "from": "0.23.45",
+      "to": "0.23.46"
+    }
+  ],
+  "dependencyDeclarations": [
+    {
+      "name": "chacha20",
+      "version": "0.10.2",
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85"
+    },
+    {
+      "name": "cpufeatures",
+      "version": "0.3.1",
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85"
+    },
+    {
+      "name": "quinn-proto",
+      "version": "0.11.18",
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85"
+    },
+    {
+      "name": "rand",
+      "version": "0.10.3",
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85"
+    },
+    {
+      "name": "rand_core",
+      "version": "0.10.1",
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85"
+    },
+    {
+      "name": "rand_pcg",
+      "version": "0.10.2",
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85"
+    },
+    {
+      "name": "rustls",
+      "version": "0.23.46",
+      "license": "Apache-2.0 OR ISC OR MIT",
+      "rust_version": "1.71"
+    }
+  ],
+  "audit": {
+    "vulnerabilities": 0,
+    "warningClasses": [
+      "unmaintained",
+      "unsound",
+      "yanked"
+    ],
+    "repositoryPolicyUnchanged": true,
+    "logSha256": "af3b78ad0d67b7805c7dd41f242d3d19b6019cce66397601d7757ae1c49f85f0"
+  },
+  "lockfileSha256": "0a4f044720cc2b23475c088cb3f98b7cab0e9e477b58119c511560c8f015e06d",
+  "originalLogSha256": {
+    "rustsec": "829e63264cc55951edb1a1d17d9fe583ae7f75d1c7ae512b4ef92f00226a2d7f",
+    "linuxSbom": "ea5458dc9b95e48b4839194691207db9fdc611ec49866a717df58d2136689b6a"
+  },
+  "status": "local patched audit passed; exact-head CI and independent review pending"
+}

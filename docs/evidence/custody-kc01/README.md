@@ -75,8 +75,8 @@ the 30 trial maxima, a stricter aggregate than per-operation p95.
 
 | Owner sessions | p95 of trial maxima | Incremental RSS high-water |
 | --- | ---: | ---: |
-| 1 | 0.121416 ms | 1,245,184 bytes |
-| 8 | 9.376917 ms | 524,288 bytes |
+| 1 | 0.009291 ms | 1,212,416 bytes |
+| 8 | 0.756208 ms | 638,976 bytes |
 
 Both frozen limits pass (100 ms, 16 MiB), and zero handles remain after close.
 RSS baseline is before warmups with the provider already loaded. These figures
@@ -137,4 +137,6 @@ running the new target refreshed it to the existing v0.17 manifests (including
 the existing local `anvai-secure-io` crate, dirs 7, thiserror 2 and tower-http 0.7).
 This is fuzz-build dependency alignment, not a production dependency update.
 New source and generated SDK files follow the repository Apache-2.0 license.
-No private Sandesha adapter was copied or published.
+No private Sandesha adapter was copied or published. Later CI-driven transitive
+security updates are recorded in the KC-02 handback; this paragraph describes
+the original KC-01 slice.

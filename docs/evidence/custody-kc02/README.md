@@ -13,7 +13,8 @@ remaining review questions; it does not claim independent acceptance.
   sync. The value is one zeroizing 32-byte recovery secret. Metadata remains
   visible at rest; the existing SPENV cipher authenticates a full SHA-256
   commitment over canonical typed scope/reference metadata, vault identity,
-  object class, format and tombstone state. No new cipher or dependency.
+  object class, format and tombstone state. No new custody cipher or direct
+  dependency; CI-driven transitive security updates are recorded below.
 - Native-only storage reads and CAS updates authenticate the current row first.
   Updates retain immutable scope/object identity, advance revision by one and
   cannot decrease the mailbox epoch. Insert can preserve an imported reference's
@@ -102,8 +103,8 @@ its maximum dispatch/delivery time; p95 is taken over those maxima.
 
 | Owners | p95 of trial maxima | Incremental RSS high-water |
 | --- | ---: | ---: |
-| 1 | 2.716667 ms | 2,473,984 bytes |
-| 8 | 6.755666 ms | 2,097,152 bytes |
+| 1 | 1.638542 ms | 2,473,984 bytes |
+| 8 | 89.712959 ms | 2,834,432 bytes |
 
 Both limits pass (100 ms, 16 MiB), with zero handles after close. The test uses
 temporary SQLite files, encrypted values, external receipts and audit file writes.
@@ -155,3 +156,27 @@ KC-03 onward still requires Sandesha recovery/fingerprint proof, destination
 verification before migration cleanup, approved-device enrollment with distinct
 local protection, sync authorization, browser transport and physical OS-store
 qualification. Revocation cannot recall keys already possessed by a lost device.
+
+## CI checkpoint and dependency remediation
+
+[Draft PR #269](https://github.com/anvai-labs/sentinelpass/pull/269) targets develop.
+The initial checkpoint `1032ed6` passed the local commit hooks but CI found nine
+vulnerabilities in pre-existing root-lockfile dependencies. RustSec, the build
+security audit and Linux embedded-SBOM verification all reported the same issues.
+The aggregate Gate correctly failed; no exception or gate was weakened.
+
+The follow-up pins `quinn-proto` 0.11.18 and `rustls` 0.23.46, the patched releases
+identified by [RustSec's QUIC advisory](https://rustsec.org/advisories/RUSTSEC-2026-0340.html)
+and [TLS advisory](https://rustsec.org/advisories/RUSTSEC-2026-0347.html). Current
+`cargo audit` reports zero vulnerabilities under the unchanged repository policy;
+existing warning-class findings remain. `ci-security-remediation.json` records
+advisory IDs, log hashes, package/license deltas and the original failing CI links.
+The standalone fuzz graph contains neither affected package and is unchanged.
+
+The QUIC patch adds transitive `rand` 0.10.3, `rand_core` 0.10.1, `rand_pcg` 0.10.2,
+`chacha20` 0.10.2 and `cpufeatures` 0.3.1. Cargo metadata declares all five and
+quinn-proto as `MIT OR Apache-2.0`, Rust 1.85; rustls declares
+`Apache-2.0 OR ISC OR MIT`, Rust 1.71. These declared minimums fit the workspace's
+Rust 1.89 baseline. This updates the root dependency/SBOM delta; it does not change
+the custody envelope or add a direct application dependency. Exact-head CI and
+independent audit/IPC review remain acceptance gates.
