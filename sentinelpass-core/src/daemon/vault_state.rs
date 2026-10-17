@@ -35,6 +35,13 @@ pub struct DaemonVault {
     /// WBS-513 / ADR-004 rev 5: ONE Argon2id derivation in flight per vault
     /// — parallel wrong-key attempts cannot multiply 256 MB allocations.
     kdf_gate: Arc<tokio::sync::Semaphore>,
+    pub(crate) custody: Arc<crate::custody::CustodyLifecycle>,
+}
+
+impl Drop for DaemonVault {
+    fn drop(&mut self) {
+        self.custody.invalidate();
+    }
 }
 
 // `normalize_host` and `domains_match` moved to `crate::domain` (WBS-306):
@@ -64,6 +71,7 @@ impl DaemonVault {
             vault_path,
             inactivity_timeout: Duration::from_secs(inactivity_timeout_sec),
             kdf_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            custody: Arc::new(crate::custody::CustodyLifecycle::default()),
         })
     }
 
@@ -117,9 +125,12 @@ impl DaemonVault {
 
     /// Unlock the daemon with an already opened vault manager.
     pub async fn unlock_with_manager(&self, vault: VaultManager) {
-        *self.vault.lock().await = Some(Arc::new(vault));
+        let mut current = self.vault.lock().await;
+        self.custody.invalidate();
+        *current = Some(Arc::new(vault));
         *self.state.lock().unwrap() = VaultState::Unlocked;
         *self.last_activity.lock().unwrap() = Instant::now();
+        drop(current);
 
         info!("Vault unlocked successfully");
 
@@ -157,7 +168,9 @@ impl DaemonVault {
 
     /// Lock the vault
     pub async fn lock(&self) {
-        *self.vault.lock().await = None;
+        let mut current = self.vault.lock().await;
+        self.custody.invalidate();
+        *current = None;
         // Dropping the manager zeroizes the DEK; clear the derived audit
         // key context with it (WBS-414/415 key discipline).
         crate::audit::AuditLogger::clear_keys();
@@ -590,6 +603,7 @@ impl DaemonVault {
         let vault = self.vault.clone();
         let last_activity = self.last_activity.clone();
         let timeout = self.inactivity_timeout;
+        let custody = self.custody.clone();
 
         tokio::spawn(async move {
             let check_interval = if timeout.is_zero() {
@@ -605,7 +619,14 @@ impl DaemonVault {
                 let unlocked = matches!(*state.lock().unwrap(), VaultState::Unlocked);
                 if unlocked && last_activity.lock().unwrap().elapsed() >= timeout {
                     warn!("Auto-locking vault due to inactivity");
-                    *vault.lock().await = None;
+                    let mut current = vault.lock().await;
+                    // Recheck after acquiring the manager lock: an unlock or
+                    // activity update may have won while this task waited.
+                    if last_activity.lock().unwrap().elapsed() < timeout {
+                        continue;
+                    }
+                    custody.invalidate();
+                    *current = None;
                     // Zeroize the derived audit keys with the lock (WBS-414/415).
                     crate::audit::AuditLogger::clear_keys();
                     *state.lock().unwrap() = VaultState::Locked;

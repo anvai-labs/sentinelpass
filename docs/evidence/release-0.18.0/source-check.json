@@ -1,0 +1,339 @@
+{
+  "version": 1,
+  "sourceCheck": "pass",
+  "scope": "pinned source bytes only; no CI, approval, crypto or platform execution",
+  "integrationReady": false,
+  "productionReady": false,
+  "checks": [
+    {
+      "repository": "sentinelpass",
+      "file": "Cargo.lock",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/src/custody.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/custody/mod.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "Cargo.toml",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/Cargo.toml",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/src/abi.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/custody/personal.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/custody/personal/tests.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/custody/workers.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/vault/custody_ops.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/vault/custody_tests.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/vault/content_guard.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/vault/activation_ops.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/vault/rekey_ops.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/database/schema.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/database/migrations.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/database/fixtures.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/crypto/aad.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/daemon/vault_state.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/daemon/ipc/stepup.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/audit.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/examples/generate_custody_bindings.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/examples/custody_validator.ts.in",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/examples/custody_ports.ts.in",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/tests/custody_contract.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/tests/custody_contract.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/tests/jni_contract.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "tests/custody-contract.test.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "tests/native/custody/main.swift",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "tests/native/custody/com/sentinelpass/custody/CustodyContract.java",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/custody/synthetic.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/custody/tests.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/src/custody.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/src/ffi.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/src/jni.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "bindings/custody/v1.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "bindings/custody/CustodyContract.swift",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "android/SentinelPass/app/src/main/java/com/sentinelpass/custody/CustodyContract.kt",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-mobile-bridge/include/sentinelpass_bridge.h",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "scripts/qualify-custody.mjs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/daemon/ipc/server.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/vault/mod.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "bindings/custody/scope.array.invalid.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "bindings/custody/reference.array.invalid.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "bindings/custody/capabilities.array.invalid.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/daemon/transport/mod.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-core/src/daemon/transport/unix.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "docs/SANDESHA_USER_KEY_CUSTODY_CONTRACT_2026-10-16.md",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/tests/fixtures/scope.golden.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/tests/fixtures/reference.golden.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/tests/fixtures/scope.array.invalid.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/tests/fixtures/reference.array.invalid.json",
+      "status": "match"
+    },
+    {
+      "repository": "sentinelpass",
+      "file": "sentinelpass-protocol/tests/fixtures/capabilities.array.invalid.json",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "lib/encryption/recovery/contract.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "lib/encryption/recovery/enrollment-contract.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "lib/encryption/recovery/key-custody.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "lib/encryption/recovery/recovery-kit.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "lib/encryption/recovery/durable-enrollment.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "lib/encryption/key-reference.ts",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "prototypes/rust-mail-custody/Cargo.toml",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "prototypes/rust-mail-custody/Cargo.lock",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "prototypes/rust-mail-custody/src/lib.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "prototypes/rust-mail-custody/src/recovery.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "prototypes/rust-mail-custody/src/creation.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "prototypes/rust-mail-custody/src/messaging.rs",
+      "status": "match"
+    },
+    {
+      "repository": "sandesha",
+      "file": "docs/USER_KEY_CUSTODY_PROVIDERS.md",
+      "status": "match"
+    }
+  ]
+}

@@ -93,6 +93,7 @@ level = "warn"
 check-cfg = ['cfg(feature, values("cargo-clippy"))']
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }

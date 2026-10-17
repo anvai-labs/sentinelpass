@@ -1,0 +1,53 @@
+Positional metadata arrays
+running 3 tests
+test custody_reference_rejects_positional_array_metadata ... FAILED
+test custody_capabilities_rejects_positional_array_metadata ... FAILED
+test custody_scope_rejects_positional_array_metadata ... FAILED
+
+failures:
+
+---- custody_reference_rejects_positional_array_metadata stdout ----
+
+thread 'custody_reference_rejects_positional_array_metadata' (27739631) panicked at sentinelpass-protocol/tests/custody_contract.rs:16:5:
+assertion failed: ObjectRef::decode(bytes).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- custody_capabilities_rejects_positional_array_metadata stdout ----
+
+thread 'custody_capabilities_rejects_positional_array_metadata' (27739630) panicked at sentinelpass-protocol/tests/custody_contract.rs:23:5:
+assertion failed: ProviderCapabilities::decode(bytes).is_err()
+
+---- custody_scope_rejects_positional_array_metadata stdout ----
+
+thread 'custody_scope_rejects_positional_array_metadata' (27739632) panicked at sentinelpass-protocol/tests/custody_contract.rs:9:5:
+assertion failed: CustodyScope::decode(bytes).is_err()
+
+
+failures:
+    custody_capabilities_rejects_positional_array_metadata
+    custody_reference_rejects_positional_array_metadata
+    custody_scope_rejects_positional_array_metadata
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p sentinelpass-protocol --test custody_contract`
+
+Duplicate identity rollback
+running 1 test
+test vault::custody_tests::custody_receipts_reject_duplicate_identity_after_offline_schema_tampering ... FAILED
+
+failures:
+
+---- vault::custody_tests::custody_receipts_reject_duplicate_identity_after_offline_schema_tampering stdout ----
+
+thread 'vault::custody_tests::custody_receipts_reject_duplicate_identity_after_offline_schema_tampering' (27750238) panicked at sentinelpass-core/src/vault/custody_tests.rs:239:5:
+old reference was resurrected under the unchanged current receipt
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    vault::custody_tests::custody_receipts_reject_duplicate_identity_after_offline_schema_tampering
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 846 filtered out; finished in 0.71s
+
+error: test failed, to rerun pass `-p sentinelpass-core --lib`

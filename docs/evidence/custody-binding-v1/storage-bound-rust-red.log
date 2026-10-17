@@ -1,0 +1,4 @@
+   Compiling sentinelpass-protocol v0.17.0 (/Users/vijaysingh/code/sentinelpass/sentinelpass-protocol)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running `target/debug/examples/check_sandesha_binding`
+Error: "invalid vector accepted"

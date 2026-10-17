@@ -53,3 +53,10 @@ path = "fuzz_targets/fuzz_import_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_custody_metadata"
+path = "fuzz_targets/fuzz_custody_metadata.rs"
+test = false
+doc = false
+bench = false

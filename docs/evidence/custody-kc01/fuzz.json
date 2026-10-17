@@ -1,0 +1,20 @@
+{
+  "command": "cargo +nightly fuzz run fuzz_custody_metadata -- /private/tmp/custody-review-fuzz-corpus fuzz/corpus/fuzz_custody_metadata -max_total_time=60 -max_len=8192",
+  "exitCode": 0,
+  "runs": 4929997,
+  "seconds": 61,
+  "crashes": 0,
+  "consoleExcerpt": "Done 4929997 runs in 61 second(s)",
+  "scope": "metadata parsers only; no vault or platform secrets",
+  "sha256": {
+    "fuzz/fuzz_targets/fuzz_custody_metadata.rs": "f389b786a2ace91021f82065566e83c67c4873ee1f753217d0551d631c652ef4",
+    "sentinelpass-protocol/src/custody.rs": "6aa485900650fcfb8311157066819ccc052c0e43103c3a80e16ac55ab21c2299",
+    "fuzz/Cargo.lock": "8f1580291176931a60fbf42bb15efd95edd7164e24af66797eb3dc632c1d8636",
+    "fuzz/target/aarch64-apple-darwin/release/fuzz_custody_metadata": "cf6f5e7b4bd1e5758c562fa08c585d3f761e676af652a567aab6f1bd1a630bd7",
+    "bindings/custody/reference.array.invalid.json": "0d6d94dc5eea8703aa8ca4c5ed8677568f417a1febcb194fdb09fdc0272d6f7a",
+    "bindings/custody/capabilities.array.invalid.json": "44a434cdb7ef7261512476f316867f56ffda2acc49a3238afdbfac37ce966036",
+    "bindings/custody/scope.array.invalid.json": "f42148c58bd5bd85f4844a8e2acf4b7af5eabab3cb7456764c36f5b085c1ca50"
+  },
+  "seedNote": "Temporary corpus additionally seeded with the three shared positional-array negative vectors.",
+  "logSha256": "77885944763f52c179b723f09e2ff323b19db2321c1fae99e4510e1c50573dab"
+}

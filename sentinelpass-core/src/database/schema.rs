@@ -40,7 +40,8 @@ use tracing::warn;
 /// sidecar (which protects key-material rollback): this column protects
 /// LOG-lineage rollback — a relay whose log moved backwards (reset, vault
 /// swap) is refused fail-closed and requires re-pairing.
-pub const CURRENT_SCHEMA_VERSION: i32 = 13;
+/// v14: dedicated authenticated personal custody objects (no sync support).
+pub const CURRENT_SCHEMA_VERSION: i32 = 14;
 
 /// Current vault ENVELOPE FORMAT version (`db_metadata.format_version`,
 /// WBS-406). Deliberately distinct from [`CURRENT_SCHEMA_VERSION`] (the
@@ -258,6 +259,9 @@ impl Database {
         self.create_totp_secrets_table()?;
         self.create_sync_tables()?;
         self.create_registry_tables()?;
+        self.conn
+            .execute_batch(super::migrations::CUSTODY_SCHEMA)
+            .map_err(DatabaseError::Sqlite)?;
         self.create_indexes()?;
         self.create_triggers()?;
         Ok(())

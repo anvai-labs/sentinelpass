@@ -1,0 +1,13 @@
+✔ matching source never grants integration or production readiness (2.141709ms)
+✔ changed source and missing source fail the check (2.816583ms)
+✔ empty pins and unknown manifest versions are refused (0.762459ms)
+✔ path traversal and out-of-checkout symlinks are refused (1.871375ms)
+✔ containment refuses Windows parent paths and different drives (0.223417ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 60.440416

@@ -39,6 +39,11 @@ pub const FEATURE_PLATFORM_KEYSTORE: u32 = 1 << 1;
 #[allow(dead_code)]
 pub const FEATURE_RELAY_SYNC_V2: u32 = 1 << 2;
 
+/// Reserved for qualified personal-custody access. Metadata validation is not
+/// a custody provider; never advertise this bit for KC-01.
+#[allow(dead_code)]
+pub const FEATURE_CUSTODY_V1: u32 = sentinelpass_core::custody::FEATURE_CUSTODY_V1;
+
 /// ABI/feature description reported to consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeInfo {
@@ -136,6 +141,11 @@ mod tests {
         // FEATURE_RELAY_SYNC_V2 stays unset until mobile sync v2 is wired
         // (a prompt is not a cryptographic authorization — ADR-009).
         let flags = feature_flags();
+        assert_eq!(
+            flags & FEATURE_CUSTODY_V1,
+            0,
+            "custody access is not implemented by this ABI"
+        );
         assert_eq!(
             flags & FEATURE_PLATFORM_KEYSTORE,
             FEATURE_PLATFORM_KEYSTORE,
