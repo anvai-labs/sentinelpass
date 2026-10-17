@@ -251,6 +251,7 @@ fn snapshot(conn: &Connection) -> Result<Receipts> {
             .map_err(DatabaseError::Sqlite)?;
         let rows = stmt
             .query_map([], |r| {
+                super::custody_ops::check_row_bounds(r)?;
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -263,10 +264,18 @@ fn snapshot(conn: &Connection) -> Result<Receipts> {
         for row in rows {
             let row = row.map_err(DatabaseError::Sqlite)?;
             let bytes = serde_json::to_vec(&row).map_err(|_| refusal())?;
-            receipts.insert(
-                format!("custody:{}", row.0),
-                hex::encode(Sha256::digest(bytes)),
-            );
+            // An offline writer can remove SQLite uniqueness constraints. Never
+            // collapse duplicate identities: reads must see exactly the rows
+            // authenticated by the receipt, not a hidden older duplicate.
+            if receipts
+                .insert(
+                    format!("custody:{}", row.0),
+                    hex::encode(Sha256::digest(bytes)),
+                )
+                .is_some()
+            {
+                return Err(refusal());
+            }
         }
     }
     Ok(receipts)

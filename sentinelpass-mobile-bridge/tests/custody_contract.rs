@@ -3,6 +3,31 @@ const SCOPE: &[u8] = include_bytes!("../../bindings/custody/scope.golden.json");
 const REFERENCE: &[u8] = include_bytes!("../../bindings/custody/reference.golden.json");
 
 #[test]
+fn custody_ffi_rejects_positional_array_metadata() {
+    let vectors: [(u32, &[u8]); 3] = [
+        (
+            1,
+            include_bytes!("../../bindings/custody/scope.array.invalid.json"),
+        ),
+        (
+            2,
+            include_bytes!("../../bindings/custody/reference.array.invalid.json"),
+        ),
+        (
+            3,
+            include_bytes!("../../bindings/custody/capabilities.array.invalid.json"),
+        ),
+    ];
+    for (kind, bytes) in vectors {
+        assert_eq!(
+            unsafe { sp_custody_validate_metadata(2, kind, bytes.as_ptr(), bytes.len()) },
+            ErrorCode::InvalidParam,
+            "metadata kind {kind} accepted a positional array"
+        );
+    }
+}
+
+#[test]
 fn custody_ffi_metadata_is_bounded_and_fails_closed() {
     unsafe {
         assert_eq!(

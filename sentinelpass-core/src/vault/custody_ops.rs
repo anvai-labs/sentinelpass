@@ -50,7 +50,7 @@ pub(crate) struct Row {
     pub envelope: Vec<u8>,
     pub deleted: bool,
 }
-fn parse(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+pub(super) fn check_row_bounds(row: &rusqlite::Row<'_>) -> rusqlite::Result<()> {
     let decode_error = || rusqlite::Error::InvalidQuery;
     // Bounds before owned allocation, even if an offline writer bypassed the
     // table CHECK constraints. SQLite owns the borrowed row memory here.
@@ -69,6 +69,11 @@ fn parse(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
             return Err(decode_error());
         }
     }
+    Ok(())
+}
+fn parse(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
+    check_row_bounds(row)?;
+    let decode_error = || rusqlite::Error::InvalidQuery;
     let scope: String = row.get(1)?;
     let reference: String = row.get(2)?;
     let envelope: Vec<u8> = row.get(3)?;
@@ -343,8 +348,12 @@ pub(crate) fn verify(conn: &Connection, dek: &DataEncryptionKey, vault: &str) ->
     let rows = stmt
         .query_map([], parse)
         .map_err(crate::DatabaseError::Sqlite)?;
+    let mut identities = std::collections::HashSet::new();
     for row in rows {
         let row = row.map_err(|_| integrity_error())?;
+        if !identities.insert(row.object_id.clone()) {
+            return Err(integrity_error());
+        }
         drop(open(dek, vault, &row).map_err(|_| integrity_error())?);
     }
     Ok(())

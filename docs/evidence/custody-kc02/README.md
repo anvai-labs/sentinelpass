@@ -5,7 +5,9 @@
 This is a tested storage/native-authority implementation candidate, **not an
 enabled product adapter or acceptance of the complete custody contract**.
 The [review entry point](REVIEW.md) maps implementation boundaries to evidence and
-remaining review questions; it does not claim independent acceptance.
+remaining review questions. The [adversarial follow-up](ADVERSARIAL_REVIEW.md)
+records the fresh independent automated reviews, confirmed findings and corrections;
+GitHub code-owner approval remains separate.
 
 ## Implemented
 
@@ -87,15 +89,15 @@ all temporary vault/receipt/audit files are also scanned for raw recovery bytes.
 
 Final command results are recorded in `validation.json`. KC-01 golden vectors,
 ABI feature negotiation and host binding checks remain applicable and unchanged.
-The full `cargo test --workspace` passed (core: 879 passed, 6 intentionally
+The full `cargo test --workspace` passed (core: 882 passed, 6 intentionally
 ignored); workspace Clippy with `-D warnings`, formatting and generated binding
 drift checks passed. The first workspace run caught an existing IPC test startup
 race: socket-path existence preceded listening. Its setup now probes connection
 readiness; the isolated rerun and final workspace run both passed. No approval
 assertion or production IPC policy was weakened. A final full workspace run
 covers the audit reader's handling of a partially appended final log record.
-The checkpoint also passed web typechecking, all 124 TypeScript tests, generated
-binding drift checking, and the host JVM (9 checks) and Swift/C (8 checks) probes.
+The checkpoint also passed web typechecking, all 125 TypeScript tests, generated
+binding drift checking, and the host JVM (12 checks) and Swift/C (11 checks) probes.
 The separate `performance.json` measures the frozen KC-02 warm workload: 1/8
 parallel owners, two independent secrets each, 100 load/deliver/close/wipe cycles
 and 100 denials per owner, 3 warmups and 30 retained trials. Each trial records
@@ -103,8 +105,8 @@ its maximum dispatch/delivery time; p95 is taken over those maxima.
 
 | Owners | p95 of trial maxima | Incremental RSS high-water |
 | --- | ---: | ---: |
-| 1 | 1.638542 ms | 2,473,984 bytes |
-| 8 | 89.712959 ms | 2,834,432 bytes |
+| 1 | 1.038958 ms | 2,211,840 bytes |
+| 8 | 26.397541 ms | 2,113,536 bytes |
 
 Both limits pass (100 ms, 16 MiB), with zero handles after close. The test uses
 temporary SQLite files, encrypted values, external receipts and audit file writes.
@@ -144,12 +146,13 @@ binding. An operator/VPS vault, owner CLI token, service grant or OIDC session
 cannot substitute. The public Rust types cannot currently be constructed by an
 application, and the mobile custody feature remains unset.
 
-Before KC-02 acceptance: obtain fresh adversarial audit/IPC review and green
-exact-head CI. Blocking OS calls cannot be forcibly interrupted: a stalled worker
+Before KC-02 acceptance: retain fresh adversarial audit/IPC review and green
+exact-head CI. Two independent automated reviews have inspected the implementation
+and corrective diff; see [findings and closure](ADVERSARIAL_REVIEW.md). Blocking OS calls cannot be forcibly interrupted: a stalled worker
 can retain its vault reference and native source/result until the call returns,
 even though the waiter and local authority have been canceled. The worker limits
 bound this retention; these tests do not qualify every filesystem or device.
-No independent review has been claimed. No merge, tag,
+Automated technical review does not replace required code-owner approval. No merge, tag,
 deployment, release or real mailbox activation has occurred.
 
 KC-03 onward still requires Sandesha recovery/fingerprint proof, destination

@@ -36,6 +36,10 @@ The public admin trait has no implemented adapter or approval minting path.
 
 ## Local validation
 
+Functional counts below describe the original KC-01 checkpoint. Current full-suite
+results and independent review are recorded in the [KC-02 follow-up](../custody-kc02/ADVERSARIAL_REVIEW.md).
+Fuzz and performance receipts were refreshed for the corrective source on 2026-10-17.
+
 | Check | Result / scope |
 | --- | --- |
 | Red-first Rust contract, native engine and C ABI checks | Failed before implementation; excerpts in `red-first.txt` |
@@ -49,7 +53,7 @@ The public admin trait has no implemented adapter or approval minting path.
 | `npm run test:ts` | 124 tests passed, existing coverage thresholds passed |
 | `bash scripts/test-custody-native.sh` | Host JVM: 9 checks; host Swift/generated C ABI: 8 checks passed |
 | Generated binding drift and formatting | Checked with generator `--check` and `cargo fmt --all -- --check` |
-| `cargo +nightly fuzz run fuzz_custody_metadata -- -max_total_time=60 -max_len=8192` | 5,777,483 inputs / 61 seconds, exit 0, no crash; see `fuzz.json` |
+| `cargo +nightly fuzz run fuzz_custody_metadata -- -max_total_time=60 -max_len=8192` | 4,929,997 inputs / 61 seconds, exit 0, no crash; see `fuzz.json` |
 
 The full workspace run exposed an existing-wrapper convention mismatch in the new
 C entry point; fixed using the existing wrappers, with the unchanged regression
@@ -75,8 +79,8 @@ the 30 trial maxima, a stricter aggregate than per-operation p95.
 
 | Owner sessions | p95 of trial maxima | Incremental RSS high-water |
 | --- | ---: | ---: |
-| 1 | 0.009291 ms | 1,212,416 bytes |
-| 8 | 0.756208 ms | 638,976 bytes |
+| 1 | 0.021625 ms | 1,376,256 bytes |
+| 8 | 0.716666 ms | 688,128 bytes |
 
 Both frozen limits pass (100 ms, 16 MiB), and zero handles remain after close.
 RSS baseline is before warmups with the provider already loaded. These figures
@@ -113,13 +117,11 @@ No such claim follows from these metadata tests.
 
 ## Remaining ordered work
 
-KC-01 still needs fresh independent review and exact-head CI before acceptance.
-KC-02 must implement dedicated authenticated personal-vault storage with atomic
-object+binding CAS; unconditional fresh master-password step-up for every mutation
-(not the permissive desktop profile); exact-object grants; trusted source/receiver
-registration; audit and daemon lifecycle integration; restart/revoke/race tests.
-Storage must participate safely in backup/restore, DEK rotation and deletion before
-enabling durable data. Service credentials and operator/VPS grants cannot be reused.
+KC-02 dedicated storage, native authority, backup/rekey and lifecycle coverage are
+implemented as a synthetic candidate. Two independent automated reviews found and
+rechecked corrections to receipt uniqueness, metadata wire shape and negative-test
+coverage; see the KC-02 follow-up. Fresh exact-head CI and code-owner approval remain
+required. Production enrollment and capability advertisement remain unavailable.
 
 KC-03 onward still require unchanged Sandesha recovery bytes and actual proof of
 mail-key/certificate possession, verified destination before migration cleanup,

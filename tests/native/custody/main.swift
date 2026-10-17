@@ -23,4 +23,8 @@ var info = SPBridgeInfo()
 precondition(sp_bridge_negotiate(2, &info) == SPErrorCode_Success)
 precondition(info.feature_flags & CustodyContract.feature == 0)
 precondition(sp_bridge_negotiate(3, &info) == SPErrorCode_AbiUnsupported)
-print("custody metadata host Swift/C: 8 checks passed")
+for (index, name) in ["scope", "reference", "capabilities"].enumerated() {
+    let bytes = try Data(contentsOf: root.appendingPathComponent("\(name).array.invalid.json"))
+    precondition(validate(bytes, kind: UInt32(index + 1)) == SPErrorCode_InvalidParam)
+}
+print("custody metadata host Swift/C: 11 checks passed")

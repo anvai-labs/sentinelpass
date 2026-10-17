@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import scope from '../bindings/custody/scope.golden.json';
 import reference from '../bindings/custody/reference.golden.json';
+import scopeArray from '../bindings/custody/scope.array.invalid.json';
+import referenceArray from '../bindings/custody/reference.array.invalid.json';
+import capabilitiesArray from '../bindings/custody/capabilities.array.invalid.json';
 import { validateCustodyScope, validateObjectRef, validateProviderCapabilities } from '../bindings/custody/v1';
 
 describe('generated custody metadata', () => {
+  it('rejects the same positional-array vectors as Rust and the native ABI', () => {
+    expect(validateCustodyScope(scopeArray)).toBe(false);
+    expect(validateObjectRef(referenceArray)).toBe(false);
+    expect(validateProviderCapabilities(capabilitiesArray)).toBe(false);
+  });
   it('accepts the same golden metadata as Rust and the native ABI', () => {
     expect(validateCustodyScope(scope)).toBe(true);
     expect(validateObjectRef(reference)).toBe(true);

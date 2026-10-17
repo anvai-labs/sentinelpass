@@ -3,7 +3,9 @@
 Implementation candidate on `feat/personal-custody-contract`, targeting `develop`.
 The remote develop head was rechecked against the handoff base
 `84c7f58d012b428a4f8635d87ae988e0f1ebfc31` during the retention follow-up.
-This document organizes review; it is not independent reviewer acceptance.
+This document organizes review. Fresh independent automated findings and
+corrective review are recorded in [ADVERSARIAL_REVIEW.md](ADVERSARIAL_REVIEW.md);
+GitHub code-owner approval remains outstanding.
 
 ## Scope and evidence
 

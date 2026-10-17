@@ -1,7 +1,28 @@
-use sentinelpass_protocol::custody::{CustodyError, CustodyScope, ObjectRef};
+use sentinelpass_protocol::custody::{CustodyError, CustodyScope, ObjectRef, ProviderCapabilities};
 
 const SCOPE: &str = r#"{"version":1,"namespace":"sandesha","issuer":"https://issuer.example","subject":"subject-1","mailboxId":"mailbox-1","purpose":"mail-recovery"}"#;
 const REFERENCE: &str = r#"{"objectId":"object-1","revision":"1","keyEpoch":"1","bindingSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#;
+
+#[test]
+fn custody_scope_rejects_positional_array_metadata() {
+    let bytes = include_bytes!("../../bindings/custody/scope.array.invalid.json");
+    assert!(CustodyScope::decode(bytes).is_err());
+    assert!(serde_json::from_slice::<CustodyScope>(bytes).is_err());
+}
+
+#[test]
+fn custody_reference_rejects_positional_array_metadata() {
+    let bytes = include_bytes!("../../bindings/custody/reference.array.invalid.json");
+    assert!(ObjectRef::decode(bytes).is_err());
+    assert!(serde_json::from_slice::<ObjectRef>(bytes).is_err());
+}
+
+#[test]
+fn custody_capabilities_rejects_positional_array_metadata() {
+    let bytes = include_bytes!("../../bindings/custody/capabilities.array.invalid.json");
+    assert!(ProviderCapabilities::decode(bytes).is_err());
+    assert!(serde_json::from_slice::<ProviderCapabilities>(bytes).is_err());
+}
 
 #[test]
 fn custody_golden_metadata_round_trips_without_coercion() {

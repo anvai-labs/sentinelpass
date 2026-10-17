@@ -78,3 +78,16 @@ Only the KC-01 in-memory test adapter may retain synthetic backing values.
 Add regression coverage for metadata-only grants, authentic delivery after close,
 restart rejection of old approvals/sources/read handles, and synthetic canary
 absence in persisted audit output. Keep production constructors unavailable.
+
+## Adversarial-review follow-up
+
+Fresh independent automated reviews of candidate `e69bc9b` identified a custody
+receipt rollback via duplicate IDs after offline schema replacement, an alternate
+positional-array metadata shape accepted by Rust/native validation, and a negative
+test that reused an already burned lease. Preserve the failing synthetic
+reproducers before correction. Reject duplicate identities in receipt and deep
+snapshot verification, apply existing borrowed-row bounds before receipt copies,
+require JSON objects at every metadata port, and isolate each lease denial case.
+Keep receipt bytes for valid unique rows, schema/ABI versions, capability gates and
+performance limits unchanged. Record corrective review, refreshed receipts and
+fresh exact-head CI; automated technical review does not supply code-owner approval.

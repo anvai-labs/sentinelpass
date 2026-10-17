@@ -321,7 +321,7 @@ async fn reads_require_exact_preapproved_owner_purpose_reference_and_epoch() {
 }
 
 #[tokio::test]
-async fn forged_receiver_cross_peer_and_restart_handles_are_denied() {
+async fn cross_peer_receiver_is_denied_and_burns_the_lease() {
     let (control, provider) = fixture(scope(), reference());
     let (other, _) = fixture(scope(), reference());
     let cancel = Cancellation::new();
@@ -334,16 +334,48 @@ async fn forged_receiver_cross_peer_and_restart_handles_are_denied() {
         lease.deliver_to(&foreign, &cancel).await,
         Err(CustodyError::Denied)
     );
+    assert_eq!(control.live_handles(), 0);
+    assert!(!other.receiver_has_secret(&foreign));
+}
+
+#[tokio::test]
+async fn forged_receiver_is_denied_with_a_live_lease() {
+    let (control, provider) = fixture(scope(), reference());
+    let cancel = Cancellation::new();
+    let mut lease = provider
+        .acquire(&scope(), &reference(), &cancel)
+        .await
+        .unwrap();
     let receiver = control.receiver(&scope(), &reference()).unwrap();
     let forged = RuntimeReceiver {
         state: receiver.state.clone(),
         id: [0; 32],
     };
+    {
+        let state = lock(&control.state).unwrap();
+        assert!(state.leases.contains_key(&lease.id));
+        assert!(!state.receivers.contains_key(&forged.id));
+    }
     assert_eq!(
         lease.deliver_to(&forged, &cancel).await,
         Err(CustodyError::Invalidated)
     );
+    assert!(!control.receiver_has_secret(&receiver));
+    assert!(!lock(&control.state).unwrap().leases.contains_key(&lease.id));
+}
+
+#[tokio::test]
+async fn session_invalidation_rejects_previously_live_lease_and_receiver() {
+    let (control, provider) = fixture(scope(), reference());
+    let cancel = Cancellation::new();
+    let mut lease = provider
+        .acquire(&scope(), &reference(), &cancel)
+        .await
+        .unwrap();
+    let receiver = control.receiver(&scope(), &reference()).unwrap();
+    assert_eq!(control.live_handles(), 2);
     control.invalidate();
+    assert_eq!(control.live_handles(), 0);
     assert!(!control.receiver_has_secret(&receiver));
     assert_eq!(
         lease.deliver_to(&receiver, &cancel).await,

@@ -80,7 +80,19 @@ macro_rules! wire_struct {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Wire { $(#[serde(rename = $wire)] $field: $ty),+ }
-                let wire = Wire::deserialize(d)?;
+                // Derived structs also accept positional sequences. The custody
+                // wire contract requires objects in every language and entry point.
+                struct ObjectOnly;
+                impl<'de> serde::de::Visitor<'de> for ObjectOnly {
+                    type Value = Wire;
+                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        f.write_str("a custody metadata object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> std::result::Result<Wire, A::Error> {
+                        Wire::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    }
+                }
+                let wire = d.deserialize_map(ObjectOnly)?;
                 let result = Self { $($field: wire.$field),+ };
                 result.validate().map_err(serde::de::Error::custom)?;
                 Ok(result)

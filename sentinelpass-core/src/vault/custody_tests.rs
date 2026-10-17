@@ -206,3 +206,79 @@ fn custody_storage_file_receipts_backup_and_rekey_preserve_exact_values() {
     drop(reopened);
     assert!(VaultManager::open(&path, password.as_bytes()).is_err());
 }
+
+#[test]
+fn custody_receipts_reject_duplicate_identity_after_offline_schema_tampering() {
+    for tombstoned in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let password = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let path = dir.path().join("personal.db");
+        let vault = VaultManager::create(&path, password.as_bytes()).unwrap();
+        let (scope, first, value) = (scope(), reference(), secret());
+        vault.custody_put(&scope, None, &first, &value).unwrap();
+        let captured: (String, String, String, Vec<u8>, bool) = vault
+            .lock_db()
+            .unwrap()
+            .conn()
+            .query_row(
+                "SELECT object_id,scope_json,reference_json,envelope,deleted FROM custody_objects",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        let next = ObjectRef {
+            revision: "2".into(),
+            ..first.clone()
+        };
+        vault
+            .custody_put(&scope, Some(&first), &next, &secret())
+            .unwrap();
+        if tombstoned {
+            vault.custody_remove(&scope, &next).unwrap();
+        }
+        assert!(vault.custody_read(&scope, &first).is_err());
+        {
+            let db = vault.lock_db().unwrap();
+            // An offline SQLite writer can replace schema constraints. It cannot
+            // forge either envelope or modify the authenticated .contents receipt.
+            db.conn()
+                .execute_batch(
+                    "ALTER TABLE custody_objects RENAME TO captured_current;
+                CREATE TABLE custody_objects AS SELECT * FROM captured_current WHERE 0;",
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO custody_objects VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![captured.0, captured.1, captured.2, captured.3, captured.4],
+                )
+                .unwrap();
+            db.conn()
+                .execute_batch(
+                    "INSERT INTO custody_objects SELECT * FROM captured_current;
+                DROP TABLE captured_current;",
+                )
+                .unwrap();
+        }
+        // The old row sorts first among equal IDs and query_row selects it. The
+        // receipt builder used to overwrite its map entry with the current row.
+        assert!(
+            vault.custody_read(&scope, &first).is_err(),
+            "old reference was resurrected under the unchanged current receipt"
+        );
+        assert!(vault.verify_vault_envelopes().is_err());
+        {
+            let db = vault.lock_db().unwrap();
+            // Archived snapshot verification must reject duplicates even without
+            // consulting a live vault's external receipt.
+            assert!(custody_ops::verify(
+                db.conn(),
+                vault.key_hierarchy.dek().unwrap(),
+                vault.vault_uuid_str().unwrap(),
+            )
+            .is_err());
+        }
+        drop(vault);
+        assert!(VaultManager::open(&path, password.as_bytes()).is_err());
+    }
+}

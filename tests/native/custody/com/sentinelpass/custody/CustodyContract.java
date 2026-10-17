@@ -24,6 +24,11 @@ public final class CustodyContract {
         expect(-1, validateMetadata(2, 1, null));
         expect(-1, validateMetadata(2, 1, new byte[4097]));
         expect(-1, validateMetadata(2, 1, new byte[] {(byte) 0xff}));
-        System.out.println("custody metadata host JVM: 9 checks passed");
+        String[] names = {"scope", "reference", "capabilities"};
+        for (int index = 0; index < names.length; index++) {
+            byte[] bytes = Files.readAllBytes(Path.of(args[1], names[index] + ".array.invalid.json"));
+            expect(-1, validateMetadata(2, index + 1, bytes));
+        }
+        System.out.println("custody metadata host JVM: 12 checks passed");
     }
 }

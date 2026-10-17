@@ -14,6 +14,9 @@ reference JSON is synthetic public metadata, shared by Rust, TS, Swift/C and JVM
 checks. Rust rejects duplicate keys before any authority decision; TS validators
 accept parsed objects and cannot detect duplicates already lost by JSON.parse.
 Swift/Kotlin decoding alone is not validation: call the Rust metadata validator.
+All three metadata types require JSON objects; positional arrays are rejected.
+The shared `*.array.invalid.json` vectors exercise Rust, TS, C, JVM/JNI and
+Swift/C rejection without replacing the valid object-shaped golden vectors.
 
 `sp_custody_validate_metadata` and generated `CustodyContract.validateMetadata`
 validate bounded metadata only. Kind 1 is CustodyScope, 2 ObjectRef, 3
