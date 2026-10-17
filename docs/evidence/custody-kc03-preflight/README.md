@@ -42,3 +42,13 @@ Next unresolved gates are concrete: accepted KC-01/02 handback; canonical bindin
 vectors; combined native dependency qualification; native storage recovery port;
 bounded enrollment and trusted UI; macOS application-peer transport. See workcard
 KC-03B/C for proof, cancellation, migration and resource requirements.
+
+Release-preparation update: PR269 is merged after clean review and45 green checks;
+the [binding vectors](../custody-binding-v1/README.md) and
+[native graph preflight](../custody-native-graph/README.md) now have separate receipts.
+`inputs-1df0279.json` preserves the original pins. Current `inputs.json` refreshes
+only Cargo.toml/Cargo.lock for the0.18.0 version bump; eight first-party packages
+change version and registry package records are byte-equivalent as parsed TOML.
+The before/after hashes and scope are explicit in `versionOnlyRefresh`. All61
+current pins match. Historical runtime/performance/review receipts still identify
+their original candidate; this refresh does not rewrite their measured source.

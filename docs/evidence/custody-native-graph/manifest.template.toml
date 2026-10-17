@@ -1,0 +1,14 @@
+# Copy into a new isolated directory and replace these two checkout paths.
+[package]
+name = "custody-native-qualification-graph"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+sentinelpass-core = { path = "/path/to/sentinelpass/sentinelpass-core" }
+sandesha-mail-custody = { path = "/path/to/sandesha/prototypes/rust-mail-custody" }

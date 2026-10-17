@@ -1,0 +1,3 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running `target/debug/examples/check_sandesha_binding`
+Rust binding conformance: 17 valid, 38 refused; no runtime authority

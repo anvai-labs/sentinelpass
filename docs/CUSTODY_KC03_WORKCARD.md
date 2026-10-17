@@ -74,8 +74,8 @@ Before any combined native runtime work, freeze golden vectors for:
   of the mailbox key epoch and is not an OpenPGP fingerprint.
 - `bindingSha256`: a versioned, domain-separated, canonical commitment covering
   the exact owner, purpose, existing recovery reference, profile and public-key
-  expectations where applicable. The concrete encoding is still a required
-  design/vector gate; neither repository currently defines this integration mapping.
+  expectations where applicable. The concrete qualification encoding and shared
+  vectors are now frozen in [CUSTODY_BINDING_V1.md](CUSTODY_BINDING_V1.md).
 - Numeric intersection: custody decimal u64 values must not be silently coerced
   into Sandesha's JavaScript-safe epochs. Reject unrepresentable values.
 - Mail v1/compat and v2/modern profiles preserve their original bytes. Storage
@@ -142,3 +142,10 @@ bootstrap, mobile relay and production activation remain independent later gates
 KC-03A preparation is useful even while PR269 waits for CI/code-owner approval.
 It does not satisfy KC-03B/C entry gates. No merge, release, real-key enrollment,
 production configuration or sibling activation follows from this workcard.
+
+2026-10-17 follow-up: PR269 passed45 checks/7 skips and was squash-merged as026d772
+after clean corrective review, using the owner's explicit admin-review bypass.
+Binding vectors now have independent Node/Rust conformance. The
+[combined native graph](evidence/custody-native-graph/README.md) resolves and
+compile-checks on macOS, but RSA exposure/feature/notice adoption gates remain.
+These preparation results do not enable KC-03 runtime integration or release it.

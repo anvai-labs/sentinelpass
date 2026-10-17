@@ -1,0 +1,268 @@
+{
+  "runtimeHead": "1df027932f08baabf2afebb6a0444bab867fcd12",
+  "mergeCommit": "026d772e61a17950e942f6940472f223a2172e9e",
+  "pr": "https://github.com/anvai-labs/sentinelpass/pull/269",
+  "mergeAuthorization": "Owner explicitly authorized admin bypass after clean adversarial review and exact-head green CI; no code-owner approval claimed",
+  "checks": [
+    {
+      "name": "Build JNI Libraries (Android)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117335864347"
+    },
+    {
+      "name": "Desktop (ubuntu-24.04)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864583"
+    },
+    {
+      "name": "Gate",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848987/job/117335864351"
+    },
+    {
+      "name": "Run Browser Integration Tests",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848990/job/117335864244"
+    },
+    {
+      "name": "Release Setup",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335864540"
+    },
+    {
+      "name": "Check Rust Formatting",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117335864525"
+    },
+    {
+      "name": "RustSec Audit",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848998/job/117335864569"
+    },
+    {
+      "name": "linux-msrv",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011849019/job/117335864968"
+    },
+    {
+      "name": "Build Mobile Bridge (iOS)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011849018/job/117335864459"
+    },
+    {
+      "name": "Desktop (macos-latest)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864661"
+    },
+    {
+      "name": "Desktop (windows-latest)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864562"
+    },
+    {
+      "name": "Android Lint",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117335864530"
+    },
+    {
+      "name": "iOS",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864567"
+    },
+    {
+      "name": "Package (linux)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335894039"
+    },
+    {
+      "name": "Clippy Lint",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117335864243"
+    },
+    {
+      "name": "npm Audit (Root)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848998/job/117335864730"
+    },
+    {
+      "name": "iOS Unit Tests",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011849018/job/117336649150"
+    },
+    {
+      "name": "Package (macos)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335893988"
+    },
+    {
+      "name": "Package (windows)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335893997"
+    },
+    {
+      "name": "Feature Matrix (${{ matrix.os }}, ${{ matrix.label }})",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335894865"
+    },
+    {
+      "name": "Android Unit Tests",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117336823200"
+    },
+    {
+      "name": "Android",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864728"
+    },
+    {
+      "name": "TypeScript TDD",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117335864448"
+    },
+    {
+      "name": "npm Audit (Extension E2E)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848998/job/117335864648"
+    },
+    {
+      "name": "iOS Simulator Tests",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011849018/job/117336649034"
+    },
+    {
+      "name": "Release Security Audit (RustSec)",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335895026"
+    },
+    {
+      "name": "Android Emulator Tests (29, default, x86_64)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117336823163"
+    },
+    {
+      "name": "Web",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864579"
+    },
+    {
+      "name": "Build (ubuntu-24.04)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117336348075"
+    },
+    {
+      "name": "Trivy Filesystem Scan",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848998/job/117335864474"
+    },
+    {
+      "name": "iOS Integration Tests",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011849018/job/117336649079"
+    },
+    {
+      "name": "Android Emulator Tests (29, google_apis, x86_64)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117336823222"
+    },
+    {
+      "name": "Build (windows-latest)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117336348126"
+    },
+    {
+      "name": "Android Emulator Tests (34, default, x86_64)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117336823206"
+    },
+    {
+      "name": "Build (macos-latest)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117336348104"
+    },
+    {
+      "name": "Android Emulator Tests (34, google_apis, x86_64)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117336823188"
+    },
+    {
+      "name": "Release Security Audit (npm root)",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335895094"
+    },
+    {
+      "name": "Android Integration Tests",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117336823181"
+    },
+    {
+      "name": "Security Audit",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117335864695"
+    },
+    {
+      "name": "Run Tests (ubuntu-24.04)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117338048684"
+    },
+    {
+      "name": "Run Tests (windows-latest)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117338048707"
+    },
+    {
+      "name": "Run Tests (macos-latest)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117338048705"
+    },
+    {
+      "name": "Release Security Audit (npm extension e2e)",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335894711"
+    },
+    {
+      "name": "Build APK",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848999/job/117337259416"
+    },
+    {
+      "name": "Build Summary",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848995/job/117339958762"
+    },
+    {
+      "name": "Rust LLVM Coverage",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848971/job/117340973107"
+    },
+    {
+      "name": "Bundle Smoke Test (linux)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117337984891"
+    },
+    {
+      "name": "Bundle Smoke Test (macos)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117337984840"
+    },
+    {
+      "name": "Bundle Smoke Test (windows)",
+      "conclusion": "SUCCESS",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117337984827"
+    },
+    {
+      "name": "Native Installer Smoke (${{ matrix.platform }})",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117337985785"
+    },
+    {
+      "name": "Publish sentinelpass-protocol to crates.io",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117335895351"
+    },
+    {
+      "name": "Create Release",
+      "conclusion": "SKIPPED",
+      "url": "https://github.com/anvai-labs/sentinelpass/actions/runs/39011848989/job/117338036963"
+    }
+  ]
+}

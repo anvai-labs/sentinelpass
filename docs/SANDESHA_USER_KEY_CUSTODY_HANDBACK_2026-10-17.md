@@ -1,5 +1,12 @@
 # SentinelPass KC-01/02 candidate handback and KC-03 entry gates
 
+Acceptance update2026-10-17: PR269's exact runtime head passed45 checks with7
+skips, including Gate, and clean corrective adversarial reviews. The owner
+explicitly authorized bypassing code-owner approval under those conditions;
+the PR was squash-merged to develop as026d772e61a17950e942f6940472f223a2172e9e.
+No code-owner approval is claimed. The original preparation snapshot below
+retains its earlier state; no production custody adapter is enabled.
+
 Producer runtime candidate: `1df027932f08baabf2afebb6a0444bab867fcd12`.
 [PR269](https://github.com/anvai-labs/sentinelpass/pull/269) targets develop.
 This is an unmerged synthetic implementation candidate, with two completed
