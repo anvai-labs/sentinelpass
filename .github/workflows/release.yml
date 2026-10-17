@@ -683,8 +683,9 @@ jobs:
   crates-publish:
     name: Publish sentinelpass-protocol to crates.io
     # WBS-901: publishing is irreversible (a yank is permanent) — it waits
-    # for the tag-time security audits the same way the GitHub release does.
-    needs: [setup, security-audit, npm-audit-root, npm-audit-e2e]
+    # for security audits and desktop packaging/feature gates, just as the
+    # GitHub release does. Neither publication path may outrun those gates.
+    needs: [setup, security-audit, npm-audit-root, npm-audit-e2e, bundle-smoke, native-installer-smoke, feature-matrix]
     if: >-
       ${{ needs.setup.outputs.is-release == 'true' &&
           github.event_name == 'push' &&

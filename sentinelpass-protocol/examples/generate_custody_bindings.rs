@@ -128,6 +128,31 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &swift,
         check,
     )?;
+    // Package-local canonical fixtures also feed the cross-language copies.
+    for (name, content) in [
+        (
+            "scope.golden.json",
+            include_str!("../tests/fixtures/scope.golden.json"),
+        ),
+        (
+            "reference.golden.json",
+            include_str!("../tests/fixtures/reference.golden.json"),
+        ),
+        (
+            "scope.array.invalid.json",
+            include_str!("../tests/fixtures/scope.array.invalid.json"),
+        ),
+        (
+            "reference.array.invalid.json",
+            include_str!("../tests/fixtures/reference.array.invalid.json"),
+        ),
+        (
+            "capabilities.array.invalid.json",
+            include_str!("../tests/fixtures/capabilities.array.invalid.json"),
+        ),
+    ] {
+        write(root, &format!("bindings/custody/{name}"), content, check)?;
+    }
     Ok(())
 }
 

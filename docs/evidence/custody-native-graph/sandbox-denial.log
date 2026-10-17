@@ -1,0 +1,3 @@
+error: process didn't exit successfully: `sccache /Users/vijaysingh/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc -vV` (exit status: 2)
+--- stderr
+sccache: error: Operation not permitted (os error 1)
