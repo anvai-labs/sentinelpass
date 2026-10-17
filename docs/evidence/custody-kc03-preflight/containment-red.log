@@ -1,0 +1,36 @@
+✔ matching source never grants integration or production readiness (1.918042ms)
+✔ changed source and missing source fail the check (2.065917ms)
+✔ empty pins and unknown manifest versions are refused (0.924417ms)
+✔ path traversal and out-of-checkout symlinks are refused (2.138625ms)
+✖ containment refuses Windows parent paths and different drives (0.61675ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 4
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 57.598166
+
+✖ failing tests:
+
+test at scripts/check-custody-handoff.test.mjs:50:1
+✖ containment refuses Windows parent paths and different drives (0.61675ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///Users/vijaysingh/code/sentinelpass/scripts/check-custody-handoff.test.mjs:51:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1402:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:974:18)
+      at Test.postRun (node:internal/test_runner/test:1542:19)
+      at Test.run (node:internal/test_runner/test:1467:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:974:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
