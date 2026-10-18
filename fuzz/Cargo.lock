@@ -2431,7 +2431,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sentinelpass-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aes-gcm",
  "anvai-secure-io",
@@ -2487,7 +2487,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-protocol"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -2506,7 +2506,7 @@ dependencies = [
 
 [[package]]
 name = "sentinelpass-relay"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "argon2",
