@@ -1,6 +1,6 @@
 # Fuzz Targets (WBS-903 / TV-003)
 
-Coverage-guided fuzzing for the four hostile-input parsers at SentinelPass's
+Coverage-guided fuzzing for the hostile-input parsers at SentinelPass's
 trust boundaries. The targets are thin `#![no_main]` wrappers over the REAL
 production parsers — no re-implementations, no mocks:
 
@@ -10,6 +10,7 @@ production parsers — no re-implementations, no mocks:
 | `fuzz_sync_mutation` | relay `handlers::sync_v2` decode + `validate_shape`, client `sync::v2::MutationV2` decode + `verify_mutation_mac` | decode/validate may reject, never panic; stateless per-mutation verdicts |
 | `fuzz_ipc_frame` | `protocol::session` `parse_hello`/`parse_accept`/`SessionCrypto::open`, `windows_frame::decrypt_windows_ipc_frame` | hostile frames fail auth or are refused on counters; refused frames never mutate counter state; never panic |
 | `fuzz_import_parse` | `import_export` `parse_json_import_bytes` / `parse_csv_import_bytes` | user-provided import files parse to entries or typed errors under the bounded line cap |
+| `fuzz_custody_metadata` | protocol `custody` bounded typed metadata decoders | unknown/duplicate/oversized/invalid metadata refuses without panic; accepted values validate |
 
 `corpus/` is seeded from the frozen envelope golden vector (the byte-exact
 test vector in `crypto/envelope.rs`), realistic v2 push/mutation JSON, real

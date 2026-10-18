@@ -3755,14 +3755,20 @@ mod autofill_origin_gate_tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let running = tokio::spawn(server.run());
+            let mut ready = false;
             for _ in 0..100 {
-                if socket.exists() { break; }
+                // bind creates the path before listen completes. Existence
+                // alone races the first client under parallel workspace load.
+                if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                    ready = true;
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            if !socket.exists() && running.is_finished() {
+            if !ready && running.is_finished() {
                 panic!("test listener failed: {:?}", running.await);
             }
-            assert!(socket.exists(), "test listener did not start");
+            assert!(ready, "test listener did not start");
             let client = sentinelpass_protocol::IpcClient::new_with_token(socket, "test-token".into());
             let op = make_add_op("real-socket-step-up");
             let receipt = client.send(IpcMessage::StepUpAuthorize {

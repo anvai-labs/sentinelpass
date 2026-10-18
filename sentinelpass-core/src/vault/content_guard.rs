@@ -246,6 +246,38 @@ fn snapshot(conn: &Connection) -> Result<Receipts> {
             hex::encode(Sha256::digest(bytes)),
         );
     }
+    if super::custody_ops::table_exists(conn)? {
+        let mut stmt = conn.prepare("SELECT object_id,scope_json,reference_json,envelope,deleted FROM custody_objects ORDER BY object_id")
+            .map_err(DatabaseError::Sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                super::custody_ops::check_row_bounds(r)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Vec<u8>>(3)?,
+                    r.get::<_, bool>(4)?,
+                ))
+            })
+            .map_err(DatabaseError::Sqlite)?;
+        for row in rows {
+            let row = row.map_err(DatabaseError::Sqlite)?;
+            let bytes = serde_json::to_vec(&row).map_err(|_| refusal())?;
+            // An offline writer can remove SQLite uniqueness constraints. Never
+            // collapse duplicate identities: reads must see exactly the rows
+            // authenticated by the receipt, not a hidden older duplicate.
+            if receipts
+                .insert(
+                    format!("custody:{}", row.0),
+                    hex::encode(Sha256::digest(bytes)),
+                )
+                .is_some()
+            {
+                return Err(refusal());
+            }
+        }
+    }
     Ok(receipts)
 }
 
@@ -515,8 +547,8 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Connection, DataEncryptionKey) {
         let dir = tempfile::tempdir().unwrap();
         let conn = Connection::open(dir.path().join("receipt.db")).unwrap();
-        conn.execute_batch("CREATE TABLE db_metadata(id INTEGER, vault_uuid TEXT);
-            INSERT INTO db_metadata VALUES(1,'synthetic-vault');
+        conn.execute_batch("CREATE TABLE db_metadata(id INTEGER, vault_uuid TEXT, version INTEGER);
+            INSERT INTO db_metadata VALUES(1,'synthetic-vault',13);
             CREATE TABLE registry_state(key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE domain_mappings(mapping_id INTEGER PRIMARY KEY, entry_id INTEGER,
             domain TEXT NOT NULL, is_primary INTEGER, sync_id TEXT, domain_enc BLOB);

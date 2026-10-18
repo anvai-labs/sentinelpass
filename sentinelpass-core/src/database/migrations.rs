@@ -8,6 +8,26 @@
 use crate::{DatabaseError, Result};
 use rusqlite::Connection;
 
+pub(crate) const CUSTODY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS custody_objects (
+    object_id TEXT PRIMARY KEY NOT NULL,
+    scope_json TEXT NOT NULL CHECK(length(scope_json) <= 4096),
+    reference_json TEXT NOT NULL CHECK(length(reference_json) <= 4096),
+    envelope BLOB NOT NULL CHECK(length(envelope) <= 4096),
+    deleted INTEGER NOT NULL CHECK(deleted IN (0,1))
+);";
+
+/// Dedicated local custody class; no sync mutation log or generic entry index.
+pub fn migrate_v13_to_v14(conn: &Connection) -> Result<()> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute_batch(CUSTODY_SCHEMA)
+        .map_err(DatabaseError::Sqlite)?;
+    tx.execute("UPDATE db_metadata SET version=14 WHERE id=1", [])
+        .map_err(DatabaseError::Sqlite)?;
+    tx.commit().map_err(DatabaseError::Sqlite)?;
+    Ok(())
+}
+
 /// Migrate schema from v1 to v2: add sync columns and tables.
 ///
 /// Transactionality (WBS-402 / ADR-005 rev 3): the DDL, the sync-id data
@@ -903,6 +923,9 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 
     if version < 13 {
         migrate_v12_to_v13(conn)?;
+    }
+    if version < 14 {
+        migrate_v13_to_v14(conn)?;
     }
 
     Ok(())

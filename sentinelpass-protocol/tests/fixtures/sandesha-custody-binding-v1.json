@@ -1,0 +1,1088 @@
+{
+  "version": 1,
+  "scope": "Synthetic public metadata; expected bytes/hashes generated with Python stdlib independently of both checkers; no keys or recovery secrets",
+  "valid": [
+    {
+      "name": "mail-v1",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "42351735e22e22a1ece3fca20ca967cc7d0cc332791f814706a99fae61bf1e77"
+    },
+    {
+      "name": "mail-v2",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v6-25519",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":2,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"openpgp-v6-25519\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v6-25519\",\"1\",\"{\\\"header\\\":{\\\"version\\\":2,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"profile\\\":\\\"openpgp-v6-25519\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "30c066ad62c17f52b396cc8c15cd26a0ec22f3da2751b05ea8228f75febd9291"
+    },
+    {
+      "name": "mail-html-and-json-escaping",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example/<>&",
+          "subject": "quote\"back\\slash",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example/\\u003c\\u003e\\u0026\",\"subject\":\"quote\\\"back\\\\slash\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example/<>&\",\"quote\\\"back\\\\slash\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example/\\\\u003c\\\\u003e\\\\u0026\\\",\\\"subject\\\":\\\"quote\\\\\\\"back\\\\\\\\slash\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "be39050a71ac821de77c398b0475c8b5770135625c39f32c49c6365af9a6ae1f"
+    },
+    {
+      "name": "mail-max-safe-epoch-codec-only",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v6-25519",
+        "keyEpoch": "9007199254740991",
+        "reference": "{\"header\":{\"version\":2,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":9007199254740991,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"openpgp-v6-25519\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v6-25519\",\"9007199254740991\",\"{\\\"header\\\":{\\\"version\\\":2,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":9007199254740991,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"profile\\\":\\\"openpgp-v6-25519\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "b4fcd1546302ee141111446e03c0caed503c5ca702dc02314142f762fd8e1875"
+    },
+    {
+      "name": "mail-maximum-subject",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "c933174e04e6d8be25b9e773b7be3cecbad2a5675b2ee1abec9aa56e08ca1880"
+    },
+    {
+      "name": "storage-v1",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"storage-recovery\",\"0123456789abcdef0123456789abcdef\",\"sandesha-recipient-trust-storage-v1\",\"1\",\"{\\\"keyId\\\":\\\"cccccccccccccccccccccccccccccccc\\\",\\\"epoch\\\":1,\\\"sha256\\\":\\\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\\\"}\",\"\",\"\"]",
+      "sha256": "c4a0545a8a77fef7f8c36a1b18738234dfb76eab8d4f127303d3f8a9c39738ef"
+    },
+    {
+      "name": "storage-epoch-independent-codec-only",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "7",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":7,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"storage-recovery\",\"0123456789abcdef0123456789abcdef\",\"sandesha-recipient-trust-storage-v1\",\"7\",\"{\\\"keyId\\\":\\\"cccccccccccccccccccccccccccccccc\\\",\\\"epoch\\\":7,\\\"sha256\\\":\\\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\\\"}\",\"\",\"\"]",
+      "sha256": "207162277134c3f8ebe7d0f4a7f914216f03b101869dc949f28c20f6745aa915"
+    },
+    {
+      "name": "mail-distinct-journal",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "6e393f3036d9ef3afd50471e76b8f1c4cd3894f6cb4c39893f84a54e56c84823"
+    },
+    {
+      "name": "mail-distinct-issuer",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example-changed",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example-changed\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example-changed\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example-changed\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "5070b497f32db499c2e6223f4a3f2faa95bd0a238a21a41edc13f4cb256efa4f"
+    },
+    {
+      "name": "mail-distinct-subject",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1-changed",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1-changed\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1-changed\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1-changed\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "78147d4edf5fa1c5863b956102f5e9157a046b45ed2c8961c0d107c35b5ddb9b"
+    },
+    {
+      "name": "mail-distinct-mailbox",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1-changed",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1-changed\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1-changed\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1-changed\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "e34b31105a96d46a8fd1a611dfe11a536661c4b4bb69a1c90ef12614c31599c5"
+    },
+    {
+      "name": "mail-distinct-primary-pin",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "284c420bf5e73ff03fc92fcc4beccb26f8fbb008da7481c1990dd7a0306b76ba"
+    },
+    {
+      "name": "mail-distinct-encryption-pin",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"EFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEFEF\"]",
+      "sha256": "1899579f6a08e91de4fff772c05c8101e0af5735e7009a6269ff8cee1dfd8b20"
+    },
+    {
+      "name": "mail-distinct-envelope",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"},\\\"envelopeSha256\\\":\\\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "d17fb232bbc108b818a8ed088814828cef784aabf2855a336bfcacd25fe45f9d"
+    },
+    {
+      "name": "mail-distinct-certificate",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"mailbox-1\",\"mail-recovery\",\"0123456789abcdef0123456789abcdef\",\"openpgp-v4-ecc\",\"1\",\"{\\\"header\\\":{\\\"version\\\":1,\\\"purpose\\\":\\\"sandesha-mail-key\\\",\\\"owner\\\":{\\\"issuer\\\":\\\"https://issuer.example\\\",\\\"subject\\\":\\\"subject-1\\\",\\\"mailbox\\\":\\\"mailbox-1\\\"},\\\"epoch\\\":1,\\\"keyId\\\":\\\"AAAAAAAAAAAAAAAAAAAAAA\\\",\\\"certificateSha256\\\":\\\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\\\"},\\\"envelopeSha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\"}\",\"ABABABABABABABABABABABABABABABABABABABAB\",\"CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD\"]",
+      "sha256": "2a5779e32a8ad08616b1f442443527c10e31fdca14993ebe92fcd0ae47384deb"
+    },
+    {
+      "name": "storage-subject-consumer-limit",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"mailbox-1\",\"storage-recovery\",\"0123456789abcdef0123456789abcdef\",\"sandesha-recipient-trust-storage-v1\",\"1\",\"{\\\"keyId\\\":\\\"cccccccccccccccccccccccccccccccc\\\",\\\"epoch\\\":1,\\\"sha256\\\":\\\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\\\"}\",\"\",\"\"]",
+      "sha256": "a0927db3f1db0fe310d1909b4919cb4e7a355626d5561b9e0a9a3443b2d7d90d"
+    },
+    {
+      "name": "storage-mailboxId-consumer-limit",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      },
+      "preimage": "[\"sandesha.personal-custody.binding.v1\",\"sandesha\",\"https://issuer.example\",\"subject-1\",\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"storage-recovery\",\"0123456789abcdef0123456789abcdef\",\"sandesha-recipient-trust-storage-v1\",\"1\",\"{\\\"keyId\\\":\\\"cccccccccccccccccccccccccccccccc\\\",\\\"epoch\\\":1,\\\"sha256\\\":\\\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\\\"}\",\"\",\"\"]",
+      "sha256": "487a0aeaf3e9529439ceb48d87b0f6974cb6b15360e850b90aa5868f4a194446"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "namespace",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "other",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "scope-version",
+      "input": {
+        "scope": {
+          "version": 2,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "wildcard-owner",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "*",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "unicode-owner",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "\u00e9",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "too-long-owner",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "leading-zero",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "01",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "zero",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "0",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "negative",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "-1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "numeric-epoch",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": 1,
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "unsafe-epoch",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "9007199254740992",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "epoch-mismatch",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "2",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "profile-mismatch",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v6-25519",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "lowercase-fingerprint",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "abababababababababababababababababababab",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "wrong-fingerprint-length",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "empty-fingerprint",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "journal-case",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "ABABABABABABABABABABABABABABABAB",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "journal-length",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0000000000000000000000000000000",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "extra-input",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD",
+        "extra": "refused"
+      }
+    },
+    {
+      "name": "null-reference",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": null,
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "array-reference",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "[]",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "oversized-reference",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "noncanonical-reference",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"} ",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "duplicate-reference-field",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "wrong-owner",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"someone-else\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "unknown-reference-field",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"extra\":\"refused\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "explicit-null-profile",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":null},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "v1-explicit-profile",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"openpgp-v4-ecc\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "wrong-header-purpose",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"storage\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "noncanonical-key-id",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAB\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "uppercase-digest",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":1,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"envelopeSha256\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "modern-unknown-profile",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "mail-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v6-25519",
+        "keyEpoch": "1",
+        "reference": "{\"header\":{\"version\":2,\"purpose\":\"sandesha-mail-key\",\"owner\":{\"issuer\":\"https://issuer.example\",\"subject\":\"subject-1\",\"mailbox\":\"mailbox-1\"},\"epoch\":1,\"keyId\":\"AAAAAAAAAAAAAAAAAAAAAA\",\"certificateSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"unknown\"},\"envelopeSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": "CDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD"
+      }
+    },
+    {
+      "name": "storage-mail-fingerprint",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "ABABABABABABABABABABABABABABABABABABABAB",
+        "encryptionFingerprint": ""
+      }
+    },
+    {
+      "name": "storage-mail-profile",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "openpgp-v4-ecc",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      }
+    },
+    {
+      "name": "storage-key-id",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      }
+    },
+    {
+      "name": "storage-extra-field",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"owner\":\"asserted\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      }
+    },
+    {
+      "name": "storage-epoch-mismatch",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":2,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      }
+    },
+    {
+      "name": "storage-subject-over-consumer-limit",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "mailboxId": "mailbox-1",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      }
+    },
+    {
+      "name": "storage-mailboxId-over-consumer-limit",
+      "input": {
+        "scope": {
+          "version": 1,
+          "namespace": "sandesha",
+          "issuer": "https://issuer.example",
+          "subject": "subject-1",
+          "mailboxId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "purpose": "storage-recovery"
+        },
+        "journalId": "0123456789abcdef0123456789abcdef",
+        "profile": "sandesha-recipient-trust-storage-v1",
+        "keyEpoch": "1",
+        "reference": "{\"keyId\":\"cccccccccccccccccccccccccccccccc\",\"epoch\":1,\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}",
+        "primaryFingerprint": "",
+        "encryptionFingerprint": ""
+      }
+    }
+  ]
+}

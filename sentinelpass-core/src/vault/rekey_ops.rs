@@ -57,6 +57,7 @@ impl VaultManager {
             old_uuid: self.vault_uuid_str()?,
             new_uuid: &new_uuid,
         };
+        super::custody_ops::rekey(&tx, old_dek, new_dek, self.vault_uuid_str()?, &new_uuid)?;
         use EnvelopePurpose::*;
         // Explicit inventory: no unknown blob is silently copied under a new
         // key. Stable object ids, associations, timestamps and policy survive.

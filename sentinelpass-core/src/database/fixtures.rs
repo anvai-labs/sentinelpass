@@ -201,6 +201,9 @@ fn migrate_ladder_to(conn: &rusqlite::Connection, target: i32) {
     if target >= 13 {
         migrate_v12_to_v13(conn).unwrap();
     }
+    if target >= 14 {
+        super::migrations::migrate_v13_to_v14(conn).unwrap();
+    }
     let version: i32 = conn
         .query_row("SELECT version FROM db_metadata WHERE id = 1", [], |r| {
             r.get(0)

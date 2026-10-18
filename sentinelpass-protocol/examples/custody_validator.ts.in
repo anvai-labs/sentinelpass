@@ -1,0 +1,28 @@
+function validate(name: keyof typeof schemas, value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) return false;
+  const fields = schemas[name];
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(value).length !== Object.keys(fields).length) return false;
+  for (const [key, rule] of Object.entries(fields)) {
+    const descriptor = descriptors[key];
+    if (!descriptor || !('value' in descriptor)) return false;
+    const v: unknown = descriptor.value;
+    switch (rule) {
+      case 'version': if (v !== 1) return false; break;
+      case 'secretBytes': if (v !== 32) return false; break;
+      case 'bool': if (typeof v !== 'boolean') return false; break;
+      case 'id128': case 'id512':
+        if (typeof v !== 'string' || v.length < 1 || v.length > (rule === 'id128' ? 128 : 512)
+            || !/^[\x21-\x7e]+$/.test(v) || v.includes('*')) return false;
+        break;
+      case 'decimal':
+        if (typeof v !== 'string' || v.length > 20 || !/^[1-9][0-9]*$/.test(v)
+            || BigInt(v) > 18446744073709551615n) return false;
+        break;
+      case 'sha256': if (typeof v !== 'string' || !/^[0-9a-f]{64}$/.test(v)) return false; break;
+      default: if (typeof v !== 'string' || !enums[rule]?.includes(v)) return false;
+    }
+  }
+  return true;
+}

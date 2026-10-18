@@ -97,6 +97,16 @@ impl StepUpState {
         Self::default()
     }
 
+    /// Native capability destruction burns an unused approval too. The caller
+    /// already owns the opaque ID; this can only remove authority.
+    pub(crate) fn discard(&self, approval_id: &str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(approval_id);
+    }
+
     fn key(inner: &mut Inner) -> Zeroizing<[u8; 32]> {
         // Lazily generate ONCE and store: mint and every later take must
         // derive commitments under the SAME key (found by the SP-0 test

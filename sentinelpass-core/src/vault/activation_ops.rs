@@ -738,6 +738,7 @@ impl VaultManager {
         report.totp_secrets_verified += totp_verified;
         verify_domain_rows(conn, dek, &vault_uuid, &tag_key, &mut report)?;
         verify_identity_metadata(conn, dek, &vault_uuid, &mut report)?;
+        super::custody_ops::verify(conn, dek, &vault_uuid)?;
         Ok(report)
     }
 }
@@ -785,6 +786,7 @@ pub(crate) fn verify_snapshot_envelopes(
     report.totp_secrets_verified += totp_verified;
     verify_domain_rows(conn, dek, vault_uuid, &tag_key, &mut report)?;
     verify_identity_metadata(conn, dek, vault_uuid, &mut report)?;
+    super::custody_ops::verify(conn, dek, vault_uuid)?;
     Ok(report)
 }
 

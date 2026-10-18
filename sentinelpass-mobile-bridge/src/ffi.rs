@@ -57,6 +57,36 @@ use std::ptr;
 /// Vault handle type (opaque u64)
 pub type VaultHandle = u64;
 
+/// Validate custody v1 metadata only; Success grants no authority or capability.
+/// `kind`: 1 = CustodyScope, 2 = ObjectRef, 3 = ProviderCapabilities. The metadata
+/// is UTF-8 JSON, bounded to 4096 bytes. Unknown/duplicate fields fail closed.
+/// The caller must first negotiate ABI v2; custody access is NOT advertised.
+///
+/// # Safety
+/// For a nonzero length <=4096, metadata must point to that many readable bytes
+/// for this call. The buffer is borrowed, never retained or freed by Rust.
+#[no_mangle]
+pub unsafe extern "C" fn sp_custody_validate_metadata(
+    client_abi_version: u32,
+    kind: u32,
+    metadata: *const u8,
+    metadata_len: usize,
+) -> ErrorCode {
+    catch_panic(|| {
+        if crate::abi::negotiate(client_abi_version).is_err() {
+            return ErrorCode::AbiUnsupported;
+        }
+        if metadata.is_null()
+            || metadata_len == 0
+            || metadata_len > sentinelpass_core::custody::MAX_METADATA_BYTES
+        {
+            return ErrorCode::InvalidParam;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(metadata, metadata_len) };
+        crate::custody::validate(client_abi_version, kind, bytes)
+    })
+}
+
 /// FFI-safe entry representation
 #[repr(C)]
 pub struct Entry {
@@ -1190,6 +1220,7 @@ mod abi_contract_tests {
         "sp_backup_restore",
         "sp_bridge_info",
         "sp_bridge_negotiate",
+        "sp_custody_validate_metadata",
         "sp_entry_free",
         "sp_entry_list_free",
         "sp_bytes_free",

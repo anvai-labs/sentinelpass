@@ -15,6 +15,8 @@
 
 pub mod client;
 pub mod connection;
+/// Strict, versioned personal-custody metadata (no secret transport).
+pub mod custody;
 pub mod envelope;
 pub mod error;
 pub mod message;

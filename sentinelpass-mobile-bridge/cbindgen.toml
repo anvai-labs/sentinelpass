@@ -49,6 +49,7 @@ include = [
     "sp_backup_restore",
     "sp_bridge_info",
     "sp_bridge_negotiate",
+    "sp_custody_validate_metadata",
     "sp_entry_free",
     "sp_entry_list_free",
     "sp_sync_get_status",
