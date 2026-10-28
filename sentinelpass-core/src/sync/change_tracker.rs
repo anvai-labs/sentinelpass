@@ -22,8 +22,8 @@ fn create_tombstone_blob(
 ) -> Result<SyncEntryBlob> {
     let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-    let encrypted = encrypt_for_sync(dek, &tombstone_data)
-        .map_err(crate::PasswordManagerError::Crypto)?;
+    let encrypted =
+        encrypt_for_sync(dek, &tombstone_data).map_err(crate::PasswordManagerError::Crypto)?;
 
     Ok(SyncEntryBlob {
         sync_id,
@@ -325,7 +325,12 @@ pub fn collect_pending_ssh_key_blobs(
 
         if is_deleted {
             blobs.push(create_tombstone_blob(
-                dek, sync_id, SyncEntryType::SshKey, sync_version, modified_at, device_id,
+                dek,
+                sync_id,
+                SyncEntryType::SshKey,
+                sync_version,
+                modified_at,
+                device_id,
             )?);
             continue;
         }
@@ -484,7 +489,12 @@ pub fn collect_pending_totp_blobs(
 
         if is_deleted {
             blobs.push(create_tombstone_blob(
-                dek, sync_id, SyncEntryType::TotpSecret, sync_version, created_at, device_id,
+                dek,
+                sync_id,
+                SyncEntryType::TotpSecret,
+                sync_version,
+                created_at,
+                device_id,
             )?);
             continue;
         }

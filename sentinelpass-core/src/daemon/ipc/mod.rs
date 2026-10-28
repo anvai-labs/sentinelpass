@@ -70,7 +70,7 @@ mod tests {
         prefix: &str,
     ) -> (
         std::path::PathBuf,
-        tempfile::TempDir,
+        std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
         &'static [u8],
@@ -108,7 +108,10 @@ mod tests {
         allowlist_path: &std::path::Path,
         password: &[u8],
         auth_token: &str,
-    ) -> (Arc<IpcServer>, tokio::task::JoinHandle<()>) {
+    ) -> (std::sync::Arc<IpcServer>, tokio::task::JoinHandle<()>) {
+        use crate::daemon::DaemonVault;
+        use std::sync::Arc;
+
         let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path.to_path_buf()), 300).unwrap());
         daemon_vault.unlock(password).await.unwrap();
 
@@ -120,7 +123,9 @@ mod tests {
         ));
         let server_task = tokio::spawn({
             let server = server.clone();
-            async move { server.run().await }
+            async move {
+                let _ = server.run().await;
+            }
         });
 
         for _ in 0..50 {
@@ -137,13 +142,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn daemon_ipc_external_secret_lookup_requires_victor_allowlist() {
-        use crate::daemon::DaemonVault;
         use crate::{
             CredentialType, Entry, ExternalSecretAllowlist, ExternalSecretField, VaultManager,
         };
         use chrono::Utc;
-        use std::sync::Arc;
-        use tokio::time::{sleep, Duration};
 
         let (vault_path, socket_dir, socket_path, allowlist_path, password, auth_token) =
             setup_ipc_test_env("ipc");
@@ -177,7 +179,7 @@ mod tests {
             .unwrap();
         allowlist.save_to_path(&allowlist_path).unwrap();
 
-        let (_server, _server_task) = setup_ipc_server_with_allowlist(
+        let (_server, server_task) = setup_ipc_server_with_allowlist(
             &vault_path,
             &socket_path,
             &allowlist_path,
@@ -254,14 +256,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn daemon_ipc_client_tokens_enforce_grant_access() {
-        use crate::daemon::DaemonVault;
         use crate::{
             ClientTokenStatus, CredentialType, Entry, ExternalSecretAllowlist, ExternalSecretField,
             VaultManager,
         };
         use chrono::Utc;
-        use std::sync::Arc;
-        use tokio::time::{sleep, Duration};
 
         let (vault_path, socket_dir, socket_path, allowlist_path, password, auth_token) =
             setup_ipc_test_env("tok");
@@ -290,7 +289,7 @@ mod tests {
         let token = allowlist.mint_client_token("victor").unwrap();
         allowlist.save_to_path(&allowlist_path).unwrap();
 
-        let (_server, _server_task) = setup_ipc_server_with_allowlist(
+        let (_server, server_task) = setup_ipc_server_with_allowlist(
             &vault_path,
             &socket_path,
             &allowlist_path,
@@ -713,7 +712,8 @@ mod tests {
         use sentinelpass_protocol::connection::{IpcConnection, TransportConnection};
         use std::sync::Arc;
 
-        let (vault_path, socket_dir, socket_path, password, _) = setup_ipc_test_env("stall");
+        let (vault_path, socket_dir, socket_path, _allowlist_path, password, _auth_token) =
+            setup_ipc_test_env("stall");
 
         let vault = VaultManager::create(&vault_path, password).unwrap();
         drop(vault);
@@ -800,7 +800,8 @@ mod tests {
         use sentinelpass_protocol::Origin;
         use std::sync::Arc;
 
-        let (vault_path, socket_dir, socket_path, password, _) = setup_ipc_test_env("cap");
+        let (vault_path, socket_dir, socket_path, _allowlist_path, password, _auth_token) =
+            setup_ipc_test_env("cap");
         let capability_store = socket_dir.join("capabilities.json");
 
         // Mint the installation capability for the native host.
@@ -907,7 +908,8 @@ mod tests {
         use sentinelpass_protocol::service::{ServiceOutcome, VaultOp};
         use std::sync::Arc;
 
-        let (vault_path, socket_dir, socket_path, password, _) = setup_ipc_test_env("live");
+        let (vault_path, socket_dir, socket_path, _allowlist_path, password, _auth_token) =
+            setup_ipc_test_env("live");
 
         let vault = VaultManager::create(&vault_path, password).unwrap();
         drop(vault);

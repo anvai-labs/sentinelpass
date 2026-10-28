@@ -4,15 +4,15 @@ use sentinelpass_protocol::custody::Purpose;
 // Helper to set up a custody test fixture with acquired lease and receiver.
 // Eliminates duplication across multiple custody tests.
 async fn setup_custody_fixture() -> (
-    CustodyControl,
-    CustodyProvider,
-    Lease,
-    Receiver,
+    super::synthetic::Controller,
+    NativeReadSession,
+    CustodyLease,
+    RuntimeReceiver,
     Cancellation,
 ) {
     let (control, provider) = fixture(scope(), reference());
     let cancel = Cancellation::new();
-    let mut lease = provider
+    let lease = provider
         .acquire(&scope(), &reference(), &cancel)
         .await
         .unwrap();

@@ -39,6 +39,7 @@ fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
 
 // Seal TOTP identity metadata fields (issuer and account_name) into envelopes.
 // Extracted to eliminate duplication between INSERT and UPDATE arms of TOTP apply.
+#[allow(clippy::type_complexity)]
 fn seal_totp_identity_metadata(
     dek: &DataEncryptionKey,
     vault_uuid: &str,

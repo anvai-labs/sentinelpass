@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 // Helper to create a passkey reference entry for tests.
 // Eliminates duplication across multiple vault tests.
-fn create_passkey_reference_entry() -> Entry {
+pub(crate) fn create_passkey_reference_entry() -> Entry {
     Entry {
         entry_id: None,
         title: "Example Passkey".to_string(),

@@ -16,7 +16,14 @@ fn reference() -> ObjectRef {
 
 // Helper to set up a reader with acquired lease and delivery receiver.
 // Eliminates duplication across multiple custody tests.
-async fn setup_reader_with_lease(harness: &Harness) -> (PersonalCustodyControl, Lease, Receiver) {
+async fn setup_reader_with_lease(
+    harness: &Harness,
+) -> (
+    super::super::synthetic::Controller,
+    NativeReadSession,
+    CustodyLease,
+    RuntimeReceiver,
+) {
     let (control, read) = harness.reader().await;
     let receiver = control.receiver(&scope(), &reference()).unwrap();
     let mut lease = read
@@ -27,7 +34,7 @@ async fn setup_reader_with_lease(harness: &Harness) -> (PersonalCustodyControl, 
         .deliver_to(&receiver, &Cancellation::new())
         .await
         .unwrap();
-    (control, lease, receiver)
+    (control, read, lease, receiver)
 }
 
 // Helper to create a replay approval from an existing approval.
@@ -41,9 +48,9 @@ fn replay_approval(approval: &PersonalApproval) -> PersonalApproval {
 
 // Helper to approve and execute a remove operation.
 // Eliminates duplication across multiple custody tests.
-async fn approve_and_remove(harness: &Harness, reason: &str) {
+async fn approve_and_remove(harness: &Harness) {
     let approval = harness
-        .approve(harness.password.as_bytes(), "remove", Some(reason))
+        .approve(harness.password.as_bytes(), "remove", None)
         .await
         .unwrap();
     harness
@@ -283,9 +290,9 @@ async fn daemon_lock_wipes_native_sources_receivers_and_denies_late_delivery() {
 async fn native_remove_revokes_existing_reads_and_wipes_delivered_value() {
     let harness = Harness::new().await;
     harness.enroll().await;
-    let (control, _lease, receiver) = setup_reader_with_lease(&harness).await;
+    let (control, read, _lease, receiver) = setup_reader_with_lease(&harness).await;
     assert!(control.receiver_matches_object(&receiver));
-    approve_and_remove(&harness, "remove").await;
+    approve_and_remove(&harness).await;
     assert!(!control.receiver_has_secret(&receiver));
     assert!(matches!(
         read.acquire(&scope(), &reference(), &Cancellation::new())
@@ -650,7 +657,7 @@ async fn durable_grants_retain_metadata_only_between_deliveries() {
 async fn restart_keeps_objects_but_rejects_old_native_authority() {
     let harness = Harness::new().await;
     harness.enroll().await;
-    let (control, _lease, _receiver) = setup_reader_with_lease(&harness).await;
+    let (control, read, _lease, receiver) = setup_reader_with_lease(&harness).await;
     let old_remove = harness
         .approve(harness.password.as_bytes(), "remove", None)
         .await
@@ -749,7 +756,7 @@ async fn native_audit_records_outcomes_without_recovery_or_authority_canaries() 
             .await,
         Err(CustodyError::Denied)
     );
-    let (control, _lease, receiver) = setup_reader_with_lease(&harness).await;
+    let (control, _read, _lease, receiver) = setup_reader_with_lease(&harness).await;
     assert!(control.receiver_matches_object(&receiver));
     let approval = harness
         .approve(harness.password.as_bytes(), "remove", None)

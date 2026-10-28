@@ -934,12 +934,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
     use crate::database::fixtures::V1_SCHEMA_SQL;
+    use crate::database::Database;
 
     /// Raw v1 schema DDL (no sync columns), shared by the in-memory and
     /// file-based fixtures. Now references the shared constant from fixtures.rs.
-
     fn seed_v1_metadata(conn: &rusqlite::Connection) {
         conn.execute(
             "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)
