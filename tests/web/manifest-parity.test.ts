@@ -15,6 +15,19 @@ const firefoxManifest = JSON.parse(
 const PINNED_CHROME_EXTENSION_ID = 'nophfgfiiohedlodfeepjoioljbhggdd';
 const HOST_NAME = 'com.passwordmanager.host';
 
+// Shared sources array for native-host registration tests
+const NATIVE_HOST_SOURCES: Array<[string, string]> = [
+  ['installation/install.sh', readFileSync(path.join(repoRoot, 'installation', 'install.sh'), 'utf8')],
+  [
+    'installation/install.ps1',
+    readFileSync(path.join(repoRoot, 'installation', 'install.ps1'), 'utf8')
+  ],
+  [
+    'sentinelpass-ui/src-tauri/src/main.rs',
+    readFileSync(path.join(repoRoot, 'sentinelpass-ui', 'src-tauri', 'src', 'main.rs'), 'utf8')
+  ]
+];
+
 /** Chrome stable extension ID: a-p base-16 of SHA256(manifest key)[0..16]. */
 function deriveChromeExtensionId(manifestKey: string): string {
   const keyDer = Buffer.from(manifestKey, 'base64');
@@ -49,18 +62,7 @@ describe('manifest/native-host parity (WBS-718, SR-CLIENT-004, TD-CLIENT-08)', (
   });
 
   it('allows the derived Chrome ID in every native-host registration source', () => {
-    const sources: Array<[string, string]> = [
-      ['installation/install.sh', readFileSync(path.join(repoRoot, 'installation', 'install.sh'), 'utf8')],
-      [
-        'installation/install.ps1',
-        readFileSync(path.join(repoRoot, 'installation', 'install.ps1'), 'utf8')
-      ],
-      [
-        'sentinelpass-ui/src-tauri/src/main.rs',
-        readFileSync(path.join(repoRoot, 'sentinelpass-ui', 'src-tauri', 'src', 'main.rs'), 'utf8')
-      ]
-    ];
-    for (const [label, source] of sources) {
+    for (const [label, source] of NATIVE_HOST_SOURCES) {
       expect(
         source.includes(PINNED_CHROME_EXTENSION_ID),
         `${label} does not allow the Chrome extension ID ${PINNED_CHROME_EXTENSION_ID}`
@@ -71,18 +73,7 @@ describe('manifest/native-host parity (WBS-718, SR-CLIENT-004, TD-CLIENT-08)', (
   it('uses ONE firefox extension ID across the manifest and every native-host source', () => {
     const geckoId = firefoxManifest.browser_specific_settings?.gecko?.id;
     expect(typeof geckoId).toBe('string');
-    const sources: Array<[string, string]> = [
-      ['installation/install.sh', readFileSync(path.join(repoRoot, 'installation', 'install.sh'), 'utf8')],
-      [
-        'installation/install.ps1',
-        readFileSync(path.join(repoRoot, 'installation', 'install.ps1'), 'utf8')
-      ],
-      [
-        'sentinelpass-ui/src-tauri/src/main.rs',
-        readFileSync(path.join(repoRoot, 'sentinelpass-ui', 'src-tauri', 'src', 'main.rs'), 'utf8')
-      ]
-    ];
-    for (const [label, source] of sources) {
+    for (const [label, source] of NATIVE_HOST_SOURCES) {
       expect(
         source.includes(geckoId),
         `${label} pins a different firefox ID than the manifest (${geckoId})`
