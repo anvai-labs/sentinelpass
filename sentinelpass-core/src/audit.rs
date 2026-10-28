@@ -2242,16 +2242,34 @@ mod tests {
     #[test]
     fn records_without_installed_keys_keep_raw_identifiers() {
         let _guard = KEY_SERIAL.lock().unwrap();
-        AuditLogger::clear_keys();
-        let tmp = make_test_dir();
-        let logger = AuditLogger::new(tmp.clone()).unwrap();
+        // The audit key context is process-global, and daemon-driven tests
+        // in this binary (custody harnesses unlocking real DaemonVaults)
+        // install keys with no visibility into KEY_SERIAL. An install
+        // landing between our clear and the log call tokenizes the entry
+        // id instead of leaving it raw, so retry on a fresh log until the
+        // genuinely keyless state is observed; a real regression still
+        // fails the assertion on the last attempt.
+        let mut tmp = make_test_dir();
+        let mut raw = String::new();
+        for _ in 0..8 {
+            AuditLogger::clear_keys();
+            let _ = std::fs::remove_dir_all(&tmp);
+            tmp = make_test_dir();
+            let logger = AuditLogger::new(tmp.clone()).unwrap();
 
-        logger
-            .log(AuditEventType::CredentialViewed { entry_id: 42 }, "viewed")
-            .unwrap();
+            logger
+                .log(AuditEventType::CredentialViewed { entry_id: 42 }, "viewed")
+                .unwrap();
 
-        let raw = std::fs::read_to_string(logger.log_file.clone()).unwrap();
-        assert!(raw.contains("\"entry_id\":42"));
+            raw = std::fs::read_to_string(logger.log_file.clone()).unwrap();
+            if raw.contains("\"entry_id\":42") {
+                break;
+            }
+        }
+        assert!(
+            raw.contains("\"entry_id\":42"),
+            "entry id was not recorded raw (keyless state never observed)"
+        );
         // Such records are chained keylessly (unsealed), not dropped.
         let report = verify_audit_chain(&tmp, Some(&chain_key_for(&test_dek()))).unwrap();
         assert!(report.is_ok());
@@ -2266,29 +2284,45 @@ mod tests {
     #[test]
     fn locked_state_domain_probe_is_redacted_not_plaintext() {
         let _guard = KEY_SERIAL.lock().unwrap();
-        AuditLogger::clear_keys();
-        let tmp = make_test_dir();
-        let logger = AuditLogger::new(tmp.clone()).unwrap();
+        // As above: daemon-driven tests install process-global audit keys
+        // concurrently with this test, which would tokenize the domain
+        // instead of leaving the no-key redaction marker. Retry on a fresh
+        // log until the genuinely keyless state is observed.
+        let mut tmp = make_test_dir();
+        let mut logger = AuditLogger::new(tmp.clone()).unwrap();
+        let mut raw = String::new();
+        for _ in 0..8 {
+            AuditLogger::clear_keys();
+            let _ = std::fs::remove_dir_all(&tmp);
+            tmp = make_test_dir();
+            logger = AuditLogger::new(tmp.clone()).unwrap();
 
-        logger
-            .log(
-                AuditEventType::ExternalSecretAccess {
-                    client_id: Some("victor".to_string()),
-                    domain: "secret-domain.example".to_string(),
-                    field: Some("password".to_string()),
-                    purpose: None,
-                    success: false,
-                },
-                "External secret access denied",
-            )
-            .unwrap();
+            logger
+                .log(
+                    AuditEventType::ExternalSecretAccess {
+                        client_id: Some("victor".to_string()),
+                        domain: "secret-domain.example".to_string(),
+                        field: Some("password".to_string()),
+                        purpose: None,
+                        success: false,
+                    },
+                    "External secret access denied",
+                )
+                .unwrap();
 
-        let raw = std::fs::read_to_string(logger.log_file.clone()).unwrap();
+            raw = std::fs::read_to_string(logger.log_file.clone()).unwrap();
+            if raw.contains(REDACTED_DOMAIN_NO_KEY) {
+                break;
+            }
+        }
         assert!(
             !raw.contains("secret-domain.example"),
             "locked-state probe leaked the plaintext domain"
         );
-        assert!(raw.contains(REDACTED_DOMAIN_NO_KEY));
+        assert!(
+            raw.contains(REDACTED_DOMAIN_NO_KEY),
+            "locked-state probe was not redacted (keyless state never observed)"
+        );
         let entries = logger.get_entries(1).unwrap();
         match &entries[0].event_type {
             AuditEventType::ExternalSecretAccess { domain, .. } => {
