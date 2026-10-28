@@ -205,7 +205,9 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
   const cli = (args: string[], stdin?: string) => runWithTty(homeDir, CLI_BIN, args, stdin);
 
   // 1. Provision the vault offline (no daemon yet — creation is exclusive).
-  const initResult = cli(['init'], `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`);
+  // CLI commands are grouped since 0.18.0: init/unlock/lock under `vault`,
+  // credential add/list under `entry`.
+  const initResult = cli(['vault', 'init'], `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`);
   if (initResult.status !== 0) {
     throw new Error(`CLI init failed: ${initResult.stdout}\n${initResult.stderr}`);
   }
@@ -233,13 +235,14 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
   }
 
   // 3. Unlock via the daemon, then seed credentials through it.
-  const unlock = cli(['unlock'], `${MASTER_PASSWORD}\n`);
+  const unlock = cli(['vault', 'unlock'], `${MASTER_PASSWORD}\n`);
   if (unlock.status !== 0) {
     throw new Error(`CLI unlock failed: ${unlock.stdout}\n${unlock.stderr}`);
   }
 
   for (const credential of options.credentials) {
     const add = cli([
+      'entry',
       'add',
       '--title', credential.title,
       '--username', credential.username,

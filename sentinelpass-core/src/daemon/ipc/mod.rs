@@ -65,7 +65,9 @@ mod tests {
     use std::path::Path;
 
     // Helper to set up IPC test environment with vault, socket, and allowlist.
-    // Eliminates duplication across multiple IPC tests.
+    // Eliminates duplication across multiple IPC tests. Unix-only like every
+    // caller (the socket path and 0700 runtime dir are unix IPC concepts).
+    #[cfg(unix)]
     fn setup_ipc_test_env(
         prefix: &str,
     ) -> (
@@ -81,6 +83,7 @@ mod tests {
         let vault_path =
             std::env::temp_dir().join(format!("sentinelpass_{prefix}_{short_suffix}.db"));
         let socket_dir = tempfile::TempDir::new().unwrap().keep();
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -101,7 +104,8 @@ mod tests {
     }
 
     // Helper to set up IPC server with allowlist and wait for socket.
-    // Eliminates duplication across multiple IPC tests.
+    // Eliminates duplication across multiple IPC tests (unix-only callers).
+    #[cfg(unix)]
     async fn setup_ipc_server_with_allowlist(
         vault_path: &std::path::Path,
         socket_path: &std::path::Path,
