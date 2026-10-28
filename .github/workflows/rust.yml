@@ -44,11 +44,15 @@ jobs:
         run: |
           # jscpd ratchet: fail CI if duplicate Rust clones exceed threshold.
           # Current baseline: 24 clones at token 120 (0.51% duplication).
-          # Tighten threshold as more duplicates are consolidated.
-          npx jscpd --min-tokens 120 --format "rust" \
+          # Tighten as more duplicates are consolidated.
+          # jscpd has no --max-clones flag; count clones from the JSON report.
+          # Pin the version so a future release cannot silently change flags.
+          npx --yes jscpd@5.4.2 --min-tokens 120 --format "rust" \
             --ignore "**/vendor/**,**/target/**" \
-            --max-clones 24 \
-            .
+            --reporters json --output "$RUNNER_TEMP/jscpd-rust" .
+          CLONES=$(node -p "require('$RUNNER_TEMP/jscpd-rust/jscpd-report.json').duplicates.length")
+          echo "Rust duplicate clones at token 120: $CLONES (ratchet max 24)"
+          test "$CLONES" -le 24
 
   # TypeScript TDD - runs in parallel
   web_tdd:
@@ -65,13 +69,17 @@ jobs:
         run: npm run test:ts
       - name: Check for code duplication (jscpd ratchet)
         run: |
-          # jscpd ratchet: fail CI if duplicate clones exceed threshold.
-          # Current baseline: 1 clone (test file). Tighten to 0 once that
-          # last test-file clone is consolidated.
-          npx jscpd --min-tokens 50 --format "typescript" \
+          # jscpd ratchet: fail CI if duplicate TypeScript clones exceed
+          # threshold. Current baseline: 5 clones at token 50, all in test
+          # files (e2e specs + clipboard unit tests). Tighten as they are
+          # consolidated. jscpd has no --max-clones flag; count clones from
+          # the JSON report and pin the version for stable flags.
+          npx --yes jscpd@5.4.2 --min-tokens 50 --format "typescript" \
             --ignore "**/*.js,**/dist/**,**/node_modules/**,**/vendor/**,**/*.d.ts" \
-            --max-clones 1 \
-            .
+            --reporters json --output "$RUNNER_TEMP/jscpd-ts" .
+          CLONES=$(node -p "require('$RUNNER_TEMP/jscpd-ts/jscpd-report.json').duplicates.length")
+          echo "TypeScript duplicate clones at token 50: $CLONES (ratchet max 5)"
+          test "$CLONES" -le 5
       - name: Upload TypeScript coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

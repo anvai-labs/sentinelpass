@@ -1,13 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
+  addNeverSaveDomain,
   autofillPageUrlForDaemon,
   buildSaveNotificationRequestKey,
   classifyCredentialUrlSecurity,
   domainMatchesPolicy,
+  getNeverSaveDomains,
   isUsernameMatchOrUnknown,
   normalizeCredentialUrl,
   normalizeDomainForPolicy,
-  normalizeUsername
+  normalizeUsername,
+  setNeverSaveDomains,
+  shouldSuppressSavePrompt
 } from '../../browser-extension/chrome/save-heuristics.ts';
 
 describe('save heuristics', () => {
@@ -58,6 +62,19 @@ describe('save heuristics', () => {
 
     it('extracts hosts from non-web schemes rather than storing them raw', () => {
       expect(normalizeDomainForPolicy('ftp://example.com/pub')).toBe('example.com');
+    });
+
+    it('refuses host:port shapes whose port is out of range', () => {
+      // Matches the host:port pattern, but the WHATWG parser rejects ports
+      // above 65535 — the value must be refused, never stored raw.
+      expect(normalizeDomainForPolicy('example.com:99999')).toBeNull();
+    });
+
+    it('refuses dot-only hosts that parse but carry no host text', () => {
+      // `https://.` parses with hostname "."; after policy cleaning there is
+      // no host left to store.
+      expect(normalizeDomainForPolicy('.')).toBeNull();
+      expect(normalizeDomainForPolicy('..')).toBeNull();
     });
 
     it('uppercases nothing: mixed-case hosts and schemes normalize fully', () => {
@@ -210,5 +227,82 @@ describe('autofill page URL resolution (WBS-711)', () => {
     expect(autofillPageUrlForDaemon('', undefined, true)).toBeNull();
     expect(autofillPageUrlForDaemon('   ', undefined, true)).toBeNull();
     expect(autofillPageUrlForDaemon(null, 'https://tab.example/', true)).toBeNull();
+  });
+});
+
+// The never-save domain policy moved into this shared module (extension
+// deduplication); these storage-backed helpers need a chrome.storage mock.
+describe('never-save domain policy storage', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function stubChromeStorage(
+    store: Record<string, unknown>,
+    lastError: { message: string } | null = null
+  ) {
+    vi.stubGlobal('chrome', {
+      runtime: { lastError },
+      storage: {
+        local: {
+          get: (keys: string[], cb: (result: Record<string, unknown>) => void) => {
+            const result: Record<string, unknown> = {};
+            for (const key of keys) result[key] = store[key];
+            cb(result);
+          },
+          set: (items: Record<string, unknown>, cb: () => void) => {
+            Object.assign(store, items);
+            cb();
+          }
+        }
+      }
+    });
+    return store;
+  }
+
+  it('reads stored never-save domains and defaults to an empty map', async () => {
+    stubChromeStorage({ neverSaveDomains: { 'example.com': { createdAt: 123 } } });
+    await expect(getNeverSaveDomains()).resolves.toEqual({ 'example.com': { createdAt: 123 } });
+
+    stubChromeStorage({});
+    await expect(getNeverSaveDomains()).resolves.toEqual({});
+  });
+
+  it('resolves an empty map when the storage read fails', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    stubChromeStorage({}, { message: 'quota exceeded' });
+    await expect(getNeverSaveDomains()).resolves.toEqual({});
+  });
+
+  it('persists never-save domains via storage and rejects on write failure', async () => {
+    const store = stubChromeStorage({});
+    await expect(
+      setNeverSaveDomains({ 'example.com': { createdAt: 1 } })
+    ).resolves.toBeUndefined();
+    expect(store['neverSaveDomains']).toEqual({ 'example.com': { createdAt: 1 } });
+
+    stubChromeStorage({}, { message: 'write failed' });
+    await expect(setNeverSaveDomains({})).rejects.toThrow('write failed');
+  });
+
+  it('suppresses save prompts for never-save domains and their subdomains only', async () => {
+    stubChromeStorage({ neverSaveDomains: { 'example.com': { createdAt: 1 } } });
+    await expect(shouldSuppressSavePrompt('https://app.example.com/login')).resolves.toBe(true);
+    await expect(shouldSuppressSavePrompt('https://example.com/signin')).resolves.toBe(true);
+    await expect(shouldSuppressSavePrompt('https://github.com/login')).resolves.toBe(false);
+    // Unnormalizable input can never match a policy domain.
+    await expect(shouldSuppressSavePrompt('not a url!!')).resolves.toBe(false);
+  });
+
+  it('adds never-save domains normalized, and refuses garbage input', async () => {
+    const store = stubChromeStorage({});
+    vi.spyOn(Date, 'now').mockReturnValue(42);
+
+    await expect(addNeverSaveDomain('https://www.example.com/login')).resolves.toBe(true);
+    expect(store['neverSaveDomains']).toEqual({ 'example.com': { createdAt: 42 } });
+
+    await expect(addNeverSaveDomain('not a url!!')).resolves.toBe(false);
+    expect(store['neverSaveDomains']).toEqual({ 'example.com': { createdAt: 42 } });
   });
 });

@@ -35,15 +35,6 @@ function initDebugMode() {
 // Initialize on load
 initDebugMode();
 /**
- * Set debug mode on or off (persists to chrome.storage).
- */
-function setDebugMode(enabled) {
-    debugMode = enabled;
-    if (typeof chrome !== 'undefined' && chrome.storage) {
-        chrome.storage.local.set({ debugModeEnabled: enabled });
-    }
-}
-/**
  * Check if debug mode is enabled.
  */
 export function isDebugEnabled() {
