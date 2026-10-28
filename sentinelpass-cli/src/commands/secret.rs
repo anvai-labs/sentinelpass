@@ -418,28 +418,6 @@ pub fn render_external_secret_audit_report(
     output
 }
 
-pub fn handle_secret_get(
-    domain: String,
-    field: SecretField,
-    biometric_unlock: bool,
-    client_id: String,
-    purpose: Option<String>,
-    output: SecretOutputFormat,
-    prompt_reason: String,
-) -> Result<()> {
-    let result = crate::run_async(get_secret_from_daemon(
-        domain,
-        field,
-        biometric_unlock,
-        prompt_reason,
-        client_id,
-        purpose,
-        None,
-    ))??;
-    println!("{}", render_secret_lookup(&result, output)?);
-    Ok(())
-}
-
 pub fn handle_secret_command(command: &crate::SecretCommands) -> Result<()> {
     // P1b (Sandesha adoption handoff): legacy policy administration
     // (allow/revoke/token) writes external-secret-access.json directly,
