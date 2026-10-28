@@ -43,11 +43,11 @@ jobs:
       - name: Check for Rust code duplication (jscpd ratchet)
         run: |
           # jscpd ratchet: fail CI if duplicate Rust clones exceed threshold.
-          # Current baseline: 29 clones at token 120 (0.70% duplication).
+          # Current baseline: 24 clones at token 120 (0.51% duplication).
           # Tighten threshold as more duplicates are consolidated.
           npx jscpd --min-tokens 120 --format "rust" \
             --ignore "**/vendor/**,**/target/**" \
-            --max-clones 29 \
+            --max-clones 24 \
             .
 
   # TypeScript TDD - runs in parallel
