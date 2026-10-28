@@ -10,6 +10,32 @@ use rusqlite::Connection;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+// Helper to create a tombstone sync blob.
+// Eliminates duplication across multiple entry type handlers.
+fn create_tombstone_blob(
+    dek: &DataEncryptionKey,
+    sync_id: Uuid,
+    entry_type: SyncEntryType,
+    sync_version: i64,
+    modified_at: i64,
+    device_id: Uuid,
+) -> Result<SyncEntryBlob> {
+    let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+    let encrypted = encrypt_for_sync(dek, &tombstone_data)
+        .map_err(crate::PasswordManagerError::Crypto)?;
+
+    Ok(SyncEntryBlob {
+        sync_id,
+        entry_type,
+        sync_version: sync_version as u64,
+        modified_at,
+        encrypted_payload: encrypted,
+        is_tombstone: true,
+        origin_device_id: device_id,
+    })
+}
+
 /// Query all entries with `sync_state = 'pending'` and build sync blobs.
 pub fn collect_pending_credential_blobs(
     conn: &Connection,
@@ -298,20 +324,9 @@ pub fn collect_pending_ssh_key_blobs(
             .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
-            let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let encrypted = encrypt_for_sync(dek, &tombstone_data)
-                .map_err(crate::PasswordManagerError::Crypto)?;
-
-            blobs.push(SyncEntryBlob {
-                sync_id,
-                entry_type: SyncEntryType::SshKey,
-                sync_version: sync_version as u64,
-                modified_at,
-                encrypted_payload: encrypted,
-                is_tombstone: true,
-                origin_device_id: device_id,
-            });
+            blobs.push(create_tombstone_blob(
+                dek, sync_id, SyncEntryType::SshKey, sync_version, modified_at, device_id,
+            )?);
             continue;
         }
 
@@ -468,20 +483,9 @@ pub fn collect_pending_totp_blobs(
             .map_err(|e| PasswordManagerError::InvalidInput(format!("Invalid sync_id: {}", e)))?;
 
         if is_deleted {
-            let tombstone_data = serde_json::to_vec(&serde_json::json!({"tombstone": true}))
-                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-            let encrypted = encrypt_for_sync(dek, &tombstone_data)
-                .map_err(crate::PasswordManagerError::Crypto)?;
-
-            blobs.push(SyncEntryBlob {
-                sync_id,
-                entry_type: SyncEntryType::TotpSecret,
-                sync_version: sync_version as u64,
-                modified_at: created_at,
-                encrypted_payload: encrypted,
-                is_tombstone: true,
-                origin_device_id: device_id,
-            });
+            blobs.push(create_tombstone_blob(
+                dek, sync_id, SyncEntryType::TotpSecret, sync_version, created_at, device_id,
+            )?);
             continue;
         }
 
