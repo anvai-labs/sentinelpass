@@ -37,6 +37,45 @@ fn decrypt_sync_payload<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&json).map_err(|e| DatabaseError::Serialization(e.to_string()).into())
 }
 
+// Seal TOTP identity metadata fields (issuer and account_name) into envelopes.
+// Extracted to eliminate duplication between INSERT and UPDATE arms of TOTP apply.
+fn seal_totp_identity_metadata(
+    dek: &DataEncryptionKey,
+    vault_uuid: &str,
+    sync_id_str: &str,
+    issuer: Option<&str>,
+    account_name: Option<&str>,
+    epoch: i64,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+    let issuer_blob = issuer
+        .map(|c| {
+            crate::vault::envelope_ops::seal_object_field(
+                dek,
+                vault_uuid,
+                sync_id_str,
+                crate::crypto::aad::ObjectType::TotpSecret,
+                crate::crypto::aad::EnvelopePurpose::TotpIssuer,
+                c,
+                epoch,
+            )
+        })
+        .transpose()?;
+    let account_name_blob = account_name
+        .map(|c| {
+            crate::vault::envelope_ops::seal_object_field(
+                dek,
+                vault_uuid,
+                sync_id_str,
+                crate::crypto::aad::ObjectType::TotpSecret,
+                crate::crypto::aad::EnvelopePurpose::TotpAccount,
+                c,
+                epoch,
+            )
+        })
+        .transpose()?;
+    Ok((issuer_blob, account_name_blob))
+}
+
 /// Conflict + tombstone preamble for the "existing local row" path.
 ///
 /// Returns `true` when the caller should return `Ok(())` immediately (row kept locally
@@ -1357,36 +1396,14 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
                 crate::vault::envelope_ops::zeroed_legacy_v1_columns();
             // Identity metadata sealed in place (WBS-306): issuer/
             // account_name carry Summary envelopes under the row's identity.
-            let issuer_blob = payload
-                .issuer
-                .as_deref()
-                .map(|c| {
-                    crate::vault::envelope_ops::seal_object_field(
-                        dek,
-                        &vault_uuid,
-                        &sync_id_str,
-                        crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::TotpIssuer,
-                        c,
-                        epoch,
-                    )
-                })
-                .transpose()?;
-            let account_name_blob = payload
-                .account_name
-                .as_deref()
-                .map(|c| {
-                    crate::vault::envelope_ops::seal_object_field(
-                        dek,
-                        &vault_uuid,
-                        &sync_id_str,
-                        crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::TotpAccount,
-                        c,
-                        epoch,
-                    )
-                })
-                .transpose()?;
+            let (issuer_blob, account_name_blob) = seal_totp_identity_metadata(
+                dek,
+                &vault_uuid,
+                &sync_id_str,
+                payload.issuer.as_deref(),
+                payload.account_name.as_deref(),
+                epoch,
+            )?;
 
             let Some(eid) = entry_id else {
                 // The parent credential has not landed locally (relay
@@ -1460,36 +1477,14 @@ impl<T: SyncTransport + 'static> SyncEngine<T> {
             let (nonce_blob, auth_tag_blob) =
                 crate::vault::envelope_ops::zeroed_legacy_v1_columns();
             // Identity metadata sealed in place (WBS-306 — see UPDATE arm).
-            let issuer_blob = payload
-                .issuer
-                .as_deref()
-                .map(|c| {
-                    crate::vault::envelope_ops::seal_object_field(
-                        dek,
-                        &vault_uuid,
-                        &sync_id_str,
-                        crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::TotpIssuer,
-                        c,
-                        epoch,
-                    )
-                })
-                .transpose()?;
-            let account_name_blob = payload
-                .account_name
-                .as_deref()
-                .map(|c| {
-                    crate::vault::envelope_ops::seal_object_field(
-                        dek,
-                        &vault_uuid,
-                        &sync_id_str,
-                        crate::crypto::aad::ObjectType::TotpSecret,
-                        crate::crypto::aad::EnvelopePurpose::TotpAccount,
-                        c,
-                        epoch,
-                    )
-                })
-                .transpose()?;
+            let (issuer_blob, account_name_blob) = seal_totp_identity_metadata(
+                dek,
+                &vault_uuid,
+                &sync_id_str,
+                payload.issuer.as_deref(),
+                payload.account_name.as_deref(),
+                epoch,
+            )?;
 
             let Some(eid) = entry_id else {
                 // Deferred, not dropped — see the UPDATE arm above.

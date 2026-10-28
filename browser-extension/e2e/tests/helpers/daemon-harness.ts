@@ -53,6 +53,25 @@ export interface HarnessCliResult {
   stderr: string;
 }
 
+// Build isolated environment variables for a given HOME directory.
+// Shared helper to avoid duplication between runWithTty and grantInsecureViaHost.
+function buildIsolatedEnv(homeDir: string, extra?: Record<string, string>): Record<string, string> {
+  return {
+    ...process.env,
+    HOME: homeDir,
+    // The FULL XDG family — matching isolatedEnv. On Linux the dirs
+    // crate honors XDG_CONFIG_HOME/XDG_DATA_HOME over HOME; without
+    // these the CLI resolves its config/token dir OUTSIDE the isolated
+    // HOME and finds no daemon token (the CI-only unlock failure).
+    XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+    XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+    XDG_CACHE_HOME: path.join(homeDir, '.cache'),
+    XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
+    XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
+    ...extra,
+  };
+}
+
 export interface DaemonHarness {
   /** Register an additional fixture route at runtime (both http + https). */
   addFixturePage: (page: FixturePage) => void;
@@ -113,20 +132,7 @@ function runWithTty(
   const ptyDriver = path.join(__dirname, 'cli_pty.py');
   const result = spawnSync('python3', [ptyDriver, command, ...args], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      // The FULL XDG family — matching isolatedEnv. On Linux the dirs
-      // crate honors XDG_CONFIG_HOME/XDG_DATA_HOME over HOME; without
-      // these the CLI resolves its config/token dir OUTSIDE the isolated
-      // HOME and finds no daemon token (the CI-only unlock failure).
-      XDG_CONFIG_HOME: path.join(homeDir, '.config'),
-      XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
-      XDG_CACHE_HOME: path.join(homeDir, '.cache'),
-      XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
-      XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
-      SENTINELPASS_CLI_STDIN: stdin ?? '',
-    },
+    env: buildIsolatedEnv(homeDir, { SENTINELPASS_CLI_STDIN: stdin ?? '' }),
     timeout: 60_000,
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
@@ -302,19 +308,7 @@ export function grantInsecureViaHost(homeDir: string, host: string): void {
     [path.join(__dirname, 'probe_host.py'), HOST_BIN, message],
     {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        HOME: homeDir,
-        // FULL XDG family — matching isolatedEnv. On Linux the dirs crate
-        // honors XDG_CONFIG_HOME over HOME; without it the host resolves
-        // its config/token dir OUTSIDE the isolated HOME and fails the
-        // daemon handshake (CI-only; macOS ignores XDG_CONFIG_HOME).
-        XDG_CONFIG_HOME: path.join(homeDir, '.config'),
-        XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
-        XDG_CACHE_HOME: path.join(homeDir, '.cache'),
-        XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
-        XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
-      },
+      env: buildIsolatedEnv(homeDir),
       timeout: 30_000,
     }
   );

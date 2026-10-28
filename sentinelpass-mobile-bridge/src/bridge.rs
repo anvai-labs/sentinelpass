@@ -26,6 +26,27 @@ pub(crate) fn record_error(err: &BridgeError) {
     LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(err.to_string()));
 }
 
+// Acquire vault registry and vault locks for a given handle.
+// Extracted to eliminate duplication across multiple bridge functions.
+fn with_vault<F, R>(handle: u64, f: F) -> BridgeResult<R>
+where
+    F: FnOnce(&VaultManager) -> BridgeResult<R>,
+{
+    let registry = get_registry()
+        .lock()
+        .map_err(|_| BridgeError::Unknown("Failed to acquire vault registry lock".into()))?;
+
+    let vault_arc = registry
+        .get_vault(handle)
+        .ok_or_else(|| BridgeError::InvalidParam(format!("Invalid vault handle: {}", handle)))?;
+
+    let vault = vault_arc
+        .lock()
+        .map_err(|_| BridgeError::Unknown("Failed to acquire vault lock".into()))?;
+
+    f(&vault)
+}
+
 /// The detail (if any) recorded by the most recent failed bridge call on
 /// the calling thread.
 #[cfg(feature = "jni")]
@@ -222,51 +243,41 @@ pub fn bridge_entry_update(
     url: Option<&str>,
     notes: Option<&str>,
 ) -> BridgeResult<()> {
-    let registry = get_registry()
-        .lock()
-        .map_err(|_| BridgeError::Unknown("Failed to acquire vault registry lock".into()))?;
+    with_vault(handle, |vault| {
+        let id_i64: i64 = entry_id
+            .parse()
+            .map_err(|_| BridgeError::InvalidParam(format!("Invalid entry ID: {}", entry_id)))?;
 
-    let vault_arc = registry
-        .get_vault(handle)
-        .ok_or_else(|| BridgeError::InvalidParam(format!("Invalid vault handle: {}", handle)))?;
+        let mut existing = vault.get_entry(id_i64)?;
 
-    let vault = vault_arc
-        .lock()
-        .map_err(|_| BridgeError::Unknown("Failed to acquire vault lock".into()))?;
+        if let Some(t) = title {
+            existing.title = t.to_string();
+        }
+        if let Some(u) = username {
+            existing.username = u.to_string();
+        }
+        if let Some(p) = password {
+            existing.password = p.to_string().into();
+        }
+        if let Some(u) = url {
+            existing.url = if u.is_empty() {
+                None
+            } else {
+                Some(u.to_string())
+            };
+        }
+        if let Some(n) = notes {
+            existing.notes = if n.is_empty() {
+                None
+            } else {
+                Some(n.to_string())
+            };
+        }
+        existing.modified_at = chrono::Utc::now();
 
-    let id_i64: i64 = entry_id
-        .parse()
-        .map_err(|_| BridgeError::InvalidParam(format!("Invalid entry ID: {}", entry_id)))?;
-
-    let mut existing = vault.get_entry(id_i64)?;
-
-    if let Some(t) = title {
-        existing.title = t.to_string();
-    }
-    if let Some(u) = username {
-        existing.username = u.to_string();
-    }
-    if let Some(p) = password {
-        existing.password = p.to_string().into();
-    }
-    if let Some(u) = url {
-        existing.url = if u.is_empty() {
-            None
-        } else {
-            Some(u.to_string())
-        };
-    }
-    if let Some(n) = notes {
-        existing.notes = if n.is_empty() {
-            None
-        } else {
-            Some(n.to_string())
-        };
-    }
-    existing.modified_at = chrono::Utc::now();
-
-    vault.update_entry(id_i64, &existing)?;
-    Ok(())
+        vault.update_entry(id_i64, &existing)?;
+        Ok(())
+    })
 }
 
 /// Delete an entry

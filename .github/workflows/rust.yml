@@ -40,6 +40,15 @@ jobs:
         run: cargo run -p sentinelpass-protocol --example check_sandesha_binding
       - name: Test protocol crate as packaged for publication
         run: bash scripts/test-protocol-package.sh
+      - name: Check for Rust code duplication (jscpd ratchet)
+        run: |
+          # jscpd ratchet: fail CI if duplicate Rust clones exceed threshold.
+          # Current baseline: 29 clones at token 120 (0.70% duplication).
+          # Tighten threshold as more duplicates are consolidated.
+          npx jscpd --min-tokens 120 --format "rust" \
+            --ignore "**/vendor/**,**/target/**" \
+            --max-clones 29 \
+            .
 
   # TypeScript TDD - runs in parallel
   web_tdd:
@@ -54,6 +63,15 @@ jobs:
         run: npm run web:typecheck
       - name: Run TypeScript unit tests with coverage
         run: npm run test:ts
+      - name: Check for code duplication (jscpd ratchet)
+        run: |
+          # jscpd ratchet: fail CI if duplicate clones exceed threshold.
+          # Current baseline: 1 clone (test file). Tighten to 0 once that
+          # last test-file clone is consolidated.
+          npx jscpd --min-tokens 50 --format "typescript" \
+            --ignore "**/*.js,**/dist/**,**/node_modules/**,**/vendor/**,**/*.d.ts" \
+            --max-clones 1 \
+            .
       - name: Upload TypeScript coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

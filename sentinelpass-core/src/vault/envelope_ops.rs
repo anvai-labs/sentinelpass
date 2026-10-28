@@ -37,6 +37,35 @@ use zeroize::Zeroizing;
 /// independent of the database schema version (see module docs).
 pub const ENTRY_ENVELOPE_SCHEMA: i32 = 1;
 
+/// Identity metadata fields that require envelope verification/sweep.
+/// Shared between verify_identity_metadata (activation_ops) and
+/// sweep_identity_metadata (migration_ops) to eliminate duplication.
+///
+/// Each tuple: (table, id_column, field_column, object_type, envelope_purpose)
+pub(crate) const IDENTITY_METADATA_FIELDS: &[(&str, &str, &str, ObjectType, EnvelopePurpose)] = &[
+    (
+        "totp_secrets",
+        "totp_id",
+        "issuer",
+        ObjectType::TotpSecret,
+        EnvelopePurpose::TotpIssuer,
+    ),
+    (
+        "totp_secrets",
+        "totp_id",
+        "account_name",
+        ObjectType::TotpSecret,
+        EnvelopePurpose::TotpAccount,
+    ),
+    (
+        "ssh_keys",
+        "key_id",
+        "comment",
+        ObjectType::SshKey,
+        EnvelopePurpose::Summary,
+    ),
+];
+
 /// Field-class plaintext ceilings (policy bound under the envelope's 1 MiB
 /// ciphertext cap; b64 inflation ×4/3 keeps a 2 MiB secret well under the
 /// 4 MiB document cap). Generous by design — imports of legacy vaults

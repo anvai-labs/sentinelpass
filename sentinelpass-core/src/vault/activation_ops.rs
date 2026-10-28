@@ -597,29 +597,7 @@ fn verify_identity_metadata(
     report: &mut VaultVerificationReport,
 ) -> Result<()> {
     use rusqlite::types::Value;
-    for (table, id, column, kind, purpose) in [
-        (
-            "totp_secrets",
-            "totp_id",
-            "issuer",
-            ObjectType::TotpSecret,
-            EnvelopePurpose::TotpIssuer,
-        ),
-        (
-            "totp_secrets",
-            "totp_id",
-            "account_name",
-            ObjectType::TotpSecret,
-            EnvelopePurpose::TotpAccount,
-        ),
-        (
-            "ssh_keys",
-            "key_id",
-            "comment",
-            ObjectType::SshKey,
-            EnvelopePurpose::Summary,
-        ),
-    ] {
+    for (table, id, column, kind, purpose) in envelope_ops::IDENTITY_METADATA_FIELDS {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {id},sync_id,{column} FROM {table} WHERE {column} IS NOT NULL"
@@ -644,8 +622,8 @@ fn verify_identity_metadata(
                 dek,
                 Some(vault),
                 sid.as_deref(),
-                kind,
-                purpose,
+                *kind,
+                *purpose,
                 Some(value),
             )
             .is_err()

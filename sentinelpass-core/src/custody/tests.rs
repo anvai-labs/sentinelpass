@@ -1,8 +1,15 @@
 use super::*;
 use sentinelpass_protocol::custody::Purpose;
 
-#[tokio::test]
-async fn dropping_authority_invalidates_retained_read_and_runtime_handles() {
+// Helper to set up a custody test fixture with acquired lease and receiver.
+// Eliminates duplication across multiple custody tests.
+async fn setup_custody_fixture() -> (
+    CustodyControl,
+    CustodyProvider,
+    Lease,
+    Receiver,
+    Cancellation,
+) {
     let (control, provider) = fixture(scope(), reference());
     let cancel = Cancellation::new();
     let mut lease = provider
@@ -10,6 +17,12 @@ async fn dropping_authority_invalidates_retained_read_and_runtime_handles() {
         .await
         .unwrap();
     let receiver = control.receiver(&scope(), &reference()).unwrap();
+    (control, provider, lease, receiver, cancel)
+}
+
+#[tokio::test]
+async fn dropping_authority_invalidates_retained_read_and_runtime_handles() {
+    let (control, provider, mut lease, receiver, cancel) = setup_custody_fixture().await;
     drop(control);
     assert!(matches!(
         provider.acquire(&scope(), &reference(), &cancel).await,
@@ -24,14 +37,11 @@ async fn dropping_authority_invalidates_retained_read_and_runtime_handles() {
 
 #[tokio::test(start_paused = true)]
 async fn idle_expiry_wipes_receiver_without_a_followup_request() {
-    let (control, provider) = fixture(scope(), reference());
-    let cancel = Cancellation::new();
-    let mut lease = provider
-        .acquire(&scope(), &reference(), &cancel)
+    let (control, _provider, mut lease, receiver, _cancel) = setup_custody_fixture().await;
+    lease
+        .deliver_to(&receiver, &Cancellation::new())
         .await
         .unwrap();
-    let receiver = control.receiver(&scope(), &reference()).unwrap();
-    lease.deliver_to(&receiver, &cancel).await.unwrap();
     tokio::time::advance(Duration::from_secs(121)).await;
     tokio::task::yield_now().await;
     // Inspect directly: this check cannot perform opportunistic cleanup.
@@ -104,13 +114,7 @@ async fn delivered_custody_expires_and_unregistered_receivers_are_bounded() {
 
 #[tokio::test]
 async fn authority_is_checked_again_when_reference_changes_during_delivery() {
-    let (control, provider) = fixture(scope(), reference());
-    let cancel = Cancellation::new();
-    let mut lease = provider
-        .acquire(&scope(), &reference(), &cancel)
-        .await
-        .unwrap();
-    let receiver = control.receiver(&scope(), &reference()).unwrap();
+    let (control, _provider, mut lease, receiver, cancel) = setup_custody_fixture().await;
     let gate = control.pause_delivery();
     let mut pending = Box::pin(lease.deliver_to(&receiver, &cancel));
     tokio::select! {
@@ -272,13 +276,7 @@ fn reference() -> ObjectRef {
 
 #[tokio::test]
 async fn delivery_is_exact_single_use_and_close_disposes_runtime_custody() {
-    let (control, provider) = fixture(scope(), reference());
-    let cancel = Cancellation::new();
-    let mut lease = provider
-        .acquire(&scope(), &reference(), &cancel)
-        .await
-        .unwrap();
-    let receiver = control.receiver(&scope(), &reference()).unwrap();
+    let (control, _provider, mut lease, receiver, cancel) = setup_custody_fixture().await;
     lease.deliver_to(&receiver, &cancel).await.unwrap();
     assert!(control.receiver_has_secret(&receiver));
     assert_eq!(
@@ -340,13 +338,7 @@ async fn cross_peer_receiver_is_denied_and_burns_the_lease() {
 
 #[tokio::test]
 async fn forged_receiver_is_denied_with_a_live_lease() {
-    let (control, provider) = fixture(scope(), reference());
-    let cancel = Cancellation::new();
-    let mut lease = provider
-        .acquire(&scope(), &reference(), &cancel)
-        .await
-        .unwrap();
-    let receiver = control.receiver(&scope(), &reference()).unwrap();
+    let (control, _provider, mut lease, receiver, cancel) = setup_custody_fixture().await;
     let forged = RuntimeReceiver {
         state: receiver.state.clone(),
         id: [0; 32],
@@ -366,13 +358,7 @@ async fn forged_receiver_is_denied_with_a_live_lease() {
 
 #[tokio::test]
 async fn session_invalidation_rejects_previously_live_lease_and_receiver() {
-    let (control, provider) = fixture(scope(), reference());
-    let cancel = Cancellation::new();
-    let mut lease = provider
-        .acquire(&scope(), &reference(), &cancel)
-        .await
-        .unwrap();
-    let receiver = control.receiver(&scope(), &reference()).unwrap();
+    let (control, _provider, mut lease, receiver, cancel) = setup_custody_fixture().await;
     assert_eq!(control.live_handles(), 2);
     control.invalidate();
     assert_eq!(control.live_handles(), 0);

@@ -408,6 +408,39 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
+    // Helper to insert test entries at sequential server sequences.
+    // Eliminates duplication across multiple sync handler tests.
+    fn insert_test_entries(
+        conn: &rusqlite::Connection,
+        vault_id: &str,
+        start_seq: i64,
+        count: i64,
+    ) {
+        let now = Utc::now().timestamp();
+        for i in 0..count {
+            let seq = start_seq + i;
+            conn.execute(
+                "INSERT INTO sync_entries (sync_id, vault_id, entry_type, sync_version, modified_at,
+                                           encrypted_payload, is_tombstone, origin_device_id,
+                                           server_sequence, received_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    vault_id,
+                    "credential",
+                    1i64,
+                    now,
+                    vec![seq as u8],
+                    false,
+                    Uuid::new_v4().to_string(),
+                    seq,
+                    now,
+                ],
+            )
+            .unwrap();
+        }
+    }
+
     fn setup_test_vault(state: &RelayAppState) -> (Uuid, String, Uuid) {
         let device_id = Uuid::new_v4();
         let vault_id = Uuid::new_v4().to_string();
@@ -642,30 +675,9 @@ mod tests {
         let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
         let (device_id, vault_id, _sync_id) = setup_test_vault(&state);
         let conn = state.storage.conn().unwrap();
-        let now = Utc::now().timestamp();
 
         // Insert entries at server sequences 1, 2, 3, 4, 5
-        for i in 1..=5 {
-            conn.execute(
-                "INSERT INTO sync_entries (sync_id, vault_id, entry_type, sync_version, modified_at,
-                                           encrypted_payload, is_tombstone, origin_device_id,
-                                           server_sequence, received_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                rusqlite::params![
-                    Uuid::new_v4().to_string(),
-                    vault_id,
-                    "credential",
-                    1i64,
-                    now,
-                    vec![i as u8],  // Raw bytes, not base64
-                    false,
-                    Uuid::new_v4().to_string(),
-                    i,
-                    now,
-                ],
-            )
-            .unwrap();
-        }
+        insert_test_entries(&conn, &vault_id, 1, 5);
         drop(conn);
 
         // Pull since sequence 2
@@ -688,30 +700,9 @@ mod tests {
         let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
         let (device_id, vault_id, _) = setup_test_vault(&state);
         let conn = state.storage.conn().unwrap();
-        let now = Utc::now().timestamp();
 
         // Insert 5 entries
-        for i in 1..=5 {
-            conn.execute(
-                "INSERT INTO sync_entries (sync_id, vault_id, entry_type, sync_version, modified_at,
-                                           encrypted_payload, is_tombstone, origin_device_id,
-                                           server_sequence, received_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                rusqlite::params![
-                    Uuid::new_v4().to_string(),
-                    vault_id,
-                    "credential",
-                    1i64,
-                    now,
-                    vec![i as u8],  // Raw bytes, not base64
-                    false,
-                    Uuid::new_v4().to_string(),
-                    i,
-                    now,
-                ],
-            )
-            .unwrap();
-        }
+        insert_test_entries(&conn, &vault_id, 1, 5);
         drop(conn);
 
         // Pull with limit 2
@@ -793,31 +784,15 @@ mod tests {
         let state = RelayAppState::new(RelayStorage::in_memory().unwrap(), RelayConfig::default());
         let (device_id, vault_id, _) = setup_test_vault(&state);
         let conn = state.storage.conn().unwrap();
-        let now = Utc::now().timestamp();
 
         // Insert 2 regular entries and 1 tombstone
-        for i in 1..=3 {
-            let is_tombstone = i == 3;
-            conn.execute(
-                "INSERT INTO sync_entries (sync_id, vault_id, entry_type, sync_version, modified_at,
-                                           encrypted_payload, is_tombstone, origin_device_id,
-                                           server_sequence, received_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                rusqlite::params![
-                    Uuid::new_v4().to_string(),
-                    vault_id,
-                    "credential",
-                    1i64,
-                    now,
-                    vec![i as u8],  // Raw bytes, not base64
-                    is_tombstone,
-                    Uuid::new_v4().to_string(),
-                    i,
-                    now,
-                ],
-            )
-            .unwrap();
-        }
+        insert_test_entries(&conn, &vault_id, 1, 3);
+        // Mark the third entry as a tombstone
+        conn.execute(
+            "UPDATE sync_entries SET is_tombstone = 1 WHERE server_sequence = 3",
+            [],
+        )
+        .unwrap();
         drop(conn);
 
         let resp = status(State(state), auth_extensions(device_id))

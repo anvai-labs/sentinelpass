@@ -126,11 +126,12 @@ fn host_binary_name() -> &'static str {
     }
 }
 
-fn resolve_host_binary_path() -> PathBuf {
-    let binary_name = host_binary_name();
+// Shared binary path resolver. Extracted to eliminate duplication between
+// resolve_host_binary_path and resolve_daemon_binary_path.
+fn resolve_binary_path(binary_name: &str, env_var: &str) -> PathBuf {
     let mut candidates = Vec::new();
 
-    if let Ok(explicit_path) = std::env::var("SENTINELPASS_HOST_PATH") {
+    if let Ok(explicit_path) = std::env::var(env_var) {
         let trimmed = explicit_path.trim();
         if !trimmed.is_empty() {
             candidates.push(PathBuf::from(trimmed));
@@ -172,50 +173,12 @@ fn resolve_host_binary_path() -> PathBuf {
     PathBuf::from(binary_name)
 }
 
+fn resolve_host_binary_path() -> PathBuf {
+    resolve_binary_path(host_binary_name(), "SENTINELPASS_HOST_PATH")
+}
+
 fn resolve_daemon_binary_path() -> std::path::PathBuf {
-    let binary_name = daemon_binary_name();
-    let mut candidates = Vec::new();
-
-    if let Ok(explicit_path) = std::env::var("SENTINELPASS_DAEMON_PATH") {
-        let trimmed = explicit_path.trim();
-        if !trimmed.is_empty() {
-            candidates.push(PathBuf::from(trimmed));
-        }
-    }
-
-    if let Some(resource_dir) = RESOURCE_DIR.get() {
-        candidates.push(
-            resource_dir
-                .join("src-tauri")
-                .join("resources")
-                .join("bin")
-                .join(binary_name),
-        );
-        candidates.push(resource_dir.join("bin").join(binary_name));
-        candidates.push(resource_dir.join(binary_name));
-    }
-
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(exe_dir) = current_exe.parent() {
-            candidates.push(exe_dir.join(binary_name));
-            candidates.push(exe_dir.join("resources").join("bin").join(binary_name));
-            candidates.push(
-                exe_dir
-                    .join("..")
-                    .join("Resources")
-                    .join("bin")
-                    .join(binary_name),
-            );
-        }
-    }
-
-    for candidate in candidates {
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    std::path::PathBuf::from(binary_name)
+    resolve_binary_path(daemon_binary_name(), "SENTINELPASS_DAEMON_PATH")
 }
 
 fn spawn_daemon_process() -> std::result::Result<Child, String> {

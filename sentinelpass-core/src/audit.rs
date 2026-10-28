@@ -1735,6 +1735,20 @@ mod tests {
         crate::crypto::derive_audit_chain_key(dek).unwrap().to_vec()
     }
 
+    // Helper to set up a locked-period test scenario with initial unlocked log.
+    // Eliminates duplication across multiple locked-period audit tests.
+    fn setup_locked_period_test() -> (PathBuf, AuditLogger) {
+        let _guard = KEY_SERIAL.lock().unwrap();
+        let tmp = make_test_dir();
+        let logger = AuditLogger::new(tmp.clone()).unwrap();
+        AuditLogger::install_keys(&test_dek()).unwrap();
+        logger
+            .log(AuditEventType::VaultUnlocked { success: true }, "u")
+            .unwrap();
+        AuditLogger::clear_keys();
+        (tmp, logger)
+    }
+
     fn read_lines(path: &Path) -> Vec<String> {
         std::fs::read_to_string(path)
             .unwrap()
@@ -2665,15 +2679,7 @@ mod tests {
     /// verifiable across the sealed/unsealed boundary.
     #[test]
     fn locked_period_records_chain_keylessly_and_flagged() {
-        let _guard = KEY_SERIAL.lock().unwrap();
-        let tmp = make_test_dir();
-        let logger = AuditLogger::new(tmp.clone()).unwrap();
-
-        AuditLogger::install_keys(&test_dek()).unwrap();
-        logger
-            .log(AuditEventType::VaultUnlocked { success: true }, "u")
-            .unwrap();
-        AuditLogger::clear_keys();
+        let (tmp, logger) = setup_locked_period_test();
         logger
             .log(
                 AuditEventType::EpochHighWaterRebased { refused: true },
@@ -2704,15 +2710,7 @@ mod tests {
     /// the keyless hash, but the next SEALED record then exposes the splice).
     #[test]
     fn tampering_locked_period_records_is_detected() {
-        let _guard = KEY_SERIAL.lock().unwrap();
-        let tmp = make_test_dir();
-        let logger = AuditLogger::new(tmp.clone()).unwrap();
-
-        AuditLogger::install_keys(&test_dek()).unwrap();
-        logger
-            .log(AuditEventType::VaultUnlocked { success: true }, "u")
-            .unwrap();
-        AuditLogger::clear_keys();
+        let (tmp, logger) = setup_locked_period_test();
         logger
             .log(
                 AuditEventType::EpochHighWaterRebased { refused: true },
