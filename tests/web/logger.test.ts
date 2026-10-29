@@ -154,3 +154,65 @@ describe('logger (no chrome API)', () => {
     expect(console.log).toHaveBeenCalledWith('[SentinelPass] still works');
   });
 });
+
+// redactForLog moved here from background.ts/content.ts (extension
+// deduplication). It is the console-redaction boundary, so its behavior is
+// pinned directly: sensitive keys must never survive a log call.
+describe('redactForLog', () => {
+  beforeEach(() => {
+    vi.stubGlobal('chrome', createChromeMock('normal', false));
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('passes primitives and null through untouched', async () => {
+    const { redactForLog } = await import('../../browser-extension/chrome/logger.ts');
+    expect(redactForLog('plain')).toBe('plain');
+    expect(redactForLog(42)).toBe(42);
+    expect(redactForLog(true)).toBe(true);
+    expect(redactForLog(null)).toBeNull();
+    expect(redactForLog(undefined)).toBeUndefined();
+  });
+
+  it('redacts every sensitive key, case-insensitively', async () => {
+    const { redactForLog } = await import('../../browser-extension/chrome/logger.ts');
+    const redacted = redactForLog({
+      username: 'alice',
+      password: 'hunter2',
+      token: 'abc',
+      SECRET: 's',
+      PassPhrase: 'p',
+      totp_code: '000000'
+    }) as Record<string, unknown>;
+    expect(redacted['username']).toBe('alice');
+    expect(redacted['password']).toBe('[REDACTED]');
+    expect(redacted['token']).toBe('[REDACTED]');
+    expect(redacted['SECRET']).toBe('[REDACTED]');
+    expect(redacted['PassPhrase']).toBe('[REDACTED]');
+    expect(redacted['totp_code']).toBe('[REDACTED]');
+  });
+
+  it('recurses into nested objects and arrays', async () => {
+    const { redactForLog } = await import('../../browser-extension/chrome/logger.ts');
+    const redacted = redactForLog({
+      request: { url: 'https://example.com', password: 'nested-secret' },
+      attempts: [{ token: 'one' }, { ok: true }]
+    }) as Record<string, unknown>;
+    const request = redacted['request'] as Record<string, unknown>;
+    const attempts = redacted['attempts'] as Record<string, unknown>[];
+    expect(request['url']).toBe('https://example.com');
+    expect(request['password']).toBe('[REDACTED]');
+    expect(attempts[0]['token']).toBe('[REDACTED]');
+    expect(attempts[1]['ok']).toBe(true);
+  });
+
+  it('does not mutate the input value', async () => {
+    const { redactForLog } = await import('../../browser-extension/chrome/logger.ts');
+    const input = { password: 'hunter2' };
+    redactForLog(input);
+    expect(input.password).toBe('hunter2');
+  });
+});

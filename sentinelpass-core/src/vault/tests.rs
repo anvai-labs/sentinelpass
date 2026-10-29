@@ -2,6 +2,25 @@ use super::*;
 use crate::database::Database;
 use tempfile::TempDir;
 
+// Helper to create a passkey reference entry for tests.
+// Eliminates duplication across multiple vault tests.
+pub(crate) fn create_passkey_reference_entry() -> Entry {
+    Entry {
+        entry_id: None,
+        title: "Example Passkey".to_string(),
+        username: "user@example.com".to_string(),
+        password: "passkey-ref:example.com:user@example.com"
+            .to_string()
+            .into(),
+        url: Some("https://example.com".to_string()),
+        notes: Some("Reference only; no WebAuthn private key material".to_string()),
+        credential_type: CredentialType::PasskeyReference,
+        created_at: Utc::now(),
+        modified_at: Utc::now(),
+        favorite: false,
+    }
+}
+
 #[test]
 fn field_substitution_is_rejected_within_an_entry() {
     let vault = VaultManager::create(":memory:", uuid::Uuid::new_v4().as_bytes()).unwrap();
@@ -456,20 +475,7 @@ fn test_vault_add_and_get_passkey_reference_entry_type() {
 
     let vault = VaultManager::create(temp_path, password).unwrap();
 
-    let entry = Entry {
-        entry_id: None,
-        title: "Example Passkey".to_string(),
-        username: "user@example.com".to_string(),
-        password: "passkey-ref:example.com:user@example.com"
-            .to_string()
-            .into(),
-        url: Some("https://example.com".to_string()),
-        notes: Some("Reference only; no WebAuthn private key material".to_string()),
-        credential_type: CredentialType::PasskeyReference,
-        created_at: Utc::now(),
-        modified_at: Utc::now(),
-        favorite: false,
-    };
+    let entry = create_passkey_reference_entry();
 
     let entry_id = vault.add_entry(&entry).unwrap();
     let retrieved = vault.get_entry(entry_id).unwrap();

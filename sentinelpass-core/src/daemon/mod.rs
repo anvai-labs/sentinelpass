@@ -3,6 +3,7 @@
 pub mod autolock;
 pub mod capabilities;
 pub mod ipc;
+pub mod json_store;
 pub mod maintenance;
 pub mod native_messaging;
 pub mod service;

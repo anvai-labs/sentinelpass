@@ -40,16 +40,6 @@ function initDebugMode(): void {
 initDebugMode();
 
 /**
- * Set debug mode on or off (persists to chrome.storage).
- */
-function setDebugMode(enabled: boolean): void {
-  debugMode = enabled;
-  if (typeof chrome !== 'undefined' && chrome.storage) {
-    chrome.storage.local.set({ debugModeEnabled: enabled });
-  }
-}
-
-/**
  * Check if debug mode is enabled.
  */
 export function isDebugEnabled(): boolean {
@@ -135,4 +125,39 @@ export function sanitizePasswordLength(password: string): string {
   } else {
     return 'long (12+ chars)';
   }
+}
+
+/**
+ * Keys whose values must be replaced with `[REDACTED]` before logging.
+ * The superset covers both background (totp_code) and content-script contexts.
+ */
+const SENSITIVE_LOG_KEYS = new Set([
+  'password', 'secret', 'token', 'passphrase', 'totp_code'
+]);
+
+/**
+ * Recursively redact sensitive keys from a value before logging.
+ * Shared between background and content scripts.
+ */
+export function redactForLog(value: unknown): unknown {
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(redactForLog);
+  }
+
+  const redacted: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (SENSITIVE_LOG_KEYS.has(key.toLowerCase())) {
+      redacted[key] = '[REDACTED]';
+    } else if (item && typeof item === 'object') {
+      redacted[key] = redactForLog(item);
+    } else {
+      redacted[key] = item;
+    }
+  }
+
+  return redacted;
 }

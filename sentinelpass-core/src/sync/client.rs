@@ -383,6 +383,24 @@ impl SyncClient {
 
     // --- Internal helpers ---
 
+    // Helper to handle HTTP response and extract bytes.
+    // Eliminates duplication between signed_post and signed_get.
+    async fn handle_response(resp: reqwest::Response) -> Result<Vec<u8>> {
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
+            return Err(PasswordManagerError::InvalidInput(format!(
+                "Relay error {}: {}",
+                status, body
+            )));
+        }
+
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))
+    }
+
     async fn signed_post(&self, path: &str, body: &[u8]) -> Result<Vec<u8>> {
         let timestamp = chrono::Utc::now().timestamp();
         let nonce = Uuid::new_v4().to_string();
@@ -402,19 +420,7 @@ impl SyncClient {
             .await
             .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
-            return Err(PasswordManagerError::InvalidInput(format!(
-                "Relay error {}: {}",
-                status, body
-            )));
-        }
-
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))
+        Self::handle_response(resp).await
     }
 
     async fn signed_get(&self, path: &str) -> Result<Vec<u8>> {
@@ -434,19 +440,7 @@ impl SyncClient {
             .await
             .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|_| "unknown".to_string());
-            return Err(PasswordManagerError::InvalidInput(format!(
-                "Relay error {}: {}",
-                status, body
-            )));
-        }
-
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| PasswordManagerError::Io(std::io::Error::other(e.to_string())))
+        Self::handle_response(resp).await
     }
 }
 

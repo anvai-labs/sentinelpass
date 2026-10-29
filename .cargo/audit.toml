@@ -37,4 +37,22 @@ ignore = [
   # review note: re-assess each quarter; remove when ssh-key ships a fixed
   #   rsa or the advisory is withdrawn.
   "RUSTSEC-2023-0071",
+
+  # RUSTSEC-2026-0387 — crypto-bigint: secret-dependent branches in
+  # operations intended to be constant-time (subtraction, zero counting,
+  # division, Montgomery multiplication; UintRef early-exit equality).
+  # owner: core-maintainer | added: 2026-10-28
+  # expiry: 2026-12-31 (quarterly exception review)
+  # exposure: NOT REACHABLE. crypto-bigint 0.5.5 is linked transitively via
+  #   elliptic-curve 0.13 / ecdsa / p256 / p384 <- ssh-key 0.6.7, and ssh-key
+  #   itself has ZERO call sites in workspace code (grep ssh_key:: — no
+  #   hits; SSH keygen shells out to ssh-keygen, storage is raw blobs), so
+  #   no vulnerable arithmetic ever executes in-process. The timing channel
+  #   would additionally require an attacker measuring this process's ECDSA
+  #   operation timing. Patched only in crypto-bigint >=0.7.6; no stable
+  #   ssh-key release consumes the 0.7 line yet (0.7.x is RC-only).
+  # review note: re-assess each quarter; remove when ssh-key 0.7 (stable)
+  #   lands and the workspace upgrades past elliptic-curve 0.13, or if any
+  #   ssh_key call site appears — that flips this to a real exposure.
+  "RUSTSEC-2026-0387",
 ]

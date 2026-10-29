@@ -416,25 +416,31 @@ mod tests {
         db
     }
 
-    #[test]
-    fn test_repository_create_entry() {
-        let db = create_in_memory_db();
-        let repo = SqliteEntryRepository::new(&db);
-
-        let new_entry = NewEntryParams {
+    // Helper to create a test entry with common defaults.
+    // Eliminates duplication across multiple repository tests.
+    fn create_test_entry(credential_type: &str, url: Option<&[u8]>) -> NewEntryParams {
+        NewEntryParams {
             title: b"Test Entry".to_vec(),
             username: b"user@example.com".to_vec(),
             password: b"password123".to_vec(),
-            url: Some(b"https://example.com".to_vec()),
+            url: url.map(|u| u.to_vec()),
             notes: None,
-            credential_type: "password".to_string(),
+            credential_type: credential_type.to_string(),
             entry_nonce: vec![0u8; 12],
             auth_tag: vec![0u8; 16],
             created_at: Utc::now().timestamp(),
             modified_at: Utc::now().timestamp(),
             favorite: false,
             sync_id: None,
-        };
+        }
+    }
+
+    #[test]
+    fn test_repository_create_entry() {
+        let db = create_in_memory_db();
+        let repo = SqliteEntryRepository::new(&db);
+
+        let new_entry = create_test_entry("password", Some(b"https://example.com"));
 
         let entry_id = repo.create(new_entry).unwrap();
         assert!(entry_id > 0);
@@ -445,20 +451,7 @@ mod tests {
         let db = create_in_memory_db();
         let repo = SqliteEntryRepository::new(&db);
 
-        let new_entry = NewEntryParams {
-            title: b"Test Entry".to_vec(),
-            username: b"user@example.com".to_vec(),
-            password: b"password123".to_vec(),
-            url: Some(b"https://example.com".to_vec()),
-            notes: None,
-            credential_type: "api_key".to_string(),
-            entry_nonce: vec![0u8; 12],
-            auth_tag: vec![0u8; 16],
-            created_at: Utc::now().timestamp(),
-            modified_at: Utc::now().timestamp(),
-            favorite: false,
-            sync_id: None,
-        };
+        let new_entry = create_test_entry("api_key", Some(b"https://example.com"));
 
         let entry_id = repo.create(new_entry).unwrap();
         let retrieved = repo.get_raw(entry_id).unwrap();
@@ -531,20 +524,7 @@ mod tests {
         let db = create_in_memory_db();
         let repo = SqliteEntryRepository::new(&db);
 
-        let new_entry = NewEntryParams {
-            title: b"Test Entry".to_vec(),
-            username: b"user@example.com".to_vec(),
-            password: b"password123".to_vec(),
-            url: None,
-            notes: None,
-            credential_type: "password".to_string(),
-            entry_nonce: vec![0u8; 12],
-            auth_tag: vec![0u8; 16],
-            created_at: Utc::now().timestamp(),
-            modified_at: Utc::now().timestamp(),
-            favorite: false,
-            sync_id: None,
-        };
+        let new_entry = create_test_entry("password", None);
 
         let entry_id = repo.create(new_entry).unwrap();
         assert!(repo.get_raw(entry_id).unwrap().is_some());
@@ -560,20 +540,7 @@ mod tests {
 
         assert!(!repo.exists(1).unwrap());
 
-        let new_entry = NewEntryParams {
-            title: b"Test Entry".to_vec(),
-            username: b"user@example.com".to_vec(),
-            password: b"password123".to_vec(),
-            url: None,
-            notes: None,
-            credential_type: "password".to_string(),
-            entry_nonce: vec![0u8; 12],
-            auth_tag: vec![0u8; 16],
-            created_at: Utc::now().timestamp(),
-            modified_at: Utc::now().timestamp(),
-            favorite: false,
-            sync_id: None,
-        };
+        let new_entry = create_test_entry("password", None);
 
         let entry_id = repo.create(new_entry).unwrap();
         assert!(repo.exists(entry_id).unwrap());
@@ -586,20 +553,7 @@ mod tests {
         let repo = SqliteEntryRepository::new(&db);
 
         // Create an entry
-        let new_entry = NewEntryParams {
-            title: b"Test Entry".to_vec(),
-            username: b"user@example.com".to_vec(),
-            password: b"password123".to_vec(),
-            url: Some(b"https://example.com".to_vec()),
-            notes: None,
-            credential_type: "password".to_string(),
-            entry_nonce: vec![0u8; 12],
-            auth_tag: vec![0u8; 16],
-            created_at: Utc::now().timestamp(),
-            modified_at: Utc::now().timestamp(),
-            favorite: false,
-            sync_id: None,
-        };
+        let new_entry = create_test_entry("password", Some(b"https://example.com"));
         let entry_id = repo.create(new_entry).unwrap();
 
         // Insert a domain mapping for this entry
