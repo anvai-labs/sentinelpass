@@ -2736,6 +2736,10 @@ mod tests {
     /// verifiable across the sealed/unsealed boundary.
     #[test]
     fn locked_period_records_chain_keylessly_and_flagged() {
+        // The helper's own guard is dropped on return; the keyless logging
+        // span that follows must stay inside the serial too, or a
+        // daemon-test key install can seal a "locked" record.
+        let _guard = key_serial();
         let (tmp, logger) = setup_locked_period_test();
         logger
             .log(
@@ -2767,6 +2771,8 @@ mod tests {
     /// the keyless hash, but the next SEALED record then exposes the splice).
     #[test]
     fn tampering_locked_period_records_is_detected() {
+        // Same span discipline as the test above.
+        let _guard = key_serial();
         let (tmp, logger) = setup_locked_period_test();
         logger
             .log(
