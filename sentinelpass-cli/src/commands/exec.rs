@@ -210,7 +210,7 @@ fn classify_and_report(err: anyhow::Error) -> i32 {
     if err.is::<LockedExit>() {
         eprintln!(
             "sentinelpass vault is locked — unlock via the UI, \
-             'sentinelpass unlock-biometric', or pass --biometric-unlock"
+             'sentinelpass biometric unlock', or pass --biometric-unlock"
         );
         3
     } else if daemon_unreachable(&err) {

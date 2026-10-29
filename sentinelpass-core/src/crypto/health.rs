@@ -200,13 +200,9 @@ impl VaultHealthSummary {
 pub struct PasswordHealthAnalyzer;
 
 impl PasswordHealthAnalyzer {
-    /// Analyze the health of all passwords in the vault
-    pub fn analyze_vault(vault: &VaultManager) -> Result<VaultHealthSummary> {
-        if !vault.is_unlocked() {
-            return Err(PasswordManagerError::VaultLocked);
-        }
-
-        // Get all entries with full details including passwords
+    // Helper to fetch all entries and build password usage map.
+    // Eliminates duplication between analyze_vault and get_health_report.
+    fn build_password_usage(vault: &VaultManager) -> Result<HashMap<Vec<u8>, Vec<Entry>>> {
         let summaries = vault.list_entries()?;
         let mut entries = Vec::new();
         for summary in &summaries {
@@ -216,7 +212,6 @@ impl PasswordHealthAnalyzer {
             }
         }
 
-        // Build password usage map
         let mut password_usage: HashMap<Vec<u8>, Vec<Entry>> = HashMap::new();
         for entry in &entries {
             let password_bytes = entry.password.as_bytes().to_vec();
@@ -225,6 +220,16 @@ impl PasswordHealthAnalyzer {
                 .or_default()
                 .push(entry.clone());
         }
+        Ok(password_usage)
+    }
+
+    /// Analyze the health of all passwords in the vault
+    pub fn analyze_vault(vault: &VaultManager) -> Result<VaultHealthSummary> {
+        if !vault.is_unlocked() {
+            return Err(PasswordManagerError::VaultLocked);
+        }
+
+        let password_usage = Self::build_password_usage(vault)?;
 
         // Find reused passwords (used more than once)
         let reused_passwords: HashSet<Vec<u8>> = password_usage
@@ -246,7 +251,7 @@ impl PasswordHealthAnalyzer {
             excellent: 0,
         };
 
-        for entry in &entries {
+        for entry in password_usage.values().flatten() {
             let is_reused = reused_passwords.contains(entry.password.as_bytes());
             let reuse_count = if is_reused {
                 password_usage
@@ -313,10 +318,11 @@ impl PasswordHealthAnalyzer {
             .take(10) // Limit to top 10
             .collect();
 
-        let unique_count = entries.len() - reused_passwords.len();
+        let total_entries: usize = password_usage.values().map(|v| v.len()).sum();
+        let unique_count = total_entries - reused_passwords.len();
 
         let mut summary = VaultHealthSummary {
-            total_passwords: entries.len(),
+            total_passwords: total_entries,
             compromised_count,
             weak_count,
             reused_count: reused_passwords.len(),
@@ -338,25 +344,7 @@ impl PasswordHealthAnalyzer {
             return Err(PasswordManagerError::VaultLocked);
         }
 
-        // Get all entries with full details including passwords
-        let summaries = vault.list_entries()?;
-        let mut entries = Vec::new();
-        for summary in &summaries {
-            match vault.get_entry(summary.entry_id) {
-                Ok(entry) => entries.push(entry),
-                Err(_) => continue,
-            }
-        }
-
-        // Build password usage map
-        let mut password_usage: HashMap<Vec<u8>, Vec<Entry>> = HashMap::new();
-        for entry in &entries {
-            let password_bytes = entry.password.as_bytes().to_vec();
-            password_usage
-                .entry(password_bytes)
-                .or_default()
-                .push(entry.clone());
-        }
+        let password_usage = Self::build_password_usage(vault)?;
 
         // Find reused passwords
         let reused_passwords: HashSet<Vec<u8>> = password_usage
@@ -367,7 +355,7 @@ impl PasswordHealthAnalyzer {
 
         // Analyze each entry
         let mut health_records = Vec::new();
-        for entry in &entries {
+        for entry in password_usage.values().flatten() {
             let is_reused = reused_passwords.contains(entry.password.as_bytes());
             let reuse_count = if is_reused {
                 password_usage
@@ -456,12 +444,13 @@ mod tests {
         assert!(HealthScore::Strong < HealthScore::Excellent);
     }
 
-    #[test]
-    fn test_calculate_health_score_compromised() {
-        use crate::crypto::strength::PasswordStrength;
-
-        let analysis = PasswordAnalysis {
-            strength: PasswordStrength::VeryStrong,
+    // Helper to create a test PasswordAnalysis with common defaults.
+    // Eliminates duplication across multiple health score tests.
+    fn create_test_analysis(
+        strength: crate::crypto::strength::PasswordStrength,
+    ) -> PasswordAnalysis {
+        PasswordAnalysis {
+            strength,
             entropy_bits: 100.0,
             crack_time_seconds: 1e15,
             length: 20,
@@ -471,7 +460,14 @@ mod tests {
             has_symbols: true,
             warnings: vec![],
             suggestions: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn test_calculate_health_score_compromised() {
+        use crate::crypto::strength::PasswordStrength;
+
+        let analysis = create_test_analysis(PasswordStrength::VeryStrong);
 
         let score = PasswordHealthAnalyzer::calculate_health_score(&analysis, false, true);
         assert_eq!(score, HealthScore::Critical);
@@ -481,18 +477,7 @@ mod tests {
     fn test_calculate_health_score_reused_strong() {
         use crate::crypto::strength::PasswordStrength;
 
-        let analysis = PasswordAnalysis {
-            strength: PasswordStrength::VeryStrong,
-            entropy_bits: 100.0,
-            crack_time_seconds: 1e15,
-            length: 20,
-            has_lowercase: true,
-            has_uppercase: true,
-            has_digits: true,
-            has_symbols: true,
-            warnings: vec![],
-            suggestions: vec![],
-        };
+        let analysis = create_test_analysis(PasswordStrength::VeryStrong);
 
         let score = PasswordHealthAnalyzer::calculate_health_score(&analysis, true, false);
         assert_eq!(score, HealthScore::Good);

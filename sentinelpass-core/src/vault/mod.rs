@@ -27,7 +27,7 @@ pub use slot_ops::{SlotSummary, SlotType};
 mod ssh_ops;
 mod sync_ops;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod totp_ops;
 
 use crate::{

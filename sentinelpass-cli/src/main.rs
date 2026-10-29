@@ -25,81 +25,40 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new password vault
-    Init {
-        /// Enable development mode (in-memory database)
-        #[arg(long)]
-        dev: bool,
+    /// Vault operations (init, unlock, lock, status, passwd, rekey)
+    Vault {
+        #[command(subcommand)]
+        command: VaultCommands,
     },
 
-    /// Unlock the vault
-    Unlock,
-
-    /// Lock the vault
-    Lock,
-
-    /// Show biometric unlock status for this vault
-    BiometricStatus,
-
-    /// Enable biometric unlock for this vault
-    BiometricEnable {
-        /// Master password (prompted securely if omitted)
-        #[arg(long)]
-        master_password: Option<String>,
+    /// Credential entry management (add, list, get, search, delete, edit)
+    Entry {
+        #[command(subcommand)]
+        command: EntryCommands,
     },
 
-    /// Disable biometric unlock for this vault
-    BiometricDisable,
-
-    /// Unlock vault using biometric authentication
-    UnlockBiometric,
-
-    /// Rotate the vault master password (re-wraps the data key; entries untouched)
-    Passwd,
-
-    /// Create a verified replacement vault with a fresh data-encryption key
-    Rekey {
-        /// New directory for the replacement vault (must not exist)
-        #[arg(long)]
-        output_dir: PathBuf,
+    /// SSH agent and key management
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommands,
     },
 
-    /// Show vault schema version, key epoch, and daemon reachability
-    /// (no master password required)
-    Status,
+    /// TOTP management (add, code, remove)
+    Totp {
+        #[command(subcommand)]
+        command: TotpCommands,
+    },
 
-    /// Check whether SSH agent integration is available
-    SshAgentStatus,
+    /// Biometric unlock management (status, enable, disable, unlock)
+    Biometric {
+        #[command(subcommand)]
+        command: BiometricCommands,
+    },
 
-    /// Retrieve a single secret field through the unlocked daemon
-    SecretGet {
-        /// Domain or service key used to look up the credential
-        #[arg(long)]
-        domain: String,
-
-        /// Field to print
-        #[arg(long, value_enum, default_value_t = SecretField::Password)]
-        field: SecretField,
-
-        /// If the daemon is locked, request biometric unlock before lookup
-        #[arg(long)]
-        biometric_unlock: bool,
-
-        /// Local tool client id used for allowlist authorization (required)
-        #[arg(long)]
-        client_id: String,
-
-        /// Purpose label recorded in daemon audit context
-        #[arg(long)]
-        purpose: Option<String>,
-
-        /// Output format
-        #[arg(long, value_enum, default_value_t = SecretOutputFormat::Plain)]
-        output: SecretOutputFormat,
-
-        /// Prompt shown by the OS biometric dialog
-        #[arg(long, default_value = "Unlock SentinelPass to retrieve a secret")]
-        prompt_reason: String,
+    /// Audit trail verification
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommands,
     },
 
     /// Manage least-privilege external secret access for local tools
@@ -181,63 +140,128 @@ enum Commands {
         command: PasskeyCommands,
     },
 
-    /// Add a private key file to SSH agent
-    SshAgentAdd {
-        /// Path to private key file
-        key_path: PathBuf,
+    /// Generate a secure random password
+    Generate {
+        /// Password length (default: 16)
+        #[arg(short, long, default_value = "16")]
+        length: usize,
+
+        /// Include lowercase letters (default: true)
+        #[arg(long, default_value = "true")]
+        lowercase: bool,
+
+        /// Include uppercase letters (default: true)
+        #[arg(long, default_value = "true")]
+        uppercase: bool,
+
+        /// Include digits (default: true)
+        #[arg(long, default_value = "true")]
+        digits: bool,
+
+        /// Include symbols (default: true)
+        #[arg(long, default_value = "true")]
+        symbols: bool,
+
+        /// Exclude ambiguous characters like l, 1, I, O, 0
+        #[arg(long, default_value = "true")]
+        exclude_ambiguous: bool,
+
+        /// Number of passwords to generate
+        #[arg(short, long, default_value = "1")]
+        count: usize,
     },
 
-    /// Add a stored vault SSH key to SSH agent without writing it to disk
-    SshAgentAddStored {
-        /// SSH key ID stored in vault
-        id: i64,
+    /// Check password strength
+    Check {
+        /// Password to check (will prompt if not provided)
+        #[arg(short, long)]
+        password: Option<String>,
     },
 
-    /// Remove all identities from SSH agent
-    SshAgentClear,
-
-    /// Add an SSH private key to the vault
-    SshKeyAdd {
-        /// Display name for the key in vault
+    /// Show vault password health report
+    Health {
+        /// Show detailed report for all entries
         #[arg(long)]
-        name: String,
+        detailed: bool,
 
-        /// Path to private key file
+        /// Show only weak/reused passwords
         #[arg(long)]
-        private_key_file: PathBuf,
-
-        /// Path to public key file (defaults to <private_key_file>.pub)
-        #[arg(long)]
-        public_key_file: Option<PathBuf>,
-
-        /// Optional comment override
-        #[arg(long)]
-        comment: Option<String>,
+        only_issues: bool,
     },
 
-    /// List SSH keys stored in vault
-    SshKeyList,
-
-    /// Get SSH key details by ID
-    SshKeyGet {
-        /// SSH key ID
-        id: i64,
-
-        /// Also print decrypted private key
-        #[arg(long)]
-        show_private: bool,
+    /// Manage the credential registry (entities, reuse clusters, rotation posture)
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommands,
     },
 
-    /// Delete SSH key by ID
-    SshKeyDelete {
-        /// SSH key ID
-        id: i64,
+    /// Export vault to file
+    Export {
+        /// Output file path
+        output: PathBuf,
 
-        /// Skip confirmation
-        #[arg(long)]
-        force: bool,
+        /// Export format (json, csv, or keepass)
+        #[arg(short, long, default_value = "json")]
+        format: String,
     },
 
+    /// Import entries from file
+    Import {
+        /// Input file path
+        input: PathBuf,
+
+        /// Import format (json, csv, or keepass)
+        #[arg(short, long, default_value = "json")]
+        format: String,
+    },
+
+    /// Recovery key management (setup, recover without master password, status)
+    Recovery {
+        #[command(subcommand)]
+        command: commands::recovery::RecoveryCommands,
+    },
+
+    /// Portable authenticated backup (create, verify, restore)
+    #[command(subcommand)]
+    Backup(commands::backup::BackupCommands),
+
+    /// Sync subcommands for encrypted cloud sync
+    #[command(subcommand)]
+    Sync(SyncCommands),
+}
+
+#[derive(Subcommand)]
+enum VaultCommands {
+    /// Initialize a new password vault
+    Init {
+        /// Enable development mode (in-memory database)
+        #[arg(long)]
+        dev: bool,
+    },
+
+    /// Unlock the vault
+    Unlock,
+
+    /// Lock the vault
+    Lock,
+
+    /// Show vault schema version, key epoch, and daemon reachability
+    /// (no master password required)
+    Status,
+
+    /// Rotate the vault master password (re-wraps the data key; entries untouched)
+    Passwd,
+
+    /// Create a verified replacement vault with a fresh data-encryption key
+    Rekey {
+        /// New directory for the replacement vault (must not exist)
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum EntryCommands {
     /// Add a new credential entry
     Add {
         /// Title for the entry
@@ -332,9 +356,93 @@ enum Commands {
         #[arg(long)]
         favorite: Option<bool>,
     },
+}
 
+#[derive(Subcommand)]
+enum SshCommands {
+    /// Check whether SSH agent integration is available
+    Status,
+
+    /// SSH agent operations (add, add-stored, clear)
+    Agent {
+        #[command(subcommand)]
+        command: SshAgentCommands,
+    },
+
+    /// SSH key vault operations (add, list, get, delete)
+    Key {
+        #[command(subcommand)]
+        command: SshKeyCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SshAgentCommands {
+    /// Add a private key file to SSH agent
+    Add {
+        /// Path to private key file
+        key_path: PathBuf,
+    },
+
+    /// Add a stored vault SSH key to SSH agent without writing it to disk
+    AddStored {
+        /// SSH key ID stored in vault
+        id: i64,
+    },
+
+    /// Remove all identities from SSH agent
+    Clear,
+}
+
+#[derive(Subcommand)]
+enum SshKeyCommands {
+    /// Add an SSH private key to the vault
+    Add {
+        /// Display name for the key in vault
+        #[arg(long)]
+        name: String,
+
+        /// Path to private key file
+        #[arg(long)]
+        private_key_file: PathBuf,
+
+        /// Path to public key file (defaults to <private_key_file>.pub)
+        #[arg(long)]
+        public_key_file: Option<PathBuf>,
+
+        /// Optional comment override
+        #[arg(long)]
+        comment: Option<String>,
+    },
+
+    /// List SSH keys stored in vault
+    List,
+
+    /// Get SSH key details by ID
+    Get {
+        /// SSH key ID
+        id: i64,
+
+        /// Also print decrypted private key
+        #[arg(long)]
+        show_private: bool,
+    },
+
+    /// Delete SSH key by ID
+    Delete {
+        /// SSH key ID
+        id: i64,
+
+        /// Skip confirmation
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TotpCommands {
     /// Add or update a TOTP secret for an entry
-    TotpAdd {
+    Add {
         /// Entry ID to attach TOTP to
         #[arg(long)]
         entry_id: i64,
@@ -369,14 +477,14 @@ enum Commands {
     },
 
     /// Generate current TOTP code for an entry
-    TotpCode {
+    Code {
         /// Entry ID with configured TOTP
         #[arg(long)]
         entry_id: i64,
     },
 
     /// Remove TOTP secret for an entry
-    TotpRemove {
+    Remove {
         /// Entry ID with configured TOTP
         #[arg(long)]
         entry_id: i64,
@@ -385,110 +493,31 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+}
 
-    /// Generate a secure random password
-    Generate {
-        /// Password length (default: 16)
-        #[arg(short, long, default_value = "16")]
-        length: usize,
+#[derive(Subcommand)]
+enum BiometricCommands {
+    /// Show biometric unlock status for this vault
+    Status,
 
-        /// Include lowercase letters (default: true)
-        #[arg(long, default_value = "true")]
-        lowercase: bool,
-
-        /// Include uppercase letters (default: true)
-        #[arg(long, default_value = "true")]
-        uppercase: bool,
-
-        /// Include digits (default: true)
-        #[arg(long, default_value = "true")]
-        digits: bool,
-
-        /// Include symbols (default: true)
-        #[arg(long, default_value = "true")]
-        symbols: bool,
-
-        /// Exclude ambiguous characters like l, 1, I, O, 0
-        #[arg(long, default_value = "true")]
-        exclude_ambiguous: bool,
-
-        /// Number of passwords to generate
-        #[arg(short, long, default_value = "1")]
-        count: usize,
-    },
-
-    /// Check password strength
-    Check {
-        /// Password to check (will prompt if not provided)
-        #[arg(short, long)]
-        password: Option<String>,
-    },
-
-    /// Show vault password health report
-    Health {
-        /// Show detailed report for all entries
+    /// Enable biometric unlock for this vault
+    Enable {
+        /// Master password (prompted securely if omitted)
         #[arg(long)]
-        detailed: bool,
-
-        /// Show only weak/reused passwords
-        #[arg(long)]
-        only_issues: bool,
+        master_password: Option<String>,
     },
 
-    /// Manage the credential registry (entities, reuse clusters, rotation posture)
-    Registry {
-        #[command(subcommand)]
-        command: RegistryCommands,
-    },
+    /// Disable biometric unlock for this vault
+    Disable,
 
+    /// Unlock vault using biometric authentication
+    Unlock,
+}
+
+#[derive(Subcommand)]
+enum AuditCommands {
     /// Verify the audit trail hash chain (detects tampering, deletions, reordering)
-    AuditVerify,
-
-    /// Export vault to file
-    Export {
-        /// Output file path
-        output: PathBuf,
-
-        /// Export format (json or csv)
-        #[arg(short, long, default_value = "json")]
-        format: String,
-    },
-
-    /// Import entries from file
-    Import {
-        /// Input file path
-        input: PathBuf,
-
-        /// Import format (json, csv, or keepass)
-        #[arg(short, long, default_value = "json")]
-        format: String,
-    },
-
-    /// Export entries to KeePass XML format
-    KeePassExport {
-        /// Output file path
-        output: PathBuf,
-    },
-
-    /// Import entries from KeePass XML format
-    KeePassImport {
-        /// Input file path
-        input: PathBuf,
-    },
-
-    /// Recovery key management (setup, recover without master password, status)
-    Recovery {
-        #[command(subcommand)]
-        command: commands::recovery::RecoveryCommands,
-    },
-
-    /// Portable authenticated backup (create, verify, restore)
-    #[command(subcommand)]
-    Backup(commands::backup::BackupCommands),
-
-    /// Sync subcommands for encrypted cloud sync
-    #[command(subcommand)]
-    Sync(SyncCommands),
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -722,7 +751,7 @@ enum ServiceGrantCommands {
         #[arg(long)]
         client_id: String,
 
-        /// EXACT entry id the grant may read (see `sentinelpass list`)
+        /// EXACT entry id the grant may read (see `sentinelpass entry list`)
         #[arg(long)]
         entry_id: i64,
 
@@ -1299,15 +1328,202 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { dev } => {
-            let vault_path = get_vault_path(&cli, dev);
-            commands::vault::handle_init(vault_path, dev)?;
+        Commands::Vault { ref command } => {
+            let vault_path = get_vault_path(&cli, false);
+            match command {
+                VaultCommands::Init { dev } => {
+                    let vault_path = get_vault_path(&cli, *dev);
+                    commands::vault::handle_init(vault_path, *dev)?;
+                }
+                VaultCommands::Unlock => {
+                    commands::vault::handle_unlock(vault_path)?;
+                }
+                VaultCommands::Lock => {
+                    commands::vault::handle_lock()?;
+                }
+                VaultCommands::Status => {
+                    commands::vault::handle_status(vault_path)?;
+                }
+                VaultCommands::Passwd => {
+                    commands::vault::handle_passwd(vault_path)?;
+                }
+                VaultCommands::Rekey { ref output_dir } => {
+                    commands::vault::handle_rekey(vault_path, output_dir)?;
+                }
+            }
         }
 
-        Commands::Unlock => {
+        Commands::Entry { ref command } => {
             let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_unlock(vault_path)?;
+            match command {
+                EntryCommands::Add {
+                    ref title,
+                    ref username,
+                    ref password,
+                    credential_type,
+                    ref url,
+                    ref notes,
+                    favorite,
+                } => {
+                    let credential_type = CredentialType::from(*credential_type);
+                    commands::credentials::handle_add(
+                        vault_path,
+                        title,
+                        username.as_deref(),
+                        password.as_deref(),
+                        credential_type,
+                        url.clone(),
+                        notes.clone(),
+                        *favorite,
+                    )?;
+                }
+                EntryCommands::List { show_passwords } => {
+                    commands::credentials::handle_list(vault_path, *show_passwords)?;
+                }
+                EntryCommands::Get { id } => {
+                    commands::credentials::handle_get(vault_path, *id)?;
+                }
+                EntryCommands::Search { ref query } => {
+                    commands::credentials::handle_search(vault_path, query)?;
+                }
+                EntryCommands::Delete { id, force } => {
+                    commands::credentials::handle_delete(vault_path, *id, *force)?;
+                }
+                EntryCommands::Edit {
+                    id,
+                    ref title,
+                    ref username,
+                    ref password,
+                    new_password,
+                    ref url,
+                    ref notes,
+                    favorite,
+                } => {
+                    commands::credentials::handle_edit(
+                        vault_path,
+                        *id,
+                        title.as_deref(),
+                        username.as_deref(),
+                        password.as_deref(),
+                        *new_password,
+                        url.clone(),
+                        notes.clone(),
+                        *favorite,
+                    )?;
+                }
+            }
         }
+
+        Commands::Ssh { ref command } => match command {
+            SshCommands::Status => {
+                commands::ssh::handle_ssh_agent_status()?;
+            }
+            SshCommands::Agent { ref command } => match command {
+                SshAgentCommands::Add { ref key_path } => {
+                    commands::ssh::handle_ssh_agent_add(key_path)?;
+                }
+                SshAgentCommands::AddStored { id } => {
+                    let vault_path = get_vault_path(&cli, false);
+                    commands::ssh::handle_ssh_agent_add_stored(vault_path, *id)?;
+                }
+                SshAgentCommands::Clear => {
+                    commands::ssh::handle_ssh_agent_clear()?;
+                }
+            },
+            SshCommands::Key { ref command } => match command {
+                SshKeyCommands::Add {
+                    ref name,
+                    ref private_key_file,
+                    ref public_key_file,
+                    ref comment,
+                } => {
+                    let vault_path = get_vault_path(&cli, false);
+                    commands::ssh::handle_ssh_key_add(
+                        vault_path,
+                        name,
+                        private_key_file,
+                        public_key_file.as_ref(),
+                        comment.clone(),
+                    )?;
+                }
+                SshKeyCommands::List => {
+                    let vault_path = get_vault_path(&cli, false);
+                    commands::ssh::handle_ssh_key_list(vault_path)?;
+                }
+                SshKeyCommands::Get { id, show_private } => {
+                    let vault_path = get_vault_path(&cli, false);
+                    commands::ssh::handle_ssh_key_get(vault_path, *id, *show_private)?;
+                }
+                SshKeyCommands::Delete { id, force } => {
+                    let vault_path = get_vault_path(&cli, false);
+                    commands::ssh::handle_ssh_key_delete(vault_path, *id, *force)?;
+                }
+            },
+        },
+
+        Commands::Totp { ref command } => {
+            let vault_path = get_vault_path(&cli, false);
+            match command {
+                TotpCommands::Add {
+                    entry_id,
+                    ref secret,
+                    ref otpauth_uri,
+                    ref algorithm,
+                    digits,
+                    period,
+                    ref issuer,
+                    ref account,
+                } => {
+                    commands::totp::handle_totp_add(
+                        vault_path,
+                        *entry_id,
+                        secret.as_deref(),
+                        otpauth_uri.as_deref(),
+                        algorithm.as_deref(),
+                        *digits,
+                        *period,
+                        issuer.clone(),
+                        account.clone(),
+                    )?;
+                }
+                TotpCommands::Code { entry_id } => {
+                    commands::totp::handle_totp_code(vault_path, *entry_id)?;
+                }
+                TotpCommands::Remove { entry_id, force } => {
+                    commands::totp::handle_totp_remove(vault_path, *entry_id, *force)?;
+                }
+            }
+        }
+
+        Commands::Biometric { ref command } => {
+            let vault_path = get_vault_path(&cli, false);
+            match command {
+                BiometricCommands::Status => {
+                    commands::vault::handle_biometric_status(vault_path)?;
+                }
+                BiometricCommands::Enable {
+                    ref master_password,
+                } => {
+                    commands::vault::handle_biometric_enable(
+                        vault_path,
+                        master_password.as_deref(),
+                    )?;
+                }
+                BiometricCommands::Disable => {
+                    commands::vault::handle_biometric_disable(vault_path)?;
+                }
+                BiometricCommands::Unlock => {
+                    commands::vault::handle_unlock_biometric(vault_path)?;
+                }
+            }
+        }
+
+        Commands::Audit { ref command } => match command {
+            AuditCommands::Verify => {
+                let vault_path = get_vault_path(&cli, false);
+                commands::audit::handle_audit_verify(vault_path)?;
+            }
+        },
 
         Commands::Recovery { ref command } => {
             let vault_path = get_vault_path(&cli, false);
@@ -1322,10 +1538,6 @@ fn main() -> Result<()> {
                     commands::recovery::handle_status(vault_path)?
                 }
             }
-        }
-
-        Commands::Lock => {
-            commands::vault::handle_lock()?;
         }
 
         Commands::Backup(ref command) => {
@@ -1350,110 +1562,6 @@ fn main() -> Result<()> {
                     *disable_sync,
                 )?,
             }
-        }
-
-        Commands::BiometricStatus => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_biometric_status(vault_path)?;
-        }
-
-        Commands::BiometricEnable {
-            ref master_password,
-        } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_biometric_enable(vault_path, master_password.as_deref())?;
-        }
-
-        Commands::BiometricDisable => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_biometric_disable(vault_path)?;
-        }
-
-        Commands::UnlockBiometric => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_unlock_biometric(vault_path)?;
-        }
-
-        Commands::SshAgentStatus => {
-            commands::ssh::handle_ssh_agent_status()?;
-        }
-
-        Commands::SshAgentAdd { ref key_path } => {
-            commands::ssh::handle_ssh_agent_add(key_path)?;
-        }
-
-        Commands::SshAgentAddStored { id } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::ssh::handle_ssh_agent_add_stored(vault_path, id)?;
-        }
-
-        Commands::SshAgentClear => {
-            commands::ssh::handle_ssh_agent_clear()?;
-        }
-
-        Commands::SshKeyAdd {
-            ref name,
-            ref private_key_file,
-            ref public_key_file,
-            ref comment,
-        } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::ssh::handle_ssh_key_add(
-                vault_path,
-                name,
-                private_key_file,
-                public_key_file.as_ref(),
-                comment.clone(),
-            )?;
-        }
-
-        Commands::SshKeyList => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::ssh::handle_ssh_key_list(vault_path)?;
-        }
-
-        Commands::SshKeyGet { id, show_private } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::ssh::handle_ssh_key_get(vault_path, id, show_private)?;
-        }
-
-        Commands::SshKeyDelete { id, force } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::ssh::handle_ssh_key_delete(vault_path, id, force)?;
-        }
-
-        Commands::Passwd => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_passwd(vault_path)?;
-        }
-
-        Commands::Rekey { ref output_dir } => {
-            commands::vault::handle_rekey(get_vault_path(&cli, false), output_dir)?;
-        }
-
-        Commands::Status => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::vault::handle_status(vault_path)?;
-        }
-
-        Commands::SecretGet {
-            domain,
-            field,
-            biometric_unlock,
-            client_id,
-            purpose,
-            output,
-            prompt_reason,
-        } => {
-            commands::secret::handle_secret_get(
-                domain,
-                field,
-                biometric_unlock,
-                client_id,
-                purpose,
-                output,
-                prompt_reason,
-            )?;
         }
 
         Commands::Secret { command } => {
@@ -1690,107 +1798,6 @@ fn main() -> Result<()> {
             }
         },
 
-        Commands::Add {
-            ref title,
-            ref username,
-            ref password,
-            credential_type,
-            ref url,
-            ref notes,
-            favorite,
-        } => {
-            let vault_path = get_vault_path(&cli, false);
-            let credential_type = CredentialType::from(credential_type);
-            commands::credentials::handle_add(
-                vault_path,
-                title,
-                username.as_deref(),
-                password.as_deref(),
-                credential_type,
-                url.clone(),
-                notes.clone(),
-                favorite,
-            )?;
-        }
-
-        Commands::List { show_passwords } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::credentials::handle_list(vault_path, show_passwords)?;
-        }
-
-        Commands::Get { id } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::credentials::handle_get(vault_path, id)?;
-        }
-
-        Commands::Search { ref query } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::credentials::handle_search(vault_path, query)?;
-        }
-
-        Commands::Delete { id, force } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::credentials::handle_delete(vault_path, id, force)?;
-        }
-
-        Commands::Edit {
-            id,
-            ref title,
-            ref username,
-            ref password,
-            new_password,
-            ref url,
-            ref notes,
-            favorite,
-        } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::credentials::handle_edit(
-                vault_path,
-                id,
-                title.as_deref(),
-                username.as_deref(),
-                password.as_deref(),
-                new_password,
-                url.clone(),
-                notes.clone(),
-                favorite,
-            )?;
-        }
-
-        Commands::TotpAdd {
-            entry_id,
-            ref secret,
-            ref otpauth_uri,
-            ref algorithm,
-            digits,
-            period,
-            ref issuer,
-            ref account,
-        } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::totp::handle_totp_add(
-                vault_path,
-                entry_id,
-                secret.as_deref(),
-                otpauth_uri.as_deref(),
-                algorithm.as_deref(),
-                digits,
-                period,
-                issuer.clone(),
-                account.clone(),
-            )?;
-        }
-
-        Commands::TotpCode { entry_id } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::totp::handle_totp_code(vault_path, entry_id)?;
-        }
-
-        Commands::TotpRemove { entry_id, force } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::totp::handle_totp_remove(vault_path, entry_id, force)?;
-        }
-
         Commands::Generate {
             length,
             lowercase,
@@ -1828,11 +1835,6 @@ fn main() -> Result<()> {
             commands::registry::handle_registry_command(vault_path, command)?;
         }
 
-        Commands::AuditVerify => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::audit::handle_audit_verify(vault_path)?;
-        }
-
         Commands::Export {
             ref output,
             ref format,
@@ -1847,16 +1849,6 @@ fn main() -> Result<()> {
         } => {
             let vault_path = get_vault_path(&cli, false);
             commands::import_export::handle_import(vault_path, input, format)?;
-        }
-
-        Commands::KeePassImport { ref input } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::import_export::handle_keepass_import(vault_path, input)?;
-        }
-
-        Commands::KeePassExport { ref output } => {
-            let vault_path = get_vault_path(&cli, false);
-            commands::import_export::handle_keepass_export(vault_path, output)?;
         }
 
         Commands::Sync(ref sync_cmd) => {
@@ -2690,6 +2682,7 @@ mod tests {
     fn parses_add_api_key_entry_contract() {
         let cli = Cli::try_parse_from([
             "sentinelpass",
+            "entry",
             "add",
             "--title",
             "Anthropic API",
@@ -2705,13 +2698,16 @@ mod tests {
         .unwrap();
 
         match cli.command {
-            Commands::Add {
-                title,
-                username,
-                password,
-                url,
-                credential_type,
-                ..
+            Commands::Entry {
+                command:
+                    EntryCommands::Add {
+                        title,
+                        username,
+                        password,
+                        url,
+                        credential_type,
+                        ..
+                    },
             } => {
                 assert_eq!(title, "Anthropic API");
                 assert_eq!(username, Some("ANTHROPIC_API_KEY".to_string()));
@@ -2723,7 +2719,7 @@ mod tests {
                     CredentialType::ApiKey
                 );
             }
-            _ => panic!("expected add command"),
+            _ => panic!("expected entry add command"),
         }
     }
 
@@ -2732,6 +2728,7 @@ mod tests {
     fn parses_add_api_key_without_username() {
         let cli = Cli::try_parse_from([
             "sentinelpass",
+            "entry",
             "add",
             "--title",
             "Stripe API",
@@ -2743,10 +2740,13 @@ mod tests {
         .unwrap();
 
         match cli.command {
-            Commands::Add {
-                username,
-                credential_type,
-                ..
+            Commands::Entry {
+                command:
+                    EntryCommands::Add {
+                        username,
+                        credential_type,
+                        ..
+                    },
             } => {
                 assert_eq!(username, None);
                 assert_eq!(
@@ -2754,7 +2754,7 @@ mod tests {
                     CredentialType::ApiKey
                 );
             }
-            _ => panic!("expected add command"),
+            _ => panic!("expected entry add command"),
         }
     }
 
@@ -2764,6 +2764,7 @@ mod tests {
     fn parses_add_api_key_with_empty_username() {
         let cli = Cli::try_parse_from([
             "sentinelpass",
+            "entry",
             "add",
             "--title",
             "Stripe API",
@@ -2777,10 +2778,12 @@ mod tests {
         .unwrap();
 
         match cli.command {
-            Commands::Add { username, .. } => {
+            Commands::Entry {
+                command: EntryCommands::Add { username, .. },
+            } => {
                 assert_eq!(username, Some(String::new()));
             }
-            _ => panic!("expected add command"),
+            _ => panic!("expected entry add command"),
         }
     }
 
@@ -2788,6 +2791,7 @@ mod tests {
     fn generic_add_rejects_passkey_reference_type() {
         let result = Cli::try_parse_from([
             "sentinelpass",
+            "entry",
             "add",
             "--title",
             "Example Passkey",
@@ -2872,43 +2876,6 @@ mod tests {
         assert!(entry.password.contains("\"kind\":\"passkey_reference\""));
         assert!(entry.password.contains("\"platform\":\"icloud-keychain\""));
         assert!(!entry.credential_type.is_retrievable_secret());
-    }
-
-    #[test]
-    fn legacy_secret_get_can_opt_into_client_allowlist() {
-        let cli = Cli::try_parse_from([
-            "sentinelpass",
-            "secret-get",
-            "--domain",
-            "anthropic",
-            "--field",
-            "password",
-            "--client-id",
-            "victor",
-            "--purpose",
-            "victor-auth",
-            "--output",
-            "json",
-        ])
-        .unwrap();
-
-        match cli.command {
-            Commands::SecretGet {
-                domain,
-                field,
-                client_id,
-                purpose,
-                output,
-                ..
-            } => {
-                assert_eq!(domain, "anthropic");
-                assert!(matches!(field, SecretField::Password));
-                assert_eq!(client_id, "victor".to_string());
-                assert_eq!(purpose, Some("victor-auth".to_string()));
-                assert_eq!(output, SecretOutputFormat::Json);
-            }
-            _ => panic!("expected legacy secret-get command"),
-        }
     }
 
     #[test]

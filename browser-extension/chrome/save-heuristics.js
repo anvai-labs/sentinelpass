@@ -200,3 +200,47 @@ export function autofillPageUrlForDaemon(requestedPageUrl, senderUrl, trustedPop
         ? requestedPageUrl
         : null;
 }
+// ─── Never-save domain policy (shared between background and content) ───
+const NEVER_SAVE_DOMAINS_KEY = 'neverSaveDomains';
+export function getNeverSaveDomains() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get([NEVER_SAVE_DOMAINS_KEY], (result) => {
+            if (chrome.runtime.lastError) {
+                console.error('[SentinelPass] Failed reading never-save domains:', chrome.runtime.lastError?.message);
+                resolve({});
+                return;
+            }
+            resolve(result[NEVER_SAVE_DOMAINS_KEY] || {});
+        });
+    });
+}
+export function setNeverSaveDomains(domains) {
+    return new Promise((resolve, reject) => {
+        chrome.storage.local.set({ [NEVER_SAVE_DOMAINS_KEY]: domains }, () => {
+            if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+            }
+            else {
+                resolve();
+            }
+        });
+    });
+}
+export async function shouldSuppressSavePrompt(domainOrUrl) {
+    const normalized = normalizeDomainForPolicy(domainOrUrl);
+    if (!normalized) {
+        return false;
+    }
+    const domains = await getNeverSaveDomains();
+    return Object.keys(domains).some((policyDomain) => domainMatchesPolicy(normalized, policyDomain));
+}
+export async function addNeverSaveDomain(domainOrUrl) {
+    const normalized = normalizeDomainForPolicy(domainOrUrl);
+    if (!normalized) {
+        return false;
+    }
+    const domains = await getNeverSaveDomains();
+    domains[normalized] = { createdAt: Date.now() };
+    await setNeverSaveDomains(domains);
+    return true;
+}

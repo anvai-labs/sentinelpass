@@ -50,10 +50,10 @@ every register row marked `config-ignore` MUST appear in the config file.
 - Review evidence (raw finding list + decisions) is appended to the
   session log in `TECHNICAL_DEBT.md`.
 
-## Register — 2026-09-11 baseline
+## Register — 2026-09-11 baseline (updated 2026-10-28)
 
 Raw audit run (config set aside) against the current lockfile: **1
-vulnerability** (would fail) and **18 warning-class findings** (reported
+vulnerability** (would fail) and **13 warning-class findings** (reported
 only). Rows below cover each distinct advisory.
 
 ### Config-ignored (fail the audit if unignored)
@@ -61,6 +61,7 @@ only). Rows below cover each distinct advisory.
 | RUSTSEC | Crate (ver) | Class | Severity | Owner | Expiry | Exposure assessment | Review note / removal |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | RUSTSEC-2023-0071 | rsa 0.9.10 | vulnerability | 5.9 medium | core-maintainer | 2026-12-31 | NOT REACHABLE: linked via ssh-key 0.6.7 and a direct sentinelpass-core dependency that no code uses (verified: no `use rsa` in the workspace); SSH RSA keygen shells out to `ssh-keygen`; no in-process RSA decrypt oracle exists in a local-first app with no network RSA surface. Marvin requires timing observation of RSA decryption — outside the threat model. | Remove when ssh-key ships a fixed rsa chain or the advisory is withdrawn. The unused direct `rsa` dep in sentinelpass-core is a removal candidate; ssh-key keeps the crate in the tree regardless. |
+| RUSTSEC-2026-0387 | crypto-bigint 0.5.5 | vulnerability | none published | core-maintainer | 2026-12-31 | NOT REACHABLE: transitively linked via elliptic-curve 0.13 / ecdsa / p256 / p384 <- ssh-key 0.6.7, and ssh-key has ZERO call sites in workspace code (verified: no `ssh_key::` in any crate; keygen shells out to `ssh-keygen`, key material is stored as blobs) — the affected constant-time arithmetic never executes. The finding (secret-dependent branches in subtraction/division/Montgomery multiplication) additionally requires timing observation of this process's ECDSA operations. Patched only in crypto-bigint >=0.7.6; ssh-key's 0.7 line is RC-only, so no stable upgrade path exists today. | Remove when ssh-key 0.7 stabilizes and the workspace moves past elliptic-curve 0.13, or immediately if any `ssh_key` call site appears (that flips the assessment to real exposure). Related: the code-UNUSED `ssh-key` dep in sentinelpass-core is a removal candidate alongside `rsa`. |
 
 ### Registered warnings (visible in audit output; do not fail)
 

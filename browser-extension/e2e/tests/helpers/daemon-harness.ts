@@ -53,6 +53,25 @@ export interface HarnessCliResult {
   stderr: string;
 }
 
+// Build isolated environment variables for a given HOME directory.
+// Shared helper to avoid duplication between runWithTty and grantInsecureViaHost.
+function buildIsolatedEnv(homeDir: string, extra?: Record<string, string>): Record<string, string> {
+  return {
+    ...process.env,
+    HOME: homeDir,
+    // The FULL XDG family — matching isolatedEnv. On Linux the dirs
+    // crate honors XDG_CONFIG_HOME/XDG_DATA_HOME over HOME; without
+    // these the CLI resolves its config/token dir OUTSIDE the isolated
+    // HOME and finds no daemon token (the CI-only unlock failure).
+    XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+    XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+    XDG_CACHE_HOME: path.join(homeDir, '.cache'),
+    XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
+    XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
+    ...extra,
+  };
+}
+
 export interface DaemonHarness {
   /** Register an additional fixture route at runtime (both http + https). */
   addFixturePage: (page: FixturePage) => void;
@@ -113,20 +132,7 @@ function runWithTty(
   const ptyDriver = path.join(__dirname, 'cli_pty.py');
   const result = spawnSync('python3', [ptyDriver, command, ...args], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      // The FULL XDG family — matching isolatedEnv. On Linux the dirs
-      // crate honors XDG_CONFIG_HOME/XDG_DATA_HOME over HOME; without
-      // these the CLI resolves its config/token dir OUTSIDE the isolated
-      // HOME and finds no daemon token (the CI-only unlock failure).
-      XDG_CONFIG_HOME: path.join(homeDir, '.config'),
-      XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
-      XDG_CACHE_HOME: path.join(homeDir, '.cache'),
-      XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
-      XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
-      SENTINELPASS_CLI_STDIN: stdin ?? '',
-    },
+    env: buildIsolatedEnv(homeDir, { SENTINELPASS_CLI_STDIN: stdin ?? '' }),
     timeout: 60_000,
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
@@ -199,7 +205,9 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
   const cli = (args: string[], stdin?: string) => runWithTty(homeDir, CLI_BIN, args, stdin);
 
   // 1. Provision the vault offline (no daemon yet — creation is exclusive).
-  const initResult = cli(['init'], `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`);
+  // CLI commands are grouped since 0.18.0: init/unlock/lock under `vault`,
+  // credential add/list under `entry`.
+  const initResult = cli(['vault', 'init'], `${MASTER_PASSWORD}\n${MASTER_PASSWORD}\n`);
   if (initResult.status !== 0) {
     throw new Error(`CLI init failed: ${initResult.stdout}\n${initResult.stderr}`);
   }
@@ -227,13 +235,14 @@ export async function startDaemonHarness(options: HarnessOptions): Promise<Daemo
   }
 
   // 3. Unlock via the daemon, then seed credentials through it.
-  const unlock = cli(['unlock'], `${MASTER_PASSWORD}\n`);
+  const unlock = cli(['vault', 'unlock'], `${MASTER_PASSWORD}\n`);
   if (unlock.status !== 0) {
     throw new Error(`CLI unlock failed: ${unlock.stdout}\n${unlock.stderr}`);
   }
 
   for (const credential of options.credentials) {
     const add = cli([
+      'entry',
       'add',
       '--title', credential.title,
       '--username', credential.username,
@@ -302,19 +311,7 @@ export function grantInsecureViaHost(homeDir: string, host: string): void {
     [path.join(__dirname, 'probe_host.py'), HOST_BIN, message],
     {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        HOME: homeDir,
-        // FULL XDG family — matching isolatedEnv. On Linux the dirs crate
-        // honors XDG_CONFIG_HOME over HOME; without it the host resolves
-        // its config/token dir OUTSIDE the isolated HOME and fails the
-        // daemon handshake (CI-only; macOS ignores XDG_CONFIG_HOME).
-        XDG_CONFIG_HOME: path.join(homeDir, '.config'),
-        XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
-        XDG_CACHE_HOME: path.join(homeDir, '.cache'),
-        XDG_STATE_HOME: path.join(homeDir, '.local', 'state'),
-        XDG_RUNTIME_DIR: path.join(homeDir, 'runtime'),
-      },
+      env: buildIsolatedEnv(homeDir),
       timeout: 30_000,
     }
   );

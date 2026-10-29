@@ -426,7 +426,7 @@ test('submitting a login captures, resumes, and saves through the daemon', async
   const listDeadline = Date.now() + 15_000;
   let listed = '';
   while (Date.now() < listDeadline) {
-    listed = harness.cli(['list']).stdout;
+    listed = harness.cli(['entry', 'list']).stdout;
     if (listed.includes('popup-saved@fixture.test')) {
       break;
     }
@@ -436,7 +436,7 @@ test('submitting a login captures, resumes, and saves through the daemon', async
 });
 
 test('a locked vault delivers nothing', async () => {
-  const lock = harness.cli(['lock']);
+  const lock = harness.cli(['vault', 'lock']);
   expect(lock.status).toBe(0);
 
   const page = await newPage();
@@ -450,6 +450,6 @@ test('a locked vault delivers nothing', async () => {
   await page.close();
 
   // Re-unlock for any later tests.
-  const unlock = harness.cli(['unlock'], `${MASTER_PASSWORD}\n`);
+  const unlock = harness.cli(['vault', 'unlock'], `${MASTER_PASSWORD}\n`);
   expect(unlock.status).toBe(0);
 });

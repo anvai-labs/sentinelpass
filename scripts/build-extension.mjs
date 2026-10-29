@@ -63,6 +63,16 @@ if (emit.status !== 0) {
   console.warn('[ext:build] warning: tsc reported type diagnostics; run `npm run web:typecheck`.');
 }
 
+// 1a. Copy emitted .js files to target directories BEFORE bundling content.js.
+// This ensures esbuild sees the latest exports when resolving imports from content.ts.
+for (const target of targets) {
+  cpSync(distDir, target, {
+    recursive: true,
+    filter: (src) => src === distDir || src.endsWith('.js'),
+    force: true,
+  });
+}
+
 // 1b. Bundle the content script into a single classic IIFE: content
 // scripts are classic scripts, and ES `import` syntax throws a
 // SyntaxError there (the injection was silently broken this way — found
