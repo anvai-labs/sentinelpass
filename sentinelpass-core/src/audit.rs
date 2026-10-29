@@ -547,6 +547,52 @@ fn keys_cell() -> &'static RwLock<Option<AuditKeys>> {
     AUDIT_KEYS.get_or_init(|| RwLock::new(None))
 }
 
+/// Test-only serialization for the process-global audit key context.
+///
+/// The lib test binary runs audit tests alongside daemon-driven tests
+/// (custody harnesses, IPC servers) that unlock real `DaemonVault`s and so
+/// install/clear the process-global keys with no visibility into the audit
+/// tests' own `KEY_SERIAL`. An install or clear landing inside an audit
+/// test's install→log→verify window changes whether records are sealed or
+/// keyless and flips the test's assertions. `install_keys`/`clear_keys`
+/// take this lock, and audit tests hold it for their whole span, so those
+/// mutations cannot interleave — from any thread, including server tasks.
+/// Reentrant on the owning thread so audit tests may install/clear while
+/// holding it. Never compiled into production builds.
+#[cfg(test)]
+pub(crate) mod audit_key_serial {
+    use std::cell::Cell;
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static DEPTH: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) struct Guard(#[allow(dead_code)] Option<MutexGuard<'static, ()>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    pub(crate) fn lock() -> Guard {
+        let held = DEPTH.with(|depth| {
+            let held = depth.get() > 0;
+            depth.set(depth.get() + 1);
+            held
+        });
+        if held {
+            Guard(None)
+        } else {
+            Guard(Some(
+                LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ))
+        }
+    }
+}
+
 fn genesis_prev() -> [u8; 32] {
     Sha256::digest(GENESIS_DOMAIN).into()
 }
@@ -937,6 +983,10 @@ impl AuditLogger {
     /// records; without it records are still written, but unsealed with raw
     /// identifiers where identifiers are involved.
     pub fn install_keys(dek: &DataEncryptionKey) -> Result<()> {
+        // See `audit_key_serial`: test-binary serialization against audit
+        // tests holding the span; a no-op in production builds.
+        #[cfg(test)]
+        let _serial = audit_key_serial::lock();
         let keys = AuditKeys {
             id_key: derive_audit_id_key(dek)?,
             chain_key: derive_audit_chain_key(dek)?,
@@ -951,6 +1001,9 @@ impl AuditLogger {
     /// Clear the process-wide audit key context (called on every lock
     /// path). Key buffers are zeroized on drop.
     pub fn clear_keys() {
+        // See `audit_key_serial` (same rationale as install_keys).
+        #[cfg(test)]
+        let _serial = audit_key_serial::lock();
         let mut guard = keys_cell()
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1707,7 +1760,6 @@ impl Drop for AuditKeyLease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     fn make_test_dir() -> PathBuf {
         let dir = std::env::temp_dir()
@@ -1718,8 +1770,13 @@ mod tests {
     }
 
     /// The audit key context is process-global, so key-sensitive tests
-    /// serialize on this mutex and reset the context at their start.
-    static KEY_SERIAL: Mutex<()> = Mutex::new(());
+    /// serialize on this guard and reset the context at their start. The
+    /// guard is reentrant and shared with `install_keys`/`clear_keys` (see
+    /// `audit_key_serial`), which also keeps daemon-driven tests in this
+    /// binary from mutating the context inside a test's span.
+    fn key_serial() -> super::audit_key_serial::Guard {
+        super::audit_key_serial::lock()
+    }
 
     fn test_dek() -> DataEncryptionKey {
         let mut bytes = [7u8; 32];
@@ -1733,6 +1790,20 @@ mod tests {
 
     fn chain_key_for(dek: &DataEncryptionKey) -> Vec<u8> {
         crate::crypto::derive_audit_chain_key(dek).unwrap().to_vec()
+    }
+
+    // Helper to set up a locked-period test scenario with initial unlocked log.
+    // Eliminates duplication across multiple locked-period audit tests.
+    fn setup_locked_period_test() -> (PathBuf, AuditLogger) {
+        let _guard = key_serial();
+        let tmp = make_test_dir();
+        let logger = AuditLogger::new(tmp.clone()).unwrap();
+        AuditLogger::install_keys(&test_dek()).unwrap();
+        logger
+            .log(AuditEventType::VaultUnlocked { success: true }, "u")
+            .unwrap();
+        AuditLogger::clear_keys();
+        (tmp, logger)
     }
 
     fn read_lines(path: &Path) -> Vec<String> {
@@ -2043,7 +2114,7 @@ mod tests {
     /// P: the recorded entry carries the opaque token, not the raw entry id.
     #[test]
     fn recorded_entry_contains_opaque_token_not_raw_entry_id() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2076,7 +2147,7 @@ mod tests {
     /// P: domains and entity ids are opaqued; client_id stays raw by design.
     #[test]
     fn recorded_entries_contain_opaque_domain_and_entity_tokens() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2135,7 +2206,7 @@ mod tests {
     /// P: the vault owner can re-derive the mapping locally.
     #[test]
     fn owner_can_rederive_the_token_mapping() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2179,7 +2250,7 @@ mod tests {
     /// string labels).
     #[test]
     fn distinct_identifiers_produce_distinct_tokens() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
 
         let mut seen = std::collections::HashSet::new();
@@ -2204,7 +2275,7 @@ mod tests {
     /// N: token derivation is deterministic per DEK and changes with it.
     #[test]
     fn token_derivation_is_deterministic_and_key_bound() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let a = AuditLogger::opaque_entry_token(99).unwrap();
         AuditLogger::clear_keys();
@@ -2227,7 +2298,7 @@ mod tests {
     /// unlocked vault) stay raw.
     #[test]
     fn records_without_installed_keys_keep_raw_identifiers() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::clear_keys();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2251,7 +2322,7 @@ mod tests {
     /// the audit log — it carries the redaction marker instead.
     #[test]
     fn locked_state_domain_probe_is_redacted_not_plaintext() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::clear_keys();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2290,7 +2361,7 @@ mod tests {
     /// P: a fresh log verifies with a genesis-anchored chain.
     #[test]
     fn chain_verifies_on_a_fresh_log() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2320,7 +2391,7 @@ mod tests {
     /// P: the chain continues across rotation files via the carryover hash.
     #[test]
     fn chain_verifies_across_rotation() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::with_policy(
@@ -2369,7 +2440,7 @@ mod tests {
     /// `CarriedOver` and still verifies everything it can see.
     #[test]
     fn retention_prunes_oldest_rotated_files() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::with_policy(
@@ -2412,7 +2483,7 @@ mod tests {
     /// position.
     #[test]
     fn flipping_a_byte_is_detected_with_exact_position() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2453,7 +2524,7 @@ mod tests {
     /// N: deleting a middle record is detected with the exact position.
     #[test]
     fn deleting_a_record_is_detected_with_exact_position() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2496,7 +2567,7 @@ mod tests {
     /// N: reordering records is detected with the exact position.
     #[test]
     fn reordering_records_is_detected_with_exact_position() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2536,7 +2607,7 @@ mod tests {
     /// N: an attacker-crafted tail record (no chain key) fails verification.
     #[test]
     fn forged_tail_record_is_detected() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2579,7 +2650,7 @@ mod tests {
     /// record, and missing keys are reported rather than skipped.
     #[test]
     fn verification_is_key_bound() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2620,7 +2691,7 @@ mod tests {
     /// fresh at the first new-format record.
     #[test]
     fn legacy_prefix_is_grandfathered_but_flagged() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::clear_keys();
         let tmp = make_test_dir();
         let log_file = tmp.join(AUDIT_LOG_FILE_NAME);
@@ -2665,15 +2736,7 @@ mod tests {
     /// verifiable across the sealed/unsealed boundary.
     #[test]
     fn locked_period_records_chain_keylessly_and_flagged() {
-        let _guard = KEY_SERIAL.lock().unwrap();
-        let tmp = make_test_dir();
-        let logger = AuditLogger::new(tmp.clone()).unwrap();
-
-        AuditLogger::install_keys(&test_dek()).unwrap();
-        logger
-            .log(AuditEventType::VaultUnlocked { success: true }, "u")
-            .unwrap();
-        AuditLogger::clear_keys();
+        let (tmp, logger) = setup_locked_period_test();
         logger
             .log(
                 AuditEventType::EpochHighWaterRebased { refused: true },
@@ -2704,15 +2767,7 @@ mod tests {
     /// the keyless hash, but the next SEALED record then exposes the splice).
     #[test]
     fn tampering_locked_period_records_is_detected() {
-        let _guard = KEY_SERIAL.lock().unwrap();
-        let tmp = make_test_dir();
-        let logger = AuditLogger::new(tmp.clone()).unwrap();
-
-        AuditLogger::install_keys(&test_dek()).unwrap();
-        logger
-            .log(AuditEventType::VaultUnlocked { success: true }, "u")
-            .unwrap();
-        AuditLogger::clear_keys();
+        let (tmp, logger) = setup_locked_period_test();
         logger
             .log(
                 AuditEventType::EpochHighWaterRebased { refused: true },
@@ -2774,7 +2829,7 @@ mod tests {
     /// for chain recovery, and does not break subsequent appends.
     #[test]
     fn torn_tail_line_is_counted_not_fatal() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2812,7 +2867,7 @@ mod tests {
     /// share ONE chain — no fork.
     #[test]
     fn concurrent_logger_instances_share_one_chain() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::install_keys(&test_dek()).unwrap();
         let tmp = make_test_dir();
         let vault_logger = AuditLogger::new(tmp.clone()).unwrap();
@@ -2843,7 +2898,7 @@ mod tests {
     /// correct chain continuation, and appends stay O(tail).)
     #[test]
     fn chain_recovery_handles_large_legacy_prefix() {
-        let _guard = KEY_SERIAL.lock().unwrap();
+        let _guard = key_serial();
         AuditLogger::clear_keys();
         let tmp = make_test_dir();
         let log_file = tmp.join(AUDIT_LOG_FILE_NAME);

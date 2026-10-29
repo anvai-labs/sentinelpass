@@ -934,75 +934,11 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::fixtures::V1_SCHEMA_SQL;
     use crate::database::Database;
 
     /// Raw v1 schema DDL (no sync columns), shared by the in-memory and
-    /// file-based fixtures.
-    const V1_SCHEMA_SQL: &str = "CREATE TABLE db_metadata (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                version INTEGER NOT NULL,
-                kdf_params BLOB NOT NULL,
-                wrapped_dek BLOB NOT NULL,
-                dek_nonce BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                last_modified INTEGER NOT NULL,
-                biometric_ref TEXT
-            );
-            CREATE TABLE entries (
-                entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vault_id INTEGER NOT NULL,
-                title BLOB NOT NULL,
-                username BLOB NOT NULL,
-                password BLOB NOT NULL,
-                url BLOB,
-                notes BLOB,
-                entry_nonce BLOB NOT NULL,
-                auth_tag BLOB NOT NULL,
-                created_at INTEGER NOT NULL,
-                modified_at INTEGER NOT NULL,
-                favorite INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE domain_mappings (
-                mapping_id INTEGER PRIMARY KEY,
-                entry_id INTEGER NOT NULL,
-                domain TEXT NOT NULL,
-                is_primary INTEGER NOT NULL DEFAULT 1,
-                FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE
-            );
-            CREATE TABLE failed_attempts (
-                attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attempt_time INTEGER NOT NULL,
-                ip_address TEXT
-            );
-            CREATE TABLE ssh_keys (
-                key_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                comment TEXT,
-                key_type TEXT NOT NULL,
-                key_size INTEGER,
-                public_key TEXT NOT NULL,
-                private_key_encrypted BLOB NOT NULL,
-                nonce BLOB NOT NULL,
-                auth_tag BLOB NOT NULL,
-                fingerprint TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                modified_at INTEGER NOT NULL
-            );
-            CREATE TABLE totp_secrets (
-                totp_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_id INTEGER NOT NULL UNIQUE,
-                secret_encrypted BLOB NOT NULL,
-                nonce BLOB NOT NULL,
-                auth_tag BLOB NOT NULL,
-                algorithm TEXT NOT NULL DEFAULT 'SHA1',
-                digits INTEGER NOT NULL DEFAULT 6,
-                period INTEGER NOT NULL DEFAULT 30,
-                issuer TEXT,
-                account_name TEXT,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY (entry_id) REFERENCES entries(entry_id) ON DELETE CASCADE
-            );";
-
+    /// file-based fixtures. Now references the shared constant from fixtures.rs.
     fn seed_v1_metadata(conn: &rusqlite::Connection) {
         conn.execute(
             "INSERT INTO db_metadata (id, version, kdf_params, wrapped_dek, dek_nonce, created_at, last_modified)

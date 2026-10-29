@@ -1,10 +1,15 @@
 // Content script for password field detection and autofill
 
-import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength } from './logger.js';
+import { debugLog, infoLog, warnLog, errorLog, sanitizeUrl, sanitizeHostname, sanitizePasswordLength, redactForLog } from './logger.js';
 import {
   classifyCredentialUrlSecurity,
   domainMatchesPolicy,
-  normalizeDomainForPolicy
+  normalizeDomainForPolicy,
+  getNeverSaveDomains,
+  setNeverSaveDomains,
+  shouldSuppressSavePrompt,
+  addNeverSaveDomain,
+  buildSaveNotificationRequestKey,
 } from './save-heuristics.js';
 import {
   classifyInputField,
@@ -61,8 +66,6 @@ const AUTOFILL_BUTTON_HOVER_STYLE = `
   background: #1557b0;
 `;
 
-const SENSITIVE_LOG_KEYS = new Set(['password', 'secret', 'token', 'passphrase']);
-const NEVER_SAVE_DOMAINS_KEY = 'neverSaveDomains';
 const SAVE_NOTIFICATION_REQUEST_DEDUP_WINDOW_MS = 4000;
 const AUTOFILL_SUBMISSION_WINDOW_MS = 10 * 60 * 1000;
 // Forms already instrumented for the submit-button mousedown capture (one
@@ -101,90 +104,10 @@ function detectInputMethod(username, password, domain) {
   return usernameCompatible ? 'autofill_reuse' : 'manual_or_unknown';
 }
 
-function redactForLog(value) {
-  if (!value || typeof value !== 'object') {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.map(redactForLog);
-  }
-
-  const redacted = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (SENSITIVE_LOG_KEYS.has(key.toLowerCase())) {
-      redacted[key] = '[REDACTED]';
-    } else if (item && typeof item === 'object') {
-      redacted[key] = redactForLog(item);
-    } else {
-      redacted[key] = item;
-    }
-  }
-
-  return redacted;
-}
-
 // Domain policy normalization (normalizeDomainForPolicy / domainMatchesPolicy)
 // is shared with the background worker via ./save-heuristics (WBS-706): both
 // surfaces must classify hosts identically, so this module no longer carries
 // its own string-based copy.
-
-function getNeverSaveDomains() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([NEVER_SAVE_DOMAINS_KEY], (result) => {
-      if (chrome.runtime.lastError) {
-        errorLog('Failed reading never-save domains:', chrome.runtime.lastError?.message);
-        resolve({});
-        return;
-      }
-      resolve(result[NEVER_SAVE_DOMAINS_KEY] || {});
-    });
-  });
-}
-
-function setNeverSaveDomains(domains) {
-  return new Promise<void>((resolve, reject) => {
-    chrome.storage.local.set({ [NEVER_SAVE_DOMAINS_KEY]: domains }, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve();
-      }
-    });
-  });
-}
-
-async function shouldSuppressSavePrompt(domainOrUrl) {
-  const normalized = normalizeDomainForPolicy(domainOrUrl);
-  if (!normalized) {
-    return false;
-  }
-
-  const domains = await getNeverSaveDomains();
-  return Object.keys(domains).some((policyDomain) =>
-    domainMatchesPolicy(normalized, policyDomain)
-  );
-}
-
-async function addNeverSaveDomain(domainOrUrl) {
-  const normalized = normalizeDomainForPolicy(domainOrUrl);
-  if (!normalized) {
-    return false;
-  }
-
-  const domains = await getNeverSaveDomains();
-  domains[normalized] = { createdAt: Date.now() };
-  await setNeverSaveDomains(domains);
-  return true;
-}
-
-function buildSaveNotificationRequestKey(data) {
-  const domain = normalizeDomainForPolicy(data?.domain || data?.url || '') || 'unknown';
-  const username = typeof data?.username === 'string' ? data.username.trim().toLowerCase() : '';
-  const url = typeof data?.url === 'string' ? data.url.split('#')[0] : '';
-  const passwordLength = typeof data?.password === 'string' ? data.password.length : 0;
-  return `${domain}|${username}|${url}|len:${passwordLength}`;
-}
 
 function isDuplicateSaveNotificationRequest(data) {
   const now = Date.now();
@@ -495,25 +418,9 @@ function trackFormSubmissions() {
     // Get credentials IMMEDIATELY - no delays (review F2: the captured
     // field is the NEW password on change/registration shapes, and the
     // change flag is set BEFORE the payload is serialized).
-    const usernameField = findUsernameField(passwordField);
-    const domain = window.location.hostname;
+    const submissionData = buildSubmissionData(form, passwordField);
 
-    const submittedUsername = usernameField ? usernameField.value : '';
-    const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
-    const isNewPassword = isNewPasswordForm(form, passwordField);
-    const submissionData = {
-      username: submittedUsername,
-      password: passwordField.value,
-      domain: domain,
-      url: window.location.href,
-      submitted_url: window.location.href,
-      timestamp: Date.now(),
-      input_method: inputMethod,
-      isNewPassword: isNewPassword,
-      isPasswordChange: isNewPassword && isPasswordChangeForm(form)
-    };
-
-    debugLog('[SentinelPass] Submission input method:', inputMethod);
+    debugLog('[SentinelPass] Submission input method:', submissionData.input_method);
 
     debugLog('[SentinelPass] Button click - capturing credentials immediately');
     debugLog('[SentinelPass] Domain:', submissionData.domain);
@@ -533,6 +440,38 @@ function trackFormSubmissions() {
       })();
     }
   }, true);
+}
+
+// Build submission data object from form and password field.
+// Shared helper to avoid duplication between submit-button and mousedown capture paths.
+function buildSubmissionData(form: HTMLFormElement, passwordField: HTMLInputElement): {
+  username: string;
+  password: string;
+  domain: string;
+  url: string;
+  submitted_url: string;
+  timestamp: number;
+  input_method: string;
+  isNewPassword: boolean;
+  isPasswordChange: boolean;
+} {
+  const usernameField = findUsernameField(passwordField);
+  const domain = window.location.hostname;
+  const submittedUsername = usernameField ? usernameField.value : '';
+  const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
+  const isNewPassword = isNewPasswordForm(form, passwordField);
+
+  return {
+    username: submittedUsername,
+    password: passwordField.value,
+    domain: domain,
+    url: window.location.href,
+    submitted_url: window.location.href,
+    timestamp: Date.now(),
+    input_method: inputMethod,
+    isNewPassword: isNewPassword,
+    isPasswordChange: isNewPassword && isPasswordChangeForm(form)
+  };
 }
 
 // WBS-714 review fix F2: pick the field whose value is the credential the
@@ -566,17 +505,19 @@ function selectCaptureTarget(form) {
   return pool[pool.length - 1];
 }
 
-// Detect what a form's password fields mean (WBS-714): the page's own
-// autocomplete attributes are the primary signal — `new-password` marks
-// registration/change flows, and an existing (non-empty) current-password
-// paired with a new-password is a password CHANGE. Text heuristics are the
-// fallback for pages that do not declare semantics.
-function isNewPasswordForm(form, passwordField) {
-  debugLog('[SentinelPass] Checking if new password form...');
-
+// Describe password fields in a form for classification (WBS-714).
+// Shared helper to avoid duplication between isNewPasswordForm and isPasswordChangeForm.
+function describePasswordFields(form: HTMLFormElement): Array<{
+  autocomplete: string;
+  type: string;
+  name: string;
+  id: string;
+  placeholder: string;
+  hasValue: boolean;
+}> {
   const described = [];
   for (const field of form.querySelectorAll('input[type="password"]')) {
-    const input = field;
+    const input = field as HTMLInputElement;
     described.push({
       autocomplete: input.getAttribute('autocomplete') || '',
       type: input.type,
@@ -586,6 +527,18 @@ function isNewPasswordForm(form, passwordField) {
       hasValue: Boolean(input.value)
     });
   }
+  return described;
+}
+
+// Detect what a form's password fields mean (WBS-714): the page's own
+// autocomplete attributes are the primary signal — `new-password` marks
+// registration/change flows, and an existing (non-empty) current-password
+// paired with a new-password is a password CHANGE. Text heuristics are the
+// fallback for pages that do not declare semantics.
+function isNewPasswordForm(form, passwordField) {
+  debugLog('[SentinelPass] Checking if new password form...');
+
+  const described = describePasswordFields(form);
 
   const kind = classifyPasswordForm(described);
   debugLog('[SentinelPass] Password form kind (autocomplete signal):', kind);
@@ -614,18 +567,7 @@ function isNewPasswordForm(form, passwordField) {
 // an existing (non-empty) current-password paired with a new-password.
 // Drives the "Update password?" prompt and the change save trigger.
 function isPasswordChangeForm(form) {
-  const described = [];
-  for (const field of form.querySelectorAll('input[type="password"]')) {
-    const input = field;
-    described.push({
-      autocomplete: input.getAttribute('autocomplete') || '',
-      type: input.type,
-      name: input.name || '',
-      id: input.id || '',
-      placeholder: input.getAttribute('placeholder') || '',
-      hasValue: Boolean(input.value)
-    });
-  }
+  const described = describePasswordFields(form);
   return classifyPasswordForm(described) === 'password-change';
 }
 
@@ -1102,28 +1044,12 @@ function monitorPasswordField(passwordField) {
     debugLog('Submit button mousedown - capturing credentials');
     debugLog('Password value length:', sanitizePasswordLength(passwordField.value));
 
-    const usernameField = findUsernameField(passwordField);
-    const domain = window.location.hostname;
-
-    const submittedUsername = usernameField ? usernameField.value : '';
-    const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
-    const isNewPassword = isNewPasswordForm(form, passwordField);
-    const submissionData = {
-      username: submittedUsername,
-      password: passwordField.value,
-      domain: domain,
-      url: window.location.href,
-      submitted_url: window.location.href,
-      timestamp: Date.now(),
-      input_method: inputMethod,
-      isNewPassword: isNewPassword,
-      isPasswordChange: isNewPassword && isPasswordChangeForm(form)
-    };
+    const submissionData = buildSubmissionData(form, passwordField);
 
     debugLog('[SentinelPass] Captured credentials on mousedown');
-    debugLog('[SentinelPass] Domain:', domain);
+    debugLog('[SentinelPass] Domain:', submissionData.domain);
     debugLog('[SentinelPass] Username detected:', Boolean(submissionData.username));
-    debugLog('[SentinelPass] Submission input method:', inputMethod);
+    debugLog('[SentinelPass] Submission input method:', submissionData.input_method);
 
     // Hand the submission to the background worker (WBS-716)
     capturePendingLogin(submissionData);

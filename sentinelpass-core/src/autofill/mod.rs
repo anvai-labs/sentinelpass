@@ -4,7 +4,7 @@
 //! vault reference do not establish consent or destination authority. Browser
 //! autofill uses the separate daemon/native-host protocol, not this module.
 
-fn native_autofill_unavailable() -> crate::PasswordManagerError {
+pub(crate) fn native_autofill_unavailable() -> crate::PasswordManagerError {
     crate::PasswordManagerError::NotImplemented(
         "Native autofill is disabled until daemon authorization and destination binding are implemented; use the browser extension".into(),
     )
@@ -18,6 +18,10 @@ pub mod macos;
 
 #[cfg(all(target_os = "linux", feature = "x11"))]
 pub mod linux;
+
+// Shared stub implementations for disabled platforms (linux, macos).
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "x11")))]
+mod stubs;
 
 /// Result of an auto-fill operation
 #[derive(Debug, Clone, PartialEq, Eq)]

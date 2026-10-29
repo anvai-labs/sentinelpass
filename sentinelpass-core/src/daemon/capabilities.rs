@@ -68,38 +68,11 @@ pub fn native_host_capability_path() -> PathBuf {
 
 impl InstallationCapabilities {
     pub fn load_from_path(path: &Path) -> Result<Self> {
-        match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-                PasswordManagerError::from(DatabaseError::Serialization(format!(
-                    "capability store unreadable: {e}"
-                )))
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(PasswordManagerError::Io(e)),
-        }
+        super::json_store::load_json_store(path, "capability")
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|e| PasswordManagerError::from(DatabaseError::Serialization(e.to_string())))?;
-        // WBS-911 F4: owner-only FROM BIRTH — plain `fs::write` + post-hoc
-        // chmod left a umask window on the first save. Same creator as the
-        // sibling site-permissions store (symlink/regular-file checks, 0600
-        // at open); the mode repair below stays for pre-existing files.
-        let mut file = crate::platform::create_owner_only_file(path).map_err(|e| {
-            PasswordManagerError::from(DatabaseError::FileIo(format!(
-                "failed to open capability store owner-only: {e}"
-            )))
-        })?;
-        use std::io::Write;
-        file.write_all(&json).map_err(PasswordManagerError::Io)?;
-        drop(file);
-        crate::platform::set_owner_only_mode(path, false).map_err(|e| {
-            PasswordManagerError::from(DatabaseError::FileIo(format!(
-                "failed to tighten capability store mode: {e}"
-            )))
-        })?;
-        Ok(())
+        super::json_store::save_json_store(self, path)
     }
 
     /// Mint a capability for `audience` and return the PRESENTED SECRET

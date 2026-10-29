@@ -5,7 +5,7 @@ use anyhow::Result;
 use sentinelpass_protocol::service::VaultOp;
 use std::path::PathBuf;
 
-/// `sentinelpass audit-verify`: verify the audit hash chain through the
+/// `sentinelpass audit verify`: verify the audit hash chain through the
 /// daemon service boundary (the chain keys are DEK-derived, so the daemon
 /// derives them while unlocked). Exits non-zero on a failed verification.
 pub fn handle_audit_verify(vault_path: PathBuf) -> Result<()> {
@@ -34,10 +34,15 @@ pub fn handle_audit_verify(vault_path: PathBuf) -> Result<()> {
 mod tests {
     use clap::Parser;
 
-    /// The `audit-verify` subcommand parses with no arguments.
+    /// The `audit verify` subcommand parses with no arguments.
     #[test]
     fn parses_audit_verify_subcommand() {
-        let cli = crate::Cli::try_parse_from(["sentinelpass", "audit-verify"]).unwrap();
-        assert!(matches!(cli.command, crate::Commands::AuditVerify));
+        let cli = crate::Cli::try_parse_from(["sentinelpass", "audit", "verify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Audit {
+                command: crate::AuditCommands::Verify
+            }
+        ));
     }
 }

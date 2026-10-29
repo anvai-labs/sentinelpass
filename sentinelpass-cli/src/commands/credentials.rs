@@ -154,7 +154,7 @@ pub fn handle_list(vault_path: PathBuf, show_passwords: bool) -> Result<()> {
     let entries = to_core_summaries(backend.call(VaultOp::EntryList)?)?;
 
     if entries.is_empty() {
-        println!("No entries found. Add one with 'sentinelpass add'");
+        println!("No entries found. Add one with 'sentinelpass entry add'");
         return Ok(());
     }
 
@@ -240,7 +240,7 @@ pub fn handle_get(vault_path: PathBuf, id: i64) -> Result<()> {
         other => {
             error!("Failed to get entry: {:?}", other);
             anyhow::bail!(
-                "Entry {} not found. Use 'sentinelpass list' to see all entries",
+                "Entry {} not found. Use 'sentinelpass entry list' to see all entries",
                 id
             );
         }

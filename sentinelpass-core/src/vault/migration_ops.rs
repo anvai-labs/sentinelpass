@@ -557,29 +557,7 @@ fn sweep_identity_metadata(
     report: &mut V2BlobSweepReport,
 ) -> Result<()> {
     use rusqlite::types::Value;
-    for (table, id, column, kind, purpose) in [
-        (
-            "totp_secrets",
-            "totp_id",
-            "issuer",
-            ObjectType::TotpSecret,
-            EnvelopePurpose::TotpIssuer,
-        ),
-        (
-            "totp_secrets",
-            "totp_id",
-            "account_name",
-            ObjectType::TotpSecret,
-            EnvelopePurpose::TotpAccount,
-        ),
-        (
-            "ssh_keys",
-            "key_id",
-            "comment",
-            ObjectType::SshKey,
-            EnvelopePurpose::Summary,
-        ),
-    ] {
+    for (table, id, column, kind, purpose) in envelope_ops::IDENTITY_METADATA_FIELDS {
         let mut stmt = conn
             .prepare(&format!(
                 "SELECT {id},sync_id,{column} FROM {table} WHERE {column} IS NOT NULL"
@@ -610,7 +588,7 @@ fn sweep_identity_metadata(
                         }
                         let doc: crate::crypto::Envelope = serde_json::from_slice(blob)
                             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-                        if doc.context.purpose == purpose
+                        if doc.context.purpose == *purpose
                             && (!purpose.is_entry_field() || doc.context.schema_version == 2)
                         {
                             // Verify even an already converted envelope before marking completion.
@@ -618,8 +596,8 @@ fn sweep_identity_metadata(
                                 dek,
                                 Some(vault),
                                 Some(sid),
-                                kind,
-                                purpose,
+                                *kind,
+                                *purpose,
                                 blob,
                             )?;
                             return Ok(());
@@ -632,13 +610,14 @@ fn sweep_identity_metadata(
                     dek,
                     Some(vault),
                     Some(sid),
-                    kind,
+                    *kind,
                     read_purpose,
                     Some(value),
                 )?
                 .ok_or_else(|| PasswordManagerError::InvalidInput("missing metadata".into()))?;
                 let plain = zeroize::Zeroizing::new(plain);
-                let sealed = seal_and_verify_field(dek, vault, sid, kind, purpose, &plain, epoch)?;
+                let sealed =
+                    seal_and_verify_field(dek, vault, sid, *kind, *purpose, &plain, epoch)?;
                 conn.execute(
                     &format!("UPDATE {table} SET {column}=?1 WHERE {id}=?2"),
                     rusqlite::params![sealed, row],

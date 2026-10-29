@@ -1,6 +1,6 @@
 // Background service worker for Password Manager Extension
-import { autofillPageUrlForDaemon, classifyCredentialUrlSecurity, domainMatchesPolicy, normalizeCredentialUrl, normalizeDomainForPolicy, normalizeUsername, isUsernameMatchOrUnknown, } from './save-heuristics.js';
-import { debugLog, infoLog, warnLog } from './logger.js';
+import { autofillPageUrlForDaemon, classifyCredentialUrlSecurity, normalizeCredentialUrl, normalizeUsername, isUsernameMatchOrUnknown, shouldSuppressSavePrompt, addNeverSaveDomain, buildSaveNotificationRequestKey, } from './save-heuristics.js';
+import { debugLog, infoLog, warnLog, redactForLog } from './logger.js';
 import { PENDING_CREDENTIAL_KEY, PENDING_CREDENTIAL_TTL_MS, PENDING_INLINE_PREFIX, isSessionSecretExpired, isSessionSecretKey, sessionSecretExpiry } from './session-secrets.js';
 // Native messaging host configuration
 const HOST_NAME = 'com.passwordmanager.host';
@@ -11,8 +11,6 @@ debugLog('Extension ID:', chrome.runtime.id);
 // ========================================
 // Helper Functions
 // ========================================
-const SENSITIVE_LOG_KEYS = new Set(['password', 'secret', 'token', 'passphrase', 'totp_code']);
-const NEVER_SAVE_DOMAINS_KEY = 'neverSaveDomains';
 const SAVE_NOTIFICATION_DEDUP_WINDOW_MS = 4000;
 const PENDING_UNLOCK_RETRY_KEY = 'pendingUnlockRetry';
 const VAULT_LOCKED_NOTIFICATION_PREFIX = 'vault-locked-';
@@ -184,27 +182,6 @@ async function isCredentialUnchanged(data) {
         console.error('[SentinelPass Background] Failed unchanged-credential check:', error);
         return false;
     }
-}
-function redactForLog(value) {
-    if (!value || typeof value !== 'object') {
-        return value;
-    }
-    if (Array.isArray(value)) {
-        return value.map(redactForLog);
-    }
-    const redacted = {};
-    for (const [key, item] of Object.entries(value)) {
-        if (SENSITIVE_LOG_KEYS.has(key.toLowerCase())) {
-            redacted[key] = '[REDACTED]';
-        }
-        else if (item && typeof item === 'object') {
-            redacted[key] = redactForLog(item);
-        }
-        else {
-            redacted[key] = item;
-        }
-    }
-    return redacted;
 }
 function createNotification(notificationId, options) {
     return new Promise((resolve, reject) => {
@@ -407,16 +384,9 @@ async function retryPendingSaveAfterUnlock() {
         requireInteraction: false
     });
 }
-function buildSaveNotificationDedupKey(data) {
-    const domain = normalizeDomainForPolicy(data?.domain || data?.url || '') || 'unknown';
-    const username = typeof data?.username === 'string' ? data.username.trim().toLowerCase() : '';
-    const url = typeof data?.url === 'string' ? data.url.split('#')[0] : '';
-    const passwordLength = typeof data?.password === 'string' ? data.password.length : 0;
-    return `${domain}|${username}|${url}|len:${passwordLength}`;
-}
 function isDuplicateSaveNotification(data) {
     const now = Date.now();
-    const dedupKey = buildSaveNotificationDedupKey(data);
+    const dedupKey = buildSaveNotificationRequestKey(data);
     for (const [key, timestamp] of recentSaveNotificationRequests.entries()) {
         if (now - timestamp > SAVE_NOTIFICATION_DEDUP_WINDOW_MS) {
             recentSaveNotificationRequests.delete(key);
@@ -466,48 +436,6 @@ function requestInlineSavePrompt(tabId, data) {
             resolve(response?.success === true);
         });
     });
-}
-function getNeverSaveDomains() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get([NEVER_SAVE_DOMAINS_KEY], (result) => {
-            if (chrome.runtime.lastError) {
-                console.error('[SentinelPass Background] Failed reading never-save domains:', chrome.runtime.lastError.message);
-                resolve({});
-                return;
-            }
-            resolve(result[NEVER_SAVE_DOMAINS_KEY] || {});
-        });
-    });
-}
-function setNeverSaveDomains(domains) {
-    return new Promise((resolve, reject) => {
-        chrome.storage.local.set({ [NEVER_SAVE_DOMAINS_KEY]: domains }, () => {
-            if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-            }
-            else {
-                resolve();
-            }
-        });
-    });
-}
-async function shouldSuppressSavePrompt(domainOrUrl) {
-    const normalized = normalizeDomainForPolicy(domainOrUrl);
-    if (!normalized) {
-        return false;
-    }
-    const domains = await getNeverSaveDomains();
-    return Object.keys(domains).some((policyDomain) => domainMatchesPolicy(normalized, policyDomain));
-}
-async function addNeverSaveDomain(domainOrUrl) {
-    const normalized = normalizeDomainForPolicy(domainOrUrl);
-    if (!normalized) {
-        return false;
-    }
-    const domains = await getNeverSaveDomains();
-    domains[normalized] = { createdAt: Date.now() };
-    await setNeverSaveDomains(domains);
-    return true;
 }
 // Handle get_credential request
 async function handleGetCredential(domain, requestId, pageUrl, username) {

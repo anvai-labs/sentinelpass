@@ -60,6 +60,32 @@
       return "long (12+ chars)";
     }
   }
+  var SENSITIVE_LOG_KEYS = /* @__PURE__ */ new Set([
+    "password",
+    "secret",
+    "token",
+    "passphrase",
+    "totp_code"
+  ]);
+  function redactForLog(value) {
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(redactForLog);
+    }
+    const redacted = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (SENSITIVE_LOG_KEYS.has(key.toLowerCase())) {
+        redacted[key] = "[REDACTED]";
+      } else if (item && typeof item === "object") {
+        redacted[key] = redactForLog(item);
+      } else {
+        redacted[key] = item;
+      }
+    }
+    return redacted;
+  }
 
   // browser-extension/chrome/save-heuristics.js
   function hasSchemePrefix(value) {
@@ -135,6 +161,55 @@
     const normalizedDomain = domain.replace(/^\[|\]$/g, "");
     const normalizedPolicy = policyDomain.replace(/^\[|\]$/g, "");
     return normalizedDomain === normalizedPolicy || normalizedDomain.endsWith(`.${normalizedPolicy}`);
+  }
+  function buildSaveNotificationRequestKey(data) {
+    const domain = normalizeDomainForPolicy(data?.domain || data?.url || "") || "unknown";
+    const username = typeof data?.username === "string" ? data.username.trim().toLowerCase() : "";
+    const url = typeof data?.url === "string" ? data.url.split("#")[0] : "";
+    const passwordLength = typeof data?.password === "string" ? data.password.length : 0;
+    return `${domain}|${username}|${url}|len:${passwordLength}`;
+  }
+  var NEVER_SAVE_DOMAINS_KEY = "neverSaveDomains";
+  function getNeverSaveDomains() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get([NEVER_SAVE_DOMAINS_KEY], (result) => {
+        if (chrome.runtime.lastError) {
+          console.error("[SentinelPass] Failed reading never-save domains:", chrome.runtime.lastError?.message);
+          resolve({});
+          return;
+        }
+        resolve(result[NEVER_SAVE_DOMAINS_KEY] || {});
+      });
+    });
+  }
+  function setNeverSaveDomains(domains) {
+    return new Promise((resolve, reject) => {
+      chrome.storage.local.set({ [NEVER_SAVE_DOMAINS_KEY]: domains }, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+  async function shouldSuppressSavePrompt(domainOrUrl) {
+    const normalized = normalizeDomainForPolicy(domainOrUrl);
+    if (!normalized) {
+      return false;
+    }
+    const domains = await getNeverSaveDomains();
+    return Object.keys(domains).some((policyDomain) => domainMatchesPolicy(normalized, policyDomain));
+  }
+  async function addNeverSaveDomain(domainOrUrl) {
+    const normalized = normalizeDomainForPolicy(domainOrUrl);
+    if (!normalized) {
+      return false;
+    }
+    const domains = await getNeverSaveDomains();
+    domains[normalized] = { createdAt: Date.now() };
+    await setNeverSaveDomains(domains);
+    return true;
   }
 
   // browser-extension/chrome/field-semantics.js
@@ -244,8 +319,6 @@
   var AUTOFILL_BUTTON_HOVER_STYLE = `
   background: #1557b0;
 `;
-  var SENSITIVE_LOG_KEYS = /* @__PURE__ */ new Set(["password", "secret", "token", "passphrase"]);
-  var NEVER_SAVE_DOMAINS_KEY = "neverSaveDomains";
   var SAVE_NOTIFICATION_REQUEST_DEDUP_WINDOW_MS = 4e3;
   var AUTOFILL_SUBMISSION_WINDOW_MS = 10 * 60 * 1e3;
   var mousedownInstrumentedForms = /* @__PURE__ */ new WeakSet();
@@ -271,75 +344,6 @@
     const autofillUser = normalizeUsernameValue(lastAutofillContext.username);
     const usernameCompatible = !autofillUser || !currentUser || autofillUser === currentUser;
     return usernameCompatible ? "autofill_reuse" : "manual_or_unknown";
-  }
-  function redactForLog(value) {
-    if (!value || typeof value !== "object") {
-      return value;
-    }
-    if (Array.isArray(value)) {
-      return value.map(redactForLog);
-    }
-    const redacted = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (SENSITIVE_LOG_KEYS.has(key.toLowerCase())) {
-        redacted[key] = "[REDACTED]";
-      } else if (item && typeof item === "object") {
-        redacted[key] = redactForLog(item);
-      } else {
-        redacted[key] = item;
-      }
-    }
-    return redacted;
-  }
-  function getNeverSaveDomains() {
-    return new Promise((resolve) => {
-      chrome.storage.local.get([NEVER_SAVE_DOMAINS_KEY], (result) => {
-        if (chrome.runtime.lastError) {
-          errorLog("Failed reading never-save domains:", chrome.runtime.lastError?.message);
-          resolve({});
-          return;
-        }
-        resolve(result[NEVER_SAVE_DOMAINS_KEY] || {});
-      });
-    });
-  }
-  function setNeverSaveDomains(domains) {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.set({ [NEVER_SAVE_DOMAINS_KEY]: domains }, () => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-  async function shouldSuppressSavePrompt(domainOrUrl) {
-    const normalized = normalizeDomainForPolicy(domainOrUrl);
-    if (!normalized) {
-      return false;
-    }
-    const domains = await getNeverSaveDomains();
-    return Object.keys(domains).some(
-      (policyDomain) => domainMatchesPolicy(normalized, policyDomain)
-    );
-  }
-  async function addNeverSaveDomain(domainOrUrl) {
-    const normalized = normalizeDomainForPolicy(domainOrUrl);
-    if (!normalized) {
-      return false;
-    }
-    const domains = await getNeverSaveDomains();
-    domains[normalized] = { createdAt: Date.now() };
-    await setNeverSaveDomains(domains);
-    return true;
-  }
-  function buildSaveNotificationRequestKey(data) {
-    const domain = normalizeDomainForPolicy(data?.domain || data?.url || "") || "unknown";
-    const username = typeof data?.username === "string" ? data.username.trim().toLowerCase() : "";
-    const url = typeof data?.url === "string" ? data.url.split("#")[0] : "";
-    const passwordLength = typeof data?.password === "string" ? data.password.length : 0;
-    return `${domain}|${username}|${url}|len:${passwordLength}`;
   }
   function isDuplicateSaveNotificationRequest(data) {
     const now = Date.now();
@@ -564,23 +568,8 @@
       const passwordField = selectCaptureTarget(form);
       if (!passwordField || !passwordField.value) return;
       debugLog("[SentinelPass] Submit button clicked in form with password field");
-      const usernameField = findUsernameField(passwordField);
-      const domain = window.location.hostname;
-      const submittedUsername = usernameField ? usernameField.value : "";
-      const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
-      const isNewPassword = isNewPasswordForm(form, passwordField);
-      const submissionData = {
-        username: submittedUsername,
-        password: passwordField.value,
-        domain,
-        url: window.location.href,
-        submitted_url: window.location.href,
-        timestamp: Date.now(),
-        input_method: inputMethod,
-        isNewPassword,
-        isPasswordChange: isNewPassword && isPasswordChangeForm(form)
-      };
-      debugLog("[SentinelPass] Submission input method:", inputMethod);
+      const submissionData = buildSubmissionData(form, passwordField);
+      debugLog("[SentinelPass] Submission input method:", submissionData.input_method);
       debugLog("[SentinelPass] Button click - capturing credentials immediately");
       debugLog("[SentinelPass] Domain:", submissionData.domain);
       capturePendingLogin(submissionData);
@@ -595,6 +584,24 @@
         })();
       }
     }, true);
+  }
+  function buildSubmissionData(form, passwordField) {
+    const usernameField = findUsernameField(passwordField);
+    const domain = window.location.hostname;
+    const submittedUsername = usernameField ? usernameField.value : "";
+    const inputMethod = detectInputMethod(submittedUsername, passwordField.value, domain);
+    const isNewPassword = isNewPasswordForm(form, passwordField);
+    return {
+      username: submittedUsername,
+      password: passwordField.value,
+      domain,
+      url: window.location.href,
+      submitted_url: window.location.href,
+      timestamp: Date.now(),
+      input_method: inputMethod,
+      isNewPassword,
+      isPasswordChange: isNewPassword && isPasswordChangeForm(form)
+    };
   }
   function selectCaptureTarget(form) {
     const fields = Array.from(
@@ -622,8 +629,7 @@
     }
     return pool[pool.length - 1];
   }
-  function isNewPasswordForm(form, passwordField) {
-    debugLog("[SentinelPass] Checking if new password form...");
+  function describePasswordFields(form) {
     const described = [];
     for (const field of form.querySelectorAll('input[type="password"]')) {
       const input = field;
@@ -636,6 +642,11 @@
         hasValue: Boolean(input.value)
       });
     }
+    return described;
+  }
+  function isNewPasswordForm(form, passwordField) {
+    debugLog("[SentinelPass] Checking if new password form...");
+    const described = describePasswordFields(form);
     const kind = classifyPasswordForm(described);
     debugLog("[SentinelPass] Password form kind (autocomplete signal):", kind);
     if (kind !== "login") {
@@ -662,18 +673,7 @@
     return hasNewAccountIndicator;
   }
   function isPasswordChangeForm(form) {
-    const described = [];
-    for (const field of form.querySelectorAll('input[type="password"]')) {
-      const input = field;
-      described.push({
-        autocomplete: input.getAttribute("autocomplete") || "",
-        type: input.type,
-        name: input.name || "",
-        id: input.id || "",
-        placeholder: input.getAttribute("placeholder") || "",
-        hasValue: Boolean(input.value)
-      });
-    }
+    const described = describePasswordFields(form);
     return classifyPasswordForm(described) === "password-change";
   }
   function showSavePrompt(username, domain, password, sourceUrl = window.location.href, promptId = null, isPasswordChange = false) {
@@ -1061,26 +1061,11 @@
       }
       debugLog("Submit button mousedown - capturing credentials");
       debugLog("Password value length:", sanitizePasswordLength(passwordField2.value));
-      const usernameField = findUsernameField(passwordField2);
-      const domain = window.location.hostname;
-      const submittedUsername = usernameField ? usernameField.value : "";
-      const inputMethod = detectInputMethod(submittedUsername, passwordField2.value, domain);
-      const isNewPassword = isNewPasswordForm(form, passwordField2);
-      const submissionData = {
-        username: submittedUsername,
-        password: passwordField2.value,
-        domain,
-        url: window.location.href,
-        submitted_url: window.location.href,
-        timestamp: Date.now(),
-        input_method: inputMethod,
-        isNewPassword,
-        isPasswordChange: isNewPassword && isPasswordChangeForm(form)
-      };
+      const submissionData = buildSubmissionData(form, passwordField2);
       debugLog("[SentinelPass] Captured credentials on mousedown");
-      debugLog("[SentinelPass] Domain:", domain);
+      debugLog("[SentinelPass] Domain:", submissionData.domain);
       debugLog("[SentinelPass] Username detected:", Boolean(submissionData.username));
-      debugLog("[SentinelPass] Submission input method:", inputMethod);
+      debugLog("[SentinelPass] Submission input method:", submissionData.input_method);
       capturePendingLogin(submissionData);
       if (!submissionData.isNewPassword) {
         void (async () => {

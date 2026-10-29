@@ -117,19 +117,6 @@ pub fn handle_import(vault_path: PathBuf, input: &Path, format: &str) -> Result<
     Ok(())
 }
 
-pub fn handle_keepass_import(vault_path: PathBuf, input: &Path) -> Result<()> {
-    if !vault_path.exists() {
-        anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
-    }
-
-    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
-
-    let count = import_keepass(&backend, input)?;
-    println!("Imported {} entries from {}", count, input.display());
-    println!("Note: Groups/tags have been preserved in the notes field.");
-    Ok(())
-}
-
 fn import_keepass(backend: &sc::Backend, input: &Path) -> Result<usize> {
     let ke_entries = parse_keepass_xml(input)?;
     let mut wire = Vec::with_capacity(ke_entries.len());
@@ -141,23 +128,4 @@ fn import_keepass(backend: &sc::Backend, input: &Path) -> Result<usize> {
         VaultOpResult::Imported(ids) => Ok(ids.len()),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }
-}
-
-pub fn handle_keepass_export(vault_path: PathBuf, output: &Path) -> Result<()> {
-    if !vault_path.exists() {
-        anyhow::bail!("No vault found. Use 'sentinelpass init' to create a new vault");
-    }
-
-    let backend = sc::connect(&vault_path, || crate::prompt_master_password(false))?;
-    let entries = fetch_export_entries(&backend)?;
-
-    let ke_entries: Vec<KeePassEntry> = entries.into_iter().map(KeePassEntry::from).collect();
-    let xml = generate_keepass_xml(&ke_entries)?;
-    let mut file = sentinelpass_core::platform::create_owner_only_file(output)
-        .map_err(|e| anyhow::anyhow!("Failed to create export file: {}", e))?;
-    use std::io::Write;
-    file.write_all(xml.as_bytes())?;
-    println!("Exported vault entries to {}", output.display());
-    println!("Note: This file contains unencrypted passwords. Handle with care!");
-    Ok(())
 }

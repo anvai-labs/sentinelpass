@@ -1,41 +1,20 @@
-//! Disabled compatibility surface for the unshipped native-autofill prototype.
-//! Browser autofill uses the daemon/native-host protocol instead.
+//! Linux native autofill stub (disabled).
+//!
+//! Native autofill is disabled on Linux. This module provides the platform-specific
+//! `AutoFillContext` struct and re-exports the shared stub implementations.
 
-#![forbid(unsafe_code)]
-
-use super::{native_autofill_unavailable, AutoFillResult, CredentialMatch};
-use crate::Result;
-
-/// Retained for source compatibility; never establishes a verified origin.
+/// Context for auto-fill operation (Linux-specific).
+#[derive(Debug, Clone)]
 pub struct AutoFillContext {
+    /// Window title
     pub window_title: String,
+    /// Window class
     pub window_class: String,
+    /// Domain
     pub domain: Option<String>,
+    /// Window ID
     pub window_id: u64,
 }
 
-/// Disabled: native app/field binding and authorization are not implemented.
-pub fn get_context() -> Result<AutoFillContext> {
-    Err(native_autofill_unavailable())
-}
-
-/// Disabled before any credential read or clipboard access.
-pub async fn autofill_via_clipboard(
-    _credential: &CredentialMatch,
-    _vault_manager: &crate::vault::VaultManager,
-) -> Result<AutoFillResult> {
-    Err(native_autofill_unavailable())
-}
-
-/// Disabled before any credential read or input injection.
-pub async fn autofill_via_input(
-    _credential: &CredentialMatch,
-    _vault_manager: &crate::vault::VaultManager,
-) -> Result<AutoFillResult> {
-    Err(native_autofill_unavailable())
-}
-
-/// Disabled with the legacy native credential-delivery path.
-pub fn register_hotkey(_modifiers: u32, _vk: u32) -> Result<()> {
-    Err(native_autofill_unavailable())
-}
+// Re-export shared stub implementations
+pub use super::stubs::*;

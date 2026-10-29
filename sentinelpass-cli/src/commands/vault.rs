@@ -67,8 +67,8 @@ pub fn handle_init(vault_path: PathBuf, dev: bool) -> Result<()> {
         println!("✓ Your vault is now unlocked and ready to use");
         println!();
         println!("Next steps:");
-        println!("  sentinelpass add --title 'GitHub' --username 'user@example.com'");
-        println!("  sentinelpass list");
+        println!("  sentinelpass entry add --title 'GitHub' --username 'user@example.com'");
+        println!("  sentinelpass entry list");
 
         // Vault is dropped here, which locks it
         drop(vault);
