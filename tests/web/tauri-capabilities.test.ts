@@ -36,7 +36,10 @@ function readUiSources(): string {
  * plugin grants are gone and the plugin must not be registered either.
  */
 const AUDITED_ALLOWLIST: Record<string, RegExp> = {
-  'dialog:allow-confirm': /dialog\s*\.\s*confirm/
+  'dialog:allow-confirm': /dialog\s*\.\s*confirm/,
+  // SP-0 step-up: the frontend listens for the daemon's step_up_required
+  // refusal so it can prompt for the master password (app.ts).
+  'core:event:allow-listen': /listen\s*\(\s*'step-up-required'/
 };
 
 const capabilityFile = JSON.parse(readFileSync(CAPABILITIES_PATH, 'utf8'));
