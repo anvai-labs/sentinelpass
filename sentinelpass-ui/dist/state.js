@@ -14,6 +14,8 @@
 export let invoke;
 /** Tauri `confirm` dialog helper. */
 export let confirm;
+/** Tauri event `listen` bridge — subscribe to Rust-emitted events. */
+export let listen;
 /**
  * Detect the Tauri runtime and bind its core API helpers.
  *
@@ -27,6 +29,7 @@ export function initTauriAPI() {
     if (window.__TAURI__) {
         invoke = window.__TAURI__.core.invoke;
         confirm = window.__TAURI__.dialog.confirm;
+        listen = window.__TAURI__.event.listen;
         return true;
     }
     return false;

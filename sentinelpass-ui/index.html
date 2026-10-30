@@ -347,6 +347,29 @@
         </div>
     </div>
 
+    <!-- Step-Up Authorization Modal (SP-0): the daemon refused a vault write
+         with step_up_required; collect the master password once, retry. -->
+    <div id="step-up-modal" class="modal-overlay hidden" aria-hidden="true">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="step-up-modal-title">
+            <h3 id="step-up-modal-title">Master password required</h3>
+            <p class="modal-description">
+                The daemon requires fresh authorization for this change.
+                Enter your master password to approve it once.
+            </p>
+            <form id="step-up-form">
+                <div class="form-group">
+                    <label for="step-up-password">Master password</label>
+                    <input type="password" id="step-up-password" class="input"
+                           placeholder="Master password" autocomplete="off" required>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" id="step-up-cancel" class="btn btn-secondary">Cancel</button>
+                    <button type="submit" id="step-up-submit" class="btn btn-primary">Approve</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- TOTP Setup Modal -->
     <div id="totp-modal" class="modal-overlay hidden" aria-hidden="true">
         <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="totp-modal-title">

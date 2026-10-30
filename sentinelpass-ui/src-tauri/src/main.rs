@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{Manager, State};
+use std::time::Duration;
+use tauri::{Emitter, Manager, State};
 
 mod clipboard_secret;
 mod native_host_manifest;
@@ -31,6 +32,11 @@ struct AppState {
     /// the UI's direct mode is lock-guarded exactly like the CLI's — a live
     /// daemon owns the vault and direct mode refuses.
     direct_lock: Arc<Mutex<Option<sentinelpass_core::daemon::MaintenanceLockGuard>>>,
+    /// AppHandle for emitting `step-up-required` to the frontend (SP-0).
+    app_handle: OnceLock<tauri::AppHandle>,
+    /// Pending step-up reply channel: the frontend answers the master-password
+    /// prompt through the `step_up_submit` / `step_up_cancel` commands.
+    step_up_reply: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
 }
 
 /// FLAGGED direct-vault compatibility mode (ADR-007 migration window;
@@ -83,10 +89,62 @@ async fn service_call(state: &AppState, op: VaultOp) -> Result<VaultOpResult, St
     ensure_daemon_running(state).await?;
     let client = IpcClient::new(default_ipc_socket_path())
         .map_err(|e| format!("Daemon unavailable: {}", e))?;
+    match client.call_service(op.clone()).await {
+        Ok(result) => Ok(result),
+        Err(err) if is_step_up_required(&err) => step_up_and_retry(state, &client, op).await,
+        Err(e) => Err(format!("Failed to communicate with daemon: {}", e)),
+    }
+}
+
+/// SP-0: does this daemon error demand a master-password step-up?
+fn is_step_up_required(err: &sentinelpass_protocol::ProtocolError) -> bool {
+    matches!(
+        err,
+        sentinelpass_protocol::ProtocolError::Service(code, _)
+            if code == "step_up_required" || code.starts_with("step_up_required")
+    ) || err.to_string().contains("step_up_required")
+}
+
+/// SP-0 step-up: the daemon refused a mutation with `step_up_required`.
+/// Emit `step-up-required` so the frontend prompts for the master password
+/// (the same fresh authorization the CLI requests), then retry the op and
+/// the authorization together on one connection. The password is used once
+/// and dropped; a 120s timeout cancels the pending write.
+async fn step_up_and_retry(
+    state: &AppState,
+    client: &IpcClient,
+    op: VaultOp,
+) -> Result<VaultOpResult, String> {
+    if let Some(app) = state.app_handle.get() {
+        let _ = app.emit("step-up-required", ());
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    *state.step_up_reply.lock().await = Some(tx);
+    let password = match tokio::time::timeout(Duration::from_secs(120), rx).await {
+        Ok(Ok(password)) => password,
+        Ok(Err(_dropped)) => return Err("Step-up cancelled".to_string()),
+        Err(_elapsed) => return Err("Step-up timed out".to_string()),
+    };
     client
-        .call_service(op)
+        .call_service_with_step_up(op, password)
         .await
         .map_err(|e| format!("Failed to communicate with daemon: {}", e))
+}
+
+// Command: Frontend answered the step-up prompt with the master password.
+#[tauri::command]
+async fn step_up_submit(state: State<'_, AppState>, password: String) -> Result<(), String> {
+    if let Some(tx) = state.step_up_reply.lock().await.take() {
+        let _ = tx.send(password);
+    }
+    Ok(())
+}
+
+// Command: Frontend dismissed the step-up prompt.
+#[tauri::command]
+async fn step_up_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    drop(state.step_up_reply.lock().await.take());
+    Ok(())
 }
 
 /// Map a wire entry summary to the core type for the frontend.
@@ -1436,8 +1494,11 @@ fn main() {
                 Mutex::new(clipboard_secret::ClipboardSecretTracker::new()),
             ),
             direct_lock: Arc::new(Mutex::new(None)),
+            app_handle: OnceLock::new(),
+            step_up_reply: Arc::new(tokio::sync::Mutex::new(None)),
         })
         .setup(|app| {
+            let _ = app.state::<AppState>().app_handle.set(app.handle().clone());
             if let Ok(resource_dir) = app.path().resource_dir() {
                 let _ = RESOURCE_DIR.set(resource_dir.clone());
                 unlock_debug_log(&format!("setup: resource_dir={}", resource_dir.display()));
@@ -1468,6 +1529,8 @@ fn main() {
             unlock_vault,
             unlock_vault_biometric,
             lock_vault,
+            step_up_submit,
+            step_up_cancel,
             is_unlocked,
             daemon_status,
             biometric_status,

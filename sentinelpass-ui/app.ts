@@ -17,7 +17,7 @@
 
 import { normalizeLaunchUrl } from './url-utils.js';
 import {
-    initTauriAPI, invoke, confirm,
+    initTauriAPI, invoke, confirm, listen,
     currentEntry, setCurrentEntry,
     setCurrentTotpMetadata, setCurrentFilter,
     vaultScreen, entryList, searchInput, noSelection, entryDetail
@@ -189,7 +189,51 @@ function setupEventListeners() {
 
     // Toggle password visibility in welcome screen
     document.getElementById('toggle-password').addEventListener('click', () => togglePasswordVisibility('master-password'));
+
+    // Step-up authorization (SP-0): the daemon refused a vault write with
+    // step_up_required. Rust emits `step-up-required` and waits on our
+    // step_up_submit/step_up_cancel reply; the retried write resolves the
+    // original add/edit invoke transparently.
+    const stepUpModal = document.getElementById('step-up-modal');
+    const stepUpForm = document.getElementById('step-up-form') as HTMLFormElement | null;
+    const stepUpPassword = document.getElementById('step-up-password') as HTMLInputElement | null;
+    document.getElementById('step-up-cancel')?.addEventListener('click', cancelStepUp);
+    stepUpForm?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!stepUpPassword || !stepUpPassword.value) return;
+        const password = stepUpPassword.value;
+        stepUpPassword.value = '';
+        stepUpModal?.classList.add('hidden');
+        stepUpModal?.setAttribute('aria-hidden', 'true');
+        try {
+            await invoke('step_up_submit', { password });
+        } catch (error) {
+            showToast(String(error), 'error');
+        }
+    });
+    if (stepUpModal) {
+        stepUpModal.addEventListener('click', (event) => {
+            if (event.target === stepUpModal) cancelStepUp();
+        });
+    }
+    if (listen) {
+        void listen('step-up-required', () => {
+            stepUpModal?.classList.remove('hidden');
+            stepUpModal?.setAttribute('aria-hidden', 'false');
+            stepUpPassword?.focus();
+        });
+    }
     updateUrlOpenButtonState();
+}
+
+/** Dismiss the step-up modal and cancel the pending daemon write. */
+function cancelStepUp() {
+    const stepUpModal = document.getElementById('step-up-modal');
+    const stepUpPassword = document.getElementById('step-up-password') as HTMLInputElement | null;
+    if (stepUpPassword) stepUpPassword.value = '';
+    stepUpModal?.classList.add('hidden');
+    stepUpModal?.setAttribute('aria-hidden', 'true');
+    void invoke('step_up_cancel').catch(() => undefined);
 }
 
 /**
