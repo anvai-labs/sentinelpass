@@ -116,19 +116,37 @@ async fn step_up_and_retry(
     op: VaultOp,
 ) -> Result<VaultOpResult, String> {
     if let Some(app) = state.app_handle.get() {
-        let _ = app.emit("step-up-required", ());
+        if let Err(e) = app.emit("step-up-required", ()) {
+            eprintln!("step-up: failed to emit step-up-required: {e}");
+        }
     }
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-    *state.step_up_reply.lock().await = Some(tx);
-    let password = match tokio::time::timeout(Duration::from_secs(120), rx).await {
-        Ok(Ok(password)) => password,
-        Ok(Err(_dropped)) => return Err("Step-up cancelled".to_string()),
-        Err(_elapsed) => return Err("Step-up timed out".to_string()),
-    };
-    client
-        .call_service_with_step_up(op, password)
-        .await
-        .map_err(|e| format!("Failed to communicate with daemon: {}", e))
+    let mut slot = state.step_up_reply.lock().await;
+    if slot.is_some() {
+        // Never clobber a live prompt: a second concurrent mutation would
+        // orphan the first waiter with a misleading "cancelled" error.
+        return Err(
+            "A master-password prompt is already open; answer or cancel it first".to_string(),
+        );
+    }
+    *slot = Some(tx);
+    drop(slot);
+    match tokio::time::timeout(Duration::from_secs(120), rx).await {
+        Ok(Ok(password)) => client
+            .call_service_with_step_up(op, password)
+            .await
+            .map_err(|e| format!("Failed to communicate with daemon: {}", e)),
+        Ok(Err(_dropped)) => Err("Step-up cancelled".to_string()),
+        Err(_elapsed) => {
+            // The prompt expired server-side of the UI: close any modal
+            // the frontend still has open so a late submit cannot look
+            // approved.
+            if let Some(app) = state.app_handle.get() {
+                let _ = app.emit("step-up-expired", ());
+            }
+            Err("Step-up timed out".to_string())
+        }
+    }
 }
 
 // Command: Frontend answered the step-up prompt with the master password.

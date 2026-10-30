@@ -193,6 +193,15 @@ function setupEventListeners() {
             stepUpModal?.setAttribute('aria-hidden', 'false');
             stepUpPassword?.focus();
         });
+        void listen('step-up-expired', () => {
+            if (stepUpPassword)
+                stepUpPassword.value = '';
+            stepUpModal?.classList.add('hidden');
+            stepUpModal?.setAttribute('aria-hidden', 'true');
+        });
+    }
+    else {
+        console.warn('[SentinelPass UI] event listen unavailable; step-up prompts cannot appear');
     }
     updateUrlOpenButtonState();
 }
