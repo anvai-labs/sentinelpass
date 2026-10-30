@@ -15,7 +15,7 @@
  * shared state managed by `state.ts`.
  */
 import { normalizeLaunchUrl } from './url-utils.js';
-import { initTauriAPI, invoke, confirm, setCurrentEntry, setCurrentTotpMetadata, setCurrentFilter, vaultScreen, searchInput } from './state.js';
+import { initTauriAPI, invoke, confirm, listen, setCurrentEntry, setCurrentTotpMetadata, setCurrentFilter, vaultScreen, searchInput } from './state.js';
 import { showToast, togglePasswordVisibility, copyToClipboard, appClipboard } from './utils.js';
 import { showRegistryDashboard, loadRegistryBadgeCount } from './registry.js';
 import { setTotpButtonState, closeTotpModal, copyTotpForEntry, openTotpModal, saveTotpForEntry, removeTotpForEntry } from './totp.js';
@@ -158,7 +158,62 @@ function setupEventListeners() {
     }
     // Toggle password visibility in welcome screen
     document.getElementById('toggle-password').addEventListener('click', () => togglePasswordVisibility('master-password'));
+    // Step-up authorization (SP-0): the daemon refused a vault write with
+    // step_up_required. Rust emits `step-up-required` and waits on our
+    // step_up_submit/step_up_cancel reply; the retried write resolves the
+    // original add/edit invoke transparently.
+    const stepUpModal = document.getElementById('step-up-modal');
+    const stepUpForm = document.getElementById('step-up-form');
+    const stepUpPassword = document.getElementById('step-up-password');
+    document.getElementById('step-up-cancel')?.addEventListener('click', cancelStepUp);
+    stepUpForm?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!stepUpPassword || !stepUpPassword.value)
+            return;
+        const password = stepUpPassword.value;
+        stepUpPassword.value = '';
+        stepUpModal?.classList.add('hidden');
+        stepUpModal?.setAttribute('aria-hidden', 'true');
+        try {
+            await invoke('step_up_submit', { password });
+        }
+        catch (error) {
+            showToast(String(error), 'error');
+        }
+    });
+    if (stepUpModal) {
+        stepUpModal.addEventListener('click', (event) => {
+            if (event.target === stepUpModal)
+                cancelStepUp();
+        });
+    }
+    if (listen) {
+        void listen('step-up-required', () => {
+            stepUpModal?.classList.remove('hidden');
+            stepUpModal?.setAttribute('aria-hidden', 'false');
+            stepUpPassword?.focus();
+        });
+        void listen('step-up-expired', () => {
+            if (stepUpPassword)
+                stepUpPassword.value = '';
+            stepUpModal?.classList.add('hidden');
+            stepUpModal?.setAttribute('aria-hidden', 'true');
+        });
+    }
+    else {
+        console.warn('[SentinelPass UI] event listen unavailable; step-up prompts cannot appear');
+    }
     updateUrlOpenButtonState();
+}
+/** Dismiss the step-up modal and cancel the pending daemon write. */
+function cancelStepUp() {
+    const stepUpModal = document.getElementById('step-up-modal');
+    const stepUpPassword = document.getElementById('step-up-password');
+    if (stepUpPassword)
+        stepUpPassword.value = '';
+    stepUpModal?.classList.add('hidden');
+    stepUpModal?.setAttribute('aria-hidden', 'true');
+    void invoke('step_up_cancel').catch(() => undefined);
 }
 /**
  * Check whether the vault is already unlocked (e.g. from a previous session)
