@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readRepoFile } from './ui-source';
 
 /**
  * 2026-11-04 daemon-wedge regression (UI half).
@@ -20,9 +18,7 @@ import { fileURLToPath } from 'node:url';
  * fails the web_tdd CI job instead of shipping the wedge back.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const APP_TS = path.join(repoRoot, 'sentinelpass-ui', 'app.ts');
-const source = readFileSync(APP_TS, 'utf8');
+const source = readRepoFile('sentinelpass-ui', 'app.ts');
 
 describe('unlock form re-entrancy guard (daemon wedge regression)', () => {
   it('guards the unlock submit handler with an in-flight flag', () => {
