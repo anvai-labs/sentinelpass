@@ -12,6 +12,7 @@ use crate::daemon::transport::unix::UnixSocketTransport;
 #[cfg(windows)]
 use crate::daemon::transport::windows::WindowsNamedPipeTransport;
 use crate::daemon::transport::{TransportConfig, TransportError};
+use crate::daemon::vault_state::UnlockOutcome;
 use crate::daemon::DaemonVault;
 use crate::external_secret_access::{ExternalSecretAllowlist, ExternalSecretField};
 use crate::{AuditEventType, AuditLogger, VaultManager};
@@ -2053,7 +2054,7 @@ impl IpcServer {
                 debug!("IPC: UnlockVault");
 
                 let unlock_result = if self.vault.is_unlocked().await {
-                    Ok(())
+                    Ok(UnlockOutcome::AlreadyUnlocked)
                 } else {
                     self.vault.unlock(master_password.as_bytes()).await
                 };
@@ -2330,7 +2331,15 @@ impl IpcServer {
                 // record; a wrong password shares the vault-wide persistent
                 // lockout counter with unlock. The DaemonVault itself is
                 // never unlocked by this.
-                let permit = self.vault.kdf_permit().await;
+                let permit = match self.vault.kdf_permit().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        return IpcMessage::StepUpDenied {
+                            error: e.to_string(),
+                            retry_after_secs: None,
+                        };
+                    }
+                };
                 let vault_path = self.vault.vault_path().to_path_buf();
                 // Zeroizing custody inside the blocking task; nothing
                 // retains the password after verification.
@@ -2690,7 +2699,14 @@ impl IpcServer {
                 // Argon2id KDF + schema creation on the blocking pool
                 // (ADR-004 rev 5: KDF work never runs on the async executor)
                 // with the per-vault KDF gate held (WBS-513).
-                let kdf_permit = self.vault.kdf_permit().await;
+                let kdf_permit = match self.vault.kdf_permit().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        return IpcMessage::ServiceResult {
+                            outcome: ServiceOutcome::from(ServiceError::from(e)),
+                        };
+                    }
+                };
                 let created = tokio::task::spawn_blocking(move || {
                     let _kdf_permit = kdf_permit;
                     VaultManager::create(&vault_path, master_password.as_bytes())
@@ -3786,6 +3802,91 @@ mod autofill_origin_gate_tests {
             let entries = client.call_service(VaultOp::EntryList).await.unwrap();
             let VaultOpResult::EntryList(entries) = entries else { panic!("expected entry list"); };
             assert_eq!(entries.len(), 1, "exactly one mutation, no replay or wrong-password write");
+            running.abort();
+        });
+    }
+
+    /// 2026-11-04 daemon-wedge regression (D2 + permit discipline): while
+    /// every connection permit is held by unlock requests parked on the
+    /// KDF gate, a fresh status request must still be served within the
+    /// bounded gate wait. Pre-fix, the parked handlers leaked their
+    /// connection permits forever, the accept loop itself parked acquiring
+    /// the 17th, and the daemon went deaf to ALL new IPC while the
+    /// process lived — the exact incident signature (`vault status`
+    /// printing no `daemon:` line).
+    #[cfg(unix)] // Unix-domain-socket listener; the windows arm has its own transport
+    #[test]
+    fn gate_park_cannot_deafen_listener() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        VaultManager::create(&vault_path, b"test_password").unwrap();
+        let daemon_vault = Arc::new(DaemonVault::new(Some(vault_path), 300).unwrap());
+        let server = Arc::new(IpcServer::new_with_allowlist_path(
+            tmp.path().join("wedge.sock"),
+            daemon_vault.clone(),
+            "test-token".to_string(),
+            tmp.path().join("allowlist.json"),
+        ));
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = server.socket_path.clone();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let running = tokio::spawn(server.run());
+            let mut ready = false;
+            for _ in 0..100 {
+                if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if !ready && running.is_finished() {
+                panic!("test listener failed: {:?}", running.await);
+            }
+            assert!(ready, "test listener did not start");
+
+            // Hold the KDF gate for the whole scenario, as a stuck
+            // unlock/step-up would.
+            let _held = daemon_vault.kdf_permit().await.unwrap();
+
+            // Every connection permit consumed by an unlock request that
+            // parks waiting for the gate.
+            let mut parked = Vec::new();
+            for _ in 0..MAX_CONCURRENT_CLIENTS {
+                let sock = socket.clone();
+                parked.push(tokio::spawn(async move {
+                    let client =
+                        sentinelpass_protocol::IpcClient::new_with_token(sock, "test-token".into());
+                    let _ = client
+                        .send(IpcMessage::UnlockVault {
+                            master_password: "test_password".into(),
+                        })
+                        .await;
+                }));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            // The property: a fresh status request must still complete —
+            // the parked unlock requests must release their connection
+            // permits via the bounded gate wait instead of leaking them.
+            let status = tokio::time::timeout(
+                std::time::Duration::from_secs(25),
+                sentinelpass_protocol::IpcClient::new_with_token(socket, "test-token".into())
+                    .send(IpcMessage::CheckVault),
+            )
+            .await
+            .expect("listener must not go deaf while unlock requests wait on the KDF gate")
+            .expect("CheckVault round-trip must succeed");
+            let IpcMessage::VaultStatusResponse { unlocked, .. } = status else {
+                panic!("expected status response");
+            };
+            assert!(!unlocked, "vault must still be locked (gate was held)");
+
+            drop(_held);
+            for task in parked {
+                let _ = task.await;
+            }
             running.abort();
         });
     }
