@@ -27,6 +27,9 @@ use zeroize::Zeroizing;
 pub mod codes {
     pub const VAULT_LOCKED: &str = "vault_locked";
     pub const LOCKED_OUT: &str = "locked_out";
+    /// Transient: another unlock / step-up verification / lock-holding op
+    /// is in flight. Retryable — never a client-input or internal error.
+    pub const VAULT_BUSY: &str = "vault_busy";
     pub const NOT_FOUND: &str = "not_found";
     pub const INVALID_INPUT: &str = "invalid_input";
     pub const EPOCH_ROLLBACK: &str = "epoch_rollback";
@@ -50,6 +53,7 @@ impl From<PasswordManagerError> for ServiceError {
         let code = match &err {
             PasswordManagerError::VaultLocked => codes::VAULT_LOCKED,
             PasswordManagerError::LockedOut(_) => codes::LOCKED_OUT,
+            PasswordManagerError::VaultBusy => codes::VAULT_BUSY,
             PasswordManagerError::NotFound(_) => codes::NOT_FOUND,
             PasswordManagerError::InvalidInput(_) => codes::INVALID_INPUT,
             PasswordManagerError::EpochRollback { .. } => codes::EPOCH_ROLLBACK,

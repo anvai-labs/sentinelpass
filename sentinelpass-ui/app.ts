@@ -51,12 +51,14 @@ const confirmPasswordInput = document.getElementById('confirm-password') as HTML
 const confirmPasswordGroup = document.getElementById('confirm-password-group');
 const formTitle = document.getElementById('form-title');
 const submitPasswordBtn = document.getElementById('submit-password');
-// Re-entrancy guard for the unlock submit (2026-11-04 daemon-wedge
-// regression): the multi-second Argon2id await previously left the button
-// enabled and the input populated, so Enter key-repeat / double-press
-// fired a SECOND unlock_vault that queued on the daemon's KDF gate and
-// ran a second concurrent vault open — wedging the daemon's IPC listener.
-let unlockInFlight = false;
+// Re-entrancy guard for the password-form submit (2026-11-04
+// daemon-wedge regression): the multi-second Argon2id await previously
+// left the button enabled and the input populated, so Enter key-repeat /
+// double-press fired a SECOND unlock_vault (or create_vault) that queued
+// on the daemon's KDF gate and ran a second concurrent vault open —
+// wedging the daemon's IPC listener. Covers BOTH branches (unlock and
+// first-run vault creation share the double-submit hazard).
+let passwordSubmitInFlight = false;
 const strengthMeter = document.getElementById('strength-meter');
 const strengthFill = document.getElementById('strength-fill');
 const strengthText = document.getElementById('strength-text');
@@ -453,49 +455,51 @@ function updateStrengthMeter(analysis) {
  */
 async function handlePasswordSubmit(e) {
     e.preventDefault();
-    const password = masterPasswordInput.value;
+    if (passwordSubmitInFlight) {
+        return;
+    }
+    passwordSubmitInFlight = true;
+    submitPasswordBtn.disabled = true;
+    try {
+        const password = masterPasswordInput.value;
 
-    if (isCreateVault) {
-        const confirmPassword = confirmPasswordInput.value;
-        if (password !== confirmPassword) {
-            showToast('Passwords do not match', 'error');
-            return;
-        }
+        if (isCreateVault) {
+            const confirmPassword = confirmPasswordInput.value;
+            if (password !== confirmPassword) {
+                showToast('Passwords do not match', 'error');
+                return;
+            }
 
-        try {
-            await invoke('create_vault', { masterPassword: password });
-            showToast('Vault created successfully!', 'success');
-            showVaultScreen();
-            void loadRegistryBadgeCount();
-            await refreshBiometricStatus();
-            await refreshDaemonStatus();
-        } catch (error) {
-            showToast(error, 'error');
+            try {
+                await invoke('create_vault', { masterPassword: password });
+                showToast('Vault created successfully!', 'success');
+                showVaultScreen();
+                void loadRegistryBadgeCount();
+                await refreshBiometricStatus();
+                await refreshDaemonStatus();
+            } catch (error) {
+                showToast(error, 'error');
+            }
+        } else {
+            try {
+                const unlockMessage = await invoke('unlock_vault', { masterPassword: password });
+                const unlockType = typeof unlockMessage === 'string' && unlockMessage.includes('daemon unlock failed')
+                    ? 'warning'
+                    : 'success';
+                showToast(unlockMessage || 'Vault unlocked successfully!', unlockType);
+                showVaultScreen();
+                loadEntries();
+                void loadRegistryBadgeCount();
+                await refreshBiometricStatus();
+                const status = await refreshDaemonStatus();
+            } catch (error) {
+                console.error('[SentinelPass UI] unlock_vault error:', error);
+                showToast(error, 'error');
+            }
         }
-    } else {
-        if (unlockInFlight) {
-            return;
-        }
-        unlockInFlight = true;
-        submitPasswordBtn.disabled = true;
-        try {
-            const unlockMessage = await invoke('unlock_vault', { masterPassword: password });
-            const unlockType = typeof unlockMessage === 'string' && unlockMessage.includes('daemon unlock failed')
-                ? 'warning'
-                : 'success';
-            showToast(unlockMessage || 'Vault unlocked successfully!', unlockType);
-            showVaultScreen();
-            loadEntries();
-            void loadRegistryBadgeCount();
-            await refreshBiometricStatus();
-            const status = await refreshDaemonStatus();
-        } catch (error) {
-            console.error('[SentinelPass UI] unlock_vault error:', error);
-            showToast(error, 'error');
-        } finally {
-            unlockInFlight = false;
-            submitPasswordBtn.disabled = false;
-        }
+    } finally {
+        passwordSubmitInFlight = false;
+        submitPasswordBtn.disabled = false;
     }
 }
 

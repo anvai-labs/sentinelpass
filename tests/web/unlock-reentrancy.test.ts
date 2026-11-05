@@ -10,7 +10,9 @@ import { readRepoFile } from './ui-source';
  * second `unlock_vault`. That second request queued on the daemon's KDF
  * gate and ran a second concurrent `VaultManager::open`, wedging the
  * daemon's IPC listener (see the matching Rust regression tests in
- * sentinelpass-core vault_state / ipc::server).
+ * sentinelpass-core vault_state / ipc::server). The guard covers BOTH
+ * branches of the submit handler (unlock and first-run vault creation —
+ * adversarial review F5).
  *
  * `app.ts` is not importable under this suite's node environment (no
  * DOM), so this gate anchors on the source — the same convention as
@@ -20,26 +22,30 @@ import { readRepoFile } from './ui-source';
 
 const source = readRepoFile('sentinelpass-ui', 'app.ts');
 
-describe('unlock form re-entrancy guard (daemon wedge regression)', () => {
-  it('guards the unlock submit handler with an in-flight flag', () => {
+describe('password form re-entrancy guard (daemon wedge regression)', () => {
+  it('guards the submit handler with an in-flight flag covering both branches', () => {
     expect(source, 'handlePasswordSubmit must carry an in-flight guard').toMatch(
-      /unlockInFlight/,
+      /passwordSubmitInFlight/,
     );
     expect(source, 'the guard must be a re-entry check at handler scope').toMatch(
-      /if\s*\(\s*unlockInFlight\s*\)/,
+      /if\s*\(\s*passwordSubmitInFlight\s*\)\s*\{\s*return;/,
     );
+    expect(
+      source,
+      'the guard must wrap the whole handler (create + unlock), not one branch',
+    ).toMatch(/passwordSubmitInFlight\s*=\s*true;\s*\n\s*submitPasswordBtn\.disabled\s*=\s*true;/);
   });
 
-  it('disables the submit control while an unlock is in flight', () => {
+  it('disables the submit control while a submit is in flight', () => {
     expect(source).toMatch(/submitPasswordBtn\.disabled\s*=\s*true/);
   });
 
-  it('re-enables the submit control when the unlock fails', () => {
-    expect(source, 'a failed unlock must restore the form for retry').toMatch(
+  it('re-enables the submit control when the operation fails', () => {
+    expect(source, 'a failed submit must restore the form for retry').toMatch(
       /submitPasswordBtn\.disabled\s*=\s*false/,
     );
-    expect(source, 'the in-flight flag must clear on the failure path').toMatch(
-      /unlockInFlight\s*=\s*false/,
+    expect(source, 'the in-flight flag must clear on all paths (finally)').toMatch(
+      /passwordSubmitInFlight\s*=\s*false/,
     );
   });
 });

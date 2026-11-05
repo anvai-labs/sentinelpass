@@ -182,11 +182,7 @@ fn acquire(path: &Path) -> Result<File> {
             Ok(()) => return Ok(file),
             Err(std::fs::TryLockError::WouldBlock) => {
                 if std::time::Instant::now() >= deadline {
-                    return Err(PasswordManagerError::InvalidInput(
-                        "receipts journal lock contention timeout: another holder \
-                         (entry op, open, or restore) exceeded the bounded wait"
-                            .to_string(),
-                    ));
+                    return Err(PasswordManagerError::VaultBusy);
                 }
                 std::thread::sleep(CONTENT_LOCK_POLL);
             }

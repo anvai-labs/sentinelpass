@@ -723,17 +723,19 @@ fn lock_exclusive(file: &File) -> Result<()> {
             return Ok(());
         }
         let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            // EINTR (signal delivered mid-flock): retry the attempt —
+            // dropping the audit event on a spurious signal would erode
+            // the chain guarantee.
+            continue;
+        }
         if err.kind() != std::io::ErrorKind::WouldBlock {
             return Err(PasswordManagerError::from(DatabaseError::FileIo(format!(
                 "Failed to lock audit directory: {err}"
             ))));
         }
         if std::time::Instant::now() >= deadline {
-            return Err(PasswordManagerError::from(DatabaseError::FileIo(
-                "audit directory lock contention timeout: another holder \
-                 (open, append, or verify walk) exceeded the bounded wait"
-                    .to_string(),
-            )));
+            return Err(PasswordManagerError::VaultBusy);
         }
         std::thread::sleep(AUDIT_LOCK_POLL);
     }

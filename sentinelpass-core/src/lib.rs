@@ -142,11 +142,13 @@ pub enum PasswordManagerError {
     #[error("Vault is locked out due to too many failed attempts. Try again in {0} seconds")]
     LockedOut(i64),
 
-    /// The per-vault KDF gate could not be acquired in time: another
-    /// unlock, step-up verification, or vault creation is in flight.
-    /// Retryable by the client — never a hang (daemon wedge regression,
-    /// 2026-11-04 incident).
-    #[error("Vault busy: another unlock, step-up verification, or vault creation is already in progress. Retry in a moment.")]
+    /// A vault-scoped serialization primitive could not be acquired within
+    /// its bounded wait: the per-vault KDF gate (another unlock, step-up
+    /// verification, or vault creation in flight) or a bounded file lock
+    /// (audit directory, receipts journal) held by a stuck holder.
+    /// Retryable by the client — never a hang, and never a client-input
+    /// or internal error (daemon wedge regression, 2026-11-04 incident).
+    #[error("Vault busy: another unlock, verification, or lock-holding operation is already in progress. Retry in a moment.")]
     VaultBusy,
 
     #[error("Invalid input: {0}")]
