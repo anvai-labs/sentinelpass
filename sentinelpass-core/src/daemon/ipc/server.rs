@@ -3814,6 +3814,7 @@ mod autofill_origin_gate_tests {
     /// the 17th, and the daemon went deaf to ALL new IPC while the
     /// process lived — the exact incident signature (`vault status`
     /// printing no `daemon:` line).
+    #[cfg(unix)] // Unix-domain-socket listener; the windows arm has its own transport
     #[test]
     fn gate_park_cannot_deafen_listener() {
         let tmp = TempDir::new().unwrap();
