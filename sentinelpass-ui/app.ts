@@ -51,6 +51,12 @@ const confirmPasswordInput = document.getElementById('confirm-password') as HTML
 const confirmPasswordGroup = document.getElementById('confirm-password-group');
 const formTitle = document.getElementById('form-title');
 const submitPasswordBtn = document.getElementById('submit-password');
+// Re-entrancy guard for the unlock submit (2026-11-04 daemon-wedge
+// regression): the multi-second Argon2id await previously left the button
+// enabled and the input populated, so Enter key-repeat / double-press
+// fired a SECOND unlock_vault that queued on the daemon's KDF gate and
+// ran a second concurrent vault open — wedging the daemon's IPC listener.
+let unlockInFlight = false;
 const strengthMeter = document.getElementById('strength-meter');
 const strengthFill = document.getElementById('strength-fill');
 const strengthText = document.getElementById('strength-text');
@@ -467,6 +473,11 @@ async function handlePasswordSubmit(e) {
             showToast(error, 'error');
         }
     } else {
+        if (unlockInFlight) {
+            return;
+        }
+        unlockInFlight = true;
+        submitPasswordBtn.disabled = true;
         try {
             const unlockMessage = await invoke('unlock_vault', { masterPassword: password });
             const unlockType = typeof unlockMessage === 'string' && unlockMessage.includes('daemon unlock failed')
@@ -481,6 +492,9 @@ async function handlePasswordSubmit(e) {
         } catch (error) {
             console.error('[SentinelPass UI] unlock_vault error:', error);
             showToast(error, 'error');
+        } finally {
+            unlockInFlight = false;
+            submitPasswordBtn.disabled = false;
         }
     }
 }

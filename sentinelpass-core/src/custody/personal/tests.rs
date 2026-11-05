@@ -133,7 +133,7 @@ impl Harness {
         source: Option<&NativeSource>,
     ) -> Result<PersonalApproval> {
         let vault = self.daemon.manager().await.ok_or(CustodyError::Locked)?;
-        let _permit = self.daemon.kdf_permit().await;
+        let _permit = self.daemon.kdf_permit().await.unwrap();
         if self
             .admin
             .state

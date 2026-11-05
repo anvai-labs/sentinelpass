@@ -149,6 +149,18 @@ fn save_with_secondary(
     result
 }
 
+/// Bounded wait for the receipts-journal lock (2026-11-04 daemon-wedge
+/// regression: the previous blocking `File::lock` parked a
+/// `ContentTransaction` forever behind a stuck holder — a racing
+/// duplicate `VaultManager::open` contending with the live manager — and
+/// through it the IPC request and the listener). Tests scale the wait
+/// down to keep the regression suite fast.
+#[cfg(not(test))]
+const CONTENT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const CONTENT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const CONTENT_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
 fn acquire(path: &Path) -> Result<File> {
     if path.exists() {
         crate::platform::validate_sensitive_path(path, crate::platform::OwnerOnlyPolicy::Refuse)?;
@@ -161,8 +173,30 @@ fn acquire(path: &Path) -> Result<File> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
-    file.lock()?;
-    Ok(file)
+    // Bounded acquire: contention beyond CONTENT_LOCK_WAIT is a typed
+    // error, never a hang (cross-platform std try_lock, stable 1.89 —
+    // same primitive the maintenance lock uses).
+    let deadline = std::time::Instant::now() + CONTENT_LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(PasswordManagerError::InvalidInput(
+                        "receipts journal lock contention timeout: another holder \
+                         (entry op, open, or restore) exceeded the bounded wait"
+                            .to_string(),
+                    ));
+                }
+                std::thread::sleep(CONTENT_LOCK_POLL);
+            }
+            Err(e) => {
+                return Err(PasswordManagerError::from(DatabaseError::FileIo(format!(
+                    "failed to lock receipts journal: {e}"
+                ))));
+            }
+        }
+    }
 }
 
 fn fingerprint(row: &RawEntryRow, is_deleted: bool) -> Result<String> {
@@ -563,6 +597,49 @@ mod tests {
         let dek = DataEncryptionKey::new().unwrap();
         initialize(&conn, &dek).unwrap();
         (dir, conn, dek)
+    }
+
+    /// 2026-11-04 daemon-wedge regression (D3): the receipts-journal lock
+    /// must be BOUNDED — contention with a stuck holder is a typed error,
+    /// never an indefinite park (a parked `acquire` held the IPC request
+    /// and, through leaked connection permits, eventually the entire
+    /// listener).
+    #[cfg(unix)]
+    #[test]
+    fn content_lock_contention_is_bounded() {
+        let (dir, conn, _dek) = fixture();
+        let db_path = std::path::PathBuf::from(conn.path().expect("fixture db path"));
+        let lock_path = std::path::PathBuf::from(format!("{}.contents.lock", db_path.display()));
+        assert!(
+            lock_path.exists(),
+            "fixture's initialize must have created the journal lock file"
+        );
+
+        // Hold the journal lock from this thread: the stuck-holder stand-in.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) };
+        assert_eq!(rc, 0, "test must acquire the journal lock");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(acquire(&lock_path));
+        });
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("content lock acquisition must terminate (bounded), not hang");
+        assert!(
+            result.is_err(),
+            "contended acquire must fail with a typed error, not block"
+        );
+        drop(dir);
     }
 
     #[test]
