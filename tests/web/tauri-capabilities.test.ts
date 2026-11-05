@@ -1,7 +1,5 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readRepoFile } from './ui-source';
 
 /**
  * WBS-707 / TD-CLIENT-03 negative gate.
@@ -13,16 +11,10 @@ import { fileURLToPath } from 'node:url';
  * the build instead of shipping.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-
-const CAPABILITIES_PATH = path.join(repoRoot, 'sentinelpass-ui', 'capabilities', 'default.json');
-const TAURI_CONF_PATH = path.join(repoRoot, 'sentinelpass-ui', 'tauri.conf.json');
-const MAIN_RS_PATH = path.join(repoRoot, 'sentinelpass-ui', 'src-tauri', 'src', 'main.rs');
-const UI_SOURCES = ['app.ts', 'entries.ts', 'registry.ts', 'state.ts', 'totp.ts', 'utils.ts', 'clipboard.ts', 'credential-types.ts', 'url-utils.ts']
-  .map((f) => path.join(repoRoot, 'sentinelpass-ui', f));
+const UI_SOURCE_NAMES = ['app.ts', 'entries.ts', 'registry.ts', 'state.ts', 'totp.ts', 'utils.ts', 'clipboard.ts', 'credential-types.ts', 'url-utils.ts'];
 
 function readUiSources(): string {
-  return UI_SOURCES.map((f) => readFileSync(f, 'utf8')).join('\n');
+  return UI_SOURCE_NAMES.map((f) => readRepoFile('sentinelpass-ui', f)).join('\n');
 }
 
 /**
@@ -42,8 +34,8 @@ const AUDITED_ALLOWLIST: Record<string, RegExp> = {
   'core:event:allow-listen': /listen\s*\(\s*'step-up-required'/
 };
 
-const capabilityFile = JSON.parse(readFileSync(CAPABILITIES_PATH, 'utf8'));
-const tauriConf = JSON.parse(readFileSync(TAURI_CONF_PATH, 'utf8'));
+const capabilityFile = JSON.parse(readRepoFile('sentinelpass-ui', 'capabilities', 'default.json'));
+const tauriConf = JSON.parse(readRepoFile('sentinelpass-ui', 'tauri.conf.json'));
 const granted: string[] = capabilityFile.permissions;
 
 describe('tauri capability allowlist (WBS-707)', () => {
@@ -142,7 +134,7 @@ describe('tauri CSP (WBS-707 / TD-CLIENT-03)', () => {
 });
 
 describe('tauri plugin registration matches the capability surface (WBS-707/709)', () => {
-  const mainRs = readFileSync(MAIN_RS_PATH, 'utf8');
+  const mainRs = readRepoFile('sentinelpass-ui', 'src-tauri', 'src', 'main.rs');
 
   it('the unused shell plugin is not registered (URLs open via custom commands)', () => {
     expect(mainRs.includes('tauri_plugin_shell')).toBe(false);

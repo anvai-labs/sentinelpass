@@ -122,6 +122,17 @@ pub const AUDIT_ID_LABEL_SLOT: &str = "slot-uuid";
 
 const AUDIT_LOG_FILE_NAME: &str = "audit.log";
 const AUDIT_LOCK_FILE_NAME: &str = "audit.lock";
+
+/// Bounded wait for the audit directory lock (2026-11-04 daemon-wedge
+/// regression: the previous blocking `LOCK_EX` parked an append forever
+/// behind a stuck holder — a racing duplicate `VaultManager::open` or a
+/// full verify walk — and through it the IPC request and the listener).
+/// Tests scale the wait down to keep the regression suite fast.
+#[cfg(not(test))]
+const AUDIT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const AUDIT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+const AUDIT_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 /// Domain redaction marker for records written with no key context.
 ///
 /// Domains are credential identity (SR-DATA-004) with a REAL locked-state
@@ -697,15 +708,37 @@ impl Drop for DirLockGuard {
 #[cfg(unix)]
 fn lock_exclusive(file: &File) -> Result<()> {
     use std::os::unix::io::AsRawFd;
-    // Blocking: holders keep the lock for microseconds (append + occasional
-    // rename), and the OS releases flock when a holder dies.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if rc == -1 {
-        return Err(PasswordManagerError::from(DatabaseError::FileIo(
-            "Failed to lock audit directory".to_string(),
-        )));
+    // Bounded (2026-11-04 wedge): holders were previously ASSUMED to keep
+    // this lock for microseconds; a racing duplicate `VaultManager::open`
+    // or a full verify walk can hold it far longer, and a blocking LOCK_EX
+    // then parked the append — and the IPC request driving it — forever.
+    // Poll LOCK_NB instead: contention beyond AUDIT_LOCK_WAIT is a typed
+    // error, never a hang. The OS still releases flock when a holder
+    // dies, and appends remain serialized (unchanged semantics when
+    // uncontended).
+    let deadline = std::time::Instant::now() + AUDIT_LOCK_WAIT;
+    loop {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            // EINTR (signal delivered mid-flock): retry the attempt —
+            // dropping the audit event on a spurious signal would erode
+            // the chain guarantee.
+            continue;
+        }
+        if err.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(PasswordManagerError::from(DatabaseError::FileIo(format!(
+                "Failed to lock audit directory: {err}"
+            ))));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(PasswordManagerError::VaultBusy);
+        }
+        std::thread::sleep(AUDIT_LOCK_POLL);
     }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -1804,6 +1837,52 @@ mod tests {
             .unwrap();
         AuditLogger::clear_keys();
         (tmp, logger)
+    }
+
+    /// 2026-11-04 daemon-wedge regression (D3): the audit directory lock
+    /// must be BOUNDED — a stuck holder (e.g. the second concurrent
+    /// `VaultManager::open` from a racing duplicate unlock) surfaces as a
+    /// typed contention error instead of parking the append, its IPC
+    /// request, and — through leaked connection permits — the whole
+    /// listener.
+    #[cfg(unix)]
+    #[test]
+    fn audit_lock_contention_is_bounded() {
+        let tmp = make_test_dir();
+        let logger = AuditLogger::new(tmp.clone()).unwrap();
+        logger
+            .log(AuditEventType::VaultUnlocked { success: true }, "pave")
+            .expect("uncontended append must succeed");
+
+        // Hold the audit dir lock from this thread: the stuck-holder
+        // stand-in (cross-task contention within one process must still
+        // be bounded — flock is per-open-file-description).
+        let lock_path = tmp.join(super::AUDIT_LOCK_FILE_NAME);
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) };
+        assert_eq!(rc, 0, "test must acquire the audit lock");
+
+        let log_dir = tmp.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let logger = AuditLogger::new(log_dir).unwrap();
+            let result = logger.log(AuditEventType::VaultUnlocked { success: true }, "contended");
+            let _ = tx.send(result);
+        });
+
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("audit append under contention must terminate (bounded), not hang");
+        assert!(
+            result.is_err(),
+            "contended append must fail with a typed error, not block"
+        );
     }
 
     fn read_lines(path: &Path) -> Vec<String> {
