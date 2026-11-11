@@ -1759,7 +1759,8 @@ impl VaultManager {
             ));
         }
 
-        let staged_db = match crate::database::Database::open(&stg.staged) {
+        #[cfg_attr(not(test), expect(unused_mut))]
+        let mut staged_db = match crate::database::Database::open(&stg.staged) {
             Ok(db) => db,
             Err(e) => {
                 return Err(refuse(
@@ -1770,9 +1771,9 @@ impl VaultManager {
         };
         // WBS-418: deny the Nth staged write (test builds only).
         #[cfg(test)]
-        let fault_guard = faults
-            .staged_fail_at
-            .map(|n| crate::database::fault_injection::install_write_fault(staged_db.conn(), n));
+        let fault_guard = faults.staged_fail_at.map(|n| {
+            crate::database::fault_injection::install_write_fault(staged_db.conn_mut(), n)
+        });
         #[cfg(not(test))]
         let _ = &faults;
         if let Err(e) = validate_staged_snapshot(&staged_db, &manifest, master_password) {
@@ -1821,7 +1822,7 @@ impl VaultManager {
         // staged connection is clean for its close.
         #[cfg(test)]
         {
-            crate::database::fault_injection::clear_write_fault(staged_db.conn());
+            crate::database::fault_injection::clear_write_fault(staged_db.conn_mut());
             drop(fault_guard);
         }
         drop(staged_db); // clean close: staged WAL checkpointed + removed

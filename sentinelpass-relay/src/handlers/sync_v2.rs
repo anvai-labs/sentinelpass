@@ -1391,8 +1391,8 @@ mod tests {
             // Install the authorizer while holding the lock; the handler
             // re-locks and inherits it.
             let guard = {
-                let conn = state.storage.conn().unwrap();
-                install_write_fault(&conn, fail_at)
+                let mut conn = state.storage.conn().unwrap();
+                install_write_fault(&mut conn, fail_at)
             };
             let result = push_v2(
                 State(state.clone()),
@@ -1401,8 +1401,8 @@ mod tests {
             )
             .await;
             {
-                let conn = state.storage.conn().unwrap();
-                guard.clear(&conn);
+                let mut conn = state.storage.conn().unwrap();
+                guard.clear(&mut conn);
             }
 
             let denied = guard.seen() > fail_at;

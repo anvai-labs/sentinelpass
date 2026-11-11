@@ -30,14 +30,18 @@ impl WriteFaultGuard {
 
     /// Remove the authorizer from the connection (every test path must clear,
     /// success or failure, or later statements are spuriously denied).
-    pub(crate) fn clear(&self, conn: &rusqlite::Connection) {
-        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    pub(crate) fn clear(&self, conn: &mut rusqlite::Connection) {
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .expect("clear authorizer");
     }
 }
 
 /// Deny the `fail_at`-th top-level write action on `conn` (0-based). Reads
 /// and transaction control are always allowed.
-pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -> WriteFaultGuard {
+pub(crate) fn install_write_fault(
+    conn: &mut rusqlite::Connection,
+    fail_at: usize,
+) -> WriteFaultGuard {
     let seen = Arc::new(AtomicUsize::new(0));
     let counter = seen.clone();
     conn.authorizer(Some(move |ctx: AuthContext<'_>| {
@@ -54,6 +58,7 @@ pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -
         } else {
             Authorization::Allow
         }
-    }));
+    }))
+    .expect("set authorizer");
     WriteFaultGuard { seen }
 }
