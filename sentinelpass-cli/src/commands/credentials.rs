@@ -1,6 +1,7 @@
 use crate::commands::service_client as sc;
 use anyhow::Result;
 use rpassword::prompt_password;
+use sentinelpass_core::daemon::service::entry_from_wire;
 use sentinelpass_core::daemon::service::entry_summary_from_wire;
 use sentinelpass_core::{CredentialType, EntrySummary};
 use sentinelpass_protocol::service::{VaultOp, VaultOpResult};
@@ -217,11 +218,34 @@ pub fn handle_get(vault_path: PathBuf, id: i64) -> Result<()> {
             println!("Title: {}", entry.title);
             println!("Type: {}", credential_type_label(credential_type));
             println!("Username: {}", entry.username);
-            println!(
-                "{}: {}",
-                secret_value_label(credential_type),
-                entry.password.as_str()
-            );
+            if credential_type == sentinelpass_core::CredentialType::PasskeyReference {
+                // Render the reference as metadata — the raw payload is a
+                // locator record, not a displayable secret (design doc:
+                // "View passkey reference ... clearly states that
+                // authentication still happens through the platform").
+                match sentinelpass_core::parse_passkey_reference_entry(
+                    &entry_from_wire(&entry).map_err(|e| anyhow::anyhow!(e.to_string()))?,
+                ) {
+                    Ok(m) => {
+                        println!("Relying party ID: {}", m.relying_party_id);
+                        println!("Account: {}", m.account_label);
+                        println!("Platform: {}", m.platform);
+                        if let Some(hint) = &m.credential_id_hint {
+                            println!("Credential hint: {}", hint);
+                        }
+                        if let Some(source) = &m.sync_source {
+                            println!("Sync source: {}", source);
+                        }
+                    }
+                    Err(_) => println!("Reference payload: (present but unparseable)"),
+                }
+            } else {
+                println!(
+                    "{}: {}",
+                    secret_value_label(credential_type),
+                    entry.password.as_str()
+                );
+            }
             if let Some(url) = entry.url {
                 println!("URL: {}", url);
             }

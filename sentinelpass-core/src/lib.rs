@@ -20,6 +20,7 @@ pub mod external_secret_access;
 pub mod import_export;
 pub mod keepass;
 pub mod lockout;
+pub mod passkey;
 pub mod platform;
 pub mod registry;
 pub mod service_credentials;
@@ -54,6 +55,9 @@ pub use import_export::{
 };
 pub use keepass::{export_to_keepass_xml, import_from_keepass_xml, KeePassEntry};
 pub use lockout::{LockoutConfig, LockoutManager, DEFAULT_MAX_ATTEMPTS};
+pub use passkey::{
+    build_passkey_reference_entry, parse_passkey_reference_entry, PasskeyReferenceMetadata,
+};
 pub use platform::{
     ensure_config_dir, ensure_data_dir, get_arch, get_binary_name, get_config_dir, get_data_dir,
     get_default_vault_path, get_platform,
