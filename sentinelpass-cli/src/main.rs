@@ -210,7 +210,8 @@ enum Commands {
         /// Input file path
         input: PathBuf,
 
-        /// Import format (json, csv, or keepass)
+        /// Import format (json, csv, or keepass; keepass auto-detects
+        /// encrypted .kdbx databases and unencrypted XML exports)
         #[arg(short, long, default_value = "json")]
         format: String,
     },

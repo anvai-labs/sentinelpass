@@ -442,7 +442,7 @@ sqlite3 ~/Library/Application\ Support/PasswordManager/vault.db ".schema"  # mac
 1. Single-user vault (multi-user schema exists but not implemented)
 2. TOTP is available in core + CLI; browser/UI setup flows are still maturing
 3. SSH key storage and CLI management are implemented; advanced SSH workflows (UI, richer key lifecycle ops) remain limited
-4. KeePass XML import/export is implemented in core + CLI; KDBX (encrypted) format is not yet supported
+4. KeePass XML import/export is implemented in core + CLI; KDBX (encrypted .kdbx databases, 3.1/4.0/4.1) import is implemented in core + CLI (`import --format keepass` auto-detects by signature; group hierarchy lands in notes, TOTP seeds map to TotpSecret, SHA-512 TOTP seeds are skipped with a warning). KDBX export is not supported (XML export only)
 5. Biometric unlock is integrated with Windows Hello and macOS LocalAuthentication (Touch ID); Linux remains unsupported
 6. Multi-device sync is feature-gated (`sync`); relay server does not include TLS by default (use a reverse proxy for production)
 7. Sync conflict resolution is Last-Write-Wins only; no manual merge UI

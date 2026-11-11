@@ -5,7 +5,7 @@
 //! # Supported Formats
 //!
 //! - **KeePass XML**: Unencrypted KeePass 2.x XML export/import
-//! - **KDBX**: KeePass encrypted database format (future - requires KDBX decryption)
+//! - **KDBX**: KeePass encrypted database format (import only; see [`kdbx`])
 //!
 //! # Field Mapping
 //!
@@ -22,6 +22,7 @@
 //! | Created | created_at |
 //! | Modified | modified_at |
 
+pub mod kdbx;
 pub mod xml;
 
 use crate::{CredentialType, Entry, PasswordManagerError, Result, VaultManager};
