@@ -20,6 +20,7 @@ pub mod external_secret_access;
 pub mod import_export;
 pub mod keepass;
 pub mod lockout;
+pub mod passkey;
 pub mod platform;
 pub mod registry;
 pub mod service_credentials;
@@ -54,6 +55,9 @@ pub use import_export::{
 };
 pub use keepass::{export_to_keepass_xml, import_from_keepass_xml, KeePassEntry};
 pub use lockout::{LockoutConfig, LockoutManager, DEFAULT_MAX_ATTEMPTS};
+pub use passkey::{
+    build_passkey_reference_entry, parse_passkey_reference_entry, PasskeyReferenceMetadata,
+};
 pub use platform::{
     ensure_config_dir, ensure_data_dir, get_arch, get_binary_name, get_config_dir, get_data_dir,
     get_default_vault_path, get_platform,
@@ -141,6 +145,15 @@ pub enum PasswordManagerError {
 
     #[error("Vault is locked out due to too many failed attempts. Try again in {0} seconds")]
     LockedOut(i64),
+
+    /// A vault-scoped serialization primitive could not be acquired within
+    /// its bounded wait: the per-vault KDF gate (another unlock, step-up
+    /// verification, or vault creation in flight) or a bounded file lock
+    /// (audit directory, receipts journal) held by a stuck holder.
+    /// Retryable by the client — never a hang, and never a client-input
+    /// or internal error (daemon wedge regression, 2026-11-04 incident).
+    #[error("Vault busy: another unlock, verification, or lock-holding operation is already in progress. Retry in a moment.")]
+    VaultBusy,
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),

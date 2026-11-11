@@ -139,9 +139,15 @@ fn custody_storage_faults_preserve_complete_old_state() {
     };
     let mut succeeded = false;
     for fail_at in 0..12 {
-        let fault = install_write_fault(vault.lock_db().unwrap().conn(), fail_at);
+        let fault = {
+            let mut db = vault.lock_db().unwrap();
+            install_write_fault(db.conn_mut(), fail_at)
+        };
         let result = vault.custody_put(&scope, Some(&first), &next, &secret());
-        clear_write_fault(vault.lock_db().unwrap().conn());
+        {
+            let mut db = vault.lock_db().unwrap();
+            clear_write_fault(db.conn_mut());
+        }
         if fault.seen() > fail_at {
             assert!(result.is_err());
             assert!(vault.custody_read(&scope, &first).is_ok());

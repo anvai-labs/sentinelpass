@@ -210,7 +210,8 @@ enum Commands {
         /// Input file path
         input: PathBuf,
 
-        /// Import format (json, csv, or keepass)
+        /// Import format (json, csv, or keepass; keepass auto-detects
+        /// encrypted .kdbx databases and unencrypted XML exports)
         #[arg(short, long, default_value = "json")]
         format: String,
     },
@@ -1024,6 +1025,25 @@ enum PasskeyCommands {
         #[arg(long)]
         favorite: bool,
     },
+    /// List all passkey references with their metadata
+    List,
+    /// Show one passkey reference as metadata (never the raw payload)
+    Get {
+        /// Entry ID of the passkey reference
+        #[arg(short, long)]
+        id: i64,
+    },
+    /// Delete a passkey reference (removes SentinelPass metadata only;
+    /// the platform passkey itself is NOT deleted)
+    Delete {
+        /// Entry ID of the passkey reference
+        #[arg(short, long)]
+        id: i64,
+
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1795,6 +1815,18 @@ fn main() -> Result<()> {
                     notes.as_deref(),
                     *favorite,
                 )?;
+            }
+            PasskeyCommands::List => {
+                let vault_path = get_vault_path(&cli, false);
+                commands::passkey::handle_passkey_list(vault_path)?;
+            }
+            PasskeyCommands::Get { id } => {
+                let vault_path = get_vault_path(&cli, false);
+                commands::passkey::handle_passkey_get(vault_path, *id)?;
+            }
+            PasskeyCommands::Delete { id, force } => {
+                let vault_path = get_vault_path(&cli, false);
+                commands::passkey::handle_passkey_delete(vault_path, *id, *force)?;
             }
         },
 

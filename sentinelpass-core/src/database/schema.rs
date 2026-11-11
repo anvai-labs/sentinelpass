@@ -217,10 +217,9 @@ impl Database {
     /// Uses `pragma_update` (not `execute`) for pragmas that return a result row
     /// such as `journal_mode`, which would cause an error with plain `execute`.
     fn apply_pragmas(conn: &Connection) -> Result<()> {
-        use rusqlite::DatabaseName;
         conn.pragma_update(None, "foreign_keys", true)
             .map_err(DatabaseError::Sqlite)?;
-        conn.pragma_update(Some(DatabaseName::Main), "journal_mode", "WAL")
+        conn.pragma_update(Some("main"), "journal_mode", "WAL")
             .map_err(DatabaseError::Sqlite)?;
         conn.pragma_update(None, "busy_timeout", 5000i64)
             .map_err(DatabaseError::Sqlite)?;
@@ -771,6 +770,14 @@ impl Database {
     /// Get a reference to the underlying connection
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Get a mutable reference to the underlying connection.
+    ///
+    /// Needed by the fault-injection test harness (rusqlite 0.42 requires
+    /// `&mut Connection` to install/clear an authorizer).
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 }
 

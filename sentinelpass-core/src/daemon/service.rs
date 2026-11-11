@@ -27,6 +27,9 @@ use zeroize::Zeroizing;
 pub mod codes {
     pub const VAULT_LOCKED: &str = "vault_locked";
     pub const LOCKED_OUT: &str = "locked_out";
+    /// Transient: another unlock / step-up verification / lock-holding op
+    /// is in flight. Retryable — never a client-input or internal error.
+    pub const VAULT_BUSY: &str = "vault_busy";
     pub const NOT_FOUND: &str = "not_found";
     pub const INVALID_INPUT: &str = "invalid_input";
     pub const EPOCH_ROLLBACK: &str = "epoch_rollback";
@@ -50,6 +53,7 @@ impl From<PasswordManagerError> for ServiceError {
         let code = match &err {
             PasswordManagerError::VaultLocked => codes::VAULT_LOCKED,
             PasswordManagerError::LockedOut(_) => codes::LOCKED_OUT,
+            PasswordManagerError::VaultBusy => codes::VAULT_BUSY,
             PasswordManagerError::NotFound(_) => codes::NOT_FOUND,
             PasswordManagerError::InvalidInput(_) => codes::INVALID_INPUT,
             PasswordManagerError::EpochRollback { .. } => codes::EPOCH_ROLLBACK,
@@ -135,7 +139,9 @@ impl LiveVaultService<'_> {
             }
 
             VaultOp::EntryAdd { entry } => {
-                let id = vault.add_entry(&entry_from_wire(entry)?)?;
+                let entry = entry_from_wire(entry)?;
+                validate_passkey_reference_entry(&entry)?;
+                let id = vault.add_entry(&entry)?;
                 Ok(VaultOpResult::EntryId(id))
             }
             VaultOp::EntryGet { entry_id } => Ok(VaultOpResult::Entry(Box::new(entry_to_wire(
@@ -150,6 +156,7 @@ impl LiveVaultService<'_> {
             )),
             VaultOp::EntryUpdate { entry_id, entry } => {
                 let mut updated = entry_from_wire(entry)?;
+                validate_passkey_reference_entry(&updated)?;
                 updated.entry_id = Some(*entry_id);
                 vault.update_entry(*entry_id, &updated)?;
                 Ok(VaultOpResult::Ok)
@@ -623,6 +630,18 @@ pub fn entry_from_wire(entry: &ServiceEntry) -> Result<Entry> {
     })
 }
 
+/// Enforce the passkey design invariant at the service boundary: an entry
+/// typed `passkey_reference` MUST carry a parseable metadata-only reference
+/// payload (docs/PASSKEY_PRODUCT_DESIGN.md — private keys are never stored,
+/// even by accident). Non-passkey entries pass through untouched, and the
+/// type cannot be used as a loophole for arbitrary secret storage.
+fn validate_passkey_reference_entry(entry: &Entry) -> Result<()> {
+    if entry.credential_type == crate::vault::CredentialType::PasskeyReference {
+        crate::passkey::parse_passkey_reference_entry(entry)?;
+    }
+    Ok(())
+}
+
 /// Convert a core `Entry` into the wire DTO.
 pub fn entry_to_wire(entry: &Entry) -> Result<ServiceEntry> {
     Ok(ServiceEntry {
@@ -725,6 +744,114 @@ mod tests {
         let path = tmp.path().join("vault.db");
         let password = "test_password_123!";
         (tmp, path, password)
+    }
+
+    fn valid_passkey_reference_json() -> String {
+        crate::passkey::build_passkey_reference_entry(
+            &crate::passkey::PasskeyReferenceMetadata::new(
+                "example.com",
+                "alice@example.com",
+                "icloud_keychain",
+                None,
+                None,
+            )
+            .unwrap(),
+            None,
+            false,
+        )
+        .unwrap()
+        .password
+        .to_string()
+    }
+
+    #[test]
+    fn passkey_reference_add_accepts_valid_metadata_only_payload() {
+        let (_tmp, path, password) = temp_vault();
+        let vault = VaultManager::create(&path, password.as_bytes()).unwrap();
+        let service = LiveVaultService::new(&vault);
+
+        let added = service
+            .execute(&VaultOp::EntryAdd {
+                entry: wire_entry(
+                    "Passkey reference: example.com",
+                    &valid_passkey_reference_json(),
+                    "passkey_reference",
+                ),
+            })
+            .unwrap();
+        let entry_id = match added {
+            VaultOpResult::EntryId(id) => id,
+            other => panic!("expected EntryId, got {other:?}"),
+        };
+
+        let got = service.execute(&VaultOp::EntryGet { entry_id }).unwrap();
+        match got {
+            VaultOpResult::Entry(entry) => {
+                let parsed = crate::passkey::parse_passkey_reference_entry(
+                    &entry_from_wire(&entry).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(parsed.relying_party_id, "example.com");
+            }
+            other => panic!("expected Entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn passkey_reference_add_rejects_non_reference_payload() {
+        for payload in ["not json at all", "{}", "hunter2"] {
+            let (_tmp, path, password) = temp_vault();
+            let vault = VaultManager::create(&path, password.as_bytes()).unwrap();
+            let service = LiveVaultService::new(&vault);
+
+            let result = service.execute(&VaultOp::EntryAdd {
+                entry: wire_entry("Bad", payload, "passkey_reference"),
+            });
+            assert!(result.is_err(), "payload must be rejected: {payload}");
+        }
+    }
+
+    #[test]
+    fn passkey_reference_update_rejects_invalid_payload_and_keeps_original() {
+        let (_tmp, path, password) = temp_vault();
+        let vault = VaultManager::create(&path, password.as_bytes()).unwrap();
+        let service = LiveVaultService::new(&vault);
+
+        let added = service
+            .execute(&VaultOp::EntryAdd {
+                entry: wire_entry(
+                    "Passkey reference: example.com",
+                    &valid_passkey_reference_json(),
+                    "passkey_reference",
+                ),
+            })
+            .unwrap();
+        let entry_id = match added {
+            VaultOpResult::EntryId(id) => id,
+            other => panic!("expected EntryId, got {other:?}"),
+        };
+
+        let mut bad = wire_entry("Passkey reference: example.com", "{}", "passkey_reference");
+        bad.entry_id = Some(entry_id);
+        assert!(
+            service
+                .execute(&VaultOp::EntryUpdate {
+                    entry_id,
+                    entry: bad,
+                })
+                .is_err(),
+            "invalid payload must be rejected on update"
+        );
+
+        // Complete-old: the stored reference is untouched after the refused
+        // update.
+        let got = service.execute(&VaultOp::EntryGet { entry_id }).unwrap();
+        match got {
+            VaultOpResult::Entry(entry) => {
+                assert!(entry.password.as_str().contains("example.com"));
+            }
+            other => panic!("expected Entry, got {other:?}"),
+        }
     }
 
     #[test]

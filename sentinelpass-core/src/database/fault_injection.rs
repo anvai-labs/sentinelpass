@@ -47,7 +47,10 @@ impl WriteFaultGuard {
 /// Deny the `fail_at`-th TOP-LEVEL write action on `conn` (0-based); every
 /// earlier write action is allowed. Reads and transaction control are always
 /// allowed. Clear with [`clear_write_fault`].
-pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -> WriteFaultGuard {
+pub(crate) fn install_write_fault(
+    conn: &mut rusqlite::Connection,
+    fail_at: usize,
+) -> WriteFaultGuard {
     install_fault_inner(conn, fail_at, None)
 }
 
@@ -58,7 +61,7 @@ pub(crate) fn install_write_fault(conn: &rusqlite::Connection, fail_at: usize) -
 /// helper keeps the default-features build warning-free (`-D warnings`).
 #[cfg(feature = "sync")]
 pub(crate) fn install_write_fault_on_table(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     fail_at: usize,
     table: &'static str,
 ) -> WriteFaultGuard {
@@ -66,7 +69,7 @@ pub(crate) fn install_write_fault_on_table(
 }
 
 fn install_fault_inner(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     fail_at: usize,
     table: Option<&'static str>,
 ) -> WriteFaultGuard {
@@ -97,14 +100,16 @@ fn install_fault_inner(
         } else {
             Authorization::Allow
         }
-    }));
+    }))
+    .expect("set authorizer");
     WriteFaultGuard { seen }
 }
 
 /// Remove any authorizer from `conn` (call in EVERY test path — success or
 /// failure — so later statements are never spuriously denied).
-pub(crate) fn clear_write_fault(conn: &rusqlite::Connection) {
-    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+pub(crate) fn clear_write_fault(conn: &mut rusqlite::Connection) {
+    conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .expect("clear authorizer");
 }
 
 #[cfg(test)]
@@ -112,27 +117,27 @@ mod tests {
     use super::*;
 
     /// The harness validity canary: the authorizer must fire on EVERY
-    /// prepare, including a re-preparation of the IDENTICAL SQL — rusqlite
-    /// 0.30 prepares fresh per execute, but a future statement cache would
-    /// silently bypass it (see the module docs' validity invariant).
+    /// write, including a re-execution of the IDENTICAL SQL — a statement
+    /// cache must not silently bypass it (see the module docs' validity
+    /// invariant).
     #[test]
     fn authorizer_fires_on_every_prepare() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE t (x INTEGER);").unwrap();
         let same_sql = "INSERT INTO t (x) VALUES (1)";
 
         // fail_at = 0 denies the first write; a fresh install must deny the
         // SAME SQL text again (a statement cache would have allowed it).
         let first = {
-            let guard = install_write_fault(&conn, 0);
+            let guard = install_write_fault(&mut conn, 0);
             let r = conn.execute(same_sql, []);
-            clear_write_fault(&conn);
+            clear_write_fault(&mut conn);
             (r, guard.seen())
         };
         let second = {
-            let guard = install_write_fault(&conn, 0);
+            let guard = install_write_fault(&mut conn, 0);
             let r = conn.execute(same_sql, []);
-            clear_write_fault(&conn);
+            clear_write_fault(&mut conn);
             (r, guard.seen())
         };
 

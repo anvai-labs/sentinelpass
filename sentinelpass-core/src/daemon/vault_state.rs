@@ -22,6 +22,35 @@ pub enum VaultState {
     Unlocked,
 }
 
+/// Outcome of a [`DaemonVault`] unlock request.
+///
+/// `AlreadyUnlocked` means the request observed the vault unlocked after
+/// acquiring the KDF gate and completed WITHOUT a second
+/// `VaultManager::open`. A racing duplicate unlock (e.g. a UI
+/// double-submit that queued on the gate while the first unlock was still
+/// deriving keys) must no-op: a second concurrent open contends for the
+/// audit/content file locks against the just-activated live manager and
+/// is the root trigger of the 2026-11-04 daemon IPC wedge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnlockOutcome {
+    AlreadyUnlocked,
+    Unlocked,
+}
+
+/// Ceiling on how long an unlock/step-up/create request waits for the
+/// per-vault KDF gate (2026-11-04 wedge). Waiters normally resolve the
+/// moment the active open finishes — the double-checked unlock then
+/// no-ops — so the ceiling only matters for a STUCK holder, which must
+/// convert into a retryable [`PasswordManagerError::VaultBusy`] instead
+/// of parking the request (and its IPC connection permit) forever:
+/// parked requests leaked the 16 connection permits until the accept
+/// loop itself wedged and the daemon went deaf. Tests scale the wait
+/// down to keep the regression suite fast.
+#[cfg(not(test))]
+pub const KDF_GATE_WAIT: Duration = Duration::from_secs(300);
+#[cfg(test)]
+pub const KDF_GATE_WAIT: Duration = Duration::from_secs(10);
+
 /// Daemon vault manager with auto-lock functionality
 pub struct DaemonVault {
     /// `Arc`-wrapped so service dispatch can hand a `'static` manager to
@@ -76,13 +105,15 @@ impl DaemonVault {
     }
 
     /// Gate for KDF-heavy operations (unlock/create): one Argon2id at a
-    /// time per vault (ADR-004 rev 5, WBS-513).
-    pub async fn kdf_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.kdf_gate
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("kdf gate semaphore is never closed")
+    /// time per vault (ADR-004 rev 5, WBS-513). Fails with
+    /// [`PasswordManagerError::VaultBusy`] when the gate cannot be
+    /// acquired within the bounded wait instead of parking the caller —
+    /// and its IPC connection permit — forever.
+    pub async fn kdf_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        match tokio::time::timeout(KDF_GATE_WAIT, self.kdf_gate.clone().acquire_owned()).await {
+            Ok(permit) => Ok(permit.expect("kdf gate semaphore is never closed")),
+            Err(_) => Err(PasswordManagerError::VaultBusy),
+        }
     }
 
     /// The vault path this daemon state is bound to.
@@ -96,12 +127,25 @@ impl DaemonVault {
         self.vault.lock().await.clone()
     }
 
-    /// Unlock the vault with master password
-    pub async fn unlock(&self, master_password: &[u8]) -> Result<()> {
+    /// Unlock the vault with master password. Returns
+    /// [`UnlockOutcome::AlreadyUnlocked`] when the request observed the
+    /// vault unlocked after acquiring the KDF gate and completed without
+    /// a second `VaultManager::open` — a racing duplicate unlock (UI
+    /// double-submit) must no-op, never open concurrently with the live
+    /// manager (daemon wedge regression, 2026-11-04 incident).
+    pub async fn unlock(&self, master_password: &[u8]) -> Result<UnlockOutcome> {
         // WBS-513: Argon2id runs on the BLOCKING pool (never the async
         // executor) with the per-vault KDF gate held — parallel wrong-key
         // attempts cannot multiply the 256 MB allocation (stage-6 F1).
-        let _permit = self.kdf_permit().await;
+        let _permit = self.kdf_permit().await?;
+        // Double-checked unlock (2026-11-04 wedge): a duplicate request
+        // that queued on the gate while the winner was still deriving
+        // keys must no-op here. A second concurrent `VaultManager::open`
+        // contends for the audit/receipts file locks against the
+        // just-activated live manager and is the wedge trigger.
+        if self.is_unlocked().await {
+            return Ok(UnlockOutcome::AlreadyUnlocked);
+        }
         let vault_path = self.vault_path.clone();
         let password = master_password.to_vec();
         let vault = tokio::task::spawn_blocking(move || VaultManager::open(&vault_path, &password))
@@ -120,7 +164,7 @@ impl DaemonVault {
             })?;
 
         self.unlock_with_manager(vault).await;
-        Ok(())
+        Ok(UnlockOutcome::Unlocked)
     }
 
     /// Unlock the daemon with an already opened vault manager.
@@ -138,11 +182,19 @@ impl DaemonVault {
         self.start_auto_lock_task();
     }
 
-    /// Unlock the vault with biometric authentication.
-    pub async fn unlock_with_biometric(&self, prompt_reason: &str) -> Result<()> {
+    /// Unlock the vault with biometric authentication. Same
+    /// [`UnlockOutcome`] contract as the password path: a racing duplicate
+    /// on an already-unlocked vault must no-op instead of prompting and
+    /// opening a second manager.
+    pub async fn unlock_with_biometric(&self, prompt_reason: &str) -> Result<UnlockOutcome> {
         // WBS-513: same blocking-pool + KDF-gate discipline as password
         // unlock (stage-6 review F1).
-        let _permit = self.kdf_permit().await;
+        let _permit = self.kdf_permit().await?;
+        // Double-checked unlock (2026-11-04 wedge): see `unlock()`. Also
+        // spares the platform biometric prompt on an unlocked vault.
+        if self.is_unlocked().await {
+            return Ok(UnlockOutcome::AlreadyUnlocked);
+        }
         let vault_path = self.vault_path.clone();
         let reason = prompt_reason.to_string();
         let vault = tokio::task::spawn_blocking(move || {
@@ -163,7 +215,7 @@ impl DaemonVault {
         })?;
 
         self.unlock_with_manager(vault).await;
-        Ok(())
+        Ok(UnlockOutcome::Unlocked)
     }
 
     /// Lock the vault
@@ -679,6 +731,91 @@ mod tests {
             modified_at: Utc::now(),
             favorite: false,
         }
+    }
+
+    /// 2026-11-04 daemon-wedge regression (D1): two unlock requests racing
+    /// on the KDF gate (UI double-submit) must resolve as exactly ONE
+    /// `VaultManager::open` — the duplicate no-ops as `AlreadyUnlocked`
+    /// after the first finishes. Two `Unlocked` outcomes here mean two
+    /// concurrent opens ran with a live manager: the file-lock contention
+    /// wedge signature.
+    #[tokio::test]
+    async fn concurrent_double_unlock_runs_single_open() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+        VaultManager::create(&vault_path, password).unwrap();
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+
+        let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            tokio::join!(daemon_vault.unlock(password), daemon_vault.unlock(password))
+        })
+        .await
+        .expect("double unlock must never park forever");
+
+        let mut outcomes = [first.unwrap(), second.unwrap()];
+        outcomes.sort();
+        assert_eq!(
+            outcomes,
+            [UnlockOutcome::AlreadyUnlocked, UnlockOutcome::Unlocked],
+            "exactly one VaultManager::open may run; the racing duplicate must no-op"
+        );
+        assert!(daemon_vault.is_unlocked().await);
+    }
+
+    /// 2026-11-04 daemon-wedge regression (D2): a request that cannot
+    /// acquire the KDF gate must fail with a retryable `VaultBusy` within
+    /// the bounded wait — never park the caller (and its IPC connection
+    /// permit) indefinitely.
+    #[tokio::test]
+    async fn gate_busy_returns_bounded_error() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+        VaultManager::create(&vault_path, password).unwrap();
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+
+        // Hold the per-vault gate, as a stuck unlock/step-up would.
+        let _held = daemon_vault.kdf_permit().await.unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            daemon_vault.unlock(password),
+        )
+        .await
+        .expect("unlock must not park indefinitely on the KDF gate");
+        assert!(
+            matches!(result, Err(crate::PasswordManagerError::VaultBusy)),
+            "expected VaultBusy, got {:?}",
+            result.map(|_| ())
+        );
+    }
+
+    /// 2026-11-04 daemon-wedge regression (D1, biometric path): a
+    /// biometric unlock on an already-unlocked vault must no-op as
+    /// `AlreadyUnlocked` — without a platform prompt and without a second
+    /// `VaultManager::open`.
+    #[tokio::test]
+    async fn biometric_unlock_when_already_unlocked_is_a_noop() {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let password = b"test_password";
+        VaultManager::create(&vault_path, password).unwrap();
+        let daemon_vault = DaemonVault::new(Some(vault_path), 300).unwrap();
+
+        assert_eq!(
+            daemon_vault.unlock(password).await.unwrap(),
+            UnlockOutcome::Unlocked
+        );
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            daemon_vault.unlock_with_biometric("test prompt"),
+        )
+        .await
+        .expect("biometric unlock on an unlocked vault must not hang")
+        .expect("biometric no-op must not error");
+        assert_eq!(outcome, UnlockOutcome::AlreadyUnlocked);
     }
 
     #[tokio::test]
