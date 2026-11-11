@@ -219,6 +219,25 @@
                                     <dd id="passkey-sync-source">-</dd>
                                 </div>
                             </dl>
+                            <div id="passkey-edit-fields" class="hidden">
+                                <div class="form-group">
+                                    <label for="passkey-input-rp-id">Relying party ID</label>
+                                    <input type="text" id="passkey-input-rp-id" class="input" placeholder="example.com" autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="passkey-input-platform">Platform</label>
+                                    <input type="text" id="passkey-input-platform" class="input" placeholder="icloud-keychain, windows-hello, android, security-key" value="unknown" autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="passkey-input-hint">Credential hint (optional)</label>
+                                    <input type="text" id="passkey-input-hint" class="input" placeholder="Display-safe credential identifier or fingerprint" autocomplete="off">
+                                </div>
+                                <div class="form-group">
+                                    <label for="passkey-input-sync-source">Sync source (optional)</label>
+                                    <input type="text" id="passkey-input-sync-source" class="input" placeholder="icloud-keychain, external-authenticator" autocomplete="off">
+                                </div>
+                                <p class="metadata-muted">Metadata only — authentication stays with the platform authenticator (Touch ID, Windows Hello, security key).</p>
+                            </div>
                         </div>
 
                         <div class="form-group">

@@ -20,6 +20,7 @@ import {
     credentialTypeLabel,
     credentialTypeUiState,
     buildEntrySaveDraft,
+    buildPasskeyReferenceJson,
     entryDraftValidationError,
     isPasskeyReferenceEntry
 } from './credential-types.js';
@@ -42,7 +43,7 @@ function updatePasskeyMetadataPanel(metadata: ReturnType<typeof credentialTypeUi
 }
 
 export function applyCredentialTypeDisplay(entry: any = currentEntry) {
-    const uiState = credentialTypeUiState(entry);
+    const uiState = credentialTypeUiState(entry, currentEntry == null);
     const typeSelect = document.getElementById('detail-credential-type') as HTMLSelectElement | null;
     const secretGroup = document.getElementById('detail-secret-group');
     const passkeyPanel = document.getElementById('passkey-reference-panel');
@@ -74,6 +75,18 @@ export function applyCredentialTypeDisplay(entry: any = currentEntry) {
     }
 
     passkeyPanel?.classList.toggle('hidden', uiState.passkeyPanelHidden);
+    const passkeyFields = document.getElementById('passkey-edit-fields');
+    passkeyFields?.classList.toggle('hidden', uiState.passkeyFieldsHidden);
+    if (!uiState.passkeyFieldsHidden) {
+        // Fresh creation form: clear any stale typed values (platform keeps
+        // its 'unknown' default).
+        const rp = document.getElementById('passkey-input-rp-id') as HTMLInputElement | null;
+        const hint = document.getElementById('passkey-input-hint') as HTMLInputElement | null;
+        const sync = document.getElementById('passkey-input-sync-source') as HTMLInputElement | null;
+        if (rp) rp.value = '';
+        if (hint) hint.value = '';
+        if (sync) sync.value = '';
+    }
     secretGroup?.classList.toggle('hidden', uiState.secretGroupHidden);
     if (!uiState.totpAllowed) {
         updatePasskeyMetadataPanel(uiState.passkeyMetadata);
@@ -332,6 +345,10 @@ export function createNewEntry() {
     (document.getElementById('detail-password') as HTMLInputElement).value = '';
     (document.getElementById('detail-url') as HTMLInputElement).value = '';
     (document.getElementById('detail-notes') as HTMLTextAreaElement).value = '';
+    (document.getElementById('passkey-input-rp-id') as HTMLInputElement).value = '';
+    (document.getElementById('passkey-input-platform') as HTMLInputElement).value = 'unknown';
+    (document.getElementById('passkey-input-hint') as HTMLInputElement).value = '';
+    (document.getElementById('passkey-input-sync-source') as HTMLInputElement).value = '';
     (document.getElementById('detail-credential-type') as HTMLSelectElement).value = 'password';
     applyCredentialTypeDisplay({ credential_type: 'password' });
 
@@ -359,18 +376,49 @@ export function createNewEntry() {
  */
 export async function saveEntry() {
     const typeSelect = document.getElementById('detail-credential-type') as HTMLSelectElement | null;
+
+    // Creating a passkey reference: build the metadata-only payload from the
+    // typed panel inputs (the secret field is hidden for this type). The
+    // daemon validates the payload shape on add.
+    const isCreatingPasskey = !currentEntry && typeSelect?.value === 'passkey_reference';
+    let formPassword = (document.getElementById('detail-password') as HTMLInputElement).value;
+    let relyingPartyId: string | null = null;
+    if (isCreatingPasskey) {
+        relyingPartyId = (document.getElementById('passkey-input-rp-id') as HTMLInputElement).value;
+        try {
+            formPassword = buildPasskeyReferenceJson({
+                relyingPartyId,
+                accountLabel: (document.getElementById('detail-username') as HTMLInputElement).value,
+                platform: (document.getElementById('passkey-input-platform') as HTMLInputElement).value,
+                credentialIdHint: (document.getElementById('passkey-input-hint') as HTMLInputElement).value,
+                syncSource: (document.getElementById('passkey-input-sync-source') as HTMLInputElement).value
+            });
+        } catch (error) {
+            showToast((error as Error).message, 'warning');
+            return;
+        }
+    }
+
     const saveDraft = buildEntrySaveDraft({
         currentEntry,
         selectedCredentialType: typeSelect?.value,
-        formPassword: (document.getElementById('detail-password') as HTMLInputElement).value
+        formPassword
     });
 
+    const titleInput = (document.getElementById('detail-title') as HTMLInputElement).value;
     const entry = {
         entry_id: currentEntry?.entry_id || null,
-        title: (document.getElementById('detail-title') as HTMLInputElement).value,
+        // Match the CLI's auto-generated title when the user leaves it blank.
+        title: !titleInput.trim() && relyingPartyId
+            ? `Passkey reference: ${relyingPartyId.trim()}`
+            : titleInput,
         username: (document.getElementById('detail-username') as HTMLInputElement).value.trim(),
         password: saveDraft.password,
-        url: (document.getElementById('detail-url') as HTMLInputElement).value || null,
+        // The RP ID doubles as the URL so the existing launch button opens
+        // the platform sign-in page.
+        url: relyingPartyId
+            ? relyingPartyId.trim()
+            : (document.getElementById('detail-url') as HTMLInputElement).value || null,
         notes: (document.getElementById('detail-notes') as HTMLTextAreaElement).value || null,
         credential_type: saveDraft.credentialType,
         favorite: document.getElementById('detail-favorite').classList.contains('active'),
@@ -384,7 +432,8 @@ export async function saveEntry() {
         credentialType: saveDraft.credentialType,
         title: entry.title,
         username: entry.username,
-        password: entry.password
+        password: entry.password,
+        relyingPartyId
     });
     if (validationError) {
         showToast(validationError, 'warning');
