@@ -4107,13 +4107,13 @@ fn add_entry_fault_injection_at_every_statement_is_all_or_nothing() {
     let mut injected_failures = 0usize;
     loop {
         {
-            let db = vault.lock_db().unwrap();
-            fault_injection::install_write_fault(db.conn(), fail_at);
+            let mut db = vault.lock_db().unwrap();
+            fault_injection::install_write_fault(db.conn_mut(), fail_at);
         }
         let result = vault.add_entry(&entry);
         {
-            let db = vault.lock_db().unwrap();
-            fault_injection::clear_write_fault(db.conn());
+            let mut db = vault.lock_db().unwrap();
+            fault_injection::clear_write_fault(db.conn_mut());
         }
         let entries = count_rows(&vault, "SELECT COUNT(*) FROM entries");
         let index = count_rows(&vault, "SELECT COUNT(*) FROM secret_equality_index");
@@ -4176,13 +4176,13 @@ fn update_entry_fault_injection_at_every_statement_is_all_or_nothing() {
     let mut injected_failures = 0usize;
     loop {
         {
-            let db = vault.lock_db().unwrap();
-            fault_injection::install_write_fault(db.conn(), fail_at);
+            let mut db = vault.lock_db().unwrap();
+            fault_injection::install_write_fault(db.conn_mut(), fail_at);
         }
         let result = vault.update_entry(entry_id, &edited);
         {
-            let db = vault.lock_db().unwrap();
-            fault_injection::clear_write_fault(db.conn());
+            let mut db = vault.lock_db().unwrap();
+            fault_injection::clear_write_fault(db.conn_mut());
         }
         let (state, version) = entry_sync_bookkeeping(&vault, entry_id);
         match result {
@@ -4300,13 +4300,13 @@ fn delete_entry_fault_injection_at_every_statement_is_all_or_nothing() {
     let mut injected_failures = 0usize;
     loop {
         {
-            let db = vault.lock_db().unwrap();
-            fault_injection::install_write_fault(db.conn(), fail_at);
+            let mut db = vault.lock_db().unwrap();
+            fault_injection::install_write_fault(db.conn_mut(), fail_at);
         }
         let result = vault.delete_entry(entry_id);
         {
-            let db = vault.lock_db().unwrap();
-            fault_injection::clear_write_fault(db.conn());
+            let mut db = vault.lock_db().unwrap();
+            fault_injection::clear_write_fault(db.conn_mut());
         }
         let alive = count_rows_for_entry(
             &vault,
@@ -4543,16 +4543,16 @@ fn degraded_sync_apply_index_is_repaired_by_sweep() {
     let engine = SyncEngine::new(client, vault.db.clone(), uuid::Uuid::new_v4());
 
     {
-        let conn = vault.lock_db().unwrap();
-        fault_injection::install_write_fault_on_table(conn.conn(), 0, "secret_equality_index");
+        let mut conn = vault.lock_db().unwrap();
+        fault_injection::install_write_fault_on_table(conn.conn_mut(), 0, "secret_equality_index");
     }
     let result = {
         let conn = vault.lock_db().unwrap();
         engine.apply_remote_entry(conn.conn(), dek, &blob)
     };
     {
-        let conn = vault.lock_db().unwrap();
-        fault_injection::clear_write_fault(conn.conn());
+        let mut conn = vault.lock_db().unwrap();
+        fault_injection::clear_write_fault(conn.conn_mut());
     }
     assert!(result.is_ok(), "the delivered change must not be dropped");
 

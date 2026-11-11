@@ -922,8 +922,8 @@ mod tests {
 
     #[test]
     fn count_pending_with_entries() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
 
         insert_pending_credential(conn, &dek, "Site A", "user1", "pass1", false);
@@ -941,8 +941,8 @@ mod tests {
 
     #[test]
     fn mark_entries_synced_updates_all_tables() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
 
         let cred_id = insert_pending_credential(conn, &dek, "Test", "user", "pass", false);
@@ -1013,8 +1013,8 @@ mod tests {
 
     #[test]
     fn collect_pending_credential_blobs_returns_blobs() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1032,8 +1032,8 @@ mod tests {
 
     #[test]
     fn collect_pending_credential_blobs_tombstone() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1047,8 +1047,8 @@ mod tests {
 
     #[test]
     fn collect_pending_credential_with_domain_mappings() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1096,8 +1096,8 @@ mod tests {
 
     #[test]
     fn collect_pending_ssh_key_blobs_returns_blobs() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1136,8 +1136,8 @@ mod tests {
 
     #[test]
     fn collect_pending_ssh_key_blobs_tombstone() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1161,8 +1161,8 @@ mod tests {
 
     #[test]
     fn collect_pending_totp_blobs_returns_blobs() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1193,8 +1193,8 @@ mod tests {
 
     #[test]
     fn collect_pending_totp_blobs_tombstone() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
         let device_id = Uuid::new_v4();
 
@@ -1227,8 +1227,8 @@ mod tests {
 
     #[test]
     fn load_domain_mappings_returns_entries() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
 
         insert_pending_credential(conn, &dek, "Test", "u", "p", false);
@@ -1259,8 +1259,8 @@ mod tests {
 
     #[test]
     fn mixed_pending_count() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
 
         insert_pending_credential(conn, &dek, "Cred1", "u", "p", false);
@@ -1284,8 +1284,8 @@ mod tests {
     /// the first clean pass marks all rows synced (complete-new).
     #[test]
     fn mark_entries_synced_fault_injection_is_all_or_nothing() {
-        let db = setup_db_with_sync_schema();
-        let conn = db.conn();
+        let mut db = setup_db_with_sync_schema();
+        let conn = db.conn_mut();
         let dek = DataEncryptionKey::new().unwrap();
 
         let ids: Vec<Uuid> = (0..2)

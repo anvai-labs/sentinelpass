@@ -1723,14 +1723,14 @@ mod tests {
     // --- WBS-411 / SR-DATA-001: the apply paths are units of work ----------
 
     fn install_fault(
-        db: &Database,
+        db: &mut Database,
         fail_at: usize,
     ) -> crate::database::fault_injection::WriteFaultGuard {
-        crate::database::fault_injection::install_write_fault(db.conn(), fail_at)
+        crate::database::fault_injection::install_write_fault(db.conn_mut(), fail_at)
     }
 
-    fn clear_fault(db: &Database) {
-        crate::database::fault_injection::clear_write_fault(db.conn());
+    fn clear_fault(db: &mut Database) {
+        crate::database::fault_injection::clear_write_fault(db.conn_mut());
     }
 
     /// THE apply-update fault sweep (SR-DATA-001): one blob = entry UPDATE
@@ -1814,16 +1814,16 @@ mod tests {
         let mut injected_failures = 0usize;
         loop {
             let guard = {
-                let conn = db.lock().unwrap();
-                install_fault(&conn, fail_at)
+                let mut conn = db.lock().unwrap();
+                install_fault(&mut conn, fail_at)
             };
             let result = {
                 let conn = db.lock().unwrap();
                 engine.apply_remote_entry(conn.conn(), &dek, &blob)
             };
             {
-                let conn = db.lock().unwrap();
-                clear_fault(&conn);
+                let mut conn = db.lock().unwrap();
+                clear_fault(&mut conn);
             }
             let denied = guard.seen() > fail_at;
 
@@ -2019,7 +2019,7 @@ mod tests {
     fn apply_push_acks_fault_injection_is_all_or_nothing() {
         use crate::sync::v2::{MutationOutcome, ObjectVersion, ServerCursor};
 
-        let db = apply_test_db();
+        let mut db = apply_test_db();
         let ids: Vec<Uuid> = (0..2).map(|_| Uuid::new_v4()).collect();
         {
             let conn = db.conn();
@@ -2071,9 +2071,9 @@ mod tests {
         let mut fail_at = 0usize;
         let mut injected_failures = 0usize;
         loop {
-            install_fault(&db, fail_at);
+            install_fault(&mut db, fail_at);
             let result = outbox::apply_push_acks(db.conn(), &mutations, &results, 42);
-            clear_fault(&db);
+            clear_fault(&mut db);
 
             let (pending, acked): (i64, i64) = {
                 let conn = db.conn();
@@ -2372,16 +2372,20 @@ mod registry_boundary_tests {
 
         let blob = credential_blob(&dek, sync_id, 4);
         let guard = {
-            let conn = db.lock().unwrap();
-            fault_injection::install_write_fault_on_table(conn.conn(), 0, "secret_equality_index")
+            let mut conn = db.lock().unwrap();
+            fault_injection::install_write_fault_on_table(
+                conn.conn_mut(),
+                0,
+                "secret_equality_index",
+            )
         };
         let result = {
             let conn = db.lock().unwrap();
             engine.apply_remote_entry(conn.conn(), &dek, &blob)
         };
         {
-            let conn = db.lock().unwrap();
-            fault_injection::clear_write_fault(conn.conn());
+            let mut conn = db.lock().unwrap();
+            fault_injection::clear_write_fault(conn.conn_mut());
         }
 
         // The apply SUCCEEDS despite the denied index write.
@@ -3734,13 +3738,13 @@ mod v2_cycle_tests {
         loop {
             reset_state(&db);
             let guard = {
-                let conn = db.lock().unwrap();
-                install_write_fault(conn.conn(), fail_at)
+                let mut conn = db.lock().unwrap();
+                install_write_fault(conn.conn_mut(), fail_at)
             };
             let result = engine.sync(&dek).await;
             {
-                let conn = db.lock().unwrap();
-                clear_write_fault(conn.conn());
+                let mut conn = db.lock().unwrap();
+                clear_write_fault(conn.conn_mut());
             }
 
             let denied = guard.seen() > fail_at;
