@@ -65,16 +65,16 @@ drill_register_secret "$ENTRY_SECRET"
 
 drill_log "[step] 1. init vault + credential round-trip"
 drill_cli "$MP_ORIG
-$MP_ORIG" init
+$MP_ORIG" vault init
 drill_expect_ok "vault init"
 drill_expect_out_contains "init reports vault created" "Vault created successfully"
 
-drill_cli "$MP_ORIG" add --title "Drill Credential" --username "drill-user" \
+drill_cli "$MP_ORIG" entry add --title "Drill Credential" --username "drill-user" \
   --password "$ENTRY_SECRET" --url "https://drill.example"
 drill_expect_ok "add credential entry"
 drill_expect_out_contains "add reports entry id" "Entry created with ID: 1"
 
-drill_cli "$MP_ORIG" get 1
+drill_cli "$MP_ORIG" entry get 1
 drill_expect_ok "read back entry 1 before recovery"
 drill_expect_out_contains_raw "entry secret decrypts before recovery" "$ENTRY_SECRET"
 
@@ -117,7 +117,7 @@ drill_expect_ok "recovery recover with captured key + new password"
 drill_expect_out_contains "recover reports success + slot revocation" "Access recovered"
 
 drill_log "[step] 4. new password unlocks; credential intact"
-drill_cli "$MP_NEW" get 1
+drill_cli "$MP_NEW" entry get 1
 drill_expect_ok "entry 1 readable with NEW master password"
 drill_expect_out_contains_raw "credential decrypts identically after recovery" "$ENTRY_SECRET"
 
@@ -144,7 +144,7 @@ drill_expect_out_contains "no usable recovery slot after refused reuse" \
   "Recovery slot: NOT configured"
 
 drill_log "[step] 7. containment cross-check: custom paths are never daemon-served"
-drill_cli_nocompat "$MP_NEW" list
+drill_cli_nocompat "$MP_NEW" entry list
 drill_expect_error "custom --vault without the flagged compat path is refused (ADR-007)"
 
 drill_finish
