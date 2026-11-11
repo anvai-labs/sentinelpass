@@ -50,6 +50,10 @@ hkdf = { workspace = true }
 data-encoding = { workspace = true }
 base64 = "0.23"
 
+# KeePass KDBX import (workspace; read path). Dev dependency re-enables
+# `save_kdbx4` so tests can generate fixture databases in-memory.
+keepass = { workspace = true }
+
 # HTTP client (sync feature)
 reqwest = { workspace = true, optional = true }
 
@@ -97,3 +101,4 @@ tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+keepass = { workspace = true, features = ["save_kdbx4"] }
