@@ -4,6 +4,7 @@ import {
   PASSKEY_REFERENCE_TYPE,
   PASSWORD_CREDENTIAL_TYPE,
   buildEntrySaveDraft,
+  buildPasskeyReferenceJson,
   credentialTypeForEntry,
   credentialTypeLabel,
   credentialTypeUiState,
@@ -279,7 +280,7 @@ describe('entry draft validation (v0.13 username-optional API keys)', () => {
       title: 'GitHub',
       username: '',
       password: '{"kind":"passkey_reference"}'
-    })).toBe('Username is required');
+    })).toBe('Account label is required');
   });
 
   it('accepts whitespace-padded but non-empty values', () => {
@@ -288,6 +289,131 @@ describe('entry draft validation (v0.13 username-optional API keys)', () => {
       title: '  Bank  ',
       username: ' user@example.com ',
       password: 'pw'
+    })).toBeNull();
+  });
+});
+
+describe('creating passkey references from the UI', () => {
+  const RP_ID_INPUT = 'example.com';
+
+  it('offers the passkey-reference type when creating a new entry', () => {
+    const state = credentialTypeUiState(null, true);
+
+    expect(state.typeOptions.map(option => option.value)).toEqual([
+      PASSWORD_CREDENTIAL_TYPE,
+      API_KEY_CREDENTIAL_TYPE,
+      PASSKEY_REFERENCE_TYPE
+    ]);
+    expect(state.typeSelectDisabled).toBe(false);
+  });
+
+  it('does not offer passkey conversion when editing an existing password entry', () => {
+    const state = credentialTypeUiState({ credential_type: PASSWORD_CREDENTIAL_TYPE }, false);
+
+    expect(state.typeOptions.map(option => option.value)).toEqual([
+      PASSWORD_CREDENTIAL_TYPE,
+      API_KEY_CREDENTIAL_TYPE
+    ]);
+  });
+
+  it('shows the passkey edit fields only for a NEW passkey entry', () => {
+    expect(credentialTypeUiState({ credential_type: PASSKEY_REFERENCE_TYPE }, false).passkeyFieldsHidden).toBe(true);
+    expect(credentialTypeUiState(null, true).passkeyFieldsHidden).toBe(true);
+    // New entry with the passkey type already selected in the dropdown:
+    expect(credentialTypeUiState({ credential_type: PASSKEY_REFERENCE_TYPE }, true).passkeyFieldsHidden).toBe(false);
+  });
+
+  it('keeps the type dropdown enabled for a new passkey entry', () => {
+    expect(credentialTypeUiState({ credential_type: PASSKEY_REFERENCE_TYPE }, true).typeSelectDisabled).toBe(false);
+  });
+
+  it('builds canonical metadata-only reference JSON', () => {
+    const parsed = JSON.parse(buildPasskeyReferenceJson({
+      relyingPartyId: ' example.com ',
+      accountLabel: 'alice@example.com',
+      platform: 'icloud-keychain',
+      credentialIdHint: ' hint ',
+      syncSource: null
+    }));
+
+    expect(parsed).toEqual({
+      kind: PASSKEY_REFERENCE_TYPE,
+      relying_party_id: 'example.com',
+      account_label: 'alice@example.com',
+      platform: 'icloud-keychain',
+      credential_id_hint: 'hint',
+      sync_source: null,
+      metadata_only: true
+    });
+  });
+
+  it('rejects blank required fields when building reference JSON', () => {
+    expect(() => buildPasskeyReferenceJson({
+      relyingPartyId: '  ',
+      accountLabel: 'a',
+      platform: 'p',
+      credentialIdHint: null,
+      syncSource: null
+    })).toThrow();
+    expect(() => buildPasskeyReferenceJson({
+      relyingPartyId: 'x.com',
+      accountLabel: '',
+      platform: 'p',
+      credentialIdHint: null,
+      syncSource: null
+    })).toThrow();
+    expect(() => buildPasskeyReferenceJson({
+      relyingPartyId: 'x.com',
+      accountLabel: 'a',
+      platform: ' ',
+      credentialIdHint: null,
+      syncSource: null
+    })).toThrow();
+  });
+
+  it('keeps an existing passkey payload when saving an existing entry', () => {
+    const entry = {
+      credential_type: PASSKEY_REFERENCE_TYPE,
+      password: '{"kind":"passkey_reference","relying_party_id":"github.com","metadata_only":true}'
+    };
+    const draft = buildEntrySaveDraft({
+      currentEntry: entry,
+      selectedCredentialType: PASSKEY_REFERENCE_TYPE,
+      formPassword: '{"tampered":true}'
+    });
+
+    expect(draft.credentialType).toBe(PASSKEY_REFERENCE_TYPE);
+    expect(draft.password).toBe(
+      '{"kind":"passkey_reference","relying_party_id":"github.com","metadata_only":true}'
+    );
+  });
+
+  it('uses the caller-built payload when saving a NEW passkey entry', () => {
+    const draft = buildEntrySaveDraft({
+      currentEntry: null,
+      selectedCredentialType: PASSKEY_REFERENCE_TYPE,
+      formPassword: '{"kind":"passkey_reference","metadata_only":true}'
+    });
+
+    expect(draft.credentialType).toBe(PASSKEY_REFERENCE_TYPE);
+    expect(draft.password).toBe('{"kind":"passkey_reference","metadata_only":true}');
+  });
+
+  it('validates the relying party ID for passkey drafts', () => {
+    expect(entryDraftValidationError({
+      credentialType: PASSKEY_REFERENCE_TYPE,
+      title: 'Passkey reference: example.com',
+      username: 'alice@example.com',
+      password: '{"kind":"passkey_reference","metadata_only":true}',
+      relyingPartyId: null
+    })).toBe('Relying party ID is required');
+
+    expect(entryDraftValidationError({
+      credentialType: PASSKEY_REFERENCE_TYPE,
+      title: 'Passkey reference: example.com',
+      username: 'alice@example.com',
+      password: '{"kind":"passkey_reference","metadata_only":true}',
+      relyingPartyId: RP_ID_INPUT
     })).toBeNull();
   });
 });
