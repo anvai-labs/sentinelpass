@@ -61,14 +61,14 @@ drill_register_secret "$MP" "$SECRET_A" "$SECRET_B" "$SECRET_C" \
 
 drill_log "[step] 1. init vault + 3 original entries"
 drill_cli "$MP
-$MP" init
+$MP" vault init
 drill_expect_ok "vault init"
 
-drill_cli "$MP" add --title "Original One" --username "user-a" --password "$SECRET_A"
+drill_cli "$MP" entry add --title "Original One" --username "user-a" --password "$SECRET_A"
 drill_expect_ok "add entry 1 (Original One)"
-drill_cli "$MP" add --title "Original Two" --username "user-b" --password "$SECRET_B"
+drill_cli "$MP" entry add --title "Original Two" --username "user-b" --password "$SECRET_B"
 drill_expect_ok "add entry 2 (Original Two)"
-drill_cli "$MP" add --title "Original Three" --username "user-c" --password "$SECRET_C"
+drill_cli "$MP" entry add --title "Original Three" --username "user-c" --password "$SECRET_C"
 drill_expect_ok "add entry 3 (Original Three)"
 
 drill_log "[step] 2. backup create + deep verify"
@@ -88,14 +88,14 @@ drill_expect_out_matches "deep verify counts 3 entries" '^  entries: +3 \('
 drill_expect_out_matches "deep validation passed" '^  deep validation: +identity, slots, schema, full decrypt'
 
 drill_log "[step] 3. mutate the live vault AFTER the backup"
-drill_cli "$MP" add --title "PostBackup Fourth" --username "user-d" --password "$SECRET_ADDED"
+drill_cli "$MP" entry add --title "PostBackup Fourth" --username "user-d" --password "$SECRET_ADDED"
 drill_expect_ok "mutation: add a 4th entry"
-drill_cli "$MP" delete 1 --force
+drill_cli "$MP" entry delete 1 --force
 drill_expect_ok "mutation: delete entry 1"
-drill_cli "$MP" edit --id 2 --password "$SECRET_EDITED"
+drill_cli "$MP" entry edit --id 2 --password "$SECRET_EDITED"
 drill_expect_ok "mutation: edit entry 2's secret"
 
-drill_cli "$MP" list
+drill_cli "$MP" entry list
 drill_expect_out_contains "live vault now has 3 entries (4 added - 1 deleted)" "Total: 3 entries"
 
 drill_log "[step] 4. restore is fail closed without the acknowledgment flag"
@@ -109,7 +109,7 @@ drill_expect_out_contains "restore verified and complete" "Restore verified and 
 drill_expect_out_matches "restore summary counts 3 entries" '^  entries: +3$'
 
 drill_log "[step] 6. restored vault = exactly the 3 original entries"
-drill_cli "$MP" list --show-passwords
+drill_cli "$MP" entry list --show-passwords
 drill_expect_ok "list --show-passwords with master password after restore"
 drill_expect_out_contains "restored vault has 3 entries" "Total: 3 entries"
 drill_expect_out_contains "entry 1 present again after restore" "Original One"
@@ -121,16 +121,16 @@ drill_expect_out_contains_raw "entry 3 decrypts to its ORIGINAL secret" "Passwor
 drill_expect_out_not_contains "post-backup ADD is absent" "PostBackup Fourth"
 drill_expect_out_not_contains_raw "post-backup EDIT value is absent" "$SECRET_EDITED"
 
-drill_cli "$MP" get 1
+drill_cli "$MP" entry get 1
 drill_expect_ok "get 1 after restore"
 drill_expect_out_contains_raw "entry 1 get() decrypts to original secret" "Password: $SECRET_A"
-drill_cli "$MP" get 2
+drill_cli "$MP" entry get 2
 drill_expect_ok "get 2 after restore"
 drill_expect_out_contains_raw "entry 2 get() decrypts to original secret" "Password: $SECRET_B"
-drill_cli "$MP" get 3
+drill_cli "$MP" entry get 3
 drill_expect_ok "get 3 after restore"
 drill_expect_out_contains_raw "entry 3 get() decrypts to original secret" "Password: $SECRET_C"
-drill_cli "$MP" get 4
+drill_cli "$MP" entry get 4
 drill_expect_error "post-backup 4th entry is gone after restore"
 
 drill_finish

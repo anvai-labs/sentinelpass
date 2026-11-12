@@ -55,15 +55,15 @@ drill_register_secret "$MP_OLD" "$MP_NEW" "$ENTRY_SECRET"
 
 drill_log "[step] 1. init vault + one credential"
 drill_cli "$MP_OLD
-$MP_OLD" init
+$MP_OLD" vault init
 drill_expect_ok "vault init"
 
-drill_cli "$MP_OLD" add --title "Rotation Drill" --username "drill-user" \
+drill_cli "$MP_OLD" entry add --title "Rotation Drill" --username "drill-user" \
   --password "$ENTRY_SECRET"
 drill_expect_ok "add credential entry"
 
 drill_log "[step] 2. record the pre-rotation key epoch"
-drill_cli "" status
+drill_cli "" vault status
 drill_expect_ok "password-free vault status"
 EPOCH_BEFORE="$(drill_extract_epoch)"
 if [[ -n "$EPOCH_BEFORE" ]]; then
@@ -76,12 +76,12 @@ fi
 drill_log "[step] 3. rotate the master password (compromise response)"
 drill_cli "$MP_OLD
 $MP_NEW
-$MP_NEW" passwd
+$MP_NEW" vault passwd
 drill_expect_ok "passwd rotation old -> new"
 drill_expect_out_contains "rotation reports the epoch advance" "Master password rotated (key epoch"
 
 drill_log "[step] 4. post-rotation state"
-drill_cli "" status
+drill_cli "" vault status
 drill_expect_ok "password-free vault status after rotation"
 EPOCH_AFTER="$(drill_extract_epoch)"
 if [[ -n "$EPOCH_AFTER" && "$EPOCH_AFTER" -gt "$EPOCH_BEFORE" ]]; then
@@ -104,7 +104,7 @@ drill_expect_out_contains "exactly one usable slot (the new password wrap)" \
   "Usable key slots: 1"
 
 drill_log "[step] 5. new password unlocks; data intact (no re-encryption needed)"
-drill_cli "$MP_NEW" get 1
+drill_cli "$MP_NEW" entry get 1
 drill_expect_ok "entry 1 readable with NEW master password"
 drill_expect_out_contains_raw "credential decrypts identically after rotation" "$ENTRY_SECRET"
 
@@ -112,11 +112,11 @@ drill_log "[step] 6. old password must FAIL (fail closed)"
 drill_cli "$MP_OLD" recovery status
 drill_expect_error "old master password rejected after rotation"
 
-drill_cli "$MP_OLD" get 1
+drill_cli "$MP_OLD" entry get 1
 drill_expect_error "old master password cannot read entries"
 
 drill_log "[step] 7. containment cross-check: custom paths are never daemon-served"
-drill_cli_nocompat "$MP_NEW" list
+drill_cli_nocompat "$MP_NEW" entry list
 drill_expect_error "custom --vault without the flagged compat path is refused (ADR-007)"
 
 drill_finish
