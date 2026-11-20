@@ -171,3 +171,12 @@ credential-provider architecture is accepted and reviewed.
 - `TECHNICAL_DEBT.md`: implementation gap tracker
 - `docs/decisions/adr/README.md`: design decisions and status
 - `docs/OSS_COMMERCIAL_STRATEGY.md`: open/free/paid operating model
+
+## Incoming passkey usability request (2026-11-20)
+
+Qualify usable passkey enrollment and sign-in on macOS, Windows 11, and Ubuntu
+desktop against the same disposable Identity workflow. Test platform and hardware
+authenticators separately from SentinelPass provider routing on each browser.
+Current CLI passkey references remain metadata-only. The
+[receiving handoff](docs/handoffs/2026-11-20-identity-passkey-provider.md#windows-and-ubuntu-qualification)
+defines the platform matrix and the evidence required for each support claim.

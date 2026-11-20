@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Disposable passkey browser probe</title>
+<script defer src="/probe.js"></script>
+</head>
+<body>
+<h1>Disposable passkey browser probe</h1>
+<p>This local test creates a credential for localhost. Use a disposable profile
+or security key. Remove the test entry from the authenticator after the run.</p>
+<label for="attachment">Authenticator selection</label>
+<select id="attachment">
+  <option value="">Browser chooser</option>
+  <option value="platform">Platform</option>
+  <option value="cross-platform">Cross-platform security key</option>
+</select>
+<button id="enroll" type="button">Enroll test passkey</button>
+<button id="assert" type="button" disabled>Use enrolled passkey</button>
+<p id="result" role="status" data-outcome="idle">Ready.</p>
+</body>
+</html>
