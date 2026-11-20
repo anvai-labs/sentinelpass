@@ -84,3 +84,7 @@ Canonical follow-up destinations: SentinelPass `docs/PASSKEY_PRODUCT_DESIGN.md`,
 `docs/SECURITY_STATUS_MATRIX.md`, roadmap and a new scoped ADR/workcard. The
 receiving team should allocate its own task IDs and evidence rather than invent
 completion credit from this handoff.
+
+The [macOS feasibility workcard](../workcards/macos-passkey-provider-feasibility.md)
+defines the first signing and browser routing probe and the conditions for a real
+provider build.
