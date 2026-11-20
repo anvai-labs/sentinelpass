@@ -101,7 +101,9 @@ or provider selected, SentinelPass build, and server-side outcome for each run.
 | Windows 11 | Exercise Windows Hello and a physical FIDO2 USB security key in Edge and Chrome. Record whether user verification used Hello biometrics, a PIN, or the security key. | Start with Windows 11 25H2, the build specified by Microsoft's sample. Test plugin registration, enablement, browser selection, registration and assertion callbacks, cancellation, and uninstall. Verify the minimum supported Windows build separately. |
 | Ubuntu desktop | Start on Ubuntu 24.04 LTS with Chrome and Firefox using a physical FIDO2 USB key. Record the browser packaging and device access result. A separate Chrome test may use Google Password Manager with a disposable test profile. | Evaluate a browser-specific extension and native-host path with approved credential custody. Require a routing probe on each browser before implementing a provider. Publish support per browser and package. Ubuntu-wide provider integration remains unqualified. |
 
-Use the same disposable Identity journey for each claimed combination. Enroll,
+Begin with the [loopback browser probe](../../prototypes/browser-passkey-probe/README.md)
+to exercise browser-to-authenticator interaction. Use the same disposable
+Identity journey for each claimed combination. Enroll,
 sign in with the enrolled credential, approve a harmless reviewed owner action,
 and verify return to the initiating workspace. Test cancellation, timeout,
 unavailable or locked provider behavior, and origin and RP ID binding. For a
