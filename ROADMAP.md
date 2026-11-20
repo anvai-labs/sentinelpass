@@ -174,9 +174,9 @@ credential-provider architecture is accepted and reviewed.
 
 ## Incoming passkey usability request (2026-11-20)
 
-The owner requested usable passkey enrollment/sign-in and an Identity integration
-proof with real Mac Touch ID. Current CLI passkey references remain metadata-only.
-See [the receiving handoff](docs/handoffs/2026-11-20-identity-passkey-provider.md)
-for the platform/provider design gate, staged implementation, security review and
-qualification criteria. This request does not mark credential-provider support
-implemented or change existing private-key custody/export restrictions.
+Qualify usable passkey enrollment and sign-in on macOS, Windows 11, and Ubuntu
+desktop against the same disposable Identity workflow. Test platform and hardware
+authenticators separately from SentinelPass provider routing on each browser.
+Current CLI passkey references remain metadata-only. The
+[receiving handoff](docs/handoffs/2026-11-20-identity-passkey-provider.md#windows-and-ubuntu-qualification)
+defines the platform matrix and the evidence required for each support claim.

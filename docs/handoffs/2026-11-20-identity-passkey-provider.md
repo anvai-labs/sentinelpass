@@ -88,3 +88,35 @@ completion credit from this handoff.
 The [macOS feasibility workcard](../workcards/macos-passkey-provider-feasibility.md)
 defines the first signing and browser routing probe and the conditions for a real
 provider build.
+
+## Windows and Ubuntu qualification
+
+Run these feasibility lanes alongside macOS. Keep baseline WebAuthn
+interoperability and SentinelPass-controlled registration and assertion as
+separate results. Record the OS build, browser version and package, authenticator
+or provider selected, SentinelPass build, and server-side outcome for each run.
+
+| Platform | Baseline interoperability | SentinelPass provider feasibility |
+| --- | --- | --- |
+| Windows 11 | Exercise Windows Hello and a physical FIDO2 USB security key in Edge and Chrome. Record whether user verification used Hello biometrics, a PIN, or the security key. | Start with Windows 11 25H2, the build specified by Microsoft's sample. Test plugin registration, enablement, browser selection, registration and assertion callbacks, cancellation, and uninstall. Verify the minimum supported Windows build separately. |
+| Ubuntu desktop | Start on Ubuntu 24.04 LTS with Chrome and Firefox using a physical FIDO2 USB key. Record the browser packaging and device access result. A separate Chrome test may use Google Password Manager with a disposable test profile. | Evaluate a browser-specific extension and native-host path with approved credential custody. Require a routing probe on each browser before implementing a provider. Publish support per browser and package. Ubuntu-wide provider integration remains unqualified. |
+
+Use the same disposable Identity journey for each claimed combination. Enroll,
+sign in with the enrolled credential, approve a harmless reviewed owner action,
+and verify return to the initiating workspace. Test cancellation, timeout,
+unavailable or locked provider behavior, and origin and RP ID binding. For a
+physical FIDO2 key, exercise removal during the ceremony and confirm the
+application reports failure cleanly. Use headed sessions with an operator
+present for physical user verification. Virtual-authenticator CI covers protocol
+regressions and records its results separately from hardware and provider routing.
+
+Microsoft documents the Windows plugin model and provides a reference
+implementation. Chrome documents Google Password Manager support on Linux.
+The Linux browser's own provider and an external hardware key are useful
+interoperability baselines. SentinelPass provider support requires separate
+evidence that the browser routed the request to SentinelPass and that its
+reviewed custody and consent design handled the ceremony.
+
+- [Microsoft WebAuthn API and plugin support](https://learn.microsoft.com/en-us/windows/security/identity-protection/hello-for-business/webauthn-apis)
+- [Microsoft Passkey Manager sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/passkeymanager/)
+- [Google Chrome passkey support](https://support.google.com/chrome/answer/13168025)
