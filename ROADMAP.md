@@ -171,3 +171,12 @@ credential-provider architecture is accepted and reviewed.
 - `TECHNICAL_DEBT.md`: implementation gap tracker
 - `docs/decisions/adr/README.md`: design decisions and status
 - `docs/OSS_COMMERCIAL_STRATEGY.md`: open/free/paid operating model
+
+## Incoming passkey usability request (2026-11-20)
+
+The owner requested usable passkey enrollment/sign-in and an Identity integration
+proof with real Mac Touch ID. Current CLI passkey references remain metadata-only.
+See [the receiving handoff](docs/handoffs/2026-11-20-identity-passkey-provider.md)
+for the platform/provider design gate, staged implementation, security review and
+qualification criteria. This request does not mark credential-provider support
+implemented or change existing private-key custody/export restrictions.
